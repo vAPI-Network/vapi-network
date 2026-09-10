@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { appendReceipt, readReceipts, type Receipt } from "./receipts.js";
+import { appendReceipt, parseReceipt, readReceipts, type Receipt } from "./receipts.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -44,5 +44,30 @@ describe("receipts ledger", () => {
     const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-"));
     temporaryDirectories.push(directory);
     await expect(readReceipts(join(directory, "missing.jsonl"))).resolves.toEqual([]);
+  });
+
+  it("parses old records and validates the optional rich receipt fields", () => {
+    expect(
+      parseReceipt({
+        id: "old",
+        timestamp: "2026-09-10T08:00:00.000Z",
+        resourceUrl: "https://api.example/old",
+      }),
+    ).toMatchObject({ id: "old" });
+
+    expect(
+      parseReceipt({
+        id: "rich",
+        timestamp: "2026-09-10T08:00:00.000Z",
+        resourceUrl: "https://api.example/paid",
+        source: "vapi",
+        phases: { discoverMs: 2, quoteMs: 8, signMs: 3, requestMs: 12, settleMs: 1 },
+        listing: { name: "Weather", providerHost: "api.example", source: "vapi" },
+        retry: 0,
+        policy: { maxPriceUsd: "0.01", capsApplied: true },
+        client: { name: "vapi-network", version: "0.2.0-dev.2" },
+        outcome: "paid",
+      }),
+    ).toMatchObject({ outcome: "paid", client: { version: "0.2.0-dev.2" } });
   });
 });

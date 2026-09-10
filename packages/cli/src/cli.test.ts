@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { getVapiPaths } from "@vapi-network/core";
+import { appendReceipt, appendSearchEvent, getVapiPaths } from "@vapi-network/core";
 
 import { runCli, type CliIo } from "./cli.js";
 
@@ -57,6 +57,61 @@ describe("CLI JSON output", () => {
       address: expect.stringMatching(/^0x[0-9a-fA-F]{40}$/),
       balances: [],
     });
+  });
+});
+
+describe("local metrics commands", () => {
+  it("prints stable stats JSON and exports flattened CSV", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-metrics-"));
+    process.env.VAPI_HOME = home;
+    const paths = getVapiPaths();
+    const timestamp = new Date().toISOString();
+    await appendReceipt(
+      {
+        id: "paid-weather",
+        timestamp,
+        resourceUrl: "https://weather.example/call",
+        quote: {
+          network: "eip155:8453",
+          asset: "0xasset",
+          amountAtomic: "2500",
+          payTo: "0xpayee",
+        },
+        outcome: "paid",
+        latencyMs: 25,
+        phases: { quoteMs: 10, requestMs: 15 },
+        listing: { name: "Weather", providerHost: "weather.example", source: "vapi" },
+        policy: { capsApplied: true },
+        client: { name: "vapi-network", version: "0.2.0-dev.2" },
+      },
+      paths.receipts,
+    );
+    await appendSearchEvent(
+      {
+        timestamp,
+        query: "weather",
+        sources: [{ source: "api.vapinetwork.ai", latencyMs: 12, count: 1 }],
+        mergedCount: 1,
+      },
+      paths.searches,
+    );
+
+    const statsOutput = captureIo();
+    expect(await runCli(["stats", "--range", "24h", "--json"], statsOutput.io)).toBe(0);
+    expect(JSON.parse(statsOutput.stdout[0]!)).toMatchObject({
+      range: "24h",
+      totals: { spendUsd: "0.0025", calls: 1, uniqueApis: 1, policyDeclines: 0 },
+      outcomes: { paid: { count: 1, rate: 1 } },
+      search: { count: 1, zeroResultRate: 0 },
+    });
+
+    const csvOutput = captureIo();
+    expect(
+      await runCli(["receipts", "export", "--format", "csv", "--range", "24h"], csvOutput.io),
+    ).toBe(0);
+    expect(csvOutput.stdout[0]).toContain("id,timestamp,outcome,resourceUrl");
+    expect(csvOutput.stdout[0]).toContain("paid-weather");
+    expect(csvOutput.stdout[0]).toContain("0.0025");
   });
 });
 

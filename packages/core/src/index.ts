@@ -8,6 +8,8 @@ export * from "./net-guard.js";
 export * from "./networks.js";
 export * from "./policy.js";
 export * from "./receipts.js";
+export * from "./searches.js";
+export * from "./stats.js";
 export * from "./spend-policy.js";
 export * from "./sweep.js";
 export * from "./wallet.js";

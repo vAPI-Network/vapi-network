@@ -1,7 +1,10 @@
 import {
   marketplaceDiscoveryInputSchema,
   marketplaceDiscoveryPageSchema,
+  appendSearchEvent,
   createPublicFetch,
+  DEFAULT_REGISTRY_FALLBACKS,
+  DEFAULT_REGISTRY_URL,
   DiscoveryCatalogError,
   parseDiscovery,
   type DiscoveryCatalog,
@@ -26,7 +29,17 @@ export type MarketplaceSearchInput = {
 export type VapiRegistryConfig = Readonly<{
   discoveryUrl: string;
   marketplaceDiscoveryUrl: string;
+  registryFallbacks?: ReadonlyArray<
+    Readonly<{ discoveryUrl: string; marketplaceDiscoveryUrl: string }>
+  >;
   allowPrivateNetwork?: boolean;
+}>;
+
+export type MarketplaceSearchOptions = Readonly<{
+  searchesPath?: string;
+  now?: Date;
+  nowMs?: () => number;
+  notice?: (message: string) => void;
 }>;
 
 export type VapiRegistrySourceOptions = GuardedSourceOptions &
@@ -42,6 +55,7 @@ export async function searchMarketplace(
   input: MarketplaceSearchInput,
   config: VapiRegistryConfig,
   fetchImpl?: Fetch,
+  options: MarketplaceSearchOptions = {},
 ): Promise<MarketplaceDiscoveryPage> {
   const request =
     fetchImpl ?? createPublicFetch({ allowPrivateNetwork: config.allowPrivateNetwork ?? false });
@@ -52,23 +66,43 @@ export async function searchMarketplace(
     limit: input.limit,
     cursor: input.cursor,
   });
-  const url = new URL(config.marketplaceDiscoveryUrl);
-  if (normalized.q !== undefined) url.searchParams.set("q", normalized.q);
-  for (const kind of normalized.kinds ?? []) url.searchParams.append("kinds", kind);
-  if (normalized.network !== undefined) url.searchParams.set("network", normalized.network);
-  if (normalized.limit !== undefined) url.searchParams.set("limit", String(normalized.limit));
-  if (normalized.cursor !== undefined) url.searchParams.set("cursor", normalized.cursor);
-
-  const response = await request(url, {
-    method: "GET",
-    headers: { accept: "application/json" },
-  });
-  if (!response.ok) {
-    throw new Error(
-      `vAPI marketplace discovery returned HTTP ${response.status} ${response.statusText}.`,
-    );
+  const startedAt = options.now ?? new Date();
+  const attempts: SearchAttempt[] = [];
+  let mergedCount = 0;
+  try {
+    const response = await registryRequest({
+      kind: "marketplace",
+      config,
+      request,
+      attempts,
+      nowMs: options.nowMs,
+      notice: options.notice,
+      configureUrl(url) {
+        if (normalized.q !== undefined) url.searchParams.set("q", normalized.q);
+        for (const kind of normalized.kinds ?? []) url.searchParams.append("kinds", kind);
+        if (normalized.network !== undefined) url.searchParams.set("network", normalized.network);
+        if (normalized.limit !== undefined) url.searchParams.set("limit", String(normalized.limit));
+        if (normalized.cursor !== undefined) url.searchParams.set("cursor", normalized.cursor);
+      },
+    });
+    const page = marketplaceDiscoveryPageSchema.parse(await response.json());
+    mergedCount = page.items.length;
+    const attempt = attempts.at(-1);
+    if (attempt) attempt.count = mergedCount;
+    return page;
+  } finally {
+    if (options.searchesPath) {
+      await appendSearchEvent(
+        {
+          timestamp: startedAt.toISOString(),
+          query: normalized.q ?? "",
+          sources: attempts,
+          mergedCount,
+        },
+        options.searchesPath,
+      ).catch(() => undefined);
+    }
   }
-  return marketplaceDiscoveryPageSchema.parse(await response.json());
 }
 
 /** Resolve a registry ref through the executable Calls compatibility API. */
@@ -197,17 +231,14 @@ async function fetchCallsDiscovery(
   config: VapiRegistryConfig,
   fetchImpl: Fetch,
 ): Promise<DiscoveryCatalog> {
-  const url = new URL(config.discoveryUrl);
-  url.searchParams.set("q", query);
-  const response = await fetchImpl(url, {
-    method: "GET",
-    headers: { accept: "application/json" },
+  const response = await registryRequest({
+    kind: "services",
+    config,
+    request: fetchImpl,
+    configureUrl(url) {
+      url.searchParams.set("q", query);
+    },
   });
-  if (!response.ok) {
-    throw new Error(
-      `vAPI Calls discovery returned HTTP ${response.status} ${response.statusText}.`,
-    );
-  }
   return parseDiscovery(await response.json());
 }
 
@@ -257,19 +288,119 @@ function registryConfig(
     ? supplied.href
     : path.endsWith("/api/network/services")
       ? replacePath(supplied, "/api/network/services", "/api/marketplace/discovery").href
-      : appendPath(supplied.href, "api/marketplace/discovery").href;
+      : path.endsWith("/api/call/discovery")
+        ? supplied.href
+        : path.endsWith("/api/call/services")
+          ? replacePath(supplied, "/api/call/services", "/api/call/discovery").href
+          : appendPath(supplied.href, "api/call/discovery").href;
   const callsDiscoveryUrl =
     discoveryUrl ??
     (path.endsWith("/api/marketplace/discovery")
       ? replacePath(supplied, "/api/marketplace/discovery", "/api/network/services").href
       : path.endsWith("/api/network/services")
         ? supplied.href
-        : appendPath(supplied.href, "api/network/services").href);
+        : path.endsWith("/api/call/discovery")
+          ? replacePath(supplied, "/api/call/discovery", "/api/call/services").href
+          : path.endsWith("/api/call/services")
+            ? supplied.href
+            : appendPath(supplied.href, "api/call/services").href);
   return {
     marketplaceDiscoveryUrl,
     discoveryUrl: callsDiscoveryUrl,
+    ...(supplied.origin === new URL(DEFAULT_REGISTRY_URL).origin
+      ? { registryFallbacks: DEFAULT_REGISTRY_FALLBACKS }
+      : {}),
     ...(allowPrivateNetwork === undefined ? {} : { allowPrivateNetwork }),
   };
+}
+
+type SearchAttempt = {
+  source: string;
+  latencyMs: number;
+  count: number;
+  error?: string;
+};
+
+const loggedFallbacks = new Set<string>();
+
+async function registryRequest(args: {
+  kind: "marketplace" | "services";
+  config: VapiRegistryConfig;
+  request: Fetch;
+  configureUrl(url: URL): void;
+  attempts?: SearchAttempt[];
+  nowMs?: () => number;
+  notice?: (message: string) => void;
+}): Promise<Response> {
+  const fallbacks = args.config.registryFallbacks ?? [];
+  const endpoints = [
+    args.kind === "marketplace" ? args.config.marketplaceDiscoveryUrl : args.config.discoveryUrl,
+    ...fallbacks.map((fallback) =>
+      args.kind === "marketplace" ? fallback.marketplaceDiscoveryUrl : fallback.discoveryUrl,
+    ),
+  ].filter((endpoint, index, values) => values.indexOf(endpoint) === index);
+  const nowMs = args.nowMs ?? (() => performance.now());
+  for (let index = 0; index < endpoints.length; index += 1) {
+    const endpoint = endpoints[index]!;
+    const url = new URL(endpoint);
+    args.configureUrl(url);
+    const started = nowMs();
+    try {
+      const response = await args.request(url, {
+        method: "GET",
+        headers: { accept: "application/json" },
+      });
+      args.attempts?.push({
+        source: url.hostname,
+        latencyMs: Math.max(0, nowMs() - started),
+        count: 0,
+        ...(!response.ok ? { error: `HTTP ${response.status}` } : {}),
+      });
+      if (response.ok) return response;
+      if (response.status === 404 && index < endpoints.length - 1) {
+        logFallbackOnce(endpoints[0]!, endpoints[index + 1]!, args.notice);
+        continue;
+      }
+      const label = args.kind === "marketplace" ? "marketplace discovery" : "Calls discovery";
+      throw new Error(`vAPI ${label} returned HTTP ${response.status} ${response.statusText}.`);
+    } catch (error) {
+      if (!args.attempts?.at(-1) || args.attempts.at(-1)?.source !== url.hostname) {
+        args.attempts?.push({
+          source: url.hostname,
+          latencyMs: Math.max(0, nowMs() - started),
+          count: 0,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      if (isEnotfound(error) && index < endpoints.length - 1) {
+        logFallbackOnce(endpoints[0]!, endpoints[index + 1]!, args.notice);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error("No vAPI registry endpoint was available.");
+}
+
+function logFallbackOnce(
+  primary: string,
+  fallback: string,
+  notice?: (message: string) => void,
+): void {
+  const key = `${new URL(primary).origin}\u0000${new URL(fallback).origin}`;
+  if (loggedFallbacks.has(key)) return;
+  loggedFallbacks.add(key);
+  const message = `vAPI registry ${new URL(primary).origin} was unavailable; using fallback ${new URL(fallback).origin}.`;
+  (notice ?? ((value) => process.stderr.write(`${value}\n`)))(message);
+}
+
+function isEnotfound(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
+    if ("code" in current && current.code === "ENOTFOUND") return true;
+    current = current.cause;
+  }
+  return false;
 }
 
 function replacePath(url: URL, suffix: string, replacement: string): URL {

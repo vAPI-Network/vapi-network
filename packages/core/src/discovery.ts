@@ -1,4 +1,5 @@
 import type { X402Resource } from "./x402.js";
+import { appendSearchEvent } from "./searches.js";
 
 export type ListingProvenance = Readonly<{
   /** Stable adapter identifier such as `vapi`, `bazaar`, or `local`. */
@@ -64,15 +65,57 @@ export function normalizeResourceUrl(value: string): string {
 export async function discover(
   sources: readonly Source[],
   query?: string,
+  options: { searchesPath?: string; now?: Date; nowMs?: () => number } = {},
 ): Promise<{ listings: Listing[]; errors: ReadonlyArray<{ source: string; error: unknown }> }> {
-  const settled = await Promise.allSettled(sources.map((source) => source.search(query)));
+  const nowMs = options.nowMs ?? (() => performance.now());
+  const startedAt = options.now ?? new Date();
+  const settled = await Promise.all(
+    sources.map(async (source) => {
+      const started = nowMs();
+      try {
+        const listings = await source.search(query);
+        return {
+          status: "fulfilled" as const,
+          source: source.id,
+          listings,
+          latencyMs: Math.max(0, nowMs() - started),
+        };
+      } catch (error) {
+        return {
+          status: "rejected" as const,
+          source: source.id,
+          error,
+          latencyMs: Math.max(0, nowMs() - started),
+        };
+      }
+    }),
+  );
   const groups: Listing[][] = [];
   const errors: Array<{ source: string; error: unknown }> = [];
-  settled.forEach((result, index) => {
-    if (result.status === "fulfilled") groups.push(result.value);
-    else errors.push({ source: sources[index]!.id, error: result.reason });
-  });
-  return { listings: mergeListings(groups), errors };
+  for (const result of settled) {
+    if (result.status === "fulfilled") groups.push(result.listings);
+    else errors.push({ source: result.source, error: result.error });
+  }
+  const listings = mergeListings(groups);
+  if (options.searchesPath) {
+    await appendSearchEvent(
+      {
+        timestamp: startedAt.toISOString(),
+        query: query ?? "",
+        sources: settled.map((result) => ({
+          source: result.source,
+          latencyMs: result.latencyMs,
+          count: result.status === "fulfilled" ? result.listings.length : 0,
+          ...(result.status === "rejected"
+            ? { error: result.error instanceof Error ? result.error.message : String(result.error) }
+            : {}),
+        })),
+        mergedCount: listings.length,
+      },
+      options.searchesPath,
+    ).catch(() => undefined);
+  }
+  return { listings, errors };
 }
 
 function cloneListing(listing: Listing): Listing {

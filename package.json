@@ -1,6 +1,6 @@
 {
   "name": "vapi-network-workspace",
-  "version": "0.2.0-dev.1",
+  "version": "0.2.0-dev.2",
   "private": true,
   "description": "Open-source, non-custodial access to x402 APIs",
   "license": "Apache-2.0",

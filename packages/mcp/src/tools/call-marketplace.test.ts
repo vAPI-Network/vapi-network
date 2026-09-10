@@ -374,7 +374,7 @@ describe("Agent Cash marketplace call boundary", () => {
     expect((error as Error).message).toContain(JSON.stringify(requestSchema));
     expect((error as Error).message).toContain("application/json");
     expect(fetchImpl).toHaveBeenCalledOnce();
-    expect(new URL(fetchImpl.mock.calls[0]![0] as URL).pathname).toBe("/api/network/services");
+    expect(new URL(fetchImpl.mock.calls[0]![0] as URL).pathname).toBe("/api/call/services");
     expect(signSpy).not.toHaveBeenCalled();
   });
 

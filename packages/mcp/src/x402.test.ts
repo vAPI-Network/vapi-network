@@ -12,6 +12,7 @@ import {
   BASE_MAINNET_CAIP2,
   NETWORKS,
   getDefaultConfig,
+  readReceipts,
 } from "@vapi-network/core";
 import { callService } from "./tools/call.js";
 import {
@@ -299,10 +300,22 @@ describe("x402 v2 challenge parsing", () => {
         fetchImpl,
         lookup: async () => ["93.184.216.34"],
         ledgerPath: join(directory, "ledger.json"),
+        receiptsPath: join(directory, "receipts.jsonl"),
       }),
     ).rejects.toThrow("exceeds the per-call cap");
     expect(signSpy).not.toHaveBeenCalled();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [receipt] = await readReceipts(join(directory, "receipts.jsonl"));
+    expect(receipt).toMatchObject({
+      resourceUrl: "https://vendor.example/paid",
+      outcome: "declined_policy",
+      quote: { amountAtomic: "2500" },
+      policy: { capsApplied: true },
+      client: { name: "vapi-network", version: "0.2.0-dev.2" },
+      error: { code: "per_call_cap_exceeded" },
+    });
+    expect(receipt).not.toHaveProperty("payer");
+    expect(receipt?.phases?.quoteMs).toBeTypeOf("number");
   });
 
   it("rejects an unconfigured required network before requesting or signing", async () => {
@@ -411,6 +424,7 @@ describe("x402 v2 challenge parsing", () => {
       fetchImpl,
       lookup: async () => ["93.184.216.34"],
       ledgerPath: join(directory, "ledger.json"),
+      receiptsPath: join(directory, "receipts.jsonl"),
     });
 
     expect(result).toMatchObject({
@@ -424,6 +438,20 @@ describe("x402 v2 challenge parsing", () => {
       },
     });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+    await expect(readReceipts(join(directory, "receipts.jsonl"))).resolves.toMatchObject([
+      {
+        outcome: "paid",
+        payer: account.address,
+        quote: { amountAtomic: "2500" },
+        settlement: { outcome: "succeeded", transaction: settlement.transaction },
+        phases: {
+          quoteMs: expect.any(Number),
+          signMs: expect.any(Number),
+          requestMs: expect.any(Number),
+          settleMs: expect.any(Number),
+        },
+      },
+    ]);
   });
 
   it.each([403, 500])(

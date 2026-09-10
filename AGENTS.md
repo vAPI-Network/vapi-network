@@ -47,8 +47,8 @@ randomness, filesystem roots, and `fetch` implementations.
 - No telemetry leaves the machine by default. Any future exporter requires an
   explicit user opt-in and must never include secrets.
 - The configuration home is `~/.vapi/`, overridable with `VAPI_HOME`. Its stable
-  files are `keystore.json`, `config.json`, `receipts.jsonl`, and
-  `spend-ledger.json`.
+  files are `keystore.json`, `config.json`, `receipts.jsonl`, `searches.jsonl`,
+  and `spend-ledger.json`.
 - Migration from `~/.vapi/agent-cash/` copies files, never deletes the old
   directory, never overwrites new state, and prints a notice.
 - Receipts are an append-only JSONL ledger. Spend accounting uses
@@ -60,7 +60,7 @@ randomness, filesystem roots, and `fetch` implementations.
 - Protect every outbound service request with the network guard. Treat redirects
   and resolved IP addresses as new destinations that need validation.
 - Published package versions move together. All packages are currently
-  `0.2.0-dev.1`, with npm tag `next` and public access.
+  `0.2.0-dev.2`, with npm tag `next` and public access.
 - Every published tarball has zero runtime dependencies. All runtime code is
   bundled with esbuild; builds must fail if non-Node external imports leak into
   `dist`.

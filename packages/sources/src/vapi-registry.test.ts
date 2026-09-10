@@ -1,4 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { readSearchEvents } from "@vapi-network/core";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   resolveServiceEndpoint,
@@ -11,6 +16,14 @@ const config = {
   discoveryUrl: "https://console.vapinetwork.ai/api/network/services",
   marketplaceDiscoveryUrl: "https://console.vapinetwork.ai/api/marketplace/discovery",
 } satisfies VapiRegistryConfig;
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
+  );
+});
 
 const marketplacePage = {
   protocol: "vapi.marketplace.discovery/1",
@@ -78,6 +91,77 @@ const callsPage = {
 } as const;
 
 describe("vAPI registry helpers", () => {
+  it("falls back on a primary 404, logs once, and records both search attempts", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-registry-search-"));
+    temporaryDirectories.push(directory);
+    const searchesPath = join(directory, "searches.jsonl");
+    const fallbackConfig: VapiRegistryConfig = {
+      discoveryUrl: "https://primary.example/api/call/services",
+      marketplaceDiscoveryUrl: "https://primary.example/api/call/discovery",
+      registryFallbacks: [
+        {
+          discoveryUrl: "https://fallback.example/api/network/services",
+          marketplaceDiscoveryUrl: "https://fallback.example/api/marketplace/discovery",
+        },
+      ],
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(Response.json(marketplacePage))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(Response.json(marketplacePage));
+    const notice = vi.fn();
+    const ticks = [0, 5, 10, 20];
+
+    await searchMarketplace({ query: "weather" }, fallbackConfig, fetchImpl, {
+      searchesPath,
+      now: new Date("2026-09-10T10:00:00.000Z"),
+      nowMs: () => ticks.shift() ?? 20,
+      notice,
+    });
+    await searchMarketplace({ query: "weather again" }, fallbackConfig, fetchImpl, { notice });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(notice).toHaveBeenCalledOnce();
+    expect(await readSearchEvents(searchesPath)).toEqual([
+      {
+        timestamp: "2026-09-10T10:00:00.000Z",
+        query: "weather",
+        sources: [
+          { source: "primary.example", latencyMs: 5, count: 0, error: "HTTP 404" },
+          { source: "fallback.example", latencyMs: 10, count: 2 },
+        ],
+        mergedCount: 2,
+      },
+    ]);
+  });
+
+  it("falls back when the primary hostname cannot be resolved", async () => {
+    const dnsError = Object.assign(new Error("getaddrinfo ENOTFOUND primary.example"), {
+      code: "ENOTFOUND",
+    });
+    const fallbackConfig: VapiRegistryConfig = {
+      discoveryUrl: "https://dns-primary.example/api/call/services",
+      marketplaceDiscoveryUrl: "https://dns-primary.example/api/call/discovery",
+      registryFallbacks: [
+        {
+          discoveryUrl: "https://dns-fallback.example/api/network/services",
+          marketplaceDiscoveryUrl: "https://dns-fallback.example/api/marketplace/discovery",
+        },
+      ],
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockRejectedValueOnce(dnsError)
+      .mockResolvedValueOnce(Response.json(callsPage));
+
+    await expect(
+      resolveServiceEndpoint("weather-call", fallbackConfig, fetchImpl),
+    ).resolves.toMatchObject({ url: "https://weather.example/call" });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   it("preserves marketplace ranking and forwards filters", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(marketplacePage));
     await expect(
@@ -147,7 +231,7 @@ describe("vAPI registry source", () => {
   it("inspects a native ref and returns null for an unknown ref", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (request) => {
       const url = new URL(request as URL);
-      if (url.pathname.endsWith("/api/network/services")) {
+      if (url.pathname.endsWith("/api/call/services")) {
         return Response.json(
           url.searchParams.get("q") === "weather-call" ? callsPage : { services: [] },
         );
