@@ -193,6 +193,25 @@ describe("browser-neutral x402 client", () => {
     ).toThrow(/No exact x402 payment option matches/);
   });
 
+  it("parses a 402 whose response was cloned first, without waiting on the tee", async () => {
+    const challenge = exactChallenge({});
+    const header = Buffer.from(JSON.stringify(challenge)).toString("base64");
+    const response = new Response(JSON.stringify(challenge), {
+      status: 402,
+      headers: { "content-type": "application/json", "payment-required": header },
+    });
+    const clone = response.clone();
+
+    const quote = await Promise.race([
+      parse402Response(response, networks),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("parse402Response hung on a cloned body")), 2_000),
+      ),
+    ]);
+    expect(quote.accepted.amount).toBeDefined();
+    expect(clone.bodyUsed).toBe(false);
+  });
+
   it("keeps realistic discovery extensions such as a Bazaar schema", () => {
     const challenge = exactChallenge({});
     challenge.extensions = {

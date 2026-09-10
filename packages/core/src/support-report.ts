@@ -1,3 +1,4 @@
+import { discardBody } from "./x402.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import { arch, platform, release } from "node:os";
 import { join } from "node:path";
@@ -118,7 +119,7 @@ export async function createSupportReport(
     headers: { "content-type": "application/json" },
     body: serialized,
   });
-  await response.body?.cancel().catch(() => undefined);
+  discardBody(response);
   return { path, issueUrl, report, responseCode: response.status };
 }
 

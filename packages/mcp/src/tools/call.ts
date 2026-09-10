@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  discardBody,
   MARKETPLACE_EXECUTION_METHODS,
   VAPI_CLIENT_VERSION,
   appendReceipt,
@@ -347,7 +348,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
       if (!location) {
         return { ...attempt, request: currentRequest };
       }
-      await response.body?.cancel().catch(() => undefined);
+      discardBody(response);
       attempt.finish();
       if (followedRedirects >= 5) {
         throw new Error("call exceeded the maximum of 5 HTTP redirect hops.");
@@ -431,13 +432,13 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
       initialResponse,
     );
   } catch (error) {
-    await initialResponse.body?.cancel().catch(() => undefined);
+    discardBody(initialResponse);
     initial.finish();
     throw error;
   }
   if (signInChallenge) {
     if (new URL(initial.request.url).protocol !== "https:") {
-      await initialResponse.body?.cancel().catch(() => undefined);
+      discardBody(initialResponse);
       initial.finish();
       throw new Error("vAPI will only send a signed SIWX proof to an HTTPS endpoint.");
     }
@@ -454,7 +455,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
       trace.retry = 1;
     } finally {
       trace.phases.signMs = elapsed(trace, signStarted);
-      await initialResponse.body?.cancel().catch(() => undefined);
+      discardBody(initialResponse);
       initial.finish();
     }
 
@@ -582,11 +583,11 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
   trace.phases.settleMs = elapsed(trace, settleStarted);
   try {
     if (settlementOutcome === "rejected") {
-      await paidResponse.body?.cancel().catch(() => undefined);
+      discardBody(paidResponse);
       throw paymentRejected(paidResponse.status, settlement);
     }
     if (isRedirectStatus(paidResponse.status) && settlementOutcome !== "succeeded") {
-      await paidResponse.body?.cancel().catch(() => undefined);
+      discardBody(paidResponse);
       throw settlementUnknown(
         "The paid endpoint returned a redirect. The payment header was not forwarded; do not retry automatically until settlement is checked.",
         quote,
@@ -618,7 +619,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
       );
     }
     if (!paidResponse.ok && settlementOutcome !== "succeeded") {
-      await paidResponse.body?.cancel().catch(() => undefined);
+      discardBody(paidResponse);
       throw settlementUnknown(
         `The paid endpoint returned HTTP ${paidResponse.status} without decisive settlement evidence. Do not retry automatically.`,
         quote,
@@ -1116,7 +1117,7 @@ function isJsonContentType(value: string): boolean {
 async function readResponseBody(response: Response): Promise<unknown> {
   const length = Number(response.headers.get("content-length") ?? "0");
   if (Number.isFinite(length) && length > MAX_RESPONSE_BYTES) {
-    await response.body?.cancel().catch(() => undefined);
+    discardBody(response);
     throw new Error(`API response exceeds the ${MAX_RESPONSE_BYTES}-byte display limit.`);
   }
   if (!response.body) return null;
@@ -1190,7 +1191,7 @@ async function fetchAttempt(
           return await Promise.race([operation, timedOut]);
         } catch (error) {
           if (error === timeoutError) {
-            await operationResponse.body?.cancel().catch(() => undefined);
+            discardBody(operationResponse);
           }
           throw error;
         }

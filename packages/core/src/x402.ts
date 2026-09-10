@@ -340,6 +340,15 @@ export function parse402Challenge(
   }
 }
 
+/**
+ * Drop a response body without waiting. Awaiting cancel() on a body that has
+ * been clone()d never settles until the other tee branch is cancelled too, so
+ * callers that only want to discard the bytes must not block on it.
+ */
+export function discardBody(response: Response | null | undefined): void {
+  void response?.body?.cancel().catch(() => undefined);
+}
+
 export async function parse402Response(
   response: Response,
   configuredNetworks: X402NetworkConfig,
@@ -357,7 +366,7 @@ export async function parse402Response(
         requiredNetwork,
         expectedPayTo,
       );
-      await response.body?.cancel().catch(() => undefined);
+      discardBody(response);
       return quote;
     } catch (error) {
       headerError = error;
