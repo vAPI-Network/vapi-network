@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getAddress, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
-import { BASE_MAINNET_CAIP2, getDefaultConfig } from "@vapi-network/core";
+import { BASE_MAINNET_CAIP2, getDefaultConfig, readReceipts } from "@vapi-network/core";
 
 import { VapiCallError, callService } from "./call.js";
 
@@ -535,6 +535,102 @@ describe("Agent Cash marketplace call boundary", () => {
     expect((fetchImpl.mock.calls[2]![0] as Request).headers.has("payment-signature")).toBe(true);
   });
 
+  it("signs in to an auth-only SIWX server and records a zero-amount receipt", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-siwx-"));
+    temporaryDirectories.push(directory);
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const signMessage = vi.spyOn(account, "signMessage");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(signInRequired(), { status: 402 }))
+      .mockResolvedValueOnce(Response.json({ private: true }));
+    const receiptsPath = join(directory, "receipts.jsonl");
+
+    const result = await callService({
+      input: { url: "https://93.184.216.34/weather", method: "GET" },
+      account,
+      config: getDefaultConfig(),
+      fetchImpl,
+      receiptsPath,
+    });
+
+    expect(result).toEqual({
+      status: 200,
+      body: { private: true },
+      payment: null,
+      outcome: "signed_in",
+    });
+    expect(signMessage).toHaveBeenCalledOnce();
+    const signedRequest = fetchImpl.mock.calls[1]![0] as Request;
+    const proof = JSON.parse(
+      Buffer.from(signedRequest.headers.get("sign-in-with-x")!, "base64").toString("utf8"),
+    ) as Record<string, unknown>;
+    expect(proof).toMatchObject({
+      domain: "93.184.216.34",
+      uri: "https://93.184.216.34/weather",
+      chainId: BASE_MAINNET_CAIP2,
+      type: "eip191",
+      address: account.address,
+    });
+    await expect(readReceipts(receiptsPath)).resolves.toEqual([
+      expect.objectContaining({
+        outcome: "signed_in",
+        quote: expect.objectContaining({
+          network: BASE_MAINNET_CAIP2,
+          amountAtomic: "0",
+        }),
+      }),
+    ]);
+  });
+
+  it("keeps the SIWX proof while continuing through a subsequent payment quote", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-siwx-pay-"));
+    temporaryDirectories.push(directory);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(signInRequired(), { status: 402 }))
+      .mockResolvedValueOnce(paymentRequired(PAY_TO))
+      .mockResolvedValueOnce(Response.json({ paid: true }));
+
+    const result = await callService({
+      input: { url: "https://93.184.216.34/weather", method: "GET", maxPriceUsd: "0.01" },
+      account: privateKeyToAccount(PRIVATE_KEY),
+      config: getDefaultConfig(),
+      fetchImpl,
+      ledgerPath: join(directory, "ledger.json"),
+    });
+
+    expect(result).toMatchObject({
+      body: { paid: true },
+      payment: { network: BASE_MAINNET_CAIP2, amountAtomic: "2500", payTo: PAY_TO },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    const paidRequest = fetchImpl.mock.calls[2]![0] as Request;
+    expect(paidRequest.headers.has("sign-in-with-x")).toBe(true);
+    expect(paidRequest.headers.has("payment-signature")).toBe(true);
+  });
+
+  it("refuses a SIWX domain mismatch before asking the wallet to sign", async () => {
+    const challenge = signInRequired();
+    challenge.extensions["sign-in-with-x"].info.domain = "attacker.example";
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const signMessage = vi.spyOn(account, "signMessage");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(challenge, { status: 402 }));
+
+    await expect(
+      callService({
+        input: { url: "https://93.184.216.34/weather", method: "GET" },
+        account,
+        config: getDefaultConfig(),
+        fetchImpl,
+      }),
+    ).rejects.toThrow(/does not match resource host.*Refusing to sign/);
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
   it.each([403, 500])(
     "marks a paid HTTP %s without settlement evidence as ambiguous",
     async (status) => {
@@ -715,4 +811,25 @@ function paymentRequired(payTo: string) {
     },
     { status: 402 },
   );
+}
+
+function signInRequired() {
+  return {
+    x402Version: 2,
+    accepts: [],
+    extensions: {
+      "sign-in-with-x": {
+        info: {
+          domain: "93.184.216.34",
+          uri: "https://93.184.216.34/weather",
+          statement: "Sign in to view this resource",
+          version: "1" as const,
+          nonce: "abcdefgh",
+          issuedAt: "2026-09-10T08:00:00.000Z",
+        },
+        supportedChains: [{ chainId: BASE_MAINNET_CAIP2, type: "eip191" as const }],
+        schema: { type: "object" },
+      },
+    },
+  };
 }

@@ -1,6 +1,6 @@
 {
   "name": "@vapi-network/mcp",
-  "version": "0.2.0-dev.2",
+  "version": "0.2.0-dev.3",
   "description": "Local, non-custodial MCP server for discovering and paying x402 APIs",
   "license": "Apache-2.0",
   "repository": {

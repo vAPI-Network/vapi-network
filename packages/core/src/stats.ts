@@ -8,6 +8,7 @@ export type ReceiptOutcome = NonNullable<Receipt["outcome"]>;
 
 const OUTCOMES: readonly ReceiptOutcome[] = [
   "paid",
+  "signed_in",
   "declined_policy",
   "failed_request",
   "settlement_rejected",

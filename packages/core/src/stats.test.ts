@@ -90,6 +90,23 @@ describe("local metrics aggregation", () => {
     expect(csv.split("\n")[0]).toContain("amountUsd");
     expect(csv.split("\n")[1]).toContain('"provider, failed"');
   });
+
+  it("counts signed-in calls without adding spend", () => {
+    const stats = aggregateStats({
+      receipts: [
+        receipt("signed-in", "2026-09-10T11:00:00.000Z", "https://auth.example/call", {
+          outcome: "signed_in",
+          quote: { network: "eip155:8453", amountAtomic: "0" },
+        }),
+      ],
+      searches: [],
+      range: "24h",
+      now,
+    });
+
+    expect(stats.totals.spendUsd).toBe("0");
+    expect(stats.outcomes.signed_in).toEqual({ count: 1, rate: 1 });
+  });
 });
 
 function receipt(

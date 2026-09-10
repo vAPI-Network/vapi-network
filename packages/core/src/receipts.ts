@@ -17,9 +17,9 @@ export interface Receipt {
   readonly provenance?: readonly ListingProvenance[];
   readonly quote?: Readonly<{
     network: string;
-    asset: string;
+    asset?: string;
     amountAtomic: string;
-    payTo: string;
+    payTo?: string;
   }>;
   readonly payer?: string;
   readonly settlement?: Readonly<{
@@ -52,7 +52,12 @@ export interface Receipt {
     version: string;
   }>;
   readonly outcome?:
-    "paid" | "declined_policy" | "failed_request" | "settlement_rejected" | "settlement_unknown";
+    | "paid"
+    | "signed_in"
+    | "declined_policy"
+    | "failed_request"
+    | "settlement_rejected"
+    | "settlement_unknown";
 }
 
 const durationSchema = z.number().nonnegative().finite();
@@ -75,9 +80,9 @@ const receiptSchema: z.ZodType<Receipt> = z.strictObject({
   quote: z
     .strictObject({
       network: z.string(),
-      asset: z.string(),
+      asset: z.string().optional(),
       amountAtomic: z.string().regex(/^\d+$/),
-      payTo: z.string(),
+      payTo: z.string().optional(),
     })
     .optional(),
   payer: z.string().optional(),
@@ -123,6 +128,7 @@ const receiptSchema: z.ZodType<Receipt> = z.strictObject({
   outcome: z
     .enum([
       "paid",
+      "signed_in",
       "declined_policy",
       "failed_request",
       "settlement_rejected",

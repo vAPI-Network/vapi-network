@@ -65,9 +65,9 @@ describe("receipts ledger", () => {
         listing: { name: "Weather", providerHost: "api.example", source: "vapi" },
         retry: 0,
         policy: { maxPriceUsd: "0.01", capsApplied: true },
-        client: { name: "vapi-network", version: "0.2.0-dev.2" },
+        client: { name: "vapi-network", version: "0.2.0-dev.3" },
         outcome: "paid",
       }),
-    ).toMatchObject({ outcome: "paid", client: { version: "0.2.0-dev.2" } });
+    ).toMatchObject({ outcome: "paid", client: { version: "0.2.0-dev.3" } });
   });
 });

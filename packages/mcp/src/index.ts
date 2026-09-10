@@ -14,3 +14,4 @@ export {
   type MarketplaceSearchInput,
 } from "./tools/search.js";
 export { getWallet, type WalletBalance } from "./tools/wallet.js";
+export { buildSIWxProof, parseSIWxResponse } from "./siwx.js";

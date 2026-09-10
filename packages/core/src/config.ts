@@ -67,6 +67,8 @@ export const configSchema = z.object({
     z.object({
       rpcUrl: z.string(),
       usdc: z.string().transform((value) => getAddress(value)),
+      depositUrl: z.url().optional(),
+      depositInstructions: z.string().trim().min(1).max(500).optional(),
       eip712Domain: z
         .object({
           name: z.string().trim().min(1).max(64),

@@ -25,6 +25,7 @@ vapi search "weather"          # every catalog, merged, with provenance
 vapi inspect <listing-ref>     # request contract and the live 402 quote, before paying
 vapi pay <listing-ref> --max 0.02
 vapi balance
+vapi accounts                   # balances plus network-specific deposit guidance
 vapi receipts                  # one line per paid call: quote, settlement, latency
 ```
 
@@ -47,8 +48,56 @@ Add this to Claude Desktop, Claude Code, or Cursor. The passphrase unlocks the l
 }
 ```
 
-Tools: `call.search`, `call.inspect`, `call.pay`, `wallet.address`, `wallet.balance`, `receipts.list`.
-Spend caps default to $0.10 per call and $1.00 per day; the wallet checks both before it signs.
+Tools: `call.search`, `call.inspect`, `call.pay`, `wallet.address`, `wallet.balance`,
+`wallet.accounts`, `receipts.list`, `receipts.stats`, `support.report`. Spend caps default to $0.10
+per call and $1.00 per day; the wallet checks both before it signs a payment.
+
+## Sign-in with X
+
+x402 v2 services can require Sign-In-With-X (SIWX) before returning a price. When `call.pay` or
+`vapi pay` receives that challenge, vAPI checks that both the challenge domain and URI match the
+final resource origin, signs the canonical EIP-4361 message locally with EVM `personal_sign`, and
+retries once with `SIGN-IN-WITH-X`. The proof is never sent to a redirect or a different host.
+
+If the retry returns a normal 402 quote, the usual spend-policy and payment flow continues. If the
+resource is free after sign-in, the result has `outcome: "signed_in"` and the local receipt records
+`amountAtomic: "0"`.
+
+## Accounts and deposits
+
+`vapi accounts` lists one deposit account for every configured network, including its CAIP-2 ID,
+network name, address, atomic and formatted USDC balance, gas-token balance, and deposit guidance.
+Use `--json` for the stable `{ "accounts": [...] }` shape. `vapi init` prints the same account list
+after creating the encrypted keystore and configuration. MCP clients can use `wallet.accounts`.
+
+Base uses the wallet's EVM address and tells you to send USDC on Base. For Arc testnet, add the
+faucet URL or instructions to that network's `config.json` entry:
+
+```json
+{
+  "depositUrl": "https://your-arc-faucet.example",
+  "depositInstructions": "Use the configured Arc testnet faucet, then send USDC to this address."
+}
+```
+
+Account lookup is adapter-based by CAIP namespace, leaving a dedicated hook for Solana address and
+balance support without coupling it to the EVM wallet.
+
+## Reporting a bug
+
+```bash
+vapi report "the provider returned 402 twice"
+vapi report "the provider returned 402 twice" --include-addresses
+vapi report "the provider returned 402 twice" --send
+```
+
+The command first writes `$VAPI_HOME/reports/<timestamp>.json`, then prints that path and a prefilled
+GitHub issue URL. Reports contain the message, client version, OS/Node information, and only the
+newest five receipt IDs. Wallet and payee addresses are included only with `--include-addresses`;
+amounts are never included. No report is uploaded unless `--send` is explicit. With `--send`, vAPI
+uses the guarded network client to POST the same JSON to the configured registry and prints the HTTP
+response code, including non-success responses such as 404. MCP clients can use `support.report`
+with the corresponding `includeAddresses` and `send` booleans.
 
 ## Discovery sources
 
@@ -110,6 +159,7 @@ config.json
 keystore.json
 receipts.jsonl
 spend-ledger.json
+reports/
 ```
 
 Set `VAPI_HOME` to use a different directory. On first use of the default home,
