@@ -60,7 +60,7 @@ randomness, filesystem roots, and `fetch` implementations.
 - Protect every outbound service request with the network guard. Treat redirects
   and resolved IP addresses as new destinations that need validation.
 - Published package versions move together. All packages are currently
-  `0.2.0-dev.2`, with npm tag `next` and public access.
+  `0.2.0-dev.3`, with npm tag `next` and public access.
 - Every published tarball has zero runtime dependencies. All runtime code is
   bundled with esbuild; builds must fail if non-Node external imports leak into
   `dist`.

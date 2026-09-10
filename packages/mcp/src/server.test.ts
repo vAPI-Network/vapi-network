@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -41,9 +41,11 @@ describe("Agent Cash MCP marketplace tools", () => {
       "call",
       "wallet.address",
       "wallet.balance",
+      "wallet.accounts",
       "wallet",
       "receipts.list",
       "receipts.stats",
+      "support.report",
     ]);
     const inspect = tools.tools.find((tool) => tool.name === "call.inspect");
     expect(inspect?.description).toContain("for free");
@@ -110,7 +112,7 @@ describe("Agent Cash MCP marketplace tools", () => {
           outcome: "paid",
           listing: { providerHost: "93.184.216.34", source: "direct" },
           policy: { capsApplied: false },
-          client: { name: "vapi-network", version: "0.2.0-dev.2" },
+          client: { name: "vapi-network", version: "0.2.0-dev.3" },
         },
       ],
     });
@@ -122,6 +124,68 @@ describe("Agent Cash MCP marketplace tools", () => {
       search: { count: 0, zeroResultRate: 0 },
     });
     await client.close();
+    await server.close();
+  });
+
+  it("lists configured accounts with deposit guidance", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const body = init?.body ?? (input instanceof Request ? await input.clone().text() : "");
+      const request = JSON.parse(String(body)) as { id: number; method: string };
+      return Response.json({
+        jsonrpc: "2.0",
+        id: request.id,
+        result: request.method === "eth_call" ? `0x${"0".repeat(64)}` : "0x0",
+      });
+    });
+    const { client, server } = await connectedServer(fetchImpl);
+
+    const result = await client.callTool({ name: "wallet.accounts" });
+
+    expect(result.isError).not.toBe(true);
+    expect(
+      (result.structuredContent as { accounts: Array<{ error?: string }> }).accounts[0]?.error,
+    ).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({
+      accounts: [
+        {
+          caip2: "eip155:8453",
+          name: "Base mainnet",
+          usdcBalance: { atomic: "0", formatted: "0" },
+          gasTokenBalance: { symbol: "ETH", atomic: "0", formatted: "0" },
+          depositInstructions: expect.stringContaining("Send USDC on Base"),
+        },
+      ],
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    await client.close();
+    await server.close();
+  });
+
+  it("writes support reports locally without sending by default", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-report-"));
+    temporaryDirectories.push(directory);
+    const fetchImpl = vi.fn<typeof fetch>();
+    const server = createVapiServer({
+      account: privateKeyToAccount(PRIVATE_KEY),
+      config: getDefaultConfig(),
+      fetchImpl,
+      receiptsPath: join(directory, "receipts.jsonl"),
+      reportsDirectory: join(directory, "reports"),
+    });
+
+    const result = await server.callTool({
+      name: "support.report",
+      arguments: { message: "payment failed" },
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      issueUrl: expect.stringContaining("title=payment%20failed"),
+      report: { message: "payment failed", receiptIds: [] },
+    });
+    const path = (result.structuredContent as { path: string }).path;
+    expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({ message: "payment failed" });
+    expect(fetchImpl).not.toHaveBeenCalled();
     await server.close();
   });
 

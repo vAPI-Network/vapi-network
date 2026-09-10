@@ -50,6 +50,8 @@ describe("vAPI config", () => {
           [BASE_MAINNET_CAIP2]: {
             rpcUrl: "https://rpc.example",
             usdc: NETWORKS[BASE_MAINNET_CAIP2].usdc,
+            depositUrl: "https://bridge.example/base",
+            depositInstructions: "Send USDC on Base.",
           },
         },
         spendCaps: { perCallAtomic: "100000", perDayAtomic: "1000000" },
@@ -59,6 +61,12 @@ describe("vAPI config", () => {
     await expect(loadConfig(path, {})).resolves.toMatchObject({
       marketplaceDiscoveryUrl: DEFAULT_MARKETPLACE_DISCOVERY_URL,
       registryFallbacks: DEFAULT_REGISTRY_FALLBACKS,
+      networks: {
+        [BASE_MAINNET_CAIP2]: {
+          depositUrl: "https://bridge.example/base",
+          depositInstructions: "Send USDC on Base.",
+        },
+      },
     });
     const configured = await loadConfig(path, {
       VAPI_MARKETPLACE_DISCOVERY_URL: "https://console.example/api/marketplace/discovery",

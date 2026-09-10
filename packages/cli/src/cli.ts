@@ -4,6 +4,7 @@ import {
   ARC_TESTNET_CAIP2,
   STATS_RANGES,
   aggregateStats,
+  createSupportReport,
   createKeystore,
   filterReceiptsByRange,
   formatUsdc,
@@ -13,6 +14,7 @@ import {
   getVapiPaths,
   isMissingFile,
   loadConfig,
+  listAccounts,
   migrateLegacyVapiHome,
   readReceipts,
   readSearchEvents,
@@ -21,6 +23,7 @@ import {
   unlockKeystore,
   writeDefaultConfig,
   type StatsRange,
+  type AccountInfo,
 } from "@vapi-network/core";
 import {
   callService,
@@ -41,10 +44,12 @@ Usage:
   vapi inspect <id> [--endpoint <name>] [--json]
   vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--json]
   vapi balance [--json]
+  vapi accounts [--json]
   vapi receipts [--limit <n>] [--json]
   vapi receipts export --format <json|csv> [--range <24h|7d|30d>]
   vapi stats [--range <24h|7d|30d>] [--json]
   vapi sweep <address> [--network <caip2>] [--json]
+  vapi report "<what happened>" [--include-addresses] [--send] [--json]
   vapi mcp [--json]
   vapi serve [--json]
   vapi version [--json]
@@ -57,6 +62,10 @@ export type CliIo = {
   stderr(message: string): void;
 };
 
+export type CliDependencies = {
+  fetchImpl?: typeof fetch;
+};
+
 const processIo: CliIo = {
   stdout: (message) => process.stdout.write(`${message}\n`),
   stderr: (message) => process.stderr.write(`${message}\n`),
@@ -65,7 +74,11 @@ const processIo: CliIo = {
 class UsageError extends Error {}
 
 /** Run one CLI invocation and return its process exit code. */
-export async function runCli(argv = process.argv.slice(2), io: CliIo = processIo): Promise<number> {
+export async function runCli(
+  argv = process.argv.slice(2),
+  io: CliIo = processIo,
+  dependencies: CliDependencies = {},
+): Promise<number> {
   let json = argv.includes("--json");
   try {
     const parsedInvocation = removeJsonFlag(argv);
@@ -87,7 +100,7 @@ export async function runCli(argv = process.argv.slice(2), io: CliIo = processIo
 
     switch (command) {
       case "init":
-        await initCommand(args.slice(1), json, io);
+        await initCommand(args.slice(1), json, io, dependencies);
         return 0;
       case "search":
         await searchCommand(args.slice(1), json, io);
@@ -101,6 +114,9 @@ export async function runCli(argv = process.argv.slice(2), io: CliIo = processIo
       case "balance":
         await balanceCommand(args.slice(1), json, io);
         return 0;
+      case "accounts":
+        await accountsCommand(args.slice(1), json, io, dependencies);
+        return 0;
       case "receipts":
         await receiptsCommand(args.slice(1), json, io);
         return 0;
@@ -109,6 +125,9 @@ export async function runCli(argv = process.argv.slice(2), io: CliIo = processIo
         return 0;
       case "sweep":
         await sweepCommand(args.slice(1), json, io);
+        return 0;
+      case "report":
+        await reportCommand(args.slice(1), json, io, dependencies);
         return 0;
       case "mcp":
         await mcpCommand(args.slice(1));
@@ -133,7 +152,12 @@ export async function runCli(argv = process.argv.slice(2), io: CliIo = processIo
   }
 }
 
-async function initCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
+async function initCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
   requireNoArguments(argv, "init");
   const paths = getVapiPaths();
   let migrated: string[] = [];
@@ -145,9 +169,16 @@ async function initCommand(argv: string[], json: boolean, io: CliIo): Promise<vo
     ? await unlockKeystore(passphrase, paths.keystore)
     : await createKeystore(passphrase, paths.keystore);
   if (!(await fileExists(paths.config))) await writeDefaultConfig(paths.config);
+  const config = await loadConfig(paths.config);
+  const accounts = await listAccounts({
+    address: account.address,
+    config,
+    ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+  });
 
   const result = {
     address: account.address,
+    accounts,
     config: paths.config,
     keystore: paths.keystore,
     message: "vAPI wallet created. Its encrypted key stays on this machine.",
@@ -162,6 +193,7 @@ async function initCommand(argv: string[], json: boolean, io: CliIo): Promise<vo
   io.stdout("Fund this address with USDC and a little ETH for gas on Base mainnet (eip155:8453).");
   io.stdout(`Config: ${paths.config}`);
   io.stdout(`Keystore: ${paths.keystore}`);
+  io.stdout(formatAccounts(accounts));
 }
 
 async function searchCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
@@ -255,6 +287,24 @@ async function balanceCommand(argv: string[], json: boolean, io: CliIo): Promise
   output(io, json, wallet, formatWallet(wallet));
 }
 
+async function accountsCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  requireNoArguments(argv, "accounts");
+  const paths = getVapiPaths();
+  const config = await loadConfig(paths.config);
+  const account = await unlockKeystore(await getKeystorePassphrase(), paths.keystore);
+  const accounts = await listAccounts({
+    address: account.address,
+    config,
+    ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+  });
+  output(io, json, { accounts }, formatAccounts(accounts));
+}
+
 async function receiptsCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
   if (argv[0] === "export") {
     await receiptsExportCommand(argv.slice(1), io);
@@ -346,6 +396,32 @@ async function sweepCommand(argv: string[], json: boolean, io: CliIo): Promise<v
   output(io, json, results, formatSweepResults(results));
 }
 
+async function reportCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set(),
+    booleanOptions: new Set(["--include-addresses", "--send"]),
+    maximumPositionals: 1,
+  });
+  const message = requiredPositional(
+    parsed.positionals[0],
+    'Usage: vapi report "<what happened>" [--include-addresses] [--send]',
+  );
+  const paths = getVapiPaths();
+  const result = await createSupportReport({
+    message,
+    includeAddresses: parsed.has("--include-addresses"),
+    send: parsed.has("--send"),
+    receiptsPath: paths.receipts,
+    ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+  });
+  output(io, json, result, formatSupportReport(result));
+}
+
 async function mcpCommand(argv: string[]): Promise<void> {
   requireNoArguments(argv, "mcp");
   const paths = getVapiPaths();
@@ -388,6 +464,37 @@ function formatWallet(wallet: Awaited<ReturnType<typeof getWallet>>): string {
     );
   }
   return lines.join("\n");
+}
+
+function formatAccounts(accounts: readonly AccountInfo[]): string {
+  if (accounts.length === 0) return "No configured network accounts.";
+  return accounts
+    .map((account) => {
+      const lines = [`${account.name} (${account.caip2})`, `  Address: ${account.address}`];
+      lines.push(
+        account.usdcBalance
+          ? `  USDC: ${account.usdcBalance.formatted} (${account.usdcBalance.atomic} atomic)`
+          : "  USDC: unavailable",
+      );
+      if (account.gasTokenBalance) {
+        lines.push(
+          `  ${account.gasTokenBalance.symbol}: ${account.gasTokenBalance.formatted} (${account.gasTokenBalance.atomic} atomic)`,
+        );
+      }
+      if (account.depositUrl) lines.push(`  Deposit: ${account.depositUrl}`);
+      if (account.depositInstructions) lines.push(`  ${account.depositInstructions}`);
+      if (account.error) lines.push(`  Balance error: ${account.error}`);
+      return lines.join("\n");
+    })
+    .join("\n");
+}
+
+function formatSupportReport(result: Awaited<ReturnType<typeof createSupportReport>>): string {
+  return [
+    `Report: ${result.path}`,
+    `GitHub: ${result.issueUrl}`,
+    ...(result.responseCode === undefined ? [] : [`Send response: HTTP ${result.responseCode}`]),
+  ].join("\n");
 }
 
 function formatReceipt(receipt: Awaited<ReturnType<typeof readReceipts>>[number]): string {
@@ -466,6 +573,7 @@ function formatSweepResults(
 
 type ArgumentSpec = {
   valueOptions: Set<string>;
+  booleanOptions?: Set<string>;
   repeatableOptions?: Set<string>;
   maximumPositionals: number;
 };
@@ -473,10 +581,16 @@ type ArgumentSpec = {
 function parseArguments(argv: string[], spec: ArgumentSpec) {
   const positionals: string[] = [];
   const options = new Map<string, string[]>();
+  const flags = new Set<string>();
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]!;
     if (!argument.startsWith("--")) {
       positionals.push(argument);
+      continue;
+    }
+    if (spec.booleanOptions?.has(argument)) {
+      if (flags.has(argument)) throw new UsageError(`${argument} may only be provided once.`);
+      flags.add(argument);
       continue;
     }
     if (!spec.valueOptions.has(argument)) throw new UsageError(`Unknown option ${argument}.`);
@@ -496,6 +610,7 @@ function parseArguments(argv: string[], spec: ArgumentSpec) {
     positionals,
     one: (name: string) => options.get(name)?.[0],
     many: (name: string) => options.get(name) ?? [],
+    has: (name: string) => flags.has(name),
   };
 }
 

@@ -1,1 +1,1 @@
-export { HELP, runCli, type CliIo } from "./cli.js";
+export { HELP, runCli, type CliDependencies, type CliIo } from "./cli.js";

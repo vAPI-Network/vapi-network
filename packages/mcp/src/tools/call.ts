@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   MARKETPLACE_EXECUTION_METHODS,
+  VAPI_CLIENT_VERSION,
   appendReceipt,
   assertPublicUrl,
   createPublicFetch,
@@ -28,6 +29,7 @@ import {
   parse402Response,
   parseSettlementResponse,
 } from "../x402.js";
+import { buildSIWxProof, parseSIWxResponse } from "../siwx.js";
 import { findMarketplaceApiByRef, resolveServiceEndpoint } from "./search.js";
 
 export type CallToolInput = {
@@ -115,6 +117,7 @@ type ResolvedCallEndpoint = {
 export type CallToolResult = {
   status: number;
   body: unknown;
+  outcome?: "signed_in";
   payment: null | {
     network: string;
     amountAtomic: string;
@@ -171,9 +174,9 @@ type CallTrace = {
   settlement?: NonNullable<Receipt["settlement"]>;
   status?: number;
   capsApplied: boolean;
+  identityNetwork?: string;
+  retry: number;
 };
-
-const CLIENT_VERSION = "0.2.0-dev.2";
 
 export async function callService(args: CallServiceArgs): Promise<CallToolResult> {
   const trace = createCallTrace(args);
@@ -402,15 +405,93 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
     }
   }
 
+  let challengeAttempt = initial;
+  let signInChallenge: Awaited<ReturnType<typeof parseSIWxResponse>>;
+  try {
+    signInChallenge = await initial.waitFor(
+      parseSIWxResponse(
+        initialResponse.clone(),
+        config.networks,
+        initial.request.url,
+        requiredNetwork,
+      ),
+      initialResponse,
+    );
+  } catch (error) {
+    await initialResponse.body?.cancel().catch(() => undefined);
+    initial.finish();
+    throw error;
+  }
+  if (signInChallenge) {
+    if (new URL(initial.request.url).protocol !== "https:") {
+      await initialResponse.body?.cancel().catch(() => undefined);
+      initial.finish();
+      throw new Error("vAPI will only send a signed SIWX proof to an HTTPS endpoint.");
+    }
+    const signStarted = trace.nowMs();
+    let proof: Awaited<ReturnType<typeof buildSIWxProof>>;
+    try {
+      proof = await buildSIWxProof({
+        signer: account,
+        challenge: signInChallenge,
+        responseUrl: initial.request.url,
+      });
+      trace.payer = account.address;
+      trace.identityNetwork = signInChallenge.chain.chainId;
+      trace.retry = 1;
+    } finally {
+      trace.phases.signMs = elapsed(trace, signStarted);
+      await initialResponse.body?.cancel().catch(() => undefined);
+      initial.finish();
+    }
+
+    const signedHeaders = new Headers(initial.request.headers);
+    for (const [name, value] of Object.entries(proof.headers)) signedHeaders.set(name, value);
+    const signedBody =
+      initial.request.method === "GET" || initial.request.method === "HEAD"
+        ? undefined
+        : await initial.request.clone().arrayBuffer();
+    const signedRequest = new Request(initial.request.url, {
+      method: initial.request.method,
+      headers: signedHeaders,
+      body: signedBody,
+    });
+    const signedStarted = trace.nowMs();
+    challengeAttempt = await fetchWithGuardedRedirects(signedRequest, false);
+    const signedResponse = challengeAttempt.response;
+    if (signedResponse.status !== 402) {
+      try {
+        const execution = {
+          resourceUrl: challengeAttempt.request.url,
+          method: challengeAttempt.request.method,
+          result: {
+            status: signedResponse.status,
+            body: await challengeAttempt.waitFor(readResponseBody(signedResponse), signedResponse),
+            payment: null,
+            ...(signedResponse.ok ? { outcome: "signed_in" as const } : {}),
+            ...expectedRequestFor(endpoint, signedResponse.status),
+          },
+        };
+        trace.resourceUrl = execution.resourceUrl;
+        trace.method = execution.method;
+        trace.status = execution.result.status;
+        return execution;
+      } finally {
+        trace.phases.requestMs = elapsed(trace, signedStarted);
+        challengeAttempt.finish();
+      }
+    }
+  }
+
   let quote: Awaited<ReturnType<typeof parse402Response>>;
   try {
-    quote = await initial.waitFor(
-      parse402Response(initialResponse, config.networks, requiredNetwork, expectedPayTo),
-      initialResponse,
+    quote = await challengeAttempt.waitFor(
+      parse402Response(challengeAttempt.response, config.networks, requiredNetwork, expectedPayTo),
+      challengeAttempt.response,
     );
   } finally {
     trace.phases.quoteMs = elapsed(trace, initialStarted);
-    initial.finish();
+    challengeAttempt.finish();
   }
   trace.quote = {
     network: quote.accepted.network,
@@ -418,7 +499,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
     amountAtomic: quote.amountAtomic.toString(),
     payTo: quote.accepted.payTo,
   };
-  if (new URL(initial.request.url).protocol !== "https:") {
+  if (new URL(challengeAttempt.request.url).protocol !== "https:") {
     throw new Error("vAPI will only send a signed x402 payment to an HTTPS endpoint.");
   }
   trace.capsApplied = true;
@@ -441,16 +522,16 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
   } finally {
     trace.phases.signMs = elapsed(trace, signStarted);
   }
-  const paidHeaders = new Headers(initial.request.headers);
+  const paidHeaders = new Headers(challengeAttempt.request.headers);
   for (const [name, value] of Object.entries(payment.headers)) {
     paidHeaders.set(name, value);
   }
   const paidBody =
-    initial.request.method === "GET" || initial.request.method === "HEAD"
+    challengeAttempt.request.method === "GET" || challengeAttempt.request.method === "HEAD"
       ? undefined
-      : await initial.request.clone().arrayBuffer();
-  const paidRequest = new Request(initial.request.url, {
-    method: initial.request.method,
+      : await challengeAttempt.request.clone().arrayBuffer();
+  const paidRequest = new Request(challengeAttempt.request.url, {
+    method: challengeAttempt.request.method,
     headers: paidHeaders,
     body: paidBody,
   });
@@ -576,6 +657,9 @@ async function recordCallReceipt(
   const evidence = payment?.settlement ?? undefined;
   const transaction = settlementTransaction(evidence);
   const settlementOutcome = payment ? classifySettlement(evidence) : undefined;
+  const identityAsset = trace.identityNetwork
+    ? args.config.networks[trace.identityNetwork]?.usdc
+    : undefined;
   const receipt: Receipt = {
     id: randomUUID(),
     timestamp: trace.startedAt.toISOString(),
@@ -597,16 +681,28 @@ async function recordCallReceipt(
             ...(evidence === undefined ? {} : { evidence }),
           },
         }
-      : {}),
+      : execution.result.outcome === "signed_in" && trace.identityNetwork
+        ? {
+            quote: {
+              network: trace.identityNetwork,
+              ...(identityAsset ? { asset: identityAsset } : {}),
+              amountAtomic: "0",
+            },
+            payer: args.account.address,
+          }
+        : {}),
     latencyMs: elapsed(trace, trace.startedMs),
     status: execution.result.status,
-    outcome: payment
-      ? settlementOutcome === "succeeded"
-        ? "paid"
-        : "settlement_unknown"
-      : execution.result.status >= 400
-        ? "failed_request"
-        : "paid",
+    outcome:
+      execution.result.outcome === "signed_in"
+        ? "signed_in"
+        : payment
+          ? settlementOutcome === "succeeded"
+            ? "paid"
+            : "settlement_unknown"
+          : execution.result.status >= 400
+            ? "failed_request"
+            : "paid",
   };
   await appendReceipt(receipt, args.receiptsPath);
 }
@@ -664,6 +760,7 @@ function createCallTrace(args: CallServiceArgs): CallTrace {
     source: marketplace || args.input.id ? "vapi" : "direct",
     ...(marketplace?.card.title ? { listingName: marketplace.card.title } : {}),
     capsApplied: false,
+    retry: 0,
   };
 }
 
@@ -685,12 +782,12 @@ function receiptContext(args: CallServiceArgs, trace: CallTrace, resourceUrl: st
       ...(providerHost ? { providerHost } : {}),
       source: trace.source,
     },
-    retry: 0,
+    retry: trace.retry,
     policy: {
       ...(maxPriceUsd === undefined ? {} : { maxPriceUsd: String(maxPriceUsd) }),
       capsApplied: trace.capsApplied,
     },
-    client: { name: "vapi-network" as const, version: CLIENT_VERSION },
+    client: { name: "vapi-network" as const, version: VAPI_CLIENT_VERSION },
     ...(args.marketplaceHit
       ? { provenance: [{ source: trace.source, ref: args.marketplaceHit.ref }] }
       : {}),
