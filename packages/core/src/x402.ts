@@ -1,14 +1,27 @@
 import { bytesToHex, getAddress, type Address, type Hex } from "viem";
+import { ExactSvmScheme } from "@x402/svm/exact/client";
 
+import { createPublicFetch } from "./net-guard.js";
+import { isSolanaAddress } from "./svm.js";
+import {
+  areSamePaymentNetwork,
+  SOLANA_MAINNET_CAIP2,
+  SOLANA_MAINNET_USDC,
+  X402_SOLANA_MAINNET_CAIP2,
+} from "./networks.js";
 import { getCanonicalX402Usdc, type X402NetworkConfig } from "./x402-networks.js";
 
 export type { Address, Hex } from "viem";
 
 export {
   ARC_TESTNET_CAIP2,
+  ARC_MAINNET_CAIP2_PLACEHOLDER,
   BASE_MAINNET_CAIP2,
   BROWSER_ENABLED_X402_NETWORK_CONFIG,
   CANONICAL_X402_USDC_NETWORKS,
+  SOLANA_MAINNET_CAIP2,
+  SOLANA_MAINNET_USDC,
+  X402_SOLANA_MAINNET_CAIP2,
   getCanonicalX402Usdc,
   type CanonicalX402UsdcIdentity,
   type CanonicalX402UsdcNetwork,
@@ -44,7 +57,7 @@ export type X402Resource = {
   iconUrl?: string;
 };
 
-export type X402PaymentRequirements = {
+export type EvmX402PaymentRequirements = {
   scheme: "exact";
   network: `eip155:${number}`;
   asset: Address;
@@ -54,12 +67,26 @@ export type X402PaymentRequirements = {
   extra: Record<string, unknown> & { name: string; version: string };
 };
 
+export type SvmX402PaymentRequirements = {
+  scheme: "exact";
+  network: `solana:${string}`;
+  asset: string;
+  amount: string;
+  payTo: string;
+  maxTimeoutSeconds: number;
+  extra: Record<string, unknown> & { feePayer: string };
+};
+
+export type X402PaymentRequirements = EvmX402PaymentRequirements | SvmX402PaymentRequirements;
+
 export type X402Quote = {
   x402Version: 2;
   amountAtomic: bigint;
   resource: X402Resource;
   accepted: X402PaymentRequirements;
   extensions?: Record<string, unknown>;
+  /** Local-only RPC route; never serialized into the payment payload. */
+  rpcUrl?: string;
 };
 
 export type Eip3009Authorization = {
@@ -93,13 +120,14 @@ export type X402TypedData = {
 export type X402Signer = {
   address: Address;
   signTypedData(typedData: X402TypedData): Promise<Hex>;
+  solana?: ConstructorParameters<typeof ExactSvmScheme>[0];
 };
 
 export type X402PaymentPayload = {
   x402Version: 2;
   resource: X402Resource;
   accepted: X402PaymentRequirements;
-  payload: { signature: Hex; authorization: Eip3009Authorization };
+  payload: { signature: Hex; authorization: Eip3009Authorization } | { transaction: string };
   extensions?: Record<string, unknown>;
 };
 
@@ -145,10 +173,14 @@ export function parse402Challenge(
   const accepted = candidates.find((candidate) => {
     const network = readString(candidate, "network");
     const scheme = readString(candidate, "scheme");
-    if (scheme !== "exact" || !network || (requiredNetwork && network !== requiredNetwork)) {
+    if (
+      scheme !== "exact" ||
+      !network ||
+      (requiredNetwork && !areSamePaymentNetwork(network, requiredNetwork))
+    ) {
       return false;
     }
-    const configured = configuredNetworks[network];
+    const configured = configuredX402Network(configuredNetworks, network);
     if (!configured || configured.enabled === false) {
       return false;
     }
@@ -157,6 +189,20 @@ export function parse402Challenge(
     const amount = readAmount(candidate);
     const maxTimeoutSeconds = readPositiveInteger(candidate.maxTimeoutSeconds);
     const extra = readBoundedJsonRecord(candidate.extra);
+    if (isSupportedSolanaNetwork(network)) {
+      const feePayer = extra ? readString(extra, "feePayer") : null;
+      return Boolean(
+        asset === SOLANA_MAINNET_USDC &&
+        configured.usdc === SOLANA_MAINNET_USDC &&
+        payTo &&
+        isSolanaAddress(payTo) &&
+        (!expectedPayTo || payTo === expectedPayTo) &&
+        amount !== null &&
+        maxTimeoutSeconds !== null &&
+        feePayer &&
+        isSolanaAddress(feePayer),
+      );
+    }
     const name = extra ? readString(extra, "name") : null;
     const version = extra ? readString(extra, "version") : null;
     const tokenDomain = canonicalTokenDomain(network, configured);
@@ -206,21 +252,17 @@ export function parse402Challenge(
   const amountAtomic = readAmount(accepted);
   const maxTimeoutSeconds = readPositiveInteger(accepted.maxTimeoutSeconds);
   const extra = readBoundedJsonRecord(accepted.extra);
-  const name = extra ? readString(extra, "name") : null;
-  const version = extra ? readString(extra, "version") : null;
   if (
     !network ||
     !asset ||
     !payTo ||
     amountAtomic === null ||
     maxTimeoutSeconds === null ||
-    !extra ||
-    !name ||
-    !version
+    !extra
   ) {
     throw new X402Error(
       "invalid_challenge",
-      "x402 exact payment option is missing amount, asset, payTo, maxTimeoutSeconds, or EIP-712 domain fields.",
+      "x402 exact payment option is missing amount, asset, payTo, maxTimeoutSeconds, or scheme metadata.",
     );
   }
 
@@ -239,6 +281,37 @@ export function parse402Challenge(
   }
 
   try {
+    const configured = configuredX402Network(configuredNetworks, network);
+    if (isSupportedSolanaNetwork(network)) {
+      const feePayer = readString(extra, "feePayer");
+      if (
+        !feePayer ||
+        !isSolanaAddress(asset) ||
+        !isSolanaAddress(payTo) ||
+        !isSolanaAddress(feePayer)
+      ) {
+        throw new Error("Invalid Solana exact-payment address.");
+      }
+      return {
+        x402Version: 2,
+        amountAtomic,
+        resource,
+        accepted: {
+          scheme: "exact",
+          network: network as `solana:${string}`,
+          asset,
+          amount: amountAtomic.toString(),
+          payTo,
+          maxTimeoutSeconds,
+          extra: { ...extra, feePayer },
+        },
+        ...(extensions ? { extensions } : {}),
+        ...(configured?.rpcUrl ? { rpcUrl: configured.rpcUrl } : {}),
+      };
+    }
+    const name = readString(extra, "name");
+    const version = readString(extra, "version");
+    if (!name || !version) throw new Error("Missing EIP-712 domain fields.");
     parseEip155ChainId(network);
     return {
       x402Version: 2,
@@ -254,6 +327,7 @@ export function parse402Challenge(
         extra: { ...extra, name, version },
       },
       ...(extensions ? { extensions } : {}),
+      ...(configured?.rpcUrl ? { rpcUrl: configured.rpcUrl } : {}),
     };
   } catch (error) {
     if (error instanceof X402Error) throw error;
@@ -345,13 +419,14 @@ export function buildEip3009TypedData(args: {
   if (!Number.isSafeInteger(args.nowSeconds) || args.nowSeconds < 0) {
     throw new Error("nowSeconds must be a non-negative integer.");
   }
-  const windowSeconds = Math.min(
-    MAX_AUTHORIZATION_WINDOW_SECONDS,
-    args.quote.accepted.maxTimeoutSeconds,
-  );
+  if (!isEvmPaymentRequirements(args.quote.accepted)) {
+    throw new Error("EIP-3009 typed data can only be built for an EVM x402 quote.");
+  }
+  const accepted = args.quote.accepted;
+  const windowSeconds = Math.min(MAX_AUTHORIZATION_WINDOW_SECONDS, accepted.maxTimeoutSeconds);
   const authorization: Eip3009Authorization = {
     from: getAddress(args.from),
-    to: args.quote.accepted.payTo,
+    to: accepted.payTo,
     value: args.quote.amountAtomic.toString(),
     validAfter: "0",
     validBefore: (args.nowSeconds + windowSeconds).toString(),
@@ -361,10 +436,10 @@ export function buildEip3009TypedData(args: {
     authorization,
     typedData: {
       domain: {
-        name: args.quote.accepted.extra.name,
-        version: args.quote.accepted.extra.version,
-        chainId: parseEip155ChainId(args.quote.accepted.network),
-        verifyingContract: args.quote.accepted.asset,
+        name: accepted.extra.name,
+        version: accepted.extra.version,
+        chainId: parseEip155ChainId(accepted.network),
+        verifyingContract: accepted.asset,
       },
       types: EIP3009_AUTHORIZATION_TYPES,
       primaryType: "TransferWithAuthorization",
@@ -385,7 +460,47 @@ export async function buildX402Payment(args: {
   quote: X402Quote;
   nowSeconds?: number;
   nonce?: Hex;
+  fetchImpl?: typeof fetch;
 }): Promise<{ payload: X402PaymentPayload; headers: X402PaymentHeaders }> {
+  if (isSvmPaymentRequirements(args.quote.accepted)) {
+    if (!args.signer.solana) {
+      throw new X402Error(
+        "unsupported_challenge",
+        "Solana is not enabled in this keystore. Run vapi accounts --enable solana first.",
+      );
+    }
+    if (!args.quote.rpcUrl) {
+      throw new X402Error(
+        "unsupported_challenge",
+        `Solana RPC is not configured for ${args.quote.accepted.network}.`,
+      );
+    }
+    const helperRequirements =
+      args.quote.accepted.network === SOLANA_MAINNET_CAIP2
+        ? { ...args.quote.accepted, network: X402_SOLANA_MAINNET_CAIP2 }
+        : args.quote.accepted;
+    const created = await withGuardedSvmFetch(
+      args.fetchImpl ?? createPublicFetch({ allowPrivateNetwork: false }),
+      async () => {
+        const helper = new ExactSvmScheme(args.signer.solana!, { rpcUrl: args.quote.rpcUrl });
+        return await helper.createPaymentPayload(
+          2,
+          helperRequirements as Parameters<ExactSvmScheme["createPaymentPayload"]>[1],
+        );
+      },
+    );
+    const payload: X402PaymentPayload = {
+      x402Version: 2,
+      resource: args.quote.resource,
+      accepted: args.quote.accepted,
+      payload: created.payload as { transaction: string },
+      ...(args.quote.extensions ? { extensions: args.quote.extensions } : {}),
+    };
+    return {
+      payload,
+      headers: { "PAYMENT-SIGNATURE": encodeBase64Json(payload) },
+    };
+  }
   const nonce = args.nonce ?? randomNonce();
   const { authorization, typedData } = buildEip3009TypedData({
     from: args.signer.address,
@@ -415,12 +530,14 @@ export async function buildCompatibleX402Payment(args: {
   quote: X402Quote;
   nowSeconds?: number;
   nonce?: Hex;
+  fetchImpl?: typeof fetch;
 }): Promise<{ payload: X402PaymentPayload; headers: X402CompatiblePaymentHeaders }> {
   const payment = await buildX402Payment({
     signer: args.account,
     quote: args.quote,
     ...(args.nowSeconds === undefined ? {} : { nowSeconds: args.nowSeconds }),
     ...(args.nonce === undefined ? {} : { nonce: args.nonce }),
+    ...(args.fetchImpl === undefined ? {} : { fetchImpl: args.fetchImpl }),
   });
   return {
     payload: payment.payload,
@@ -483,6 +600,57 @@ export function classifySettlement(value: unknown): X402SettlementOutcome {
     return "unknown";
   }
   return value.success ? "succeeded" : "rejected";
+}
+
+export function isSvmPaymentRequirements(
+  requirements: X402PaymentRequirements,
+): requirements is SvmX402PaymentRequirements {
+  return requirements.network.startsWith("solana:");
+}
+
+export function isEvmPaymentRequirements(
+  requirements: X402PaymentRequirements,
+): requirements is EvmX402PaymentRequirements {
+  return requirements.network.startsWith("eip155:");
+}
+
+function isSupportedSolanaNetwork(network: string): boolean {
+  return network === SOLANA_MAINNET_CAIP2 || network === X402_SOLANA_MAINNET_CAIP2;
+}
+
+function configuredX402Network(
+  configuredNetworks: X402NetworkConfig,
+  network: string,
+): X402NetworkConfig[string] | undefined {
+  const direct = configuredNetworks[network];
+  if (direct) return direct;
+  if (network === SOLANA_MAINNET_CAIP2) {
+    return configuredNetworks[X402_SOLANA_MAINNET_CAIP2];
+  }
+  if (network === X402_SOLANA_MAINNET_CAIP2) {
+    return configuredNetworks[SOLANA_MAINNET_CAIP2];
+  }
+  return undefined;
+}
+
+let svmFetchQueue = Promise.resolve();
+
+/** @x402/svm 2.25 accepts an RPC URL but not a fetch transport. */
+async function withGuardedSvmFetch<T>(fetchImpl: typeof fetch, operation: () => Promise<T>) {
+  const previous = svmFetchQueue;
+  let release!: () => void;
+  svmFetchQueue = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = fetchImpl;
+  try {
+    return await operation();
+  } finally {
+    globalThis.fetch = originalFetch;
+    release();
+  }
 }
 
 function parseEip155ChainId(network: string): number {

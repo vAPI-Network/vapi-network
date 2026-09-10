@@ -6,13 +6,22 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getAddress, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
-import { BASE_MAINNET_CAIP2, getDefaultConfig } from "@vapi-network/core";
+import {
+  BASE_MAINNET_CAIP2,
+  SOLANA_MAINNET_CAIP2,
+  SOLANA_MAINNET_USDC,
+  X402_SOLANA_MAINNET_CAIP2,
+  createKeystore,
+  getDefaultConfig,
+  readReceipts,
+} from "@vapi-network/core";
 
 import { VapiCallError, callService } from "./call.js";
 
 const PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" as Hex;
 const PAY_TO = getAddress("0x1111111111111111111111111111111111111111");
 const OTHER_PAYEE = getAddress("0x2222222222222222222222222222222222222222");
+const TOKEN_PROGRAM_ADDRESS = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -535,6 +544,165 @@ describe("Agent Cash marketplace call boundary", () => {
     expect((fetchImpl.mock.calls[2]![0] as Request).headers.has("payment-signature")).toBe(true);
   });
 
+  it("signs in to an auth-only SIWX server and records a zero-amount receipt", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-siwx-"));
+    temporaryDirectories.push(directory);
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const signMessage = vi.spyOn(account, "signMessage");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(signInRequired(), { status: 402 }))
+      .mockResolvedValueOnce(Response.json({ private: true }));
+    const receiptsPath = join(directory, "receipts.jsonl");
+
+    const result = await callService({
+      input: { url: "https://93.184.216.34/weather", method: "GET" },
+      account,
+      config: getDefaultConfig(),
+      fetchImpl,
+      receiptsPath,
+    });
+
+    expect(result).toEqual({
+      status: 200,
+      body: { private: true },
+      payment: null,
+      outcome: "signed_in",
+    });
+    expect(signMessage).toHaveBeenCalledOnce();
+    const signedRequest = fetchImpl.mock.calls[1]![0] as Request;
+    const proof = JSON.parse(
+      Buffer.from(signedRequest.headers.get("sign-in-with-x")!, "base64").toString("utf8"),
+    ) as Record<string, unknown>;
+    expect(proof).toMatchObject({
+      domain: "93.184.216.34",
+      uri: "https://93.184.216.34/weather",
+      chainId: BASE_MAINNET_CAIP2,
+      type: "eip191",
+      address: account.address,
+    });
+    await expect(readReceipts(receiptsPath)).resolves.toEqual([
+      expect.objectContaining({
+        outcome: "signed_in",
+        quote: expect.objectContaining({
+          network: BASE_MAINNET_CAIP2,
+          amountAtomic: "0",
+        }),
+      }),
+    ]);
+  });
+
+  it("keeps the SIWX proof while continuing through a subsequent payment quote", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-siwx-pay-"));
+    temporaryDirectories.push(directory);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(signInRequired(), { status: 402 }))
+      .mockResolvedValueOnce(paymentRequired(PAY_TO))
+      .mockResolvedValueOnce(Response.json({ paid: true }));
+
+    const result = await callService({
+      input: { url: "https://93.184.216.34/weather", method: "GET", maxPriceUsd: "0.01" },
+      account: privateKeyToAccount(PRIVATE_KEY),
+      config: getDefaultConfig(),
+      fetchImpl,
+      ledgerPath: join(directory, "ledger.json"),
+    });
+
+    expect(result).toMatchObject({
+      body: { paid: true },
+      payment: { network: BASE_MAINNET_CAIP2, amountAtomic: "2500", payTo: PAY_TO },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    const paidRequest = fetchImpl.mock.calls[2]![0] as Request;
+    expect(paidRequest.headers.has("sign-in-with-x")).toBe(true);
+    expect(paidRequest.headers.has("payment-signature")).toBe(true);
+  });
+
+  it("dispatches a post-SIWX Solana quote through the real ExactSvmScheme", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-siwx-svm-pay-"));
+    temporaryDirectories.push(directory);
+    const account = await createKeystore("test-only-passphrase", join(directory, "keystore.json"), {
+      enableSolana: true,
+    });
+    const config = getDefaultConfig({}, { networks: ["base", "solana"] });
+    config.networks[SOLANA_MAINNET_CAIP2]!.rpcUrl = "https://rpc.example";
+    let resourceAttempts = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (new URL(url).hostname === "rpc.example") {
+        const body = init?.body ?? (input instanceof Request ? await input.clone().text() : "");
+        const rpc = JSON.parse(String(body)) as { id: string | number; method: string };
+        expect(rpc.method).toBe("getAccountInfo");
+        return Response.json({
+          jsonrpc: "2.0",
+          id: rpc.id,
+          result: {
+            context: { slot: 365_123_456 },
+            value: {
+              data: [mintAccountBase64(), "base64"],
+              executable: false,
+              lamports: 1_461_600,
+              owner: TOKEN_PROGRAM_ADDRESS,
+              rentEpoch: 0,
+              space: 82,
+            },
+          },
+        });
+      }
+      resourceAttempts += 1;
+      if (resourceAttempts === 1) return Response.json(signInRequired(), { status: 402 });
+      if (resourceAttempts === 2) return solanaPaymentRequired();
+      return Response.json({ paid: true });
+    });
+
+    const result = await callService({
+      input: { url: "https://93.184.216.34/weather", method: "GET", maxPriceUsd: "0.01" },
+      account,
+      config,
+      fetchImpl,
+      ledgerPath: join(directory, "ledger.json"),
+    });
+
+    expect(result).toMatchObject({
+      body: { paid: true },
+      payment: {
+        network: X402_SOLANA_MAINNET_CAIP2,
+        amountAtomic: "2500",
+        payTo: "11111111111111111111111111111111",
+      },
+    });
+    expect(resourceAttempts).toBe(3);
+    const paidRequest = fetchImpl.mock.calls.find(
+      ([input]) =>
+        input instanceof Request &&
+        input.url === "https://93.184.216.34/weather" &&
+        input.headers.has("payment-signature"),
+    )?.[0] as Request | undefined;
+    expect(paidRequest?.headers.has("sign-in-with-x")).toBe(true);
+  });
+
+  it("refuses a SIWX domain mismatch before asking the wallet to sign", async () => {
+    const challenge = signInRequired();
+    challenge.extensions["sign-in-with-x"].info.domain = "attacker.example";
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const signMessage = vi.spyOn(account, "signMessage");
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json(challenge, { status: 402 }));
+
+    await expect(
+      callService({
+        input: { url: "https://93.184.216.34/weather", method: "GET" },
+        account,
+        config: getDefaultConfig(),
+        fetchImpl,
+      }),
+    ).rejects.toThrow(/does not match resource host.*Refusing to sign/);
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
   it.each([403, 500])(
     "marks a paid HTTP %s without settlement evidence as ambiguous",
     async (status) => {
@@ -715,4 +883,58 @@ function paymentRequired(payTo: string) {
     },
     { status: 402 },
   );
+}
+
+function signInRequired() {
+  return {
+    x402Version: 2,
+    accepts: [],
+    extensions: {
+      "sign-in-with-x": {
+        info: {
+          domain: "93.184.216.34",
+          uri: "https://93.184.216.34/weather",
+          statement: "Sign in to view this resource",
+          version: "1" as const,
+          nonce: "abcdefgh",
+          issuedAt: "2026-09-10T08:00:00.000Z",
+        },
+        supportedChains: [{ chainId: BASE_MAINNET_CAIP2, type: "eip191" as const }],
+        schema: { type: "object" },
+      },
+    },
+  };
+}
+
+function solanaPaymentRequired() {
+  return Response.json(
+    {
+      x402Version: 2,
+      resource: { url: "https://93.184.216.34/weather" },
+      accepts: [
+        {
+          scheme: "exact",
+          network: X402_SOLANA_MAINNET_CAIP2,
+          amount: "2500",
+          asset: SOLANA_MAINNET_USDC,
+          payTo: "11111111111111111111111111111111",
+          maxTimeoutSeconds: 60,
+          extra: {
+            feePayer: "SysvarRent111111111111111111111111111111111",
+            recentBlockhash: "11111111111111111111111111111111",
+            lastValidBlockHeight: "365123999",
+            memo: "fixed-vapi-siwx-test",
+          },
+        },
+      ],
+    },
+    { status: 402 },
+  );
+}
+
+function mintAccountBase64(): string {
+  const data = Buffer.alloc(82);
+  data[44] = 6;
+  data[45] = 1;
+  return data.toString("base64");
 }

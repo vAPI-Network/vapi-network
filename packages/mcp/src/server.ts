@@ -2,20 +2,25 @@ import { createInterface, type Interface } from "node:readline";
 import {
   MARKETPLACE_KINDS,
   STATS_RANGES,
+  VAPI_CLIENT_VERSION,
   aggregateStats,
+  createSupportReport,
   createPublicFetch,
   getVapiPaths,
   isMirroredHit,
+  isSolanaAddress,
+  isSupportedPaymentNetwork,
   loadConfig,
+  listAccounts,
   marketplaceDiscoveryPageSchema,
   marketplaceKindSchema,
   readReceipts,
   readSearchEvents,
+  type VapiPaymentAccount,
   type MarketplaceHit,
   type VapiConfig,
   type StatsRange,
 } from "@vapi-network/core";
-import type { PrivateKeyAccount } from "viem/accounts";
 import { z } from "zod";
 
 import {
@@ -31,12 +36,13 @@ import { getWallet } from "./tools/wallet.js";
 export { callService, type CallToolInput, type CallToolResult };
 
 export type VapiServerOptions = {
-  account: PrivateKeyAccount;
+  account: VapiPaymentAccount;
   config: VapiConfig;
   fetchImpl?: typeof fetch;
   ledgerPath?: string;
   receiptsPath?: string;
   searchesPath?: string;
+  reportsDirectory?: string;
 };
 
 const MAX_CACHED_MARKETPLACE_REFS = 200;
@@ -55,6 +61,7 @@ const callToolResultSchema = z.object({
       proof: z.string().nullable(),
     })
     .nullable(),
+  outcome: z.literal("signed_in").optional(),
   expectedRequest: z
     .object({
       contentType: z.string().optional(),
@@ -98,6 +105,42 @@ const walletToolResultSchema = z.object({
   ),
 });
 
+const accountInfoSchema = z.object({
+  caip2: z.string(),
+  name: z.string(),
+  address: z.string(),
+  usdcBalance: z.object({ atomic: z.string(), formatted: z.string() }).nullable(),
+  gasTokenBalance: z
+    .object({ symbol: z.string(), atomic: z.string(), formatted: z.string() })
+    .nullable()
+    .optional(),
+  depositUrl: z.string().optional(),
+  depositInstructions: z.string().optional(),
+  error: z.string().optional(),
+});
+
+const supportReportResultSchema = z.object({
+  path: z.string(),
+  issueUrl: z.string(),
+  responseCode: z.number().int().optional(),
+  report: z.object({
+    message: z.string(),
+    clientVersion: z.string(),
+    os: z.object({ platform: z.string(), release: z.string(), arch: z.string() }),
+    node: z.string(),
+    receiptIds: z.array(z.string()),
+    receiptAddresses: z
+      .array(
+        z.object({
+          receiptId: z.string(),
+          payer: z.string().optional(),
+          payTo: z.string().optional(),
+        }),
+      )
+      .optional(),
+  }),
+});
+
 const latencyPercentilesSchema = z.object({
   p50Ms: z.number().nullable(),
   p95Ms: z.number().nullable(),
@@ -121,6 +164,7 @@ const statsToolResultSchema = z.object({
   }),
   outcomes: z.object({
     paid: outcomeValueSchema,
+    signed_in: outcomeValueSchema,
     declined_policy: outcomeValueSchema,
     failed_request: outcomeValueSchema,
     settlement_rejected: outcomeValueSchema,
@@ -196,11 +240,14 @@ const payTool = {
       .optional(),
     network: z
       .string()
-      .regex(/^eip155:[1-9]\d*$/)
+      .refine(isSupportedPaymentNetwork, "Expected a supported EVM or Solana network identifier.")
       .optional(),
     expectedPayTo: z
       .string()
-      .regex(/^0x[0-9a-fA-F]{40}$/)
+      .refine(
+        (value) => /^0x[0-9a-fA-F]{40}$/.test(value) || isSolanaAddress(value),
+        "Expected an EVM or Solana address.",
+      )
       .optional(),
     maxPriceUsd: z
       .union([z.number().nonnegative(), z.string().regex(/^\d+(?:\.\d{1,6})?$/)])
@@ -327,7 +374,7 @@ export class VapiMcpServer {
           protocolVersion:
             typeof params?.protocolVersion === "string" ? params.protocolVersion : "2025-11-25",
           capabilities: { tools: {} },
-          serverInfo: { name: "@vapi-network/mcp", version: "0.2.0-dev.2" },
+          serverInfo: { name: "@vapi-network/mcp", version: VAPI_CLIENT_VERSION },
         };
       } else if (method === "tools/list") {
         result = await this.listTools();
@@ -407,7 +454,9 @@ export function createVapiServer(options: VapiServerOptions) {
   server.registerTool("call", deprecatedTool(payTool, "call.pay"), pay);
 
   const balance = async () =>
-    asStructuredToolResult(() => getWallet(options.account.address, options.config));
+    asStructuredToolResult(() =>
+      getWallet(options.account, options.config, { fetchImpl: guardedFetch }),
+    );
   server.registerTool(
     "wallet.address",
     {
@@ -425,6 +474,24 @@ export function createVapiServer(options: VapiServerOptions) {
       outputSchema: walletToolResultSchema,
     },
     balance,
+  );
+  server.registerTool(
+    "wallet.accounts",
+    {
+      description:
+        "List configured network accounts, USDC and gas balances, and local deposit instructions.",
+      inputSchema: {},
+      outputSchema: z.object({ accounts: z.array(accountInfoSchema) }),
+    },
+    async () =>
+      asStructuredToolResult(async () => ({
+        accounts: await listAccounts({
+          address: options.account.address,
+          ...(options.account.solana ? { solanaAddress: options.account.solana.address } : {}),
+          config: options.config,
+          fetchImpl: guardedFetch,
+        }),
+      })),
   );
   server.registerTool(
     "wallet",
@@ -469,6 +536,31 @@ export function createVapiServer(options: VapiServerOptions) {
           range: (input.range ?? "24h") as StatsRange,
         });
       }),
+  );
+  server.registerTool(
+    "support.report",
+    {
+      description:
+        "Write a privacy-preserving bug report locally. Upload only when send is explicitly true.",
+      inputSchema: {
+        message: z.string().trim().min(1).max(10_000),
+        includeAddresses: z.boolean().optional(),
+        send: z.boolean().optional(),
+      },
+      outputSchema: supportReportResultSchema,
+    },
+    async (input) =>
+      asStructuredToolResult(() =>
+        createSupportReport({
+          message: input.message,
+          includeAddresses: input.includeAddresses,
+          send: input.send,
+          receiptsPath: options.receiptsPath ?? getVapiPaths().receipts,
+          ...(options.reportsDirectory ? { reportsDirectory: options.reportsDirectory } : {}),
+          fetchImpl: guardedFetch,
+          allowPrivateNetwork: options.config.allowPrivateNetwork,
+        }),
+      ),
   );
 
   return server;

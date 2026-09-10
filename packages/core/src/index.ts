@@ -1,5 +1,6 @@
 export * from "./call-contracts.js";
 export * from "./call-contracts-wire.js";
+export * from "./accounts.js";
 export * from "./config.js";
 export * from "./discovery.js";
 export * from "./keystore.js";
@@ -11,7 +12,10 @@ export * from "./receipts.js";
 export * from "./searches.js";
 export * from "./stats.js";
 export * from "./spend-policy.js";
+export * from "./support-report.js";
 export * from "./sweep.js";
+export * from "./siwx.js";
+export * from "./svm.js";
 export * from "./wallet.js";
 export * from "./x402.js";
 export {

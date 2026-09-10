@@ -5,13 +5,14 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  configSchema,
   DEFAULT_DISCOVERY_URL,
   DEFAULT_MARKETPLACE_DISCOVERY_URL,
   DEFAULT_REGISTRY_FALLBACKS,
   getDefaultConfig,
   loadConfig,
 } from "./config.js";
-import { BASE_MAINNET_CAIP2, NETWORKS } from "./networks.js";
+import { BASE_MAINNET_CAIP2, NETWORKS, SOLANA_MAINNET_CAIP2 } from "./networks.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -38,6 +39,26 @@ describe("vAPI config", () => {
     );
   });
 
+  it("adds the documented Solana mainnet RPC and USDC when selected", () => {
+    expect(getDefaultConfig({}, { networks: ["base", "solana"] }).networks).toMatchObject({
+      [BASE_MAINNET_CAIP2]: {
+        rpcUrl: "https://mainnet.base.org",
+        usdc: NETWORKS[BASE_MAINNET_CAIP2].usdc,
+      },
+      [SOLANA_MAINNET_CAIP2]: {
+        rpcUrl: "https://api.mainnet-beta.solana.com",
+        usdc: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      },
+    });
+  });
+
+  it("rejects a non-canonical mint for the Solana mainnet config", () => {
+    const config = getDefaultConfig({}, { networks: ["solana"] });
+    config.networks[SOLANA_MAINNET_CAIP2]!.usdc = "So11111111111111111111111111111111111111112";
+
+    expect(() => configSchema.parse(config)).toThrow(/canonical Solana mainnet USDC mint/);
+  });
+
   it("keeps existing config files compatible and allows environment overrides", async () => {
     const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-config-"));
     temporaryDirectories.push(directory);
@@ -50,6 +71,8 @@ describe("vAPI config", () => {
           [BASE_MAINNET_CAIP2]: {
             rpcUrl: "https://rpc.example",
             usdc: NETWORKS[BASE_MAINNET_CAIP2].usdc,
+            depositUrl: "https://bridge.example/base",
+            depositInstructions: "Send USDC on Base.",
           },
         },
         spendCaps: { perCallAtomic: "100000", perDayAtomic: "1000000" },
@@ -59,6 +82,12 @@ describe("vAPI config", () => {
     await expect(loadConfig(path, {})).resolves.toMatchObject({
       marketplaceDiscoveryUrl: DEFAULT_MARKETPLACE_DISCOVERY_URL,
       registryFallbacks: DEFAULT_REGISTRY_FALLBACKS,
+      networks: {
+        [BASE_MAINNET_CAIP2]: {
+          depositUrl: "https://bridge.example/base",
+          depositInstructions: "Send USDC on Base.",
+        },
+      },
     });
     const configured = await loadConfig(path, {
       VAPI_MARKETPLACE_DISCOVERY_URL: "https://console.example/api/marketplace/discovery",

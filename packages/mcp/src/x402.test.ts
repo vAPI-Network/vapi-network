@@ -311,7 +311,7 @@ describe("x402 v2 challenge parsing", () => {
       outcome: "declined_policy",
       quote: { amountAtomic: "2500" },
       policy: { capsApplied: true },
-      client: { name: "vapi-network", version: "0.2.0-dev.2" },
+      client: { name: "vapi-network", version: "0.2.0-dev.3" },
       error: { code: "per_call_cap_exceeded" },
     });
     expect(receipt).not.toHaveProperty("payer");
@@ -787,6 +787,8 @@ describe("EIP-3009 exact payment construction", () => {
       nonce: NONCE,
       nowSeconds: 1_700_000_000,
     });
+    expect(payment.payload.payload).toHaveProperty("authorization");
+    if (!("authorization" in payment.payload.payload)) throw new Error("Expected EVM payload.");
     expect(payment.payload.payload.signature).toMatch(/^0x[0-9a-f]{130}$/i);
     expect(payment.payload.payload.authorization).toEqual({
       from: account.address,

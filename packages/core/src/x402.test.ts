@@ -9,10 +9,16 @@ import {
   buildEip3009TypedData,
   buildX402Payment,
   classifySettlement,
+  isSvmPaymentRequirements,
   parse402Challenge,
   parse402Response,
   parseSettlementResponse,
 } from "./x402.js";
+import {
+  SOLANA_MAINNET_CAIP2,
+  SOLANA_MAINNET_USDC,
+  X402_SOLANA_MAINNET_CAIP2,
+} from "./networks.js";
 
 const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as const;
 const ARC_USDC = "0x3600000000000000000000000000000000000000" as const;
@@ -74,6 +80,8 @@ describe("browser-neutral x402 client", () => {
       nonce: NONCE,
       nowSeconds: 1_700_000_000,
     });
+    expect(payment.payload.payload).toHaveProperty("authorization");
+    if (!("authorization" in payment.payload.payload)) throw new Error("Expected EVM payload.");
     expect(payment.payload.payload.authorization).toMatchObject({
       from: BUYER,
       to: PAY_TO,
@@ -229,6 +237,45 @@ describe("browser-neutral x402 client", () => {
         arcNetworks,
       ),
     ).toThrow(/No exact x402 payment option matches/);
+  });
+
+  it("dispatches exact challenges by EVM versus Solana network namespace", () => {
+    const quote = parse402Challenge(
+      {
+        x402Version: 2,
+        resource: { url: "https://api.example/solana" },
+        accepts: [
+          {
+            scheme: "exact",
+            network: X402_SOLANA_MAINNET_CAIP2,
+            amount: "2500",
+            asset: SOLANA_MAINNET_USDC,
+            payTo: "11111111111111111111111111111111",
+            maxTimeoutSeconds: 60,
+            extra: { feePayer: "SysvarRent111111111111111111111111111111111" },
+          },
+        ],
+      },
+      {
+        [SOLANA_MAINNET_CAIP2]: {
+          usdc: SOLANA_MAINNET_USDC,
+          rpcUrl: "https://api.mainnet-beta.solana.com",
+        },
+      },
+      "",
+      SOLANA_MAINNET_CAIP2,
+    );
+
+    expect(isSvmPaymentRequirements(quote.accepted)).toBe(true);
+    expect(quote).toMatchObject({
+      amountAtomic: 2500n,
+      accepted: {
+        network: X402_SOLANA_MAINNET_CAIP2,
+        asset: SOLANA_MAINNET_USDC,
+        extra: { feePayer: "SysvarRent111111111111111111111111111111111" },
+      },
+      rpcUrl: "https://api.mainnet-beta.solana.com",
+    });
   });
 
   it("rejects a configured override of a canonical network's token authority", () => {

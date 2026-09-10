@@ -2,13 +2,14 @@ import type { Address, Hex } from "viem";
 
 import { getVapiPaths } from "./config.js";
 import { unlockKeystore } from "./keystore.js";
-import type { ConfiguredNetwork } from "./networks.js";
+import { isSolanaNetwork, type ConfiguredNetwork } from "./networks.js";
 import type { PaymentIntent, Policy } from "./policy.js";
 import { readUsdcBalance } from "./sweep.js";
 import type { X402TypedData } from "./x402.js";
 
 export interface Signer {
   readonly address: Address;
+  readonly solana?: { readonly address: string };
   signTypedData(typedData: X402TypedData): Promise<Hex>;
 }
 
@@ -37,7 +38,13 @@ export class LocalWallet implements Wallet {
   }
 
   async balance(network: string, configured: ConfiguredNetwork): Promise<bigint> {
-    return await readUsdcBalance({ network, configured, address: this.address });
+    const address = isSolanaNetwork(network) ? this.account.solana?.address : this.address;
+    if (!address) {
+      throw new Error(
+        "Solana is not enabled in this keystore. Run vapi accounts --enable solana first.",
+      );
+    }
+    return await readUsdcBalance({ network, configured, address });
   }
 }
 

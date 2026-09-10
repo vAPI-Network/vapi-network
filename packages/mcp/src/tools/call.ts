@@ -2,24 +2,30 @@ import { randomUUID } from "node:crypto";
 
 import {
   MARKETPLACE_EXECUTION_METHODS,
+  VAPI_CLIENT_VERSION,
   appendReceipt,
+  areSamePaymentNetwork,
   assertPublicUrl,
   createPublicFetch,
   DiscoveryCatalogError,
   formatUsdc,
   getVapiPaths,
   isNetworkConfigured,
+  isSolanaAddress,
+  isSolanaNetwork,
+  isSvmPaymentRequirements,
+  isSupportedPaymentNetwork,
   marketplaceExecutionMethodSchema,
   marketplaceHitSchema,
-  parseEip155ChainId,
   reserveSpend,
   type LookupFn,
   type MarketplaceExecutionMethod,
   type MarketplaceHit,
   type Receipt,
+  type VapiPaymentAccount,
   type VapiConfig,
+  type X402PaymentPayload,
 } from "@vapi-network/core";
-import type { PrivateKeyAccount } from "viem/accounts";
 
 import {
   assertMaxPrice,
@@ -28,6 +34,7 @@ import {
   parse402Response,
   parseSettlementResponse,
 } from "../x402.js";
+import { buildSIWxProof, parseSIWxResponse } from "../siwx.js";
 import { findMarketplaceApiByRef, resolveServiceEndpoint } from "./search.js";
 
 export type CallToolInput = {
@@ -48,8 +55,9 @@ export type PossibleSettlement = {
   amountAtomic: string;
   payTo: string;
   payer: string;
-  authorizationNonce: string;
-  authorizationExpiresAt: string;
+  authorizationNonce?: string;
+  authorizationExpiresAt?: string;
+  authorizationTransaction?: string;
   receipt: unknown | null;
 };
 
@@ -115,6 +123,7 @@ type ResolvedCallEndpoint = {
 export type CallToolResult = {
   status: number;
   body: unknown;
+  outcome?: "signed_in";
   payment: null | {
     network: string;
     amountAtomic: string;
@@ -133,7 +142,7 @@ export type CallToolResult = {
 export type CallServiceArgs = {
   input: CallToolInput;
   marketplaceHit?: MarketplaceHit;
-  account: PrivateKeyAccount;
+  account: VapiPaymentAccount;
   config: VapiConfig;
   fetchImpl?: typeof fetch;
   lookup?: LookupFn;
@@ -171,9 +180,9 @@ type CallTrace = {
   settlement?: NonNullable<Receipt["settlement"]>;
   status?: number;
   capsApplied: boolean;
+  identityNetwork?: string;
+  retry: number;
 };
-
-const CLIENT_VERSION = "0.2.0-dev.2";
 
 export async function callService(args: CallServiceArgs): Promise<CallToolResult> {
   const trace = createCallTrace(args);
@@ -244,7 +253,11 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
   }
   const requestedNetwork = normalizeRequiredNetwork(input.network);
   const listingNetwork = endpoint?.payment?.network;
-  if (requestedNetwork && listingNetwork && requestedNetwork !== listingNetwork) {
+  if (
+    requestedNetwork &&
+    listingNetwork &&
+    !areSamePaymentNetwork(requestedNetwork, listingNetwork)
+  ) {
     throw new Error(
       `The registered endpoint requires ${listingNetwork}; the requested network was ${requestedNetwork}.`,
     );
@@ -253,7 +266,10 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
     listingNetwork ?? requestedNetwork,
     config.networks,
   );
-  const inputExpectedPayTo = validateExpectedPayTo(input.expectedPayTo);
+  const inputExpectedPayTo = validateExpectedPayTo(
+    input.expectedPayTo,
+    listingNetwork ?? requestedNetwork,
+  );
   if (
     endpoint?.payment?.payTo &&
     inputExpectedPayTo &&
@@ -402,15 +418,93 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
     }
   }
 
+  let challengeAttempt = initial;
+  let signInChallenge: Awaited<ReturnType<typeof parseSIWxResponse>>;
+  try {
+    signInChallenge = await initial.waitFor(
+      parseSIWxResponse(
+        initialResponse.clone(),
+        config.networks,
+        initial.request.url,
+        requiredNetwork,
+      ),
+      initialResponse,
+    );
+  } catch (error) {
+    await initialResponse.body?.cancel().catch(() => undefined);
+    initial.finish();
+    throw error;
+  }
+  if (signInChallenge) {
+    if (new URL(initial.request.url).protocol !== "https:") {
+      await initialResponse.body?.cancel().catch(() => undefined);
+      initial.finish();
+      throw new Error("vAPI will only send a signed SIWX proof to an HTTPS endpoint.");
+    }
+    const signStarted = trace.nowMs();
+    let proof: Awaited<ReturnType<typeof buildSIWxProof>>;
+    try {
+      proof = await buildSIWxProof({
+        signer: account,
+        challenge: signInChallenge,
+        responseUrl: initial.request.url,
+      });
+      trace.payer = account.address;
+      trace.identityNetwork = signInChallenge.chain.chainId;
+      trace.retry = 1;
+    } finally {
+      trace.phases.signMs = elapsed(trace, signStarted);
+      await initialResponse.body?.cancel().catch(() => undefined);
+      initial.finish();
+    }
+
+    const signedHeaders = new Headers(initial.request.headers);
+    for (const [name, value] of Object.entries(proof.headers)) signedHeaders.set(name, value);
+    const signedBody =
+      initial.request.method === "GET" || initial.request.method === "HEAD"
+        ? undefined
+        : await initial.request.clone().arrayBuffer();
+    const signedRequest = new Request(initial.request.url, {
+      method: initial.request.method,
+      headers: signedHeaders,
+      body: signedBody,
+    });
+    const signedStarted = trace.nowMs();
+    challengeAttempt = await fetchWithGuardedRedirects(signedRequest, false);
+    const signedResponse = challengeAttempt.response;
+    if (signedResponse.status !== 402) {
+      try {
+        const execution = {
+          resourceUrl: challengeAttempt.request.url,
+          method: challengeAttempt.request.method,
+          result: {
+            status: signedResponse.status,
+            body: await challengeAttempt.waitFor(readResponseBody(signedResponse), signedResponse),
+            payment: null,
+            ...(signedResponse.ok ? { outcome: "signed_in" as const } : {}),
+            ...expectedRequestFor(endpoint, signedResponse.status),
+          },
+        };
+        trace.resourceUrl = execution.resourceUrl;
+        trace.method = execution.method;
+        trace.status = execution.result.status;
+        return execution;
+      } finally {
+        trace.phases.requestMs = elapsed(trace, signedStarted);
+        challengeAttempt.finish();
+      }
+    }
+  }
+
   let quote: Awaited<ReturnType<typeof parse402Response>>;
   try {
-    quote = await initial.waitFor(
-      parse402Response(initialResponse, config.networks, requiredNetwork, expectedPayTo),
-      initialResponse,
+    quote = await challengeAttempt.waitFor(
+      parse402Response(challengeAttempt.response, config.networks, requiredNetwork, expectedPayTo),
+      challengeAttempt.response,
     );
   } finally {
     trace.phases.quoteMs = elapsed(trace, initialStarted);
-    initial.finish();
+    challengeAttempt.finish();
   }
   trace.quote = {
     network: quote.accepted.network,
@@ -418,7 +512,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
     amountAtomic: quote.amountAtomic.toString(),
     payTo: quote.accepted.payTo,
   };
-  if (new URL(initial.request.url).protocol !== "https:") {
+  if (new URL(challengeAttempt.request.url).protocol !== "https:") {
     throw new Error("vAPI will only send a signed x402 payment to an HTTPS endpoint.");
   }
   trace.capsApplied = true;
@@ -435,22 +529,25 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
     payment = await buildX402Payment({
       account,
       quote,
+      fetchImpl,
       nowSeconds: args.now ? Math.floor(args.now.getTime() / 1_000) : undefined,
     });
-    trace.payer = account.address;
+    trace.payer = isSvmPaymentRequirements(quote.accepted)
+      ? account.solana?.address
+      : account.address;
   } finally {
     trace.phases.signMs = elapsed(trace, signStarted);
   }
-  const paidHeaders = new Headers(initial.request.headers);
+  const paidHeaders = new Headers(challengeAttempt.request.headers);
   for (const [name, value] of Object.entries(payment.headers)) {
     paidHeaders.set(name, value);
   }
   const paidBody =
-    initial.request.method === "GET" || initial.request.method === "HEAD"
+    challengeAttempt.request.method === "GET" || challengeAttempt.request.method === "HEAD"
       ? undefined
-      : await initial.request.clone().arrayBuffer();
-  const paidRequest = new Request(initial.request.url, {
-    method: initial.request.method,
+      : await challengeAttempt.request.clone().arrayBuffer();
+  const paidRequest = new Request(challengeAttempt.request.url, {
+    method: challengeAttempt.request.method,
     headers: paidHeaders,
     body: paidBody,
   });
@@ -463,7 +560,8 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
     throw settlementUnknown(
       "The paid request lost its response. Do not retry automatically; inspect the authorization and settlement state first.",
       quote,
-      payment.payload.payload.authorization,
+      payment.payload,
+      trace.payer ?? account.address,
       null,
       error,
     );
@@ -492,7 +590,8 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
       throw settlementUnknown(
         "The paid endpoint returned a redirect. The payment header was not forwarded; do not retry automatically until settlement is checked.",
         quote,
-        payment.payload.payload.authorization,
+        payment.payload,
+        trace.payer ?? account.address,
         settlement,
       );
     }
@@ -510,14 +609,21 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
       } catch {
         // The repeated response does not need a parseable next quote to remain ambiguous.
       }
-      throw settlementUnknown(message, quote, payment.payload.payload.authorization, settlement);
+      throw settlementUnknown(
+        message,
+        quote,
+        payment.payload,
+        trace.payer ?? account.address,
+        settlement,
+      );
     }
     if (!paidResponse.ok && settlementOutcome !== "succeeded") {
       await paidResponse.body?.cancel().catch(() => undefined);
       throw settlementUnknown(
         `The paid endpoint returned HTTP ${paidResponse.status} without decisive settlement evidence. Do not retry automatically.`,
         quote,
-        payment.payload.payload.authorization,
+        payment.payload,
+        trace.payer ?? account.address,
         settlement,
       );
     }
@@ -532,7 +638,8 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
       throw settlementUnknown(
         "The paid response could not be read. Do not retry automatically; inspect the authorization and settlement state first.",
         quote,
-        payment.payload.payload.authorization,
+        payment.payload,
+        trace.payer ?? account.address,
         settlement,
         error,
       );
@@ -576,6 +683,9 @@ async function recordCallReceipt(
   const evidence = payment?.settlement ?? undefined;
   const transaction = settlementTransaction(evidence);
   const settlementOutcome = payment ? classifySettlement(evidence) : undefined;
+  const identityAsset = trace.identityNetwork
+    ? args.config.networks[trace.identityNetwork]?.usdc
+    : undefined;
   const receipt: Receipt = {
     id: randomUUID(),
     timestamp: trace.startedAt.toISOString(),
@@ -590,23 +700,35 @@ async function recordCallReceipt(
             amountAtomic: payment.amountAtomic,
             payTo: payment.payTo,
           },
-          payer: args.account.address,
+          payer: trace.payer ?? args.account.address,
           settlement: {
             outcome: classifySettlement(evidence),
             ...(transaction ? { transaction } : {}),
             ...(evidence === undefined ? {} : { evidence }),
           },
         }
-      : {}),
+      : execution.result.outcome === "signed_in" && trace.identityNetwork
+        ? {
+            quote: {
+              network: trace.identityNetwork,
+              ...(identityAsset ? { asset: identityAsset } : {}),
+              amountAtomic: "0",
+            },
+            payer: args.account.address,
+          }
+        : {}),
     latencyMs: elapsed(trace, trace.startedMs),
     status: execution.result.status,
-    outcome: payment
-      ? settlementOutcome === "succeeded"
-        ? "paid"
-        : "settlement_unknown"
-      : execution.result.status >= 400
-        ? "failed_request"
-        : "paid",
+    outcome:
+      execution.result.outcome === "signed_in"
+        ? "signed_in"
+        : payment
+          ? settlementOutcome === "succeeded"
+            ? "paid"
+            : "settlement_unknown"
+          : execution.result.status >= 400
+            ? "failed_request"
+            : "paid",
   };
   await appendReceipt(receipt, args.receiptsPath);
 }
@@ -664,6 +786,7 @@ function createCallTrace(args: CallServiceArgs): CallTrace {
     source: marketplace || args.input.id ? "vapi" : "direct",
     ...(marketplace?.card.title ? { listingName: marketplace.card.title } : {}),
     capsApplied: false,
+    retry: 0,
   };
 }
 
@@ -685,12 +808,12 @@ function receiptContext(args: CallServiceArgs, trace: CallTrace, resourceUrl: st
       ...(providerHost ? { providerHost } : {}),
       source: trace.source,
     },
-    retry: 0,
+    retry: trace.retry,
     policy: {
       ...(maxPriceUsd === undefined ? {} : { maxPriceUsd: String(maxPriceUsd) }),
       capsApplied: trace.capsApplied,
     },
-    client: { name: "vapi-network" as const, version: CLIENT_VERSION },
+    client: { name: "vapi-network" as const, version: VAPI_CLIENT_VERSION },
     ...(args.marketplaceHit
       ? { provenance: [{ source: trace.source, ref: args.marketplaceHit.ref }] }
       : {}),
@@ -916,17 +1039,26 @@ function normalizeRequiredNetwork(network: string | undefined): string | undefin
     return undefined;
   }
   const normalized = network.trim();
-  try {
-    parseEip155ChainId(normalized);
-  } catch {
-    throw new Error(`call network must be an eip155:<chainId> identifier; received ${network}.`);
+  if (!isSupportedPaymentNetwork(normalized)) {
+    throw new Error(
+      `call network must be a supported eip155:<chainId> or Solana identifier; received ${network}.`,
+    );
   }
   return normalized;
 }
 
-function validateExpectedPayTo(value: string | undefined): string | undefined {
+function validateExpectedPayTo(
+  value: string | undefined,
+  network: string | undefined,
+): string | undefined {
   if (value === undefined) return undefined;
   const normalized = value.trim();
+  if (network && isSolanaNetwork(network)) {
+    if (!isSolanaAddress(normalized)) {
+      throw new Error("call expectedPayTo must be a Solana base58 address.");
+    }
+    return normalized;
+  }
   if (!/^0x[0-9a-fA-F]{40}$/.test(normalized)) {
     throw new Error("call expectedPayTo must be a 20-byte 0x address.");
   }
@@ -1073,12 +1205,8 @@ async function fetchAttempt(
 function settlementUnknown(
   message: string,
   quote: Awaited<ReturnType<typeof parse402Response>>,
-  authorization: {
-    from: string;
-    to: string;
-    nonce: string;
-    validBefore: string;
-  },
+  payment: X402PaymentPayload,
+  payer: string,
   receipt: unknown | null,
   cause?: unknown,
 ): VapiCallError {
@@ -1089,10 +1217,19 @@ function settlementUnknown(
       network: quote.accepted.network,
       asset: quote.accepted.asset,
       amountAtomic: quote.amountAtomic.toString(),
-      payTo: authorization.to,
-      payer: authorization.from,
-      authorizationNonce: authorization.nonce,
-      authorizationExpiresAt: authorization.validBefore,
+      payTo: quote.accepted.payTo,
+      payer,
+      ...(isSvmPaymentRequirements(quote.accepted)
+        ? {
+            authorizationTransaction:
+              "transaction" in payment.payload ? payment.payload.transaction : "",
+          }
+        : "authorization" in payment.payload
+          ? {
+              authorizationNonce: payment.payload.authorization.nonce,
+              authorizationExpiresAt: payment.payload.authorization.validBefore,
+            }
+          : {}),
       receipt,
     },
     cause === undefined ? undefined : { cause },

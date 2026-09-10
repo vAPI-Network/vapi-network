@@ -4,7 +4,10 @@ import {
   ARC_TESTNET_CAIP2,
   STATS_RANGES,
   aggregateStats,
+  createSupportReport,
   createKeystore,
+  enableDefaultNetwork,
+  enableSolanaKey,
   filterReceiptsByRange,
   formatUsdc,
   getArcGasHeadroomAtomic,
@@ -12,7 +15,9 @@ import {
   getNetworkDefinition,
   getVapiPaths,
   isMissingFile,
+  isNetworkConfigured,
   loadConfig,
+  listAccounts,
   migrateLegacyVapiHome,
   readReceipts,
   readSearchEvents,
@@ -21,6 +26,7 @@ import {
   unlockKeystore,
   writeDefaultConfig,
   type StatsRange,
+  type AccountInfo,
 } from "@vapi-network/core";
 import {
   callService,
@@ -29,14 +35,13 @@ import {
   searchMarketplace,
   startStdioServer,
 } from "@vapi-network/mcp";
-import { getAddress } from "viem";
-
 import { CLI_VERSION } from "./version";
 
 export const HELP = `vAPI Network
 
 Usage:
-  vapi init [--json]
+  vapi init [--networks <base,solana>] [--json]
+  vapi accounts [--enable solana] [--json]
   vapi search [query] [--kind <kind>] [--network <caip2>] [--limit <n>] [--cursor <cursor>] [--json]
   vapi inspect <id> [--endpoint <name>] [--json]
   vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--json]
@@ -45,6 +50,7 @@ Usage:
   vapi receipts export --format <json|csv> [--range <24h|7d|30d>]
   vapi stats [--range <24h|7d|30d>] [--json]
   vapi sweep <address> [--network <caip2>] [--json]
+  vapi report "<what happened>" [--include-addresses] [--send] [--json]
   vapi mcp [--json]
   vapi serve [--json]
   vapi version [--json]
@@ -57,6 +63,10 @@ export type CliIo = {
   stderr(message: string): void;
 };
 
+export type CliDependencies = {
+  fetchImpl?: typeof fetch;
+};
+
 const processIo: CliIo = {
   stdout: (message) => process.stdout.write(`${message}\n`),
   stderr: (message) => process.stderr.write(`${message}\n`),
@@ -65,7 +75,11 @@ const processIo: CliIo = {
 class UsageError extends Error {}
 
 /** Run one CLI invocation and return its process exit code. */
-export async function runCli(argv = process.argv.slice(2), io: CliIo = processIo): Promise<number> {
+export async function runCli(
+  argv = process.argv.slice(2),
+  io: CliIo = processIo,
+  dependencies: CliDependencies = {},
+): Promise<number> {
   let json = argv.includes("--json");
   try {
     const parsedInvocation = removeJsonFlag(argv);
@@ -87,7 +101,10 @@ export async function runCli(argv = process.argv.slice(2), io: CliIo = processIo
 
     switch (command) {
       case "init":
-        await initCommand(args.slice(1), json, io);
+        await initCommand(args.slice(1), json, io, dependencies);
+        return 0;
+      case "accounts":
+        await accountsCommand(args.slice(1), json, io, dependencies);
         return 0;
       case "search":
         await searchCommand(args.slice(1), json, io);
@@ -99,7 +116,7 @@ export async function runCli(argv = process.argv.slice(2), io: CliIo = processIo
         await payCommand(args.slice(1), json, io);
         return 0;
       case "balance":
-        await balanceCommand(args.slice(1), json, io);
+        await balanceCommand(args.slice(1), json, io, dependencies);
         return 0;
       case "receipts":
         await receiptsCommand(args.slice(1), json, io);
@@ -109,6 +126,9 @@ export async function runCli(argv = process.argv.slice(2), io: CliIo = processIo
         return 0;
       case "sweep":
         await sweepCommand(args.slice(1), json, io);
+        return 0;
+      case "report":
+        await reportCommand(args.slice(1), json, io, dependencies);
         return 0;
       case "mcp":
         await mcpCommand(args.slice(1));
@@ -133,21 +153,46 @@ export async function runCli(argv = process.argv.slice(2), io: CliIo = processIo
   }
 }
 
-async function initCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
-  requireNoArguments(argv, "init");
+async function initCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set(["--networks"]),
+    maximumPositionals: 0,
+  });
+  const networks = parseInitNetworks(parsed.one("--networks") ?? "base");
+  const enableSolana = networks.includes("solana");
   const paths = getVapiPaths();
   let migrated: string[] = [];
   if (!process.env.VAPI_HOME?.trim()) {
     migrated = await migrateLegacyVapiHome({ targetDirectory: paths.directory, notice: io.stderr });
   }
   const passphrase = await getKeystorePassphrase({ confirm: true });
-  const account = migrated.includes(paths.keystore)
+  let account = migrated.includes(paths.keystore)
     ? await unlockKeystore(passphrase, paths.keystore)
-    : await createKeystore(passphrase, paths.keystore);
-  if (!(await fileExists(paths.config))) await writeDefaultConfig(paths.config);
+    : await createKeystore(passphrase, paths.keystore, { enableSolana });
+  if (enableSolana && !account.solana) {
+    account = await enableSolanaKey(passphrase, paths.keystore);
+  }
+  if (!(await fileExists(paths.config))) {
+    await writeDefaultConfig(paths.config, process.env, { networks });
+  } else if (enableSolana) {
+    await enableDefaultNetwork("solana", paths.config);
+  }
 
+  const config = await loadConfig(paths.config);
+  const accounts = await listAccounts({
+    address: account.address,
+    ...(account.solana ? { solanaAddress: account.solana.address } : {}),
+    config,
+    ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+  });
   const result = {
     address: account.address,
+    accounts,
     config: paths.config,
     keystore: paths.keystore,
     message: "vAPI wallet created. Its encrypted key stays on this machine.",
@@ -159,9 +204,18 @@ async function initCommand(argv: string[], json: boolean, io: CliIo): Promise<vo
 
   io.stdout(result.message);
   io.stdout(`Address: ${result.address}`);
-  io.stdout("Fund this address with USDC and a little ETH for gas on Base mainnet (eip155:8453).");
+  io.stdout(
+    "Fund the EVM address with USDC and a little ETH for gas on Base mainnet (eip155:8453).",
+  );
+  if (account.solana) {
+    io.stdout(`Solana address: ${account.solana.address}`);
+    io.stdout(
+      "Fund it with Solana USDC; x402 fees are facilitator-sponsored, while sweeps need a little SOL.",
+    );
+  }
   io.stdout(`Config: ${paths.config}`);
   io.stdout(`Keystore: ${paths.keystore}`);
+  io.stdout(formatAccounts(accounts));
 }
 
 async function searchCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
@@ -246,13 +300,48 @@ async function payCommand(argv: string[], json: boolean, io: CliIo): Promise<voi
   output(io, json, result, JSON.stringify(result, null, 2));
 }
 
-async function balanceCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
+async function balanceCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
   requireNoArguments(argv, "balance");
   const paths = getVapiPaths();
   const config = await loadConfig(paths.config);
   const account = await unlockKeystore(await getKeystorePassphrase(), paths.keystore);
-  const wallet = await getWallet(account.address, config);
+  const wallet = await getWallet(account, config, dependencies);
   output(io, json, wallet, formatWallet(wallet));
+}
+
+async function accountsCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set(["--enable"]),
+    maximumPositionals: 0,
+  });
+  const enable = parsed.one("--enable");
+  if (enable !== undefined && enable !== "solana") {
+    throw new UsageError("--enable currently supports only solana.");
+  }
+  const paths = getVapiPaths();
+  const passphrase = await getKeystorePassphrase();
+  const account = enable
+    ? await enableSolanaKey(passphrase, paths.keystore)
+    : await unlockKeystore(passphrase, paths.keystore);
+  if (enable) await enableDefaultNetwork("solana", paths.config);
+  const config = await loadConfig(paths.config);
+  const accounts = await listAccounts({
+    address: account.address,
+    ...(account.solana ? { solanaAddress: account.solana.address } : {}),
+    config,
+    ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+  });
+  output(io, json, { accounts }, formatAccounts(accounts));
 }
 
 async function receiptsCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
@@ -312,14 +401,15 @@ async function sweepCommand(argv: string[], json: boolean, io: CliIo): Promise<v
     valueOptions: new Set(["--network"]),
     maximumPositionals: 1,
   });
-  const destination = getAddress(
-    requiredPositional(parsed.positionals[0], "Usage: vapi sweep <address> [--network <caip2>]"),
+  const destination = requiredPositional(
+    parsed.positionals[0],
+    "Usage: vapi sweep <address> [--network <caip2>]",
   );
   const requestedNetwork = parsed.one("--network");
   const paths = getVapiPaths();
   const config = await loadConfig(paths.config);
   const account = await unlockKeystore(await getKeystorePassphrase(), paths.keystore);
-  if (requestedNetwork && !config.networks[requestedNetwork]) {
+  if (requestedNetwork && !isNetworkConfigured(config.networks, requestedNetwork)) {
     throw new Error(`Network ${requestedNetwork} is not configured.`);
   }
 
@@ -344,6 +434,32 @@ async function sweepCommand(argv: string[], json: boolean, io: CliIo): Promise<v
     throw new Error("No configured network had a sweepable USDC balance.");
   }
   output(io, json, results, formatSweepResults(results));
+}
+
+async function reportCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set(),
+    booleanOptions: new Set(["--include-addresses", "--send"]),
+    maximumPositionals: 1,
+  });
+  const message = requiredPositional(
+    parsed.positionals[0],
+    'Usage: vapi report "<what happened>" [--include-addresses] [--send]',
+  );
+  const paths = getVapiPaths();
+  const result = await createSupportReport({
+    message,
+    includeAddresses: parsed.has("--include-addresses"),
+    send: parsed.has("--send"),
+    receiptsPath: paths.receipts,
+    ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+  });
+  output(io, json, result, formatSupportReport(result));
 }
 
 async function mcpCommand(argv: string[]): Promise<void> {
@@ -388,6 +504,37 @@ function formatWallet(wallet: Awaited<ReturnType<typeof getWallet>>): string {
     );
   }
   return lines.join("\n");
+}
+
+function formatAccounts(accounts: readonly AccountInfo[]): string {
+  if (accounts.length === 0) return "No configured network accounts.";
+  return accounts
+    .map((account) => {
+      const lines = [`${account.name} (${account.caip2})`, `  Address: ${account.address}`];
+      lines.push(
+        account.usdcBalance
+          ? `  USDC: ${account.usdcBalance.formatted} (${account.usdcBalance.atomic} atomic)`
+          : "  USDC: unavailable",
+      );
+      if (account.gasTokenBalance) {
+        lines.push(
+          `  ${account.gasTokenBalance.symbol}: ${account.gasTokenBalance.formatted} (${account.gasTokenBalance.atomic} atomic)`,
+        );
+      }
+      if (account.depositUrl) lines.push(`  Deposit: ${account.depositUrl}`);
+      if (account.depositInstructions) lines.push(`  ${account.depositInstructions}`);
+      if (account.error) lines.push(`  Balance error: ${account.error}`);
+      return lines.join("\n");
+    })
+    .join("\n");
+}
+
+function formatSupportReport(result: Awaited<ReturnType<typeof createSupportReport>>): string {
+  return [
+    `Report: ${result.path}`,
+    `GitHub: ${result.issueUrl}`,
+    ...(result.responseCode === undefined ? [] : [`Send response: HTTP ${result.responseCode}`]),
+  ].join("\n");
 }
 
 function formatReceipt(receipt: Awaited<ReturnType<typeof readReceipts>>[number]): string {
@@ -466,6 +613,7 @@ function formatSweepResults(
 
 type ArgumentSpec = {
   valueOptions: Set<string>;
+  booleanOptions?: Set<string>;
   repeatableOptions?: Set<string>;
   maximumPositionals: number;
 };
@@ -473,10 +621,16 @@ type ArgumentSpec = {
 function parseArguments(argv: string[], spec: ArgumentSpec) {
   const positionals: string[] = [];
   const options = new Map<string, string[]>();
+  const flags = new Set<string>();
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]!;
     if (!argument.startsWith("--")) {
       positionals.push(argument);
+      continue;
+    }
+    if (spec.booleanOptions?.has(argument)) {
+      if (flags.has(argument)) throw new UsageError(`${argument} may only be provided once.`);
+      flags.add(argument);
       continue;
     }
     if (!spec.valueOptions.has(argument)) throw new UsageError(`Unknown option ${argument}.`);
@@ -496,6 +650,7 @@ function parseArguments(argv: string[], spec: ArgumentSpec) {
     positionals,
     one: (name: string) => options.get(name)?.[0],
     many: (name: string) => options.get(name) ?? [],
+    has: (name: string) => flags.has(name),
   };
 }
 
@@ -579,4 +734,20 @@ async function fileExists(path: string): Promise<boolean> {
     if (isMissingFile(error)) return false;
     throw error;
   }
+}
+
+function parseInitNetworks(value: string): string[] {
+  const networks = value
+    .split(",")
+    .map((network) => network.trim().toLowerCase())
+    .filter(Boolean);
+  if (networks.length === 0 || new Set(networks).size !== networks.length) {
+    throw new UsageError("--networks must be a comma-separated list without duplicates.");
+  }
+  for (const network of networks) {
+    if (network !== "base" && network !== "solana") {
+      throw new UsageError("--networks supports base and solana.");
+    }
+  }
+  return networks;
 }

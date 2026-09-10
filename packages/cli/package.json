@@ -1,6 +1,6 @@
 {
   "name": "@vapi-network/cli",
-  "version": "0.2.0-dev.2",
+  "version": "0.2.0-dev.3",
   "description": "Command-line interface for the non-custodial vAPI Network wallet",
   "license": "Apache-2.0",
   "repository": {

@@ -1,17 +1,20 @@
-import { createWalletClient, getAddress, type Address } from "viem";
-import type { PrivateKeyAccount } from "viem/accounts";
+import { createWalletClient, getAddress } from "viem";
 
 import type { AgentCashConfig } from "./config.js";
+import type { VapiPaymentAccount } from "./keystore.js";
 import {
   ARC_TESTNET_CAIP2,
+  configuredNetworkFor,
   createChain,
   createNetworkHttpTransport,
   createNetworkPublicClient,
   DEFAULT_ARC_GAS_HEADROOM_ATOMIC,
   getNetworkDefinition,
+  isSolanaNetwork,
   requireRpcUrl,
 } from "./networks.js";
 import type { LookupFn } from "./net-guard.js";
+import { readSolanaUsdcBalance, sweepSolanaUsdc } from "./svm.js";
 import { usdToAtomic } from "./x402.js";
 
 export const ERC20_ABI = [
@@ -37,7 +40,7 @@ export const ERC20_ABI = [
 export type SweepResult = {
   network: string;
   amountAtomic: string;
-  transaction: `0x${string}`;
+  transaction: string;
 };
 
 export function calculateSweepAmount(balanceAtomic: bigint, gasHeadroomAtomic: bigint): bigint {
@@ -64,11 +67,21 @@ export function getArcGasHeadroomAtomic(): bigint {
 export async function readUsdcBalance(args: {
   network: string;
   configured: AgentCashConfig["networks"][string];
-  address: Address;
+  address: string;
   allowPrivateNetwork?: boolean;
   fetchImpl?: typeof fetch;
   lookup?: LookupFn;
 }): Promise<bigint> {
+  if (isSolanaNetwork(args.network)) {
+    return await readSolanaUsdcBalance({
+      network: args.network,
+      configured: args.configured,
+      address: args.address,
+      allowPrivateNetwork: args.allowPrivateNetwork,
+      ...(args.fetchImpl ? { fetchImpl: args.fetchImpl } : {}),
+      ...(args.lookup ? { lookup: args.lookup } : {}),
+    });
+  }
   const client = createNetworkPublicClient(args.network, args.configured, {
     allowPrivateNetwork: args.allowPrivateNetwork,
     ...(args.fetchImpl ? { fetch: args.fetchImpl } : {}),
@@ -83,17 +96,39 @@ export async function readUsdcBalance(args: {
 }
 
 export async function sweepBack(args: {
-  account: PrivateKeyAccount;
+  account: VapiPaymentAccount;
   config: AgentCashConfig;
   network: string;
-  destination: Address;
+  destination: string;
   arcGasHeadroomAtomic?: bigint;
   fetchImpl?: typeof fetch;
   lookup?: LookupFn;
 }): Promise<SweepResult> {
-  const configured = args.config.networks[args.network];
+  const configured = configuredNetworkFor(args.config.networks, args.network);
   if (!configured) {
     throw new Error(`Network ${args.network} is not configured.`);
+  }
+
+  if (isSolanaNetwork(args.network)) {
+    if (!args.account.solana) {
+      throw new Error(
+        "Solana is not enabled in this keystore. Run vapi accounts --enable solana first.",
+      );
+    }
+    const result = await sweepSolanaUsdc({
+      network: args.network,
+      configured,
+      signer: args.account.solana,
+      destination: args.destination,
+      allowPrivateNetwork: args.config.allowPrivateNetwork,
+      ...(args.fetchImpl ? { fetchImpl: args.fetchImpl } : {}),
+      ...(args.lookup ? { lookup: args.lookup } : {}),
+    });
+    return {
+      network: args.network,
+      amountAtomic: result.amountAtomic.toString(),
+      transaction: result.transaction,
+    };
   }
 
   const definition = getNetworkDefinition(args.network);

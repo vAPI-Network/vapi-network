@@ -2,6 +2,20 @@ import { getAddress, type Address } from "viem";
 
 export const BASE_MAINNET_CAIP2 = "eip155:8453" as const;
 export const ARC_TESTNET_CAIP2 = "eip155:5042002" as const;
+/**
+ * Arc mainnet is not yet published by Arc or the x402 packages. Keep this
+ * non-routable placeholder so callers do not mistake viem's reserved chain ID
+ * for a usable x402 network.
+ *
+ * TODO: replace only after Arc publishes a mainnet RPC and canonical USDC.
+ */
+export const ARC_MAINNET_CAIP2_PLACEHOLDER: null = null;
+
+/** Full Solana mainnet genesis hash requested by the persisted vAPI config. */
+export const SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d" as const;
+/** CAIP-2 identifier emitted by the x402 reference packages. */
+export const X402_SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" as const;
+export const SOLANA_MAINNET_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" as const;
 
 export type CanonicalX402UsdcNetwork = typeof BASE_MAINNET_CAIP2 | typeof ARC_TESTNET_CAIP2;
 
@@ -20,6 +34,7 @@ export type X402NetworkConfig = Readonly<
     string,
     Readonly<{
       usdc: string;
+      rpcUrl?: string;
       enabled?: boolean;
       eip712Domain?: X402TokenDomain;
     }>
