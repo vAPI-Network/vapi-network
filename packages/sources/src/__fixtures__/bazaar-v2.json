@@ -1,0 +1,57 @@
+{
+  "x402Version": 2,
+  "items": [
+    {
+      "resource": "https://weather.example/forecast",
+      "description": "Real-time weather forecast data.",
+      "type": "http",
+      "x402Version": 2,
+      "lastUpdated": "2026-09-08T12:00:00.000Z",
+      "metadata": {
+        "category": "data",
+        "provider": "Example Labs"
+      },
+      "accepts": [
+        {
+          "scheme": "exact",
+          "network": "eip155:8453",
+          "amount": "1000",
+          "payTo": "0x2222222222222222222222222222222222222222",
+          "asset": "0x1111111111111111111111111111111111111111",
+          "maxTimeoutSeconds": 60
+        }
+      ],
+      "extensions": {
+        "bazaar": {
+          "info": {
+            "input": {
+              "type": "http",
+              "method": "POST"
+            }
+          },
+          "schema": {}
+        }
+      },
+      "quality": {
+        "l30DaysTotalCalls": 42
+      },
+      "serviceName": "Weather API",
+      "tags": ["weather", "data"]
+    },
+    {
+      "resource": {
+        "url": "https://minimal.example/data",
+        "mimeType": "application/json"
+      }
+    },
+    {
+      "resource": null,
+      "accepts": []
+    }
+  ],
+  "pagination": {
+    "limit": 100,
+    "offset": 0,
+    "total": 3
+  }
+}

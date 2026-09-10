@@ -1,0 +1,46 @@
+{
+  "name": "@vapi-network/mcp",
+  "version": "0.2.0-dev.1",
+  "description": "Local, non-custodial MCP server for discovering and paying x402 APIs",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vAPI-Network/vapi-network.git",
+    "directory": "packages/mcp"
+  },
+  "homepage": "https://github.com/vAPI-Network/vapi-network#readme",
+  "bugs": {
+    "url": "https://github.com/vAPI-Network/vapi-network/issues"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-package.mjs index=src/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "pack:check": "pnpm --dir ../.. pack:check",
+    "publish:npm": "pnpm pack:check && npm publish ./publish --access public --tag next"
+  },
+  "dependencies": {
+    "@vapi-network/core": "workspace:*",
+    "@vapi-network/sources": "workspace:*",
+    "viem": "^2.43.5",
+    "zod": "^4.1.13"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
+  }
+}

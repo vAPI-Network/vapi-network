@@ -1,0 +1,51 @@
+{
+  "name": "@vapi-network/sources",
+  "version": "0.2.0-dev.1",
+  "description": "Discovery source plugins for vAPI Network",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vAPI-Network/vapi-network.git",
+    "directory": "packages/sources"
+  },
+  "homepage": "https://github.com/vAPI-Network/vapi-network#readme",
+  "bugs": {
+    "url": "https://github.com/vAPI-Network/vapi-network/issues"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-package.mjs index=src/index.ts",
+    "pack:check": "pnpm --dir ../.. pack:check",
+    "publish:npm": "pnpm pack:check && npm publish ./publish --access public --tag next",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --max-warnings 0"
+  },
+  "dependencies": {
+    "@vapi-network/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.3",
+    "esbuild": "^0.28.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
+  }
+}

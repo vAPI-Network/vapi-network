@@ -1,0 +1,59 @@
+{
+  "name": "@vapi-network/cli",
+  "version": "0.2.0-dev.1",
+  "description": "Command-line interface for the non-custodial vAPI Network wallet",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vAPI-Network/vapi-network.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/vAPI-Network/vapi-network#readme",
+  "bugs": {
+    "url": "https://github.com/vAPI-Network/vapi-network/issues"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "bin": {
+    "vapi": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js"
+    }
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-package.mjs index=src/index.ts cli=src/cli.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "pack:check": "pnpm --dir ../.. pack:check",
+    "publish:npm": "pnpm pack:check && npm publish ./publish --access public --tag next"
+  },
+  "dependencies": {
+    "@vapi-network/core": "workspace:*",
+    "@vapi-network/mcp": "workspace:*",
+    "viem": "^2.43.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.6",
+    "esbuild": "^0.28.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
+  }
+}

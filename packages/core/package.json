@@ -1,0 +1,51 @@
+{
+  "name": "@vapi-network/core",
+  "version": "0.2.0-dev.1",
+  "description": "Non-custodial x402 protocol, wallet policy, discovery, and receipts core",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vAPI-Network/vapi-network.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/vAPI-Network/vapi-network#readme",
+  "bugs": {
+    "url": "https://github.com/vAPI-Network/vapi-network/issues"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-package.mjs index=src/index.ts",
+    "lint": "eslint src --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "pack:check": "pnpm --dir ../.. pack:check",
+    "publish:npm": "pnpm pack:check && npm publish ./publish --access public --tag next"
+  },
+  "dependencies": {
+    "viem": "^2.43.5",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.6",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
+  }
+}

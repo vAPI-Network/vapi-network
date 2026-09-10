@@ -1,0 +1,49 @@
+{
+  "name": "vapi-network",
+  "version": "0.2.0-dev.1",
+  "description": "One local wallet for discovering and paying every x402 API",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vAPI-Network/vapi-network.git",
+    "directory": "packages/vapi-network"
+  },
+  "homepage": "https://github.com/vAPI-Network/vapi-network#readme",
+  "bugs": {
+    "url": "https://github.com/vAPI-Network/vapi-network/issues"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "bin": {
+    "vapi": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-package.mjs index=src/index.ts cli=src/cli.ts",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit",
+    "pack:check": "pnpm --dir ../.. pack:check",
+    "publish:npm": "pnpm pack:check && npm publish ./publish --access public --tag next"
+  },
+  "dependencies": {
+    "@vapi-network/cli": "workspace:*",
+    "@vapi-network/core": "workspace:*",
+    "@vapi-network/mcp": "workspace:*",
+    "@vapi-network/sources": "workspace:*"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "next"
+  }
+}

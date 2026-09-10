@@ -1,0 +1,86 @@
+{
+  "protocol": "vapi.marketplace.discovery/1",
+  "items": [
+    {
+      "ref": "weather-call",
+      "kind": "api",
+      "provenance": "self_listed",
+      "execution": { "mode": "direct" },
+      "card": {
+        "title": "Weather Call",
+        "summary": "Returns current weather through a payable endpoint.",
+        "byline": "vAPI Network",
+        "badges": [
+          { "code": "live_x402", "label": "Live x402" },
+          { "code": "vapi_verified", "label": "vAPI verified" }
+        ],
+        "facts": [
+          { "label": "Price", "value": "$0.0021" },
+          { "label": "Network", "value": "eip155:8453" }
+        ]
+      },
+      "action": { "type": "invoke_api", "href": "/calls/weather-call" }
+    },
+    {
+      "ref": "https://api.weather.example/pay",
+      "kind": "api",
+      "provenance": "indexed",
+      "execution": {
+        "mode": "direct",
+        "url": "https://api.weather.example/pay",
+        "method": "GET",
+        "network": "eip155:8453"
+      },
+      "card": {
+        "title": "api.weather.example/pay",
+        "summary": "Returns current weather through an external payable endpoint.",
+        "byline": "x402 Bazaar",
+        "badges": [{ "code": "external_catalog", "label": "External catalog" }],
+        "facts": [
+          { "label": "Price", "value": "2100 base units" },
+          { "label": "Network", "value": "Base" },
+          { "label": "Method", "value": "GET" }
+        ]
+      },
+      "action": {
+        "type": "invoke_api",
+        "href": "/marketplace/apis/invoke?url=https%3A%2F%2Fapi.weather.example%2Fpay&method=GET&network=eip155%3A8453&sig=fixture"
+      }
+    },
+    {
+      "ref": "research-brief",
+      "kind": "service_offer",
+      "card": {
+        "title": "Research brief",
+        "summary": "A concise evidence-backed market research brief.",
+        "byline": "Northstar Research",
+        "badges": [{ "code": "approved_vendor", "label": "Approved vendor" }],
+        "facts": [
+          { "label": "From", "value": "25 USDC" },
+          { "label": "Network", "value": "eip155:8453" }
+        ]
+      },
+      "action": {
+        "type": "start_engagement",
+        "href": "/work/listings/research-brief"
+      }
+    },
+    {
+      "ref": "pricing-study",
+      "kind": "open_request",
+      "card": {
+        "title": "Pricing study",
+        "summary": "Compare competitor pricing and package the findings.",
+        "badges": [],
+        "facts": [{ "label": "Policy", "value": "standard" }]
+      },
+      "action": {
+        "type": "propose_to_request",
+        "href": "/orders/pricing-study"
+      }
+    }
+  ],
+  "nextCursor": null,
+  "unavailableKinds": [],
+  "rankingVersion": "marketplace-ranking-v1"
+}

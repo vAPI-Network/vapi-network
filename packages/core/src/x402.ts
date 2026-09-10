@@ -1,0 +1,648 @@
+import { bytesToHex, getAddress, type Address, type Hex } from "viem";
+
+import { getCanonicalX402Usdc, type X402NetworkConfig } from "./x402-networks.js";
+
+export type { Address, Hex } from "viem";
+
+export {
+  ARC_TESTNET_CAIP2,
+  BASE_MAINNET_CAIP2,
+  BROWSER_ENABLED_X402_NETWORK_CONFIG,
+  CANONICAL_X402_USDC_NETWORKS,
+  getCanonicalX402Usdc,
+  type CanonicalX402UsdcIdentity,
+  type CanonicalX402UsdcNetwork,
+  type X402NetworkConfig,
+  type X402TokenDomain,
+} from "./x402-networks.js";
+
+const MAX_CHALLENGE_BYTES = 1_048_576;
+const MAX_UINT256 = (1n << 256n) - 1n;
+const MAX_METADATA_DEPTH = 8;
+const MAX_METADATA_ENTRIES = 256;
+const MAX_METADATA_KEYS_PER_OBJECT = 64;
+const MAX_METADATA_ARRAY_LENGTH = 64;
+const MAX_METADATA_STRING_LENGTH = 16_384;
+
+export const EIP3009_AUTHORIZATION_TYPES = {
+  TransferWithAuthorization: [
+    { name: "from", type: "address" },
+    { name: "to", type: "address" },
+    { name: "value", type: "uint256" },
+    { name: "validAfter", type: "uint256" },
+    { name: "validBefore", type: "uint256" },
+    { name: "nonce", type: "bytes32" },
+  ],
+} as const;
+
+export type X402Resource = {
+  url: string;
+  description?: string;
+  mimeType?: string;
+  serviceName?: string;
+  tags?: string[];
+  iconUrl?: string;
+};
+
+export type X402PaymentRequirements = {
+  scheme: "exact";
+  network: `eip155:${number}`;
+  asset: Address;
+  amount: string;
+  payTo: Address;
+  maxTimeoutSeconds: number;
+  extra: Record<string, unknown> & { name: string; version: string };
+};
+
+export type X402Quote = {
+  x402Version: 2;
+  amountAtomic: bigint;
+  resource: X402Resource;
+  accepted: X402PaymentRequirements;
+  extensions?: Record<string, unknown>;
+};
+
+export type Eip3009Authorization = {
+  from: Address;
+  to: Address;
+  value: string;
+  validAfter: "0";
+  validBefore: string;
+  nonce: Hex;
+};
+
+export type X402TypedData = {
+  domain: {
+    name: string;
+    version: string;
+    chainId: number;
+    verifyingContract: Address;
+  };
+  types: typeof EIP3009_AUTHORIZATION_TYPES;
+  primaryType: "TransferWithAuthorization";
+  message: {
+    from: Address;
+    to: Address;
+    value: bigint;
+    validAfter: 0n;
+    validBefore: bigint;
+    nonce: Hex;
+  };
+};
+
+export type X402Signer = {
+  address: Address;
+  signTypedData(typedData: X402TypedData): Promise<Hex>;
+};
+
+export type X402PaymentPayload = {
+  x402Version: 2;
+  resource: X402Resource;
+  accepted: X402PaymentRequirements;
+  payload: { signature: Hex; authorization: Eip3009Authorization };
+  extensions?: Record<string, unknown>;
+};
+
+export type X402PaymentHeaders = {
+  "PAYMENT-SIGNATURE": string;
+};
+
+export type X402CompatiblePaymentHeaders = X402PaymentHeaders & {
+  "X-PAYMENT": string;
+};
+
+export type X402SettlementOutcome = "succeeded" | "rejected" | "unknown";
+
+export class X402Error extends Error {
+  constructor(
+    public readonly code: "invalid_challenge" | "unsupported_challenge" | "max_price_exceeded",
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "X402Error";
+  }
+}
+
+export function parse402Challenge(
+  challenge: unknown,
+  configuredNetworks: X402NetworkConfig,
+  fallbackResourceUrl = "",
+  requiredNetwork?: string,
+  expectedPayTo?: string,
+): X402Quote {
+  if (!isRecord(challenge) || !Array.isArray(challenge.accepts)) {
+    throw new X402Error("invalid_challenge", "x402 challenge has no accepts array.");
+  }
+  if (challenge.x402Version !== undefined && challenge.x402Version !== 2) {
+    throw new X402Error(
+      "unsupported_challenge",
+      `Unsupported x402 version: ${String(challenge.x402Version)}.`,
+    );
+  }
+
+  const candidates = challenge.accepts.filter(isRecord);
+  const accepted = candidates.find((candidate) => {
+    const network = readString(candidate, "network");
+    const scheme = readString(candidate, "scheme");
+    if (scheme !== "exact" || !network || (requiredNetwork && network !== requiredNetwork)) {
+      return false;
+    }
+    const configured = configuredNetworks[network];
+    if (!configured || configured.enabled === false) {
+      return false;
+    }
+    const asset = readString(candidate, "asset");
+    const payTo = readString(candidate, "payTo");
+    const amount = readAmount(candidate);
+    const maxTimeoutSeconds = readPositiveInteger(candidate.maxTimeoutSeconds);
+    const extra = readBoundedJsonRecord(candidate.extra);
+    const name = extra ? readString(extra, "name") : null;
+    const version = extra ? readString(extra, "version") : null;
+    const tokenDomain = canonicalTokenDomain(network, configured);
+    if (
+      !asset ||
+      !payTo ||
+      amount === null ||
+      maxTimeoutSeconds === null ||
+      !extra ||
+      !name ||
+      !version ||
+      !tokenDomain ||
+      name !== tokenDomain.name ||
+      version !== tokenDomain.version ||
+      (extra.assetTransferMethod !== undefined && extra.assetTransferMethod !== "eip3009")
+    ) {
+      return false;
+    }
+    try {
+      return (
+        getAddress(asset) === getAddress(configured.usdc) &&
+        (!expectedPayTo || getAddress(payTo) === getAddress(expectedPayTo))
+      );
+    } catch {
+      return false;
+    }
+  });
+  if (!accepted) {
+    const offered = candidates
+      .map(
+        (candidate) =>
+          `${readString(candidate, "scheme") ?? "?"}/${readString(candidate, "network") ?? "?"}`,
+      )
+      .join(", ");
+    const expected = requiredNetwork
+      ? `required network ${requiredNetwork} and its configured USDC asset`
+      : "a configured network and USDC asset";
+    throw new X402Error(
+      "unsupported_challenge",
+      `No exact x402 payment option matches ${expected}${offered ? ` (offered: ${offered})` : ""}.`,
+    );
+  }
+
+  const network = readString(accepted, "network");
+  const asset = readString(accepted, "asset");
+  const payTo = readString(accepted, "payTo");
+  const amountAtomic = readAmount(accepted);
+  const maxTimeoutSeconds = readPositiveInteger(accepted.maxTimeoutSeconds);
+  const extra = readBoundedJsonRecord(accepted.extra);
+  const name = extra ? readString(extra, "name") : null;
+  const version = extra ? readString(extra, "version") : null;
+  if (
+    !network ||
+    !asset ||
+    !payTo ||
+    amountAtomic === null ||
+    maxTimeoutSeconds === null ||
+    !extra ||
+    !name ||
+    !version
+  ) {
+    throw new X402Error(
+      "invalid_challenge",
+      "x402 exact payment option is missing amount, asset, payTo, maxTimeoutSeconds, or EIP-712 domain fields.",
+    );
+  }
+
+  let resource = readResource(challenge.resource, fallbackResourceUrl);
+  if (!resource.url) resource = readResource(accepted.resource, fallbackResourceUrl);
+  if (!resource.url) {
+    throw new X402Error("invalid_challenge", "x402 challenge is missing its resource URL.");
+  }
+  const extensions =
+    challenge.extensions === undefined ? undefined : readBoundedJsonRecord(challenge.extensions);
+  if (challenge.extensions !== undefined && !extensions) {
+    throw new X402Error(
+      "invalid_challenge",
+      "x402 challenge extensions exceed the supported JSON metadata limits.",
+    );
+  }
+
+  try {
+    parseEip155ChainId(network);
+    return {
+      x402Version: 2,
+      amountAtomic,
+      resource,
+      accepted: {
+        scheme: "exact",
+        network: network as `eip155:${number}`,
+        asset: getAddress(asset),
+        amount: amountAtomic.toString(),
+        payTo: getAddress(payTo),
+        maxTimeoutSeconds,
+        extra: { ...extra, name, version },
+      },
+      ...(extensions ? { extensions } : {}),
+    };
+  } catch (error) {
+    if (error instanceof X402Error) throw error;
+    throw new X402Error(
+      "invalid_challenge",
+      "x402 challenge contains an invalid network or address.",
+      { cause: error },
+    );
+  }
+}
+
+export async function parse402Response(
+  response: Response,
+  configuredNetworks: X402NetworkConfig,
+  requiredNetwork?: string,
+  expectedPayTo?: string,
+): Promise<X402Quote> {
+  const header = response.headers.get("payment-required");
+  let headerError: unknown;
+  if (header) {
+    try {
+      const quote = parse402Challenge(
+        decodeBase64Json(header),
+        configuredNetworks,
+        response.url,
+        requiredNetwork,
+        expectedPayTo,
+      );
+      await response.body?.cancel().catch(() => undefined);
+      return quote;
+    } catch (error) {
+      headerError = error;
+    }
+  }
+  try {
+    return parse402Challenge(
+      await readBoundedJson(response, MAX_CHALLENGE_BYTES),
+      configuredNetworks,
+      response.url,
+      requiredNetwork,
+      expectedPayTo,
+    );
+  } catch (error) {
+    if (headerError instanceof X402Error) throw headerError;
+    if (error instanceof X402Error) throw error;
+    throw new X402Error(
+      "invalid_challenge",
+      "x402 402 response has neither a valid payment-required header nor a JSON accepts[] body.",
+      { cause: error },
+    );
+  }
+}
+
+async function readBoundedJson(response: Response, maximumBytes: number): Promise<unknown> {
+  if (!response.body) throw new Error("x402 response body is empty.");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const next = await reader.read();
+    if (next.done) break;
+    total += next.value.byteLength;
+    if (total > maximumBytes) {
+      await reader.cancel();
+      throw new Error(`x402 response exceeds ${maximumBytes} bytes.`);
+    }
+    chunks.push(next.value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+}
+
+const MAX_AUTHORIZATION_WINDOW_SECONDS = 600;
+
+export function buildEip3009TypedData(args: {
+  from: Address;
+  quote: X402Quote;
+  nonce: Hex;
+  nowSeconds: number;
+}): { authorization: Eip3009Authorization; typedData: X402TypedData } {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(args.nonce)) {
+    throw new Error("EIP-3009 nonce must be a random 32-byte hex value.");
+  }
+  if (!Number.isSafeInteger(args.nowSeconds) || args.nowSeconds < 0) {
+    throw new Error("nowSeconds must be a non-negative integer.");
+  }
+  const windowSeconds = Math.min(
+    MAX_AUTHORIZATION_WINDOW_SECONDS,
+    args.quote.accepted.maxTimeoutSeconds,
+  );
+  const authorization: Eip3009Authorization = {
+    from: getAddress(args.from),
+    to: args.quote.accepted.payTo,
+    value: args.quote.amountAtomic.toString(),
+    validAfter: "0",
+    validBefore: (args.nowSeconds + windowSeconds).toString(),
+    nonce: args.nonce,
+  };
+  return {
+    authorization,
+    typedData: {
+      domain: {
+        name: args.quote.accepted.extra.name,
+        version: args.quote.accepted.extra.version,
+        chainId: parseEip155ChainId(args.quote.accepted.network),
+        verifyingContract: args.quote.accepted.asset,
+      },
+      types: EIP3009_AUTHORIZATION_TYPES,
+      primaryType: "TransferWithAuthorization",
+      message: {
+        from: authorization.from,
+        to: authorization.to,
+        value: BigInt(authorization.value),
+        validAfter: 0n,
+        validBefore: BigInt(authorization.validBefore),
+        nonce: authorization.nonce,
+      },
+    },
+  };
+}
+
+export async function buildX402Payment(args: {
+  signer: X402Signer;
+  quote: X402Quote;
+  nowSeconds?: number;
+  nonce?: Hex;
+}): Promise<{ payload: X402PaymentPayload; headers: X402PaymentHeaders }> {
+  const nonce = args.nonce ?? randomNonce();
+  const { authorization, typedData } = buildEip3009TypedData({
+    from: args.signer.address,
+    quote: args.quote,
+    nonce,
+    nowSeconds: args.nowSeconds ?? Math.floor(Date.now() / 1_000),
+  });
+  const signature = await args.signer.signTypedData(typedData);
+  const payload: X402PaymentPayload = {
+    x402Version: 2,
+    resource: args.quote.resource,
+    accepted: args.quote.accepted,
+    payload: { signature, authorization },
+    ...(args.quote.extensions ? { extensions: args.quote.extensions } : {}),
+  };
+  return {
+    payload,
+    headers: {
+      "PAYMENT-SIGNATURE": encodeBase64Json(payload),
+    },
+  };
+}
+
+/** Adds the older X-PAYMENT header while keeping PAYMENT-SIGNATURE canonical. */
+export async function buildCompatibleX402Payment(args: {
+  account: X402Signer;
+  quote: X402Quote;
+  nowSeconds?: number;
+  nonce?: Hex;
+}): Promise<{ payload: X402PaymentPayload; headers: X402CompatiblePaymentHeaders }> {
+  const payment = await buildX402Payment({
+    signer: args.account,
+    quote: args.quote,
+    ...(args.nowSeconds === undefined ? {} : { nowSeconds: args.nowSeconds }),
+    ...(args.nonce === undefined ? {} : { nonce: args.nonce }),
+  });
+  return {
+    payload: payment.payload,
+    headers: {
+      ...payment.headers,
+      "X-PAYMENT": JSON.stringify({
+        x402Version: 2,
+        scheme: args.quote.accepted.scheme,
+        network: args.quote.accepted.network,
+        payload: payment.payload.payload,
+      }),
+    },
+  };
+}
+
+export function assertMaxPrice(amountAtomic: bigint, maxPriceUsd: number | string | undefined) {
+  if (maxPriceUsd === undefined) return;
+  const maxAtomic = usdToAtomic(maxPriceUsd);
+  if (amountAtomic > maxAtomic) {
+    throw new X402Error(
+      "max_price_exceeded",
+      `x402 quote ${amountAtomic} atomic USDC exceeds maxPriceUsd ${maxPriceUsd} (${maxAtomic} atomic). Refusing to sign.`,
+    );
+  }
+}
+
+export function usdToAtomic(value: number | string): bigint {
+  const normalized = typeof value === "number" ? String(value) : value.trim();
+  if (!/^\d+(?:\.\d{1,6})?$/.test(normalized)) {
+    throw new Error("maxPriceUsd must be a non-negative USD amount with at most 6 decimals.");
+  }
+  const [whole = "0", fraction = ""] = normalized.split(".");
+  return BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, "0"));
+}
+
+export function parseSettlementResponse(headers: Headers): unknown | null {
+  const encoded = headers.get("payment-response");
+  if (encoded) {
+    try {
+      return decodeBase64Json(encoded);
+    } catch {
+      return null;
+    }
+  }
+  const compatible = headers.get("x-payment-response");
+  if (!compatible) return null;
+  try {
+    return JSON.parse(compatible) as unknown;
+  } catch {
+    try {
+      return decodeBase64Json(compatible);
+    } catch {
+      return null;
+    }
+  }
+}
+
+export function classifySettlement(value: unknown): X402SettlementOutcome {
+  if (!isRecord(value) || typeof value.success !== "boolean") {
+    return "unknown";
+  }
+  return value.success ? "succeeded" : "rejected";
+}
+
+function parseEip155ChainId(network: string): number {
+  const match = /^eip155:(\d+)$/.exec(network);
+  const chainId = match ? Number(match[1]) : Number.NaN;
+  if (!Number.isSafeInteger(chainId) || chainId <= 0) {
+    throw new Error(`Invalid EIP-155 network identifier: ${network}.`);
+  }
+  return chainId;
+}
+
+function randomNonce(): Hex {
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+  return bytesToHex(bytes);
+}
+
+function readAmount(value: Record<string, unknown>): bigint | null {
+  const raw = value.amount ?? value.maxAmountRequired;
+  let parsed: bigint;
+  if (typeof raw === "string") {
+    if (raw.length === 0 || raw.length > 78 || !/^\d+$/.test(raw)) return null;
+    parsed = BigInt(raw);
+  } else if (typeof raw === "number" && Number.isSafeInteger(raw) && raw > 0) {
+    parsed = BigInt(raw);
+  } else if (typeof raw === "bigint" && raw > 0n) {
+    parsed = raw;
+  } else {
+    return null;
+  }
+  if (parsed === 0n || parsed > MAX_UINT256) return null;
+  return parsed;
+}
+
+function readPositiveInteger(value: unknown): number | null {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return value;
+  if (typeof value === "string" && /^\d+$/.test(value)) {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+  }
+  return null;
+}
+
+function canonicalTokenDomain(
+  network: string,
+  configured: X402NetworkConfig[string],
+): Readonly<{ name: string; version: string }> | null {
+  const canonical = getCanonicalX402Usdc(network);
+  try {
+    if (canonical) {
+      return getAddress(configured.usdc) === canonical.usdc ? canonical.eip712Domain : null;
+    }
+  } catch {
+    return null;
+  }
+  const configuredDomain = configured.eip712Domain;
+  if (!configuredDomain?.name || !configuredDomain.version) return null;
+  return configuredDomain;
+}
+
+function readBoundedJsonRecord(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null;
+  const seen = new WeakSet<object>();
+  const budget = { entries: 0 };
+
+  try {
+    const cloned = cloneBoundedJson(value, 0, seen, budget);
+    return isRecord(cloned) ? cloned : null;
+  } catch {
+    return null;
+  }
+}
+
+function cloneBoundedJson(
+  value: unknown,
+  depth: number,
+  seen: WeakSet<object>,
+  budget: { entries: number },
+): unknown {
+  if (depth > MAX_METADATA_DEPTH || budget.entries >= MAX_METADATA_ENTRIES) {
+    throw new Error("x402 metadata exceeds its structural limit.");
+  }
+  budget.entries += 1;
+
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    if (value.length > MAX_METADATA_STRING_LENGTH) {
+      throw new Error("x402 metadata string is too long.");
+    }
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("x402 metadata number must be finite.");
+    return value;
+  }
+  if (typeof value !== "object") {
+    throw new Error("x402 metadata must be JSON-compatible.");
+  }
+  if (seen.has(value)) throw new Error("x402 metadata must not contain cycles.");
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    if (value.length > MAX_METADATA_ARRAY_LENGTH) {
+      throw new Error("x402 metadata array is too long.");
+    }
+    return value.map((item) => cloneBoundedJson(item, depth + 1, seen, budget));
+  }
+
+  const keys = Object.keys(value);
+  if (keys.length > MAX_METADATA_KEYS_PER_OBJECT) {
+    throw new Error("x402 metadata object has too many keys.");
+  }
+  const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of keys) {
+    if (key.length > 256) throw new Error("x402 metadata key is too long.");
+    result[key] = cloneBoundedJson(
+      (value as Record<string, unknown>)[key],
+      depth + 1,
+      seen,
+      budget,
+    );
+  }
+  return result;
+}
+
+function readResource(value: unknown, fallbackUrl: string): X402Resource {
+  if (typeof value === "string") return { url: value };
+  if (!isRecord(value)) return { url: fallbackUrl };
+  const url = readString(value, "url") ?? fallbackUrl;
+  return {
+    url,
+    ...(readString(value, "description") ? { description: readString(value, "description")! } : {}),
+    ...(readString(value, "mimeType") ? { mimeType: readString(value, "mimeType")! } : {}),
+    ...(readString(value, "serviceName") ? { serviceName: readString(value, "serviceName")! } : {}),
+    ...(Array.isArray(value.tags) && value.tags.every((tag) => typeof tag === "string")
+      ? { tags: value.tags as string[] }
+      : {}),
+    ...(readString(value, "iconUrl") ? { iconUrl: readString(value, "iconUrl")! } : {}),
+  };
+}
+
+function readString(value: Record<string, unknown>, key: string): string | null {
+  const field = value[key];
+  return typeof field === "string" && field.length > 0 ? field : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function decodeBase64Json(value: string): unknown {
+  const bytes = Uint8Array.from(globalThis.atob(value), (character) => character.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+}
+
+function encodeBase64Json(value: unknown): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+  }
+  return globalThis.btoa(binary);
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "paths": {
+      "@vapi-network/core": ["./packages/core/src/index.ts"],
+      "@vapi-network/sources": ["./packages/sources/src/index.ts"],
+      "@vapi-network/mcp": ["./packages/mcp/src/index.ts"],
+      "@vapi-network/cli": ["./packages/cli/src/index.ts"],
+      "vapi-network": ["./packages/vapi-network/src/index.ts"]
+    },
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"]
+  }
+}

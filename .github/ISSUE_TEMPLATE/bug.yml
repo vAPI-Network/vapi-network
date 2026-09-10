@@ -1,0 +1,23 @@
+name: Bug report
+description: Something is broken
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes: { label: Version, description: "Output of `vapi --version` (or the npm version)", placeholder: "0.2.0-dev.1" }
+    validations: { required: true }
+  - type: dropdown
+    id: surface
+    attributes: { label: Surface, options: [CLI, MCP server, SDK (core/sources), Gateway, Docs] }
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes: { label: Steps to reproduce, description: "Exact commands. Never paste private keys, passphrases, or full receipts with addresses you want private." }
+    validations: { required: true }
+  - type: textarea
+    id: expected
+    attributes: { label: Expected vs actual }
+    validations: { required: true }
+  - type: textarea
+    id: env
+    attributes: { label: Environment, description: "OS, Node version, agent client (Claude, Cursor, ...), network (eip155:8453, ...)" }

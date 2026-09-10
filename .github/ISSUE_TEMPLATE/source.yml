@@ -1,0 +1,18 @@
+name: New discovery source or signer
+description: Propose a catalog to search or a wallet to sign with
+labels: [source]
+body:
+  - type: input
+    id: name
+    attributes: { label: Name and URL }
+    validations: { required: true }
+  - type: textarea
+    id: shape
+    attributes: { label: Read API or signing interface, description: "Endpoint/spec link, auth needs, rate limits, listing fields available (resource, accepts, description, input schema)" }
+    validations: { required: true }
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: Contribution
+      options:
+        - label: I can open the PR with tests against a recorded fixture

@@ -1,0 +1,18 @@
+name: DCO
+on: [pull_request]
+permissions: { contents: read, pull-requests: read }
+jobs:
+  dco:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Every commit carries a Signed-off-by line
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"; head="${{ github.event.pull_request.head.sha }}"
+          bad=0
+          while IFS= read -r sha; do
+            git log -1 --format=%B "$sha" | grep -qE '^Signed-off-by: .+ <.+@.+>$' || { echo "missing sign-off: $sha"; bad=1; }
+          done < <(git rev-list "$base".."$head")
+          [ "$bad" -eq 0 ] || { echo 'Sign commits with `git commit -s` (Developer Certificate of Origin).'; exit 1; }
