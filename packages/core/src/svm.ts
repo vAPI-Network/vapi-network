@@ -1,3 +1,4 @@
+import { discardBody } from "./x402.js";
 import {
   address,
   appendTransactionMessageInstructions,
@@ -262,7 +263,7 @@ async function solanaRpcCall<T>(
     redirect: "manual",
   });
   if (!response.ok) {
-    await response.body?.cancel().catch(() => undefined);
+    discardBody(response);
     const rateLimit = response.status === 429 ? " (public RPC rate limit)" : "";
     throw new Error(`Solana RPC ${method} failed with HTTP ${response.status}${rateLimit}.`);
   }
