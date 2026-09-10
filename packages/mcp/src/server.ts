@@ -1,6 +1,8 @@
 import { createInterface, type Interface } from "node:readline";
 import {
   MARKETPLACE_KINDS,
+  STATS_RANGES,
+  aggregateStats,
   createPublicFetch,
   getVapiPaths,
   isMirroredHit,
@@ -8,8 +10,10 @@ import {
   marketplaceDiscoveryPageSchema,
   marketplaceKindSchema,
   readReceipts,
+  readSearchEvents,
   type MarketplaceHit,
   type VapiConfig,
+  type StatsRange,
 } from "@vapi-network/core";
 import type { PrivateKeyAccount } from "viem/accounts";
 import { z } from "zod";
@@ -32,6 +36,7 @@ export type VapiServerOptions = {
   fetchImpl?: typeof fetch;
   ledgerPath?: string;
   receiptsPath?: string;
+  searchesPath?: string;
 };
 
 const MAX_CACHED_MARKETPLACE_REFS = 200;
@@ -91,6 +96,58 @@ const walletToolResultSchema = z.object({
       error: z.string().optional(),
     }),
   ),
+});
+
+const latencyPercentilesSchema = z.object({
+  p50Ms: z.number().nullable(),
+  p95Ms: z.number().nullable(),
+});
+const outcomeValueSchema = z.object({ count: z.number().int(), rate: z.number() });
+const serviceStatsSchema = z.object({
+  name: z.string(),
+  resourceUrl: z.string(),
+  providerHost: z.string().optional(),
+  spendUsd: z.string(),
+  calls: z.number().int(),
+});
+const statsToolResultSchema = z.object({
+  range: z.enum(STATS_RANGES),
+  generatedAt: z.string(),
+  totals: z.object({
+    spendUsd: z.string(),
+    calls: z.number().int(),
+    uniqueApis: z.number().int(),
+    policyDeclines: z.number().int(),
+  }),
+  outcomes: z.object({
+    paid: outcomeValueSchema,
+    declined_policy: outcomeValueSchema,
+    failed_request: outcomeValueSchema,
+    settlement_rejected: outcomeValueSchema,
+    settlement_unknown: outcomeValueSchema,
+  }),
+  latency: z.object({
+    total: latencyPercentilesSchema,
+    phases: z.object({
+      discover: latencyPercentilesSchema,
+      quote: latencyPercentilesSchema,
+      sign: latencyPercentilesSchema,
+      request: latencyPercentilesSchema,
+      settle: latencyPercentilesSchema,
+    }),
+  }),
+  topServices: z.object({
+    bySpend: z.array(serviceStatsSchema),
+    byCalls: z.array(serviceStatsSchema),
+  }),
+  search: z.object({
+    count: z.number().int(),
+    zeroResultRate: z.number(),
+    sources: z.record(
+      z.string(),
+      z.object({ count: z.number().int(), p95Ms: z.number().nullable() }),
+    ),
+  }),
 });
 
 const searchTool = {
@@ -270,7 +327,7 @@ export class VapiMcpServer {
           protocolVersion:
             typeof params?.protocolVersion === "string" ? params.protocolVersion : "2025-11-25",
           capabilities: { tools: {} },
-          serverInfo: { name: "@vapi-network/mcp", version: "0.2.0-dev.1" },
+          serverInfo: { name: "@vapi-network/mcp", version: "0.2.0-dev.2" },
         };
       } else if (method === "tools/list") {
         result = await this.listTools();
@@ -320,7 +377,9 @@ export function createVapiServer(options: VapiServerOptions) {
     cursor?: string;
   }) =>
     asStructuredToolResult(async () => {
-      const page = await searchMarketplace(input, options.config, guardedFetch);
+      const page = await searchMarketplace(input, options.config, guardedFetch, {
+        ...(options.searchesPath ? { searchesPath: options.searchesPath } : {}),
+      });
       rememberMarketplaceHits(searchedMarketplaceHits, page.items);
       return page;
     });
@@ -393,6 +452,23 @@ export function createVapiServer(options: VapiServerOptions) {
           ...(input.limit === undefined ? {} : { limit: input.limit }),
         }),
       })),
+  );
+  server.registerTool(
+    "receipts.stats",
+    {
+      description: "Aggregate local call and search metrics. No data is uploaded.",
+      inputSchema: { range: z.enum(STATS_RANGES).optional() },
+      outputSchema: statsToolResultSchema,
+    },
+    async (input) =>
+      asStructuredToolResult(async () => {
+        const paths = getVapiPaths();
+        return aggregateStats({
+          receipts: await readReceipts(options.receiptsPath ?? paths.receipts),
+          searches: await readSearchEvents(options.searchesPath ?? paths.searches),
+          range: (input.range ?? "24h") as StatsRange,
+        });
+      }),
   );
 
   return server;

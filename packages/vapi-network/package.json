@@ -1,6 +1,6 @@
 {
   "name": "vapi-network",
-  "version": "0.2.0-dev.1",
+  "version": "0.2.0-dev.2",
   "description": "One local wallet for discovering and paying every x402 API",
   "license": "Apache-2.0",
   "repository": {

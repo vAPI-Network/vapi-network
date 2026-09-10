@@ -6,6 +6,7 @@ export {
   searchMarketplace,
   vapiRegistrySource,
   type MarketplaceSearchInput,
+  type MarketplaceSearchOptions,
   type VapiRegistryConfig,
   type VapiRegistrySourceOptions,
 } from "./vapi-registry.js";

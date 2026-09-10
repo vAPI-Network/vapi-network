@@ -98,6 +98,7 @@ const BODY_HEADER_NAMES = [
 ] as const;
 
 type ResolvedCallEndpoint = {
+  name?: string;
   url: string;
   method: string;
   registered: boolean;
@@ -139,6 +140,7 @@ export type CallServiceArgs = {
   ledgerPath?: string;
   receiptsPath?: string;
   now?: Date;
+  nowMs?: () => number;
   timeoutMs?: number;
 };
 
@@ -148,18 +150,43 @@ type CallExecution = {
   method: string;
 };
 
+type CallTrace = {
+  readonly startedAt: Date;
+  readonly startedMs: number;
+  readonly nowMs: () => number;
+  readonly phases: NonNullable<Receipt["phases"]> & {
+    discoverMs?: number;
+    quoteMs?: number;
+    signMs?: number;
+    requestMs?: number;
+    settleMs?: number;
+  };
+  source: string;
+  listingName?: string;
+  providerHost?: string;
+  resourceUrl?: string;
+  method?: string;
+  quote?: NonNullable<Receipt["quote"]>;
+  payer?: string;
+  settlement?: NonNullable<Receipt["settlement"]>;
+  status?: number;
+  capsApplied: boolean;
+};
+
+const CLIENT_VERSION = "0.2.0-dev.2";
+
 export async function callService(args: CallServiceArgs): Promise<CallToolResult> {
-  const startedAt = args.now ?? new Date();
+  const trace = createCallTrace(args);
   let execution: CallExecution;
   try {
-    execution = await executeCallService(args);
+    execution = await executeCallService(args, trace);
   } catch (error) {
     // Receipt errors must never hide the primary call/settlement error.
-    await recordCallError(args, error, startedAt).catch(() => undefined);
+    await recordCallError(args, error, trace).catch(() => undefined);
     throw error;
   }
   try {
-    await recordCallReceipt(args, execution, startedAt);
+    await recordCallReceipt(args, execution, trace);
   } catch (error) {
     const settlement = execution.result.payment?.settlement;
     const confirmedSettlement =
@@ -179,7 +206,7 @@ export async function callService(args: CallServiceArgs): Promise<CallToolResult
   return execution.result;
 }
 
-async function executeCallService(args: CallServiceArgs): Promise<CallExecution> {
+async function executeCallService(args: CallServiceArgs, trace: CallTrace): Promise<CallExecution> {
   const { input, account, config } = args;
   if ((!input.id && !input.url) || (input.id && input.url)) {
     throw new Error("call requires exactly one of id or url.");
@@ -200,9 +227,21 @@ async function executeCallService(args: CallServiceArgs): Promise<CallExecution>
     });
   const marketplaceHit =
     args.marketplaceHit === undefined ? undefined : marketplaceHitSchema.parse(args.marketplaceHit);
-  const endpoint = input.id
-    ? await resolveCallEndpoint(input.id, input.endpoint, marketplaceHit, config, fetchImpl)
-    : null;
+  let endpoint: ResolvedCallEndpoint | null = null;
+  if (input.id) {
+    const discoverStarted = trace.nowMs();
+    try {
+      endpoint = await resolveCallEndpoint(
+        input.id,
+        input.endpoint,
+        marketplaceHit,
+        config,
+        fetchImpl,
+      );
+    } finally {
+      trace.phases.discoverMs = elapsed(trace, discoverStarted);
+    }
+  }
   const requestedNetwork = normalizeRequiredNetwork(input.network);
   const listingNetwork = endpoint?.payment?.network;
   if (requestedNetwork && listingNetwork && requestedNetwork !== listingNetwork) {
@@ -236,12 +275,16 @@ async function executeCallService(args: CallServiceArgs): Promise<CallExecution>
   const method = (
     endpoint?.registered ? endpoint.method : (requestedMethod ?? endpoint?.method ?? "POST")
   ).toUpperCase();
+  trace.method = method;
   assertRequiredRequestKeys(endpoint, method, input.body);
   const endpointUrl = input.url ?? endpoint?.url;
   if (!endpointUrl) {
     throw new Error(`Resolved service endpoint ${JSON.stringify(input.id)} is missing a URL.`);
   }
   const url = new URL(endpointUrl);
+  trace.resourceUrl = url.href;
+  trace.providerHost = url.hostname;
+  trace.listingName = endpoint?.name ?? marketplaceHit?.card.title ?? trace.listingName;
   assertSecureCallUrl(url, config.allowPrivateNetwork ?? false);
   await assertPublicUrl(url, {
     allowPrivateNetwork: config.allowPrivateNetwork ?? false,
@@ -328,11 +371,18 @@ async function executeCallService(args: CallServiceArgs): Promise<CallExecution>
     }
   };
 
-  const initial = await fetchWithGuardedRedirects(request.clone());
+  const initialStarted = trace.nowMs();
+  let initial: Awaited<ReturnType<typeof fetchWithGuardedRedirects>>;
+  try {
+    initial = await fetchWithGuardedRedirects(request.clone());
+  } catch (error) {
+    trace.phases.requestMs = elapsed(trace, initialStarted);
+    throw error;
+  }
   const initialResponse = initial.response;
   if (initialResponse.status !== 402) {
     try {
-      return {
+      const execution = {
         resourceUrl: initial.request.url,
         method: initial.request.method,
         result: {
@@ -342,7 +392,12 @@ async function executeCallService(args: CallServiceArgs): Promise<CallExecution>
           ...expectedRequestFor(endpoint, initialResponse.status),
         },
       };
+      trace.resourceUrl = execution.resourceUrl;
+      trace.method = execution.method;
+      trace.status = execution.result.status;
+      return execution;
     } finally {
+      trace.phases.requestMs = elapsed(trace, initialStarted);
       initial.finish();
     }
   }
@@ -354,11 +409,19 @@ async function executeCallService(args: CallServiceArgs): Promise<CallExecution>
       initialResponse,
     );
   } finally {
+    trace.phases.quoteMs = elapsed(trace, initialStarted);
     initial.finish();
   }
+  trace.quote = {
+    network: quote.accepted.network,
+    asset: quote.accepted.asset,
+    amountAtomic: quote.amountAtomic.toString(),
+    payTo: quote.accepted.payTo,
+  };
   if (new URL(initial.request.url).protocol !== "https:") {
     throw new Error("vAPI will only send a signed x402 payment to an HTTPS endpoint.");
   }
+  trace.capsApplied = true;
   assertMaxPrice(quote.amountAtomic, input.maxPriceUsd);
   await reserveSpend(quote.amountAtomic, config.spendCaps, {
     ledgerPath: args.ledgerPath ?? getVapiPaths().ledger,
@@ -366,11 +429,18 @@ async function executeCallService(args: CallServiceArgs): Promise<CallExecution>
   });
 
   // The reservation above is intentionally complete before this signing call.
-  const payment = await buildX402Payment({
-    account,
-    quote,
-    nowSeconds: args.now ? Math.floor(args.now.getTime() / 1_000) : undefined,
-  });
+  const signStarted = trace.nowMs();
+  let payment: Awaited<ReturnType<typeof buildX402Payment>>;
+  try {
+    payment = await buildX402Payment({
+      account,
+      quote,
+      nowSeconds: args.now ? Math.floor(args.now.getTime() / 1_000) : undefined,
+    });
+    trace.payer = account.address;
+  } finally {
+    trace.phases.signMs = elapsed(trace, signStarted);
+  }
   const paidHeaders = new Headers(initial.request.headers);
   for (const [name, value] of Object.entries(payment.headers)) {
     paidHeaders.set(name, value);
@@ -385,9 +455,11 @@ async function executeCallService(args: CallServiceArgs): Promise<CallExecution>
     body: paidBody,
   });
   let paidAttempt: Awaited<ReturnType<typeof fetchWithGuardedRedirects>>;
+  const paidRequestStarted = trace.nowMs();
   try {
     paidAttempt = await fetchWithGuardedRedirects(paidRequest, false);
   } catch (error) {
+    trace.phases.requestMs = elapsed(trace, paidRequestStarted);
     throw settlementUnknown(
       "The paid request lost its response. Do not retry automatically; inspect the authorization and settlement state first.",
       quote,
@@ -396,9 +468,20 @@ async function executeCallService(args: CallServiceArgs): Promise<CallExecution>
       error,
     );
   }
+  trace.phases.requestMs = elapsed(trace, paidRequestStarted);
   const paidResponse = paidAttempt.response;
+  trace.status = paidResponse.status;
+  const settleStarted = trace.nowMs();
   const settlement = parseSettlementResponse(paidResponse.headers);
   const settlementOutcome = classifySettlement(settlement);
+  trace.settlement = {
+    outcome: settlementOutcome,
+    ...(settlementTransaction(settlement)
+      ? { transaction: settlementTransaction(settlement) }
+      : {}),
+    ...(settlement === null ? {} : { evidence: settlement }),
+  };
+  trace.phases.settleMs = elapsed(trace, settleStarted);
   try {
     if (settlementOutcome === "rejected") {
       await paidResponse.body?.cancel().catch(() => undefined);
@@ -439,6 +522,7 @@ async function executeCallService(args: CallServiceArgs): Promise<CallExecution>
       );
     }
     let body: unknown;
+    const bodyStarted = trace.nowMs();
     try {
       body = await paidAttempt.waitFor(readResponseBody(paidResponse), paidResponse);
     } catch (error) {
@@ -452,9 +536,11 @@ async function executeCallService(args: CallServiceArgs): Promise<CallExecution>
         settlement,
         error,
       );
+    } finally {
+      trace.phases.requestMs = (trace.phases.requestMs ?? 0) + elapsed(trace, bodyStarted);
     }
 
-    return {
+    const execution = {
       resourceUrl: paidAttempt.request.url,
       method: paidAttempt.request.method,
       result: {
@@ -472,6 +558,9 @@ async function executeCallService(args: CallServiceArgs): Promise<CallExecution>
         ...expectedRequestFor(endpoint, paidResponse.status),
       },
     };
+    trace.resourceUrl = execution.resourceUrl;
+    trace.method = execution.method;
+    return execution;
   } finally {
     paidAttempt.finish();
   }
@@ -480,17 +569,19 @@ async function executeCallService(args: CallServiceArgs): Promise<CallExecution>
 async function recordCallReceipt(
   args: CallServiceArgs,
   execution: CallExecution,
-  startedAt: Date,
+  trace: CallTrace,
 ): Promise<void> {
   if (!args.receiptsPath) return;
   const payment = execution.result.payment;
   const evidence = payment?.settlement ?? undefined;
   const transaction = settlementTransaction(evidence);
+  const settlementOutcome = payment ? classifySettlement(evidence) : undefined;
   const receipt: Receipt = {
     id: randomUUID(),
-    timestamp: startedAt.toISOString(),
+    timestamp: trace.startedAt.toISOString(),
     resourceUrl: execution.resourceUrl,
     method: execution.method,
+    ...receiptContext(args, trace, execution.resourceUrl),
     ...(payment
       ? {
           quote: {
@@ -507,8 +598,15 @@ async function recordCallReceipt(
           },
         }
       : {}),
-    latencyMs: Math.max(0, Date.now() - startedAt.getTime()),
+    latencyMs: elapsed(trace, trace.startedMs),
     status: execution.result.status,
+    outcome: payment
+      ? settlementOutcome === "succeeded"
+        ? "paid"
+        : "settlement_unknown"
+      : execution.result.status >= 400
+        ? "failed_request"
+        : "paid",
   };
   await appendReceipt(receipt, args.receiptsPath);
 }
@@ -516,25 +614,135 @@ async function recordCallReceipt(
 async function recordCallError(
   args: CallServiceArgs,
   error: unknown,
-  startedAt: Date,
+  trace: CallTrace,
 ): Promise<void> {
   if (!args.receiptsPath) return;
-  const resourceUrl = receiptResourceUrl(args.input, args.marketplaceHit);
+  const resourceUrl = trace.resourceUrl ?? receiptResourceUrl(args.input, args.marketplaceHit);
   if (!resourceUrl) return;
   const message = error instanceof Error ? error.message : String(error);
-  const code = error instanceof VapiCallError ? error.code : "call_failed";
+  const code =
+    error instanceof VapiCallError
+      ? error.code
+      : typeof error === "object" &&
+          error !== null &&
+          typeof Reflect.get(error, "code") === "string"
+        ? (Reflect.get(error, "code") as string)
+        : "call_failed";
+  const outcome = errorOutcome(error, code);
+  const settlement = errorSettlement(error, trace);
   await appendReceipt(
     {
       id: randomUUID(),
-      timestamp: startedAt.toISOString(),
+      timestamp: trace.startedAt.toISOString(),
       resourceUrl,
-      ...(args.input.method ? { method: args.input.method.toUpperCase() } : {}),
-      payer: args.account.address,
-      latencyMs: Math.max(0, Date.now() - startedAt.getTime()),
+      ...(trace.method
+        ? { method: trace.method }
+        : args.input.method
+          ? { method: args.input.method.toUpperCase() }
+          : {}),
+      ...receiptContext(args, trace, resourceUrl),
+      ...(trace.quote ? { quote: trace.quote } : {}),
+      ...(trace.payer && outcome !== "declined_policy" ? { payer: trace.payer } : {}),
+      ...(settlement ? { settlement } : {}),
+      ...(trace.status === undefined ? {} : { status: trace.status }),
+      latencyMs: elapsed(trace, trace.startedMs),
       error: { code, message },
+      outcome,
     },
     args.receiptsPath,
   );
+}
+
+function createCallTrace(args: CallServiceArgs): CallTrace {
+  const nowMs = args.nowMs ?? (() => performance.now());
+  const marketplace = args.marketplaceHit;
+  return {
+    startedAt: args.now ?? new Date(),
+    startedMs: nowMs(),
+    nowMs,
+    phases: {},
+    source: marketplace || args.input.id ? "vapi" : "direct",
+    ...(marketplace?.card.title ? { listingName: marketplace.card.title } : {}),
+    capsApplied: false,
+  };
+}
+
+function receiptContext(args: CallServiceArgs, trace: CallTrace, resourceUrl: string) {
+  let providerHost = trace.providerHost;
+  if (!providerHost) {
+    try {
+      providerHost = new URL(resourceUrl).hostname;
+    } catch {
+      // Receipt validation will report an invalid resource URL separately.
+    }
+  }
+  const maxPriceUsd = args.input.maxPriceUsd;
+  return {
+    source: trace.source,
+    phases: { ...trace.phases },
+    listing: {
+      ...(trace.listingName ? { name: trace.listingName } : {}),
+      ...(providerHost ? { providerHost } : {}),
+      source: trace.source,
+    },
+    retry: 0,
+    policy: {
+      ...(maxPriceUsd === undefined ? {} : { maxPriceUsd: String(maxPriceUsd) }),
+      capsApplied: trace.capsApplied,
+    },
+    client: { name: "vapi-network" as const, version: CLIENT_VERSION },
+    ...(args.marketplaceHit
+      ? { provenance: [{ source: trace.source, ref: args.marketplaceHit.ref }] }
+      : {}),
+  };
+}
+
+function errorOutcome(error: unknown, code: string): NonNullable<Receipt["outcome"]> {
+  if (code === "max_price_exceeded" || code.includes("cap_exceeded")) {
+    return "declined_policy";
+  }
+  if (error instanceof VapiCallError) {
+    if (error.code === "payment_rejected") return "settlement_rejected";
+    if (error.code === "settlement_unknown") return "settlement_unknown";
+    if (error.code === "response_unreadable" && error.confirmedSettlement) return "paid";
+  }
+  return "failed_request";
+}
+
+function errorSettlement(
+  error: unknown,
+  trace: CallTrace,
+): NonNullable<Receipt["settlement"]> | undefined {
+  if (error instanceof VapiCallError) {
+    if (error.paymentRejection) {
+      return { outcome: "rejected", evidence: error.paymentRejection.receipt };
+    }
+    if (error.confirmedSettlement) {
+      const evidence = error.confirmedSettlement.receipt;
+      return {
+        outcome: "succeeded",
+        ...(settlementTransaction(evidence)
+          ? { transaction: settlementTransaction(evidence) }
+          : {}),
+        evidence,
+      };
+    }
+    if (error.possibleSettlement) {
+      const evidence = error.possibleSettlement.receipt;
+      return {
+        outcome: "unknown",
+        ...(settlementTransaction(evidence)
+          ? { transaction: settlementTransaction(evidence) }
+          : {}),
+        ...(evidence === null ? {} : { evidence }),
+      };
+    }
+  }
+  return trace.settlement;
+}
+
+function elapsed(trace: CallTrace, started: number): number {
+  return Math.max(0, trace.nowMs() - started);
 }
 
 function receiptResourceUrl(

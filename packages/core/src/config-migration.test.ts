@@ -16,13 +16,14 @@ afterEach(async () => {
 });
 
 describe("vAPI config home", () => {
-  it("uses VAPI_HOME and includes both append-only ledgers", () => {
+  it("uses VAPI_HOME and includes the local receipt and search ledgers", () => {
     vi.stubEnv("VAPI_HOME", "/tmp/vapi-home");
     expect(getVapiPaths()).toEqual({
       directory: "/tmp/vapi-home",
       config: "/tmp/vapi-home/config.json",
       keystore: "/tmp/vapi-home/keystore.json",
       receipts: "/tmp/vapi-home/receipts.jsonl",
+      searches: "/tmp/vapi-home/searches.jsonl",
       ledger: "/tmp/vapi-home/spend-ledger.json",
     });
   });
@@ -37,6 +38,7 @@ describe("vAPI config home", () => {
       "config.json",
       "keystore.json",
       "receipts.jsonl",
+      "searches.jsonl",
       "spend-ledger.json",
     ]) {
       await writeFile(join(legacyDirectory, filename), `legacy ${filename}`);
@@ -50,10 +52,16 @@ describe("vAPI config home", () => {
     expect(copied).toEqual([
       join(targetDirectory, "keystore.json"),
       join(targetDirectory, "receipts.jsonl"),
+      join(targetDirectory, "searches.jsonl"),
       join(targetDirectory, "spend-ledger.json"),
     ]);
     expect(await readFile(join(targetDirectory, "config.json"), "utf8")).toBe("new config");
-    for (const filename of ["keystore.json", "receipts.jsonl", "spend-ledger.json"]) {
+    for (const filename of [
+      "keystore.json",
+      "receipts.jsonl",
+      "searches.jsonl",
+      "spend-ledger.json",
+    ]) {
       expect(await readFile(join(legacyDirectory, filename), "utf8")).toBe(`legacy ${filename}`);
       expect(await readFile(join(targetDirectory, filename), "utf8")).toBe(`legacy ${filename}`);
     }

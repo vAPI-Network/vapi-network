@@ -43,6 +43,7 @@ describe("Agent Cash MCP marketplace tools", () => {
       "wallet.balance",
       "wallet",
       "receipts.list",
+      "receipts.stats",
     ]);
     const inspect = tools.tools.find((tool) => tool.name === "call.inspect");
     expect(inspect?.description).toContain("for free");
@@ -101,7 +102,24 @@ describe("Agent Cash MCP marketplace tools", () => {
 
     expect(callResult.isError).not.toBe(true);
     expect(receiptsResult.structuredContent).toMatchObject({
-      receipts: [{ resourceUrl: "https://93.184.216.34/free", status: 200 }],
+      receipts: [
+        {
+          resourceUrl: "https://93.184.216.34/free",
+          status: 200,
+          source: "direct",
+          outcome: "paid",
+          listing: { providerHost: "93.184.216.34", source: "direct" },
+          policy: { capsApplied: false },
+          client: { name: "vapi-network", version: "0.2.0-dev.2" },
+        },
+      ],
+    });
+
+    const statsResult = await client.callTool({ name: "receipts.stats" });
+    expect(statsResult.structuredContent).toMatchObject({
+      range: "24h",
+      totals: { spendUsd: "0", calls: 1, uniqueApis: 1, policyDeclines: 0 },
+      search: { count: 0, zeroResultRate: 0 },
     });
     await client.close();
     await server.close();
@@ -358,6 +376,7 @@ async function connectedServer(fetchImpl: typeof fetch) {
     fetchImpl,
     ledgerPath: join(directory, "ledger.json"),
     receiptsPath: join(directory, "receipts.jsonl"),
+    searchesPath: join(directory, "searches.jsonl"),
   });
   const client = server;
   return { client, server };

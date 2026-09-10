@@ -8,9 +8,15 @@ import { z } from "zod";
 
 import { ARC_TESTNET_CAIP2, BASE_MAINNET_CAIP2, NETWORKS, parseEip155ChainId } from "./networks.js";
 
-export const DEFAULT_DISCOVERY_URL = "https://console.vapinetwork.ai/api/network/services";
-export const DEFAULT_MARKETPLACE_DISCOVERY_URL =
-  "https://console.vapinetwork.ai/api/marketplace/discovery";
+export const DEFAULT_REGISTRY_URL = "https://api.vapinetwork.ai";
+export const DEFAULT_DISCOVERY_URL = `${DEFAULT_REGISTRY_URL}/api/call/services`;
+export const DEFAULT_MARKETPLACE_DISCOVERY_URL = `${DEFAULT_REGISTRY_URL}/api/call/discovery`;
+export const DEFAULT_REGISTRY_FALLBACKS = [
+  {
+    discoveryUrl: "https://console.vapinetwork.ai/api/network/services",
+    marketplaceDiscoveryUrl: "https://console.vapinetwork.ai/api/marketplace/discovery",
+  },
+] as const;
 
 export const DEFAULT_SPEND_CAPS = {
   perCallAtomic: "100000",
@@ -22,6 +28,7 @@ export type VapiPaths = {
   config: string;
   keystore: string;
   receipts: string;
+  searches: string;
   ledger: string;
 };
 
@@ -36,6 +43,14 @@ export const spendCapsSchema = z.object({
 export const configSchema = z.object({
   discoveryUrl: z.url(),
   marketplaceDiscoveryUrl: z.url().default(DEFAULT_MARKETPLACE_DISCOVERY_URL),
+  registryFallbacks: z
+    .array(
+      z.object({
+        discoveryUrl: z.url(),
+        marketplaceDiscoveryUrl: z.url(),
+      }),
+    )
+    .optional(),
   allowPrivateNetwork: z.boolean().default(false).optional(),
   networks: z.record(
     z.string().refine(
@@ -80,6 +95,7 @@ export function getVapiPaths(
     config: join(directory, "config.json"),
     keystore: join(directory, "keystore.json"),
     receipts: join(directory, "receipts.jsonl"),
+    searches: join(directory, "searches.jsonl"),
     ledger: join(directory, "spend-ledger.json"),
   };
 }
@@ -108,6 +124,7 @@ export async function migrateLegacyVapiHome(options: MigrationOptions = {}): Pro
     "config.json",
     "keystore.json",
     "receipts.jsonl",
+    "searches.jsonl",
     "spend-ledger.json",
   ] as const) {
     const source = join(legacyDirectory, filename);
@@ -128,6 +145,7 @@ export async function migrateLegacyVapiHome(options: MigrationOptions = {}): Pro
 }
 
 export function getDefaultConfig(source: NodeJS.ProcessEnv = process.env): VapiConfig {
+  const registry = registryEndpoints(source.VAPI_REGISTRY_URL?.trim() || DEFAULT_REGISTRY_URL);
   const networks: VapiConfig["networks"] = {
     [BASE_MAINNET_CAIP2]: {
       rpcUrl: source.BASE_RPC_URL?.trim() || NETWORKS[BASE_MAINNET_CAIP2].publicRpcUrl,
@@ -142,9 +160,10 @@ export function getDefaultConfig(source: NodeJS.ProcessEnv = process.env): VapiC
     };
   }
   return {
-    discoveryUrl: source.VAPI_DISCOVERY_URL?.trim() || DEFAULT_DISCOVERY_URL,
+    discoveryUrl: source.VAPI_DISCOVERY_URL?.trim() || registry.discoveryUrl,
     marketplaceDiscoveryUrl:
-      source.VAPI_MARKETPLACE_DISCOVERY_URL?.trim() || DEFAULT_MARKETPLACE_DISCOVERY_URL,
+      source.VAPI_MARKETPLACE_DISCOVERY_URL?.trim() || registry.marketplaceDiscoveryUrl,
+    registryFallbacks: DEFAULT_REGISTRY_FALLBACKS.map((fallback) => ({ ...fallback })),
     allowPrivateNetwork: false,
     networks,
     spendCaps: { ...DEFAULT_SPEND_CAPS },
@@ -167,10 +186,12 @@ export async function loadConfig(
   }
 
   const config: VapiConfig = configSchema.parse(JSON.parse(raw));
+  config.registryFallbacks ??= DEFAULT_REGISTRY_FALLBACKS.map((fallback) => ({ ...fallback }));
   const baseRpcUrl = source.BASE_RPC_URL?.trim();
   const arcRpcUrl = source.ARC_TESTNET_RPC_URL?.trim();
   const discoveryUrl = source.VAPI_DISCOVERY_URL?.trim();
   const marketplaceDiscoveryUrl = source.VAPI_MARKETPLACE_DISCOVERY_URL?.trim();
+  const registryUrl = source.VAPI_REGISTRY_URL?.trim();
   if (config.networks[BASE_MAINNET_CAIP2] && baseRpcUrl) {
     config.networks[BASE_MAINNET_CAIP2].rpcUrl = baseRpcUrl;
   }
@@ -180,6 +201,11 @@ export async function loadConfig(
       usdc: config.networks[ARC_TESTNET_CAIP2]?.usdc ?? NETWORKS[ARC_TESTNET_CAIP2].usdc,
     };
   }
+  if (registryUrl) {
+    const registry = registryEndpoints(registryUrl);
+    config.discoveryUrl = registry.discoveryUrl;
+    config.marketplaceDiscoveryUrl = registry.marketplaceDiscoveryUrl;
+  }
   if (discoveryUrl) config.discoveryUrl = discoveryUrl;
   if (marketplaceDiscoveryUrl) config.marketplaceDiscoveryUrl = marketplaceDiscoveryUrl;
   for (const [network, configured] of Object.entries(config.networks)) {
@@ -187,6 +213,21 @@ export async function loadConfig(
     if (!configured.rpcUrl) delete config.networks[network];
   }
   return config;
+}
+
+function registryEndpoints(baseUrl: string): {
+  discoveryUrl: string;
+  marketplaceDiscoveryUrl: string;
+} {
+  const base = new URL(baseUrl);
+  base.search = "";
+  base.hash = "";
+  const prefix = base.pathname === "/" ? "" : base.pathname.replace(/\/+$/, "");
+  const discovery = new URL(base);
+  discovery.pathname = `${prefix}/api/call/services`;
+  const marketplace = new URL(base);
+  marketplace.pathname = `${prefix}/api/call/discovery`;
+  return { discoveryUrl: discovery.href, marketplaceDiscoveryUrl: marketplace.href };
 }
 
 export async function writeDefaultConfig(

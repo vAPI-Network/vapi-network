@@ -57,8 +57,10 @@ sources, de-duplicate them by resource URL, and retain each listing's
 provenance:
 
 - **vAPI Registry** is enabled by the default distribution, using
-  `https://console.vapinetwork.ai/api/marketplace/discovery` for discovery and
-  `https://console.vapinetwork.ai/api/network/services` for service details.
+  `https://api.vapinetwork.ai/api/call/discovery` for discovery and
+  `https://api.vapinetwork.ai/api/call/services` for service details. If the
+  primary returns HTTP 404 or cannot be resolved, the client logs one notice
+  and tries the configured fallback at `https://console.vapinetwork.ai`.
 - **Coinbase Bazaar** reads the public x402 v2
   `/discovery/resources` catalog exposed by a facilitator.
 - **Local file** reads a JSON array of listings for private or development
@@ -70,6 +72,12 @@ provenance:
 Use `@vapi-network/sources` to compose only the catalogs you trust. Network
 access is guarded against local and private destinations before a request is
 made.
+
+Set `VAPI_REGISTRY_URL` to replace the registry base; the client derives
+`/api/call/discovery` and `/api/call/services` beneath it. The existing
+`VAPI_MARKETPLACE_DISCOVERY_URL` and `VAPI_DISCOVERY_URL` variables can still
+override either full endpoint separately. Registry fallbacks are stored in
+`config.json` under `registryFallbacks`.
 
 ## Packages
 
@@ -108,6 +116,32 @@ Set `VAPI_HOME` to use a different directory. On first use of the default home,
 the client copies an existing `~/.vapi/agent-cash/` configuration into
 `~/.vapi/` when it can do so without overwriting files, prints a migration
 notice, and leaves the old directory untouched.
+
+## Metrics
+
+vAPI measures call and discovery health locally. Call receipts can include the
+listing name and provider host, policy decision, retry count, client version,
+outcome, total latency, and discovery, quote, signing, request, and settlement
+phase timings. Policy declines are recorded with the quoted amount but without
+a payer or transaction, so blocked spend remains visible without creating a
+payment authorization. Search events record the query, sources tried,
+per-source latency and result count, merged result count, and timestamp.
+
+Call receipts are appended to `$VAPI_HOME/receipts.jsonl`; search events are
+appended to `$VAPI_HOME/searches.jsonl`. Nothing in either ledger is uploaded,
+and vAPI sends no telemetry off the machine by default. The vAPI website can
+show public on-chain usage for a wallet address directly from the chain; that
+view does not require uploading these local files.
+
+Use `vapi stats --range 24h|7d|30d` for a human-readable summary or add `--json`
+for the stable `{ range, generatedAt, totals, outcomes, latency, topServices,
+search }` shape. `receipts.stats` exposes the same shape through MCP. Export raw
+receipts for spreadsheets and dashboards with:
+
+```sh
+vapi receipts export --format json --range 30d
+vapi receipts export --format csv --range 30d
+```
 
 ## Roadmap
 

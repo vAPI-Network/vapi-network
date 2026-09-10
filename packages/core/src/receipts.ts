@@ -12,6 +12,8 @@ export interface Receipt {
   readonly timestamp: string;
   readonly resourceUrl: string;
   readonly method?: string;
+  /** Primary discovery source retained for compatibility with early receipt writers. */
+  readonly source?: string;
   readonly provenance?: readonly ListingProvenance[];
   readonly quote?: Readonly<{
     network: string;
@@ -28,13 +30,39 @@ export interface Receipt {
   readonly latencyMs?: number;
   readonly status?: number;
   readonly error?: Readonly<{ code: string; message: string }>;
+  readonly phases?: Readonly<{
+    discoverMs?: number;
+    quoteMs?: number;
+    signMs?: number;
+    requestMs?: number;
+    settleMs?: number;
+  }>;
+  readonly listing?: Readonly<{
+    name?: string;
+    providerHost?: string;
+    source: string;
+  }>;
+  readonly retry?: number;
+  readonly policy?: Readonly<{
+    maxPriceUsd?: string;
+    capsApplied: boolean;
+  }>;
+  readonly client?: Readonly<{
+    name: "vapi-network";
+    version: string;
+  }>;
+  readonly outcome?:
+    "paid" | "declined_policy" | "failed_request" | "settlement_rejected" | "settlement_unknown";
 }
+
+const durationSchema = z.number().nonnegative().finite();
 
 const receiptSchema: z.ZodType<Receipt> = z.strictObject({
   id: z.string().min(1),
   timestamp: z.iso.datetime(),
   resourceUrl: z.url(),
   method: z.string().min(1).optional(),
+  source: z.string().min(1).optional(),
   provenance: z
     .array(
       z.strictObject({
@@ -63,6 +91,44 @@ const receiptSchema: z.ZodType<Receipt> = z.strictObject({
   latencyMs: z.number().nonnegative().finite().optional(),
   status: z.number().int().min(100).max(599).optional(),
   error: z.strictObject({ code: z.string(), message: z.string() }).optional(),
+  phases: z
+    .strictObject({
+      discoverMs: durationSchema.optional(),
+      quoteMs: durationSchema.optional(),
+      signMs: durationSchema.optional(),
+      requestMs: durationSchema.optional(),
+      settleMs: durationSchema.optional(),
+    })
+    .optional(),
+  listing: z
+    .strictObject({
+      name: z.string().min(1).optional(),
+      providerHost: z.string().min(1).optional(),
+      source: z.string().min(1),
+    })
+    .optional(),
+  retry: z.number().int().nonnegative().optional(),
+  policy: z
+    .strictObject({
+      maxPriceUsd: z
+        .string()
+        .regex(/^\d+(?:\.\d{1,6})?$/)
+        .optional(),
+      capsApplied: z.boolean(),
+    })
+    .optional(),
+  client: z
+    .strictObject({ name: z.literal("vapi-network"), version: z.string().min(1) })
+    .optional(),
+  outcome: z
+    .enum([
+      "paid",
+      "declined_policy",
+      "failed_request",
+      "settlement_rejected",
+      "settlement_unknown",
+    ])
+    .optional(),
 });
 
 export function parseReceipt(value: unknown): Receipt {

@@ -1,11 +1,11 @@
-#!/usr/bin/env node
-
 import { stat } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
 
 import {
   ARC_TESTNET_CAIP2,
+  STATS_RANGES,
+  aggregateStats,
   createKeystore,
+  filterReceiptsByRange,
   formatUsdc,
   getArcGasHeadroomAtomic,
   getKeystorePassphrase,
@@ -15,9 +15,12 @@ import {
   loadConfig,
   migrateLegacyVapiHome,
   readReceipts,
+  readSearchEvents,
+  receiptsToCsv,
   sweepBack,
   unlockKeystore,
   writeDefaultConfig,
+  type StatsRange,
 } from "@vapi-network/core";
 import {
   callService,
@@ -39,6 +42,8 @@ Usage:
   vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--json]
   vapi balance [--json]
   vapi receipts [--limit <n>] [--json]
+  vapi receipts export --format <json|csv> [--range <24h|7d|30d>]
+  vapi stats [--range <24h|7d|30d>] [--json]
   vapi sweep <address> [--network <caip2>] [--json]
   vapi mcp [--json]
   vapi serve [--json]
@@ -98,6 +103,9 @@ export async function runCli(argv = process.argv.slice(2), io: CliIo = processIo
         return 0;
       case "receipts":
         await receiptsCommand(args.slice(1), json, io);
+        return 0;
+      case "stats":
+        await statsCommand(args.slice(1), json, io);
         return 0;
       case "sweep":
         await sweepCommand(args.slice(1), json, io);
@@ -175,6 +183,8 @@ async function searchCommand(argv: string[], json: boolean, io: CliIo): Promise<
       ...(parsed.one("--cursor") ? { cursor: parsed.one("--cursor") } : {}),
     },
     config,
+    undefined,
+    { searchesPath: getVapiPaths().searches, notice: io.stderr },
   );
   output(io, json, page, formatSearch(page));
 }
@@ -246,6 +256,10 @@ async function balanceCommand(argv: string[], json: boolean, io: CliIo): Promise
 }
 
 async function receiptsCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
+  if (argv[0] === "export") {
+    await receiptsExportCommand(argv.slice(1), io);
+    return;
+  }
   const parsed = parseArguments(argv, {
     valueOptions: new Set(["--limit"]),
     maximumPositionals: 0,
@@ -260,6 +274,37 @@ async function receiptsCommand(argv: string[], json: boolean, io: CliIo): Promis
     receipts,
     receipts.length === 0 ? "No receipts." : receipts.map(formatReceipt).join("\n"),
   );
+}
+
+async function receiptsExportCommand(argv: string[], io: CliIo): Promise<void> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set(["--format", "--range"]),
+    maximumPositionals: 0,
+  });
+  const format = parsed.one("--format");
+  if (format !== "json" && format !== "csv") {
+    throw new UsageError("--format must be json or csv.");
+  }
+  const rangeValue = parsed.one("--range");
+  const range = rangeValue === undefined ? undefined : parseStatsRange(rangeValue);
+  const allReceipts = await readReceipts(getVapiPaths().receipts);
+  const receipts = range ? filterReceiptsByRange(allReceipts, range) : allReceipts;
+  io.stdout(format === "json" ? JSON.stringify(receipts) : receiptsToCsv(receipts));
+}
+
+async function statsCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set(["--range"]),
+    maximumPositionals: 0,
+  });
+  const range = parseStatsRange(parsed.one("--range") ?? "24h");
+  const paths = getVapiPaths();
+  const stats = aggregateStats({
+    receipts: await readReceipts(paths.receipts),
+    searches: await readSearchEvents(paths.searches),
+    range,
+  });
+  output(io, json, stats, formatStats(stats));
 }
 
 async function sweepCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
@@ -312,6 +357,7 @@ async function mcpCommand(argv: string[]): Promise<void> {
     config,
     ledgerPath: paths.ledger,
     receiptsPath: paths.receipts,
+    searchesPath: paths.searches,
   });
 }
 
@@ -348,6 +394,55 @@ function formatReceipt(receipt: Awaited<ReturnType<typeof readReceipts>>[number]
   const status =
     receipt.settlement?.outcome ?? (receipt.error ? "error" : (receipt.status ?? "recorded"));
   return `${receipt.timestamp}\t${status}\t${receipt.method ?? "GET"} ${receipt.resourceUrl}`;
+}
+
+function formatStats(stats: ReturnType<typeof aggregateStats>): string {
+  const lines = [
+    `Metrics (${stats.range}, generated ${stats.generatedAt})`,
+    "TOTALS\tVALUE",
+    `Spend (USD)\t${stats.totals.spendUsd}`,
+    `Calls\t${stats.totals.calls}`,
+    `Unique APIs\t${stats.totals.uniqueApis}`,
+    `Policy declines\t${stats.totals.policyDeclines}`,
+    "",
+    "OUTCOME\tCOUNT\tRATE",
+    ...Object.entries(stats.outcomes).map(
+      ([outcome, value]) => `${outcome}\t${value.count}\t${formatRate(value.rate)}`,
+    ),
+    "",
+    "LATENCY\tP50 MS\tP95 MS",
+    `total\t${formatLatency(stats.latency.total.p50Ms)}\t${formatLatency(stats.latency.total.p95Ms)}`,
+    ...Object.entries(stats.latency.phases).map(
+      ([phase, value]) => `${phase}\t${formatLatency(value.p50Ms)}\t${formatLatency(value.p95Ms)}`,
+    ),
+    "",
+    "TOP BY SPEND\tUSD\tCALLS",
+    ...stats.topServices.bySpend.map(
+      (service) => `${service.name}\t${service.spendUsd}\t${service.calls}`,
+    ),
+    "",
+    "TOP BY CALLS\tCALLS\tUSD",
+    ...stats.topServices.byCalls.map(
+      (service) => `${service.name}\t${service.calls}\t${service.spendUsd}`,
+    ),
+    "",
+    "SEARCH\tVALUE",
+    `Count\t${stats.search.count}`,
+    `Zero-result rate\t${formatRate(stats.search.zeroResultRate)}`,
+    "SOURCE\tSEARCHES\tP95 MS",
+    ...Object.entries(stats.search.sources).map(
+      ([source, value]) => `${source}\t${value.count}\t${formatLatency(value.p95Ms)}`,
+    ),
+  ];
+  return lines.join("\n");
+}
+
+function formatRate(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function formatLatency(value: number | null): string {
+  return value === null ? "—" : String(value);
 }
 
 function formatSweepResults(
@@ -441,6 +536,11 @@ function optionalNonNegativeInteger(value: string | undefined, option: string): 
   return parsed;
 }
 
+function parseStatsRange(value: string): StatsRange {
+  if ((STATS_RANGES as readonly string[]).includes(value)) return value as StatsRange;
+  throw new UsageError(`--range must be one of ${STATS_RANGES.join(", ")}.`);
+}
+
 function parseJson(value: string, option: string): unknown {
   try {
     return JSON.parse(value);
@@ -479,9 +579,4 @@ async function fileExists(path: string): Promise<boolean> {
     if (isMissingFile(error)) return false;
     throw error;
   }
-}
-
-const invokedPath = process.argv[1] ? pathToFileURL(process.argv[1]).href : undefined;
-if (invokedPath === import.meta.url) {
-  process.exitCode = await runCli();
 }

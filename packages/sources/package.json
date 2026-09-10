@@ -1,6 +1,6 @@
 {
   "name": "@vapi-network/sources",
-  "version": "0.2.0-dev.1",
+  "version": "0.2.0-dev.2",
   "description": "Discovery source plugins for vAPI Network",
   "license": "Apache-2.0",
   "repository": {

@@ -1,6 +1,6 @@
 {
   "name": "@vapi-network/cli",
-  "version": "0.2.0-dev.1",
+  "version": "0.2.0-dev.2",
   "description": "Command-line interface for the non-custodial vAPI Network wallet",
   "license": "Apache-2.0",
   "repository": {
@@ -32,7 +32,7 @@
     }
   },
   "scripts": {
-    "build": "node ../../scripts/build-package.mjs index=src/index.ts cli=src/cli.ts",
+    "build": "node ../../scripts/build-package.mjs index=src/index.ts cli=src/bin.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "pack:check": "pnpm --dir ../.. pack:check",
