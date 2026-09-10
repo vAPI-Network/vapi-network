@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -38,6 +38,31 @@ describe("vAPI keystore", () => {
       dkLen: 32,
     });
     expect(keystore.crypto.cipher).toBe("aes-256-gcm");
+    expect(keystore).toMatchObject({
+      version: 2,
+      keys: {
+        evm: { type: "secp256k1", address: privateKeyToAccount(PRIVATE_KEY).address },
+      },
+    });
+    expect(JSON.stringify(keystore)).not.toContain(PRIVATE_KEY.slice(2));
+  });
+
+  it("migrates a v1 file to the encrypted v2 key bundle after a successful unlock", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-keystore-v1-migration-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "keystore.json");
+    await writeFile(path, JSON.stringify(LEGACY_V1_KEYSTORE), { mode: 0o600 });
+
+    const account = await unlockKeystore("migration-passphrase", path);
+    const migrated = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+
+    expect(account.address).toBe(privateKeyToAccount(PRIVATE_KEY).address);
+    expect(migrated).toMatchObject({
+      version: 2,
+      address: account.address,
+      keys: { evm: { type: "secp256k1", address: account.address } },
+    });
+    expect(JSON.stringify(migrated)).not.toContain(PRIVATE_KEY.slice(2));
   });
 
   it("fails closed with a wrong passphrase", async () => {
@@ -66,3 +91,18 @@ describe("vAPI keystore", () => {
     ).rejects.toThrow("wrong passphrase or corrupt file");
   });
 });
+
+const LEGACY_V1_KEYSTORE = {
+  version: 1,
+  address: "0xFCAd0B19bB29D4674531d6f115237E16AfCE377c",
+  crypto: {
+    cipher: "aes-256-gcm",
+    ciphertext:
+      "itpP1e1eiE4eC41C82lYPVkrnzqP/8ec8zMZnXei6bP0vcnO6a05uK5CgGRYdgNFjJG/QhwHV7nkBkI+EdTlEA==",
+    iv: "42UyghblMwQ+qKnt",
+    authTag: "sQRKSSucPf9dDaxdChJQEw==",
+    kdf: "scrypt",
+    salt: "Nrqua6q962F2O5ubIEzZiyK6qIUOpZOYM0nDg0IS9Cw=",
+    kdfParams: { n: 2 ** 15, r: 8, p: 1, dkLen: 32 },
+  },
+} as const;

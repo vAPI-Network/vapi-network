@@ -1,7 +1,11 @@
 import {
+  ARC_MAINNET_CAIP2_PLACEHOLDER,
   ARC_TESTNET_CAIP2,
   BASE_MAINNET_CAIP2,
   CANONICAL_X402_USDC_NETWORKS,
+  SOLANA_MAINNET_CAIP2,
+  SOLANA_MAINNET_USDC,
+  X402_SOLANA_MAINNET_CAIP2,
 } from "./x402-networks.js";
 import {
   createPublicClient,
@@ -9,7 +13,6 @@ import {
   formatUnits,
   getAddress,
   http,
-  type Address,
   type Chain,
   type HttpTransport,
   type PublicClient,
@@ -17,22 +20,30 @@ import {
 
 import { createPublicFetch, type LookupFn } from "./net-guard.js";
 
-export { ARC_TESTNET_CAIP2, BASE_MAINNET_CAIP2 };
+export {
+  ARC_MAINNET_CAIP2_PLACEHOLDER,
+  ARC_TESTNET_CAIP2,
+  BASE_MAINNET_CAIP2,
+  SOLANA_MAINNET_CAIP2,
+  SOLANA_MAINNET_USDC,
+  X402_SOLANA_MAINNET_CAIP2,
+};
 export const USDC_DECIMALS = 6;
 export const DEFAULT_ARC_GAS_HEADROOM_ATOMIC = 50_000n;
 
 export type NetworkDefinition = {
-  chainId: number;
+  family: "evm" | "svm";
+  chainId?: number;
   name: string;
-  usdc: Address;
-  gasToken: "ETH" | "USDC";
+  usdc: string;
+  gasToken: "ETH" | "USDC" | "SOL";
   rpcEnv: string;
   publicRpcUrl?: string;
 };
 
 export type ConfiguredNetwork = {
   rpcUrl: string;
-  usdc: Address;
+  usdc: string;
 };
 
 export type NetworkTransportOptions = {
@@ -43,6 +54,7 @@ export type NetworkTransportOptions = {
 
 export const NETWORKS = {
   [BASE_MAINNET_CAIP2]: {
+    family: "evm",
     chainId: 8453,
     name: "Base mainnet",
     usdc: CANONICAL_X402_USDC_NETWORKS[BASE_MAINNET_CAIP2].usdc,
@@ -51,11 +63,28 @@ export const NETWORKS = {
     publicRpcUrl: "https://mainnet.base.org",
   },
   [ARC_TESTNET_CAIP2]: {
+    family: "evm",
     chainId: 5_042_002,
     name: "Arc testnet",
     usdc: CANONICAL_X402_USDC_NETWORKS[ARC_TESTNET_CAIP2].usdc,
     gasToken: "USDC",
     rpcEnv: "ARC_TESTNET_RPC_URL",
+  },
+  [SOLANA_MAINNET_CAIP2]: {
+    family: "svm",
+    name: "Solana mainnet",
+    usdc: SOLANA_MAINNET_USDC,
+    gasToken: "SOL",
+    rpcEnv: "SOLANA_RPC_URL",
+    publicRpcUrl: "https://api.mainnet-beta.solana.com",
+  },
+  [X402_SOLANA_MAINNET_CAIP2]: {
+    family: "svm",
+    name: "Solana mainnet",
+    usdc: SOLANA_MAINNET_USDC,
+    gasToken: "SOL",
+    rpcEnv: "SOLANA_RPC_URL",
+    publicRpcUrl: "https://api.mainnet-beta.solana.com",
   },
 } as const satisfies Record<string, NetworkDefinition>;
 
@@ -71,6 +100,35 @@ export function parseEip155ChainId(network: string): number {
   return chainId;
 }
 
+export function isSolanaNetwork(network: string): boolean {
+  return network === SOLANA_MAINNET_CAIP2 || network === X402_SOLANA_MAINNET_CAIP2;
+}
+
+export function areSamePaymentNetwork(left: string, right: string): boolean {
+  return left === right || (isSolanaNetwork(left) && isSolanaNetwork(right));
+}
+
+export function isSupportedPaymentNetwork(network: string): boolean {
+  if (isSolanaNetwork(network)) return true;
+  try {
+    parseEip155ChainId(network);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function configuredNetworkFor(
+  networks: Readonly<Record<string, ConfiguredNetwork>>,
+  network: string,
+): ConfiguredNetwork | undefined {
+  const configured = networks[network];
+  if (configured) return configured;
+  if (network === X402_SOLANA_MAINNET_CAIP2) return networks[SOLANA_MAINNET_CAIP2];
+  if (network === SOLANA_MAINNET_CAIP2) return networks[X402_SOLANA_MAINNET_CAIP2];
+  return undefined;
+}
+
 export function getNetworkDefinition(network: string): NetworkDefinition {
   const known = NETWORKS[network as keyof typeof NETWORKS];
   if (known) {
@@ -78,6 +136,7 @@ export function getNetworkDefinition(network: string): NetworkDefinition {
   }
   const chainId = parseEip155ChainId(network);
   return {
+    family: "evm",
     chainId,
     name: network,
     usdc: getAddress("0x0000000000000000000000000000000000000000"),
@@ -103,6 +162,9 @@ export function requireRpcUrl(network: string, configured: ConfiguredNetwork): s
 
 export function createChain(network: string, rpcUrl: string): Chain {
   const definition = getNetworkDefinition(network);
+  if (definition.family !== "evm" || definition.chainId === undefined) {
+    throw new Error(`Network ${network} is not an EVM chain.`);
+  }
   return defineChain({
     id: definition.chainId,
     name: definition.name,

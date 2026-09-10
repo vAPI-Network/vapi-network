@@ -1,7 +1,10 @@
 import {
   formatUsdc,
   getNetworkDefinition,
+  isSolanaNetwork,
   readUsdcBalance,
+  type LookupFn,
+  type VapiPaymentAccount,
   type VapiConfig,
 } from "@vapi-network/core";
 import type { Address } from "viem";
@@ -15,18 +18,32 @@ export type WalletBalance = {
 };
 
 export async function getWallet(
-  address: Address,
+  account: Address | VapiPaymentAccount,
   config: VapiConfig,
+  options: { fetchImpl?: typeof fetch; lookup?: LookupFn } = {},
 ): Promise<{ address: Address; balances: WalletBalance[] }> {
+  const evmAddress = typeof account === "string" ? account : account.address;
   const balances = await Promise.all(
     Object.entries(config.networks).map(async ([network, configured]) => {
       const definition = getNetworkDefinition(network);
       try {
+        const balanceAddress = isSolanaNetwork(network)
+          ? typeof account === "string"
+            ? undefined
+            : account.solana?.address
+          : evmAddress;
+        if (!balanceAddress) {
+          throw new Error(
+            "Solana is not enabled in this keystore. Run vapi accounts --enable solana first.",
+          );
+        }
         const amount = await readUsdcBalance({
           network,
           configured,
-          address,
+          address: balanceAddress,
           allowPrivateNetwork: config.allowPrivateNetwork,
+          ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+          ...(options.lookup ? { lookup: options.lookup } : {}),
         });
         return {
           network,
@@ -45,5 +62,5 @@ export async function getWallet(
       }
     }),
   );
-  return { address, balances };
+  return { address: evmAddress, balances };
 }

@@ -7,8 +7,10 @@ import {
   createNetworkPublicClient,
   formatUsdc,
   getNetworkDefinition,
+  isSolanaNetwork,
   type ConfiguredNetwork,
 } from "./networks.js";
+import { readSolanaGasBalance, readSolanaUsdcBalance } from "./svm.js";
 import { readUsdcBalance } from "./sweep.js";
 
 export type AccountBalance = {
@@ -46,6 +48,7 @@ export type AccountNetworkAdapter = (
 
 export type ListAccountsArgs = {
   address: string;
+  solanaAddress?: string;
   config: VapiConfig;
   fetchImpl?: typeof fetch;
   lookup?: LookupFn;
@@ -54,21 +57,30 @@ export type ListAccountsArgs = {
 };
 
 const EIP155_NAMESPACE = "eip155";
+const SOLANA_NAMESPACE = "solana";
 
 /** List deposit destinations and balances without needing access to a private key. */
 export async function listAccounts(args: ListAccountsArgs): Promise<AccountInfo[]> {
   return await Promise.all(
     Object.entries(args.config.networks).map(async ([caip2, configured]) => {
       const namespace = caip2Namespace(caip2);
+      const defaultAddress =
+        namespace === SOLANA_NAMESPACE && args.solanaAddress ? args.solanaAddress : args.address;
       const adapter =
         args.adapters?.[namespace] ??
-        (namespace === EIP155_NAMESPACE ? eip155AccountAdapter : undefined);
+        (namespace === EIP155_NAMESPACE
+          ? eip155AccountAdapter
+          : namespace === SOLANA_NAMESPACE && args.solanaAddress
+            ? solanaAccountAdapter
+            : undefined);
       if (!adapter) {
         return failedAccount(
           caip2,
           configured,
-          args.address,
-          `No account adapter is available for CAIP-2 namespace ${namespace}.`,
+          defaultAddress,
+          namespace === SOLANA_NAMESPACE
+            ? "Solana is not enabled in this keystore. Run vapi accounts --enable solana first."
+            : `No account adapter is available for CAIP-2 namespace ${namespace}.`,
         );
       }
 
@@ -78,17 +90,52 @@ export async function listAccounts(args: ListAccountsArgs): Promise<AccountInfo[
           ...(await adapter({
             caip2,
             configured,
-            defaultAddress: args.address,
+            defaultAddress,
             allowPrivateNetwork: args.config.allowPrivateNetwork,
             ...(args.fetchImpl ? { fetchImpl: args.fetchImpl } : {}),
             ...(args.lookup ? { lookup: args.lookup } : {}),
           })),
         };
       } catch (error) {
-        return failedAccount(caip2, configured, args.address, conciseError(error));
+        return failedAccount(caip2, configured, defaultAddress, conciseError(error));
       }
     }),
   );
+}
+
+async function solanaAccountAdapter(
+  context: AccountNetworkAdapterContext,
+): Promise<Omit<AccountInfo, "caip2">> {
+  const configured = context.configured as ConfiguredNetwork;
+  const [usdcAtomic, gasAtomic] = await Promise.all([
+    readSolanaUsdcBalance({
+      network: context.caip2,
+      configured,
+      address: context.defaultAddress,
+      allowPrivateNetwork: context.allowPrivateNetwork,
+      ...(context.fetchImpl ? { fetchImpl: context.fetchImpl } : {}),
+      ...(context.lookup ? { lookup: context.lookup } : {}),
+    }),
+    readSolanaGasBalance({
+      network: context.caip2,
+      configured,
+      address: context.defaultAddress,
+      allowPrivateNetwork: context.allowPrivateNetwork,
+      ...(context.fetchImpl ? { fetchImpl: context.fetchImpl } : {}),
+      ...(context.lookup ? { lookup: context.lookup } : {}),
+    }),
+  ]);
+  const definition = getNetworkDefinition(context.caip2);
+  return {
+    name: definition.name,
+    address: context.defaultAddress,
+    usdcBalance: atomicBalance(usdcAtomic, formatUsdc),
+    gasTokenBalance: {
+      symbol: definition.gasToken,
+      ...atomicBalance(gasAtomic, (amount) => formatUnits(amount, 9)),
+    },
+    ...depositDetails(context.caip2, configured, context.defaultAddress),
+  };
 }
 
 async function eip155AccountAdapter(
@@ -138,7 +185,12 @@ function failedAccount(
   address: string,
   error: string,
 ): AccountInfo {
-  const name = caip2.startsWith(`${EIP155_NAMESPACE}:`) ? getNetworkDefinition(caip2).name : caip2;
+  let name = caip2;
+  try {
+    name = getNetworkDefinition(caip2).name;
+  } catch {
+    // Custom namespace adapters may use networks unknown to the built-in registry.
+  }
   return {
     caip2,
     name,
@@ -163,7 +215,11 @@ function depositDetails(
   const configuredInstructions = configuredString(configured, "depositInstructions");
   const depositInstructions =
     configuredInstructions ??
-    (caip2 === BASE_MAINNET_CAIP2 ? `Send USDC on Base to ${address}.` : undefined);
+    (caip2 === BASE_MAINNET_CAIP2
+      ? `Send USDC on Base to ${address}.`
+      : isSolanaNetwork(caip2)
+        ? `Send USDC on Solana mainnet to ${address}.`
+        : undefined);
   return {
     ...(depositUrl ? { depositUrl } : {}),
     ...(depositInstructions ? { depositInstructions } : {}),

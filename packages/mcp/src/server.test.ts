@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  SOLANA_MAINNET_CAIP2,
+  createKeystore,
   getDefaultConfig,
   type MarketplaceDiscoveryPage,
   type MarketplaceHit,
@@ -158,6 +160,54 @@ describe("Agent Cash MCP marketplace tools", () => {
     });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     await client.close();
+    await server.close();
+  });
+
+  it("uses the enabled Solana address in both wallet tools", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-solana-wallet-"));
+    temporaryDirectories.push(directory);
+    const account = await createKeystore("test-only-passphrase", join(directory, "keystore.json"), {
+      enableSolana: true,
+    });
+    const config = getDefaultConfig({}, { networks: ["base", "solana"] });
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const body = init?.body ?? (input instanceof Request ? await input.clone().text() : "");
+      const request = JSON.parse(String(body)) as { id: number; method: string };
+      return Response.json({
+        jsonrpc: "2.0",
+        id: request.id,
+        result:
+          request.method === "eth_call"
+            ? `0x${"0".repeat(64)}`
+            : request.method === "eth_getBalance"
+              ? "0x0"
+              : request.method === "getTokenAccountsByOwner"
+                ? { context: { slot: 1 }, value: [] }
+                : { context: { slot: 1 }, value: 0 },
+      });
+    });
+    const server = createVapiServer({ account, config, fetchImpl });
+
+    const accounts = await server.callTool({ name: "wallet.accounts" });
+    const balance = await server.callTool({ name: "wallet.balance" });
+
+    expect(accounts.structuredContent).toMatchObject({
+      accounts: [
+        { caip2: "eip155:8453", address: account.address },
+        {
+          caip2: SOLANA_MAINNET_CAIP2,
+          address: account.solana?.address,
+          usdcBalance: { atomic: "0", formatted: "0" },
+          gasTokenBalance: { symbol: "SOL", atomic: "0", formatted: "0" },
+        },
+      ],
+    });
+    expect(balance.structuredContent).toMatchObject({
+      balances: [
+        { network: "eip155:8453", usdcAtomic: "0" },
+        { network: SOLANA_MAINNET_CAIP2, usdcAtomic: "0" },
+      ],
+    });
     await server.close();
   });
 

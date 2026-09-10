@@ -8,17 +8,19 @@ import {
   createPublicFetch,
   getVapiPaths,
   isMirroredHit,
+  isSolanaAddress,
+  isSupportedPaymentNetwork,
   loadConfig,
   listAccounts,
   marketplaceDiscoveryPageSchema,
   marketplaceKindSchema,
   readReceipts,
   readSearchEvents,
+  type VapiPaymentAccount,
   type MarketplaceHit,
   type VapiConfig,
   type StatsRange,
 } from "@vapi-network/core";
-import type { PrivateKeyAccount } from "viem/accounts";
 import { z } from "zod";
 
 import {
@@ -34,7 +36,7 @@ import { getWallet } from "./tools/wallet.js";
 export { callService, type CallToolInput, type CallToolResult };
 
 export type VapiServerOptions = {
-  account: PrivateKeyAccount;
+  account: VapiPaymentAccount;
   config: VapiConfig;
   fetchImpl?: typeof fetch;
   ledgerPath?: string;
@@ -238,11 +240,14 @@ const payTool = {
       .optional(),
     network: z
       .string()
-      .regex(/^eip155:[1-9]\d*$/)
+      .refine(isSupportedPaymentNetwork, "Expected a supported EVM or Solana network identifier.")
       .optional(),
     expectedPayTo: z
       .string()
-      .regex(/^0x[0-9a-fA-F]{40}$/)
+      .refine(
+        (value) => /^0x[0-9a-fA-F]{40}$/.test(value) || isSolanaAddress(value),
+        "Expected an EVM or Solana address.",
+      )
       .optional(),
     maxPriceUsd: z
       .union([z.number().nonnegative(), z.string().regex(/^\d+(?:\.\d{1,6})?$/)])
@@ -449,7 +454,9 @@ export function createVapiServer(options: VapiServerOptions) {
   server.registerTool("call", deprecatedTool(payTool, "call.pay"), pay);
 
   const balance = async () =>
-    asStructuredToolResult(() => getWallet(options.account.address, options.config));
+    asStructuredToolResult(() =>
+      getWallet(options.account, options.config, { fetchImpl: guardedFetch }),
+    );
   server.registerTool(
     "wallet.address",
     {
@@ -480,6 +487,7 @@ export function createVapiServer(options: VapiServerOptions) {
       asStructuredToolResult(async () => ({
         accounts: await listAccounts({
           address: options.account.address,
+          ...(options.account.solana ? { solanaAddress: options.account.solana.address } : {}),
           config: options.config,
           fetchImpl: guardedFetch,
         }),

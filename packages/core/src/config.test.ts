@@ -5,13 +5,14 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  configSchema,
   DEFAULT_DISCOVERY_URL,
   DEFAULT_MARKETPLACE_DISCOVERY_URL,
   DEFAULT_REGISTRY_FALLBACKS,
   getDefaultConfig,
   loadConfig,
 } from "./config.js";
-import { BASE_MAINNET_CAIP2, NETWORKS } from "./networks.js";
+import { BASE_MAINNET_CAIP2, NETWORKS, SOLANA_MAINNET_CAIP2 } from "./networks.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -36,6 +37,26 @@ describe("vAPI config", () => {
         marketplaceDiscoveryUrl: "https://registry.example/base/api/call/discovery",
       },
     );
+  });
+
+  it("adds the documented Solana mainnet RPC and USDC when selected", () => {
+    expect(getDefaultConfig({}, { networks: ["base", "solana"] }).networks).toMatchObject({
+      [BASE_MAINNET_CAIP2]: {
+        rpcUrl: "https://mainnet.base.org",
+        usdc: NETWORKS[BASE_MAINNET_CAIP2].usdc,
+      },
+      [SOLANA_MAINNET_CAIP2]: {
+        rpcUrl: "https://api.mainnet-beta.solana.com",
+        usdc: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      },
+    });
+  });
+
+  it("rejects a non-canonical mint for the Solana mainnet config", () => {
+    const config = getDefaultConfig({}, { networks: ["solana"] });
+    config.networks[SOLANA_MAINNET_CAIP2]!.usdc = "So11111111111111111111111111111111111111112";
+
+    expect(() => configSchema.parse(config)).toThrow(/canonical Solana mainnet USDC mint/);
   });
 
   it("keeps existing config files compatible and allows environment overrides", async () => {

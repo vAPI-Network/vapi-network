@@ -787,6 +787,8 @@ describe("EIP-3009 exact payment construction", () => {
       nonce: NONCE,
       nowSeconds: 1_700_000_000,
     });
+    expect(payment.payload.payload).toHaveProperty("authorization");
+    if (!("authorization" in payment.payload.payload)) throw new Error("Expected EVM payload.");
     expect(payment.payload.payload.signature).toMatch(/^0x[0-9a-f]{130}$/i);
     expect(payment.payload.payload.authorization).toEqual({
       from: account.address,

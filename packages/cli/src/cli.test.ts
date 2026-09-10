@@ -10,10 +10,12 @@ import { runCli, type CliIo } from "./cli.js";
 
 const originalHome = process.env.VAPI_HOME;
 const originalPassword = process.env.VAPI_KEYSTORE_PASSWORD;
+const originalSolanaRpc = process.env.SOLANA_RPC_URL;
 
 afterEach(() => {
   restoreEnvironment("VAPI_HOME", originalHome);
   restoreEnvironment("VAPI_KEYSTORE_PASSWORD", originalPassword);
+  restoreEnvironment("SOLANA_RPC_URL", originalSolanaRpc);
 });
 
 describe("CLI JSON output", () => {
@@ -65,6 +67,68 @@ describe("CLI JSON output", () => {
     expect(JSON.parse(captured.stdout[0]!)).toEqual({
       address: expect.stringMatching(/^0x[0-9a-fA-F]{40}$/),
       balances: [],
+    });
+  });
+
+  it("creates an encrypted Solana key and mainnet config when requested", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-solana-init-"));
+    process.env.VAPI_HOME = home;
+    process.env.VAPI_KEYSTORE_PASSWORD = "test-only-passphrase";
+    delete process.env.SOLANA_RPC_URL;
+    const captured = captureIo();
+
+    expect(
+      await runCli(["init", "--networks", "base,solana", "--json"], captured.io, {
+        fetchImpl: zeroBalanceRpc(),
+      }),
+    ).toBe(0);
+    const value = JSON.parse(captured.stdout[0]!) as {
+      accounts: Array<{ caip2: string; address: string }>;
+    };
+    const keystore = JSON.parse(await readFile(join(home, "keystore.json"), "utf8")) as {
+      version: number;
+      keys: { solana?: { type: string; address: string } };
+    };
+    const config = JSON.parse(await readFile(join(home, "config.json"), "utf8")) as {
+      networks: Record<string, { rpcUrl: string; usdc: string }>;
+    };
+
+    const solana = value.accounts.find((account) => account.caip2.startsWith("solana:"));
+    expect(solana?.address).toMatch(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
+    expect(keystore).toMatchObject({
+      version: 2,
+      keys: { solana: { type: "ed25519", address: solana?.address } },
+    });
+    expect(config.networks).toMatchObject({
+      "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d": {
+        rpcUrl: "https://api.mainnet-beta.solana.com",
+        usdc: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      },
+    });
+  });
+
+  it("lazily enables Solana without replacing the existing EVM key", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-solana-enable-"));
+    process.env.VAPI_HOME = home;
+    process.env.VAPI_KEYSTORE_PASSWORD = "test-only-passphrase";
+    delete process.env.SOLANA_RPC_URL;
+    const initialized = captureIo();
+    const fetchImpl = zeroBalanceRpc();
+    expect(await runCli(["init", "--json"], initialized.io, { fetchImpl })).toBe(0);
+    const evm = (JSON.parse(initialized.stdout[0]!) as { address: string }).address;
+    const enabled = captureIo();
+
+    expect(
+      await runCli(["accounts", "--enable", "solana", "--json"], enabled.io, { fetchImpl }),
+    ).toBe(0);
+    expect(JSON.parse(enabled.stdout[0]!)).toMatchObject({
+      accounts: [
+        { caip2: "eip155:8453", address: evm },
+        {
+          caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+          address: expect.stringMatching(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),
+        },
+      ],
     });
   });
 });
@@ -238,7 +302,14 @@ function zeroBalanceRpc() {
     return Response.json({
       jsonrpc: "2.0",
       id: request.id,
-      result: request.method === "eth_call" ? `0x${"0".repeat(64)}` : "0x0",
+      result:
+        request.method === "eth_call"
+          ? `0x${"0".repeat(64)}`
+          : request.method === "getTokenAccountsByOwner"
+            ? { context: { slot: 1 }, value: [] }
+            : request.method === "getBalance"
+              ? { context: { slot: 1 }, value: 0 }
+              : "0x0",
     });
   });
 }

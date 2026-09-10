@@ -3,9 +3,15 @@ import type { Address } from "viem";
 
 import { listAccounts, type AccountNetworkAdapter } from "./accounts.js";
 import { getDefaultConfig, type VapiConfig } from "./config.js";
-import { ARC_TESTNET_CAIP2, BASE_MAINNET_CAIP2, NETWORKS } from "./networks.js";
+import {
+  ARC_TESTNET_CAIP2,
+  BASE_MAINNET_CAIP2,
+  NETWORKS,
+  SOLANA_MAINNET_CAIP2,
+} from "./networks.js";
 
 const ADDRESS = "0x1111111111111111111111111111111111111111" as Address;
+const SOLANA_ADDRESS = "11111111111111111111111111111111";
 
 describe("account listing", () => {
   it("lists Base USDC and ETH balances with deposit instructions", async () => {
@@ -84,6 +90,45 @@ describe("account listing", () => {
       }),
     ]);
     expect(accounts[0]?.error).toContain("RPC unavailable");
+  });
+
+  it("lists Solana USDC and SOL balances for the enabled local address", async () => {
+    const methods: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (_input, init) => {
+      const request = JSON.parse(String(init?.body)) as { id: number; method: string };
+      methods.push(request.method);
+      return Response.json({
+        jsonrpc: "2.0",
+        id: request.id,
+        result:
+          request.method === "getTokenAccountsByOwner"
+            ? { context: { slot: 1 }, value: [] }
+            : { context: { slot: 1 }, value: 500_000_000 },
+      });
+    });
+    const config = {
+      ...getDefaultConfig({}),
+      networks: {
+        [SOLANA_MAINNET_CAIP2]: {
+          rpcUrl: "https://solana-rpc.example",
+          usdc: NETWORKS[SOLANA_MAINNET_CAIP2].usdc,
+        },
+      },
+    } as VapiConfig;
+
+    await expect(
+      listAccounts({ address: ADDRESS, solanaAddress: SOLANA_ADDRESS, config, fetchImpl }),
+    ).resolves.toEqual([
+      {
+        caip2: SOLANA_MAINNET_CAIP2,
+        name: "Solana mainnet",
+        address: SOLANA_ADDRESS,
+        usdcBalance: { atomic: "0", formatted: "0" },
+        gasTokenBalance: { symbol: "SOL", atomic: "500000000", formatted: "0.5" },
+        depositInstructions: `Send USDC on Solana mainnet to ${SOLANA_ADDRESS}.`,
+      },
+    ]);
+    expect(methods.sort()).toEqual(["getBalance", "getTokenAccountsByOwner"]);
   });
 
   it("allows a custom adapter for a future Solana namespace", async () => {

@@ -6,7 +6,15 @@ import { dirname, join } from "node:path";
 import { getAddress } from "viem";
 import { z } from "zod";
 
-import { ARC_TESTNET_CAIP2, BASE_MAINNET_CAIP2, NETWORKS, parseEip155ChainId } from "./networks.js";
+import {
+  ARC_TESTNET_CAIP2,
+  BASE_MAINNET_CAIP2,
+  configuredNetworkFor,
+  isSolanaNetwork,
+  isSupportedPaymentNetwork,
+  NETWORKS,
+  SOLANA_MAINNET_CAIP2,
+} from "./networks.js";
 
 export const DEFAULT_REGISTRY_URL = "https://api.vapinetwork.ai";
 export const DEFAULT_DISCOVERY_URL = `${DEFAULT_REGISTRY_URL}/api/call/services`;
@@ -40,45 +48,61 @@ export const spendCapsSchema = z.object({
   perCallAtomic: atomicString,
   perDayAtomic: atomicString,
 });
-export const configSchema = z.object({
-  discoveryUrl: z.url(),
-  marketplaceDiscoveryUrl: z.url().default(DEFAULT_MARKETPLACE_DISCOVERY_URL),
-  registryFallbacks: z
-    .array(
-      z.object({
-        discoveryUrl: z.url(),
-        marketplaceDiscoveryUrl: z.url(),
+export const configSchema = z
+  .object({
+    discoveryUrl: z.url(),
+    marketplaceDiscoveryUrl: z.url().default(DEFAULT_MARKETPLACE_DISCOVERY_URL),
+    registryFallbacks: z
+      .array(
+        z.object({
+          discoveryUrl: z.url(),
+          marketplaceDiscoveryUrl: z.url(),
+        }),
+      )
+      .optional(),
+    allowPrivateNetwork: z.boolean().default(false).optional(),
+    networks: z.record(
+      z.string().refine((network) => isSupportedPaymentNetwork(network), {
+        message: "Expected a supported eip155:<chainId> or Solana network identifier.",
       }),
-    )
-    .optional(),
-  allowPrivateNetwork: z.boolean().default(false).optional(),
-  networks: z.record(
-    z.string().refine(
-      (network) => {
-        try {
-          parseEip155ChainId(network);
-          return true;
-        } catch {
-          return false;
-        }
-      },
-      { message: "Expected an eip155:<chainId> network identifier." },
+      z.object({
+        rpcUrl: z.string(),
+        usdc: z.string().trim().min(1),
+        depositUrl: z.url().optional(),
+        depositInstructions: z.string().trim().min(1).max(500).optional(),
+        eip712Domain: z
+          .object({
+            name: z.string().trim().min(1).max(64),
+            version: z.string().trim().min(1).max(32),
+          })
+          .optional(),
+      }),
     ),
-    z.object({
-      rpcUrl: z.string(),
-      usdc: z.string().transform((value) => getAddress(value)),
-      depositUrl: z.url().optional(),
-      depositInstructions: z.string().trim().min(1).max(500).optional(),
-      eip712Domain: z
-        .object({
-          name: z.string().trim().min(1).max(64),
-          version: z.string().trim().min(1).max(32),
-        })
-        .optional(),
-    }),
-  ),
-  spendCaps: spendCapsSchema,
-});
+    spendCaps: spendCapsSchema,
+  })
+  .superRefine((config, context) => {
+    for (const [network, configured] of Object.entries(config.networks)) {
+      if (isSolanaNetwork(network)) {
+        if (configured.usdc !== NETWORKS[SOLANA_MAINNET_CAIP2].usdc) {
+          context.addIssue({
+            code: "custom",
+            path: ["networks", network, "usdc"],
+            message: "Expected canonical Solana mainnet USDC mint.",
+          });
+        }
+        continue;
+      }
+      try {
+        getAddress(configured.usdc);
+      } catch {
+        context.addIssue({
+          code: "custom",
+          path: ["networks", network, "usdc"],
+          message: "Expected a valid EVM USDC contract address.",
+        });
+      }
+    }
+  });
 
 export type SpendCaps = z.infer<typeof spendCapsSchema>;
 export type VapiConfig = z.infer<typeof configSchema>;
@@ -86,7 +110,7 @@ export type VapiConfig = z.infer<typeof configSchema>;
 export type AgentCashConfig = VapiConfig;
 
 export function isNetworkConfigured(networks: VapiConfig["networks"], network: string): boolean {
-  return Boolean(networks[network]?.rpcUrl.trim());
+  return Boolean(configuredNetworkFor(networks, network)?.rpcUrl.trim());
 }
 
 export function getVapiPaths(
@@ -146,19 +170,40 @@ export async function migrateLegacyVapiHome(options: MigrationOptions = {}): Pro
   return copied;
 }
 
-export function getDefaultConfig(source: NodeJS.ProcessEnv = process.env): VapiConfig {
+export type DefaultConfigOptions = {
+  networks?: readonly string[];
+};
+
+export function getDefaultConfig(
+  source: NodeJS.ProcessEnv = process.env,
+  options: DefaultConfigOptions = {},
+): VapiConfig {
   const registry = registryEndpoints(source.VAPI_REGISTRY_URL?.trim() || DEFAULT_REGISTRY_URL);
-  const networks: VapiConfig["networks"] = {
-    [BASE_MAINNET_CAIP2]: {
+  const requested = new Set(options.networks ?? ["base"]);
+  const networks: VapiConfig["networks"] = {};
+  if (requested.has("base") || requested.has(BASE_MAINNET_CAIP2)) {
+    networks[BASE_MAINNET_CAIP2] = {
       rpcUrl: source.BASE_RPC_URL?.trim() || NETWORKS[BASE_MAINNET_CAIP2].publicRpcUrl,
       usdc: NETWORKS[BASE_MAINNET_CAIP2].usdc,
-    },
-  };
+    };
+  }
   const arcRpcUrl = source.ARC_TESTNET_RPC_URL?.trim();
-  if (arcRpcUrl) {
+  if (arcRpcUrl || requested.has("arc") || requested.has(ARC_TESTNET_CAIP2)) {
+    if (!arcRpcUrl) {
+      throw new Error(
+        "Arc testnet RPC is required. Set ARC_TESTNET_RPC_URL before enabling Arc testnet.",
+      );
+    }
     networks[ARC_TESTNET_CAIP2] = {
       rpcUrl: arcRpcUrl,
       usdc: NETWORKS[ARC_TESTNET_CAIP2].usdc,
+    };
+  }
+  const solanaRpcUrl = source.SOLANA_RPC_URL?.trim();
+  if (solanaRpcUrl || requested.has("solana") || requested.has(SOLANA_MAINNET_CAIP2)) {
+    networks[SOLANA_MAINNET_CAIP2] = {
+      rpcUrl: solanaRpcUrl || NETWORKS[SOLANA_MAINNET_CAIP2].publicRpcUrl,
+      usdc: NETWORKS[SOLANA_MAINNET_CAIP2].usdc,
     };
   }
   return {
@@ -191,6 +236,7 @@ export async function loadConfig(
   config.registryFallbacks ??= DEFAULT_REGISTRY_FALLBACKS.map((fallback) => ({ ...fallback }));
   const baseRpcUrl = source.BASE_RPC_URL?.trim();
   const arcRpcUrl = source.ARC_TESTNET_RPC_URL?.trim();
+  const solanaRpcUrl = source.SOLANA_RPC_URL?.trim();
   const discoveryUrl = source.VAPI_DISCOVERY_URL?.trim();
   const marketplaceDiscoveryUrl = source.VAPI_MARKETPLACE_DISCOVERY_URL?.trim();
   const registryUrl = source.VAPI_REGISTRY_URL?.trim();
@@ -203,6 +249,12 @@ export async function loadConfig(
       usdc: config.networks[ARC_TESTNET_CAIP2]?.usdc ?? NETWORKS[ARC_TESTNET_CAIP2].usdc,
     };
   }
+  if (solanaRpcUrl) {
+    config.networks[SOLANA_MAINNET_CAIP2] = {
+      rpcUrl: solanaRpcUrl,
+      usdc: config.networks[SOLANA_MAINNET_CAIP2]?.usdc ?? NETWORKS[SOLANA_MAINNET_CAIP2].usdc,
+    };
+  }
   if (registryUrl) {
     const registry = registryEndpoints(registryUrl);
     config.discoveryUrl = registry.discoveryUrl;
@@ -212,6 +264,10 @@ export async function loadConfig(
   if (marketplaceDiscoveryUrl) config.marketplaceDiscoveryUrl = marketplaceDiscoveryUrl;
   for (const [network, configured] of Object.entries(config.networks)) {
     configured.rpcUrl = configured.rpcUrl.trim();
+    configured.usdc = configured.usdc.trim();
+    if (isSolanaNetwork(network) && configured.usdc !== NETWORKS[SOLANA_MAINNET_CAIP2].usdc) {
+      throw new Error(`Network ${network} must use canonical Solana mainnet USDC.`);
+    }
     if (!configured.rpcUrl) delete config.networks[network];
   }
   return config;
@@ -235,12 +291,36 @@ function registryEndpoints(baseUrl: string): {
 export async function writeDefaultConfig(
   path = getVapiPaths().config,
   source: NodeJS.ProcessEnv = process.env,
+  options: DefaultConfigOptions = {},
 ): Promise<VapiConfig> {
   if (!process.env.VAPI_HOME?.trim() && path === getVapiPaths(join(homedir(), ".vapi")).config) {
     const copied = await migrateLegacyVapiHome({ targetDirectory: join(homedir(), ".vapi") });
     if (copied.includes(path)) return await loadConfig(path, source);
   }
-  const config = getDefaultConfig(source);
+  const config = getDefaultConfig(source, options);
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporaryPath = `${path}.${process.pid}.tmp`;
+  await writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+    flag: "wx",
+  });
+  await rename(temporaryPath, path);
+  return config;
+}
+
+export async function enableDefaultNetwork(
+  network: "solana",
+  path = getVapiPaths().config,
+  source: NodeJS.ProcessEnv = process.env,
+): Promise<VapiConfig> {
+  const config = await loadConfig(path, source);
+  if (network === "solana") {
+    config.networks[SOLANA_MAINNET_CAIP2] = {
+      rpcUrl: source.SOLANA_RPC_URL?.trim() || NETWORKS[SOLANA_MAINNET_CAIP2].publicRpcUrl,
+      usdc: NETWORKS[SOLANA_MAINNET_CAIP2].usdc,
+    };
+  }
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporaryPath = `${path}.${process.pid}.tmp`;
   await writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, {

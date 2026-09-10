@@ -33,6 +33,9 @@
     "publish:npm": "pnpm pack:check && npm publish ./publish --access public --tag next"
   },
   "dependencies": {
+    "@solana-program/token": "^0.9.0",
+    "@solana/kit": "^5.1.0",
+    "@x402/svm": "2.25.0",
     "viem": "^2.43.5",
     "zod": "^4.1.13"
   },

@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ARC_MAINNET_CAIP2_PLACEHOLDER,
   ARC_TESTNET_CAIP2,
   BASE_MAINNET_CAIP2,
   BROWSER_ENABLED_X402_NETWORK_CONFIG,
   CANONICAL_X402_USDC_NETWORKS,
   getCanonicalX402Usdc,
+  SOLANA_MAINNET_CAIP2,
+  SOLANA_MAINNET_USDC,
+  X402_SOLANA_MAINNET_CAIP2,
 } from "./x402-networks.js";
 
 const ATTACKER_ASSET = "0x1111111111111111111111111111111111111111";
@@ -23,6 +27,10 @@ describe("canonical x402 USDC identities", () => {
       },
     });
     expect(getCanonicalX402Usdc("eip155:1")).toBeUndefined();
+    expect(ARC_MAINNET_CAIP2_PLACEHOLDER).toBeNull();
+    expect(SOLANA_MAINNET_CAIP2).toBe("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d");
+    expect(X402_SOLANA_MAINNET_CAIP2).toBe("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
+    expect(SOLANA_MAINNET_USDC).toBe("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
   });
 
   it("deep-freezes token, domain, and browser-enablement authority", () => {

@@ -15,6 +15,7 @@ export * from "./spend-policy.js";
 export * from "./support-report.js";
 export * from "./sweep.js";
 export * from "./siwx.js";
+export * from "./svm.js";
 export * from "./wallet.js";
 export * from "./x402.js";
 export {

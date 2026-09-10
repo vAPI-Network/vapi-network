@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { rm } from "node:fs/promises";
-import { createRequire } from "node:module";
+import { createRequire, isBuiltin } from "node:module";
 import { resolve } from "node:path";
 
 import { build } from "esbuild";
@@ -46,7 +46,7 @@ const result = await build({
 
 const leakedRuntimeImports = Object.entries(result.metafile.outputs).flatMap(([output, metadata]) =>
   metadata.imports
-    .filter((dependency) => dependency.external && !dependency.path.startsWith("node:"))
+    .filter((dependency) => dependency.external && !isBuiltin(dependency.path))
     .map((dependency) => `${output}: ${dependency.path}`),
 );
 if (leakedRuntimeImports.length > 0) {

@@ -16,10 +16,10 @@ import {
   type X402PaymentRequirements,
   type X402Quote,
   type X402Resource,
+  type X402Signer,
   type VapiConfig,
 } from "@vapi-network/core";
 import type { Hex } from "viem";
-import type { PrivateKeyAccount } from "viem/accounts";
 
 export {
   EIP3009_AUTHORIZATION_TYPES,
@@ -51,6 +51,7 @@ function toSharedNetworks(networks: VapiConfig["networks"]): X402NetworkConfig {
       network,
       {
         usdc: configured.usdc,
+        rpcUrl: configured.rpcUrl,
         enabled: Boolean(configured.rpcUrl.trim()),
         ...(configured.eip712Domain ? { eip712Domain: configured.eip712Domain } : {}),
       },
@@ -91,16 +92,18 @@ export async function parse402Response(
 // Preserve the stable @vapi-network/mcp ./x402 argument name while the shared core
 // uses the browser-neutral `signer` vocabulary.
 export async function buildX402Payment(args: {
-  account: Pick<PrivateKeyAccount, "address" | "signTypedData">;
+  account: X402Signer;
   quote: X402Quote;
   nowSeconds?: number;
   nonce?: Hex;
+  fetchImpl?: typeof fetch;
 }): Promise<{ payload: X402PaymentPayload; headers: X402PaymentHeaders }> {
   const payment = await buildSharedX402Payment({
     signer: args.account,
     quote: args.quote,
     ...(args.nowSeconds === undefined ? {} : { nowSeconds: args.nowSeconds }),
     ...(args.nonce === undefined ? {} : { nonce: args.nonce }),
+    ...(args.fetchImpl === undefined ? {} : { fetchImpl: args.fetchImpl }),
   });
   return {
     payload: payment.payload,

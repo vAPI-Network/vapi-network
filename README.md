@@ -80,8 +80,8 @@ faucet URL or instructions to that network's `config.json` entry:
 }
 ```
 
-Account lookup is adapter-based by CAIP namespace, leaving a dedicated hook for Solana address and
-balance support without coupling it to the EVM wallet.
+Account lookup dispatches by CAIP namespace: the EVM and Solana adapters use their corresponding
+local address and guarded RPC balance calls without coupling one wallet family to the other.
 
 ## Reporting a bug
 
@@ -98,6 +98,42 @@ amounts are never included. No report is uploaded unless `--send` is explicit. W
 uses the guarded network client to POST the same JSON to the configured registry and prints the HTTP
 response code, including non-success responses such as 404. MCP clients can use `support.report`
 with the corresponding `includeAddresses` and `send` booleans.
+
+## Networks
+
+| Network        | x402 identifier                                       | USDC                                           | Gas / RPC notes                                        |
+| -------------- | ----------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------ |
+| Base mainnet   | `eip155:8453`                                         | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`   | ETH; defaults to `https://mainnet.base.org`            |
+| Arc testnet    | `eip155:5042002`                                      | `0x3600000000000000000000000000000000000000`   | USDC is also the gas token; set `ARC_TESTNET_RPC_URL`  |
+| Solana mainnet | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d` | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | SOL; defaults to `https://api.mainnet-beta.solana.com` |
+
+The x402 reference packages shorten the Solana CAIP-2 reference to
+`solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`; vAPI accepts that identifier as an
+alias while persisting the full genesis hash above. Arc mainnet is not enabled:
+**not yet — placeholder only.** Arc and the x402 packages do not publish a
+mainnet RPC plus canonical USDC, so the client deliberately carries only a
+non-routable code placeholder instead of guessing a production configuration.
+
+Create both local accounts during initialization:
+
+```bash
+vapi init --networks base,solana
+```
+
+Or add an Ed25519 account to an existing encrypted keystore:
+
+```bash
+vapi accounts --enable solana
+```
+
+Fund the printed Solana address with SPL USDC. Exact x402 payments use the
+facilitator advertised in the challenge as fee payer, so they do not consume the
+local SOL balance. `vapi sweep <solana-address> --network
+solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d` is a separate transaction
+and requires a small amount of SOL locally for fees and, when necessary,
+creation of the destination token account. The default public Solana RPC is
+rate-limited and has no availability guarantee; set `SOLANA_RPC_URL` to a
+trusted dedicated endpoint for regular use.
 
 ## Discovery sources
 
