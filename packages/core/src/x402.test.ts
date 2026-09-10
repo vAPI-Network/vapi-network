@@ -185,7 +185,7 @@ describe("browser-neutral x402 client", () => {
           extra: {
             name: "USD Coin",
             version: "2",
-            metadata: nestedMetadata(20),
+            metadata: nestedMetadata(40),
           },
         }),
         networks,
@@ -193,11 +193,22 @@ describe("browser-neutral x402 client", () => {
     ).toThrow(/No exact x402 payment option matches/);
   });
 
-  it("rejects deeply nested challenge extensions", () => {
+  it("keeps realistic discovery extensions such as a Bazaar schema", () => {
     const challenge = exactChallenge({});
-    challenge.extensions = { metadata: nestedMetadata(20) };
+    challenge.extensions = {
+      bazaar: { info: { input: { type: "http", method: "POST" } }, schema: nestedMetadata(12) },
+    };
 
-    expect(() => parse402Challenge(challenge, networks)).toThrow(/metadata limits/i);
+    expect(parse402Challenge(challenge, networks).extensions).toEqual(challenge.extensions);
+  });
+
+  it("drops challenge extensions that exceed the metadata limits instead of refusing to pay", () => {
+    const challenge = exactChallenge({});
+    challenge.extensions = { metadata: nestedMetadata(40) };
+
+    const quote = parse402Challenge(challenge, networks);
+    expect(quote.extensions).toBeUndefined();
+    expect(quote.accepted.amount).toBeDefined();
   });
 
   it("rejects oversized payment metadata and challenge extensions", () => {
@@ -212,7 +223,7 @@ describe("browser-neutral x402 client", () => {
 
     const challenge = exactChallenge({});
     challenge.extensions = { metadata: "x".repeat(16_385) };
-    expect(() => parse402Challenge(challenge, networks)).toThrow(/metadata limits/i);
+    expect(parse402Challenge(challenge, networks).extensions).toBeUndefined();
   });
 
   it("uses the Arc USDC token's canonical domain", () => {

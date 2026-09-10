@@ -31,8 +31,10 @@ export {
 
 const MAX_CHALLENGE_BYTES = 1_048_576;
 const MAX_UINT256 = (1n << 256n) - 1n;
-const MAX_METADATA_DEPTH = 8;
-const MAX_METADATA_ENTRIES = 256;
+// Discovery metadata (Bazaar schemas, examples) is legitimately deep and wide;
+// these caps only bound memory, they are not a validity rule.
+const MAX_METADATA_DEPTH = 32;
+const MAX_METADATA_ENTRIES = 4096;
 const MAX_METADATA_KEYS_PER_OBJECT = 64;
 const MAX_METADATA_ARRAY_LENGTH = 64;
 const MAX_METADATA_STRING_LENGTH = 16_384;
@@ -271,14 +273,13 @@ export function parse402Challenge(
   if (!resource.url) {
     throw new X402Error("invalid_challenge", "x402 challenge is missing its resource URL.");
   }
+  // Extensions are discovery metadata, never payment input. A challenge whose
+  // extensions exceed the bounded-JSON limits is still payable: keep the quote
+  // and drop the metadata rather than refusing to pay.
   const extensions =
-    challenge.extensions === undefined ? undefined : readBoundedJsonRecord(challenge.extensions);
-  if (challenge.extensions !== undefined && !extensions) {
-    throw new X402Error(
-      "invalid_challenge",
-      "x402 challenge extensions exceed the supported JSON metadata limits.",
-    );
-  }
+    challenge.extensions === undefined
+      ? undefined
+      : (readBoundedJsonRecord(challenge.extensions) ?? undefined);
 
   try {
     const configured = configuredX402Network(configuredNetworks, network);
