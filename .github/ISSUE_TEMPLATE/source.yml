@@ -8,7 +8,11 @@ body:
     validations: { required: true }
   - type: textarea
     id: shape
-    attributes: { label: Read API or signing interface, description: "Endpoint/spec link, auth needs, rate limits, listing fields available (resource, accepts, description, input schema)" }
+    attributes:
+      {
+        label: Read API or signing interface,
+        description: "Endpoint/spec link, auth needs, rate limits, listing fields available (resource, accepts, description, input schema)",
+      }
     validations: { required: true }
   - type: checkboxes
     id: willing

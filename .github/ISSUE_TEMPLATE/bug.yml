@@ -4,7 +4,12 @@ labels: [bug]
 body:
   - type: input
     id: version
-    attributes: { label: Version, description: "Output of `vapi --version` (or the npm version)", placeholder: "0.2.0-dev.1" }
+    attributes:
+      {
+        label: Version,
+        description: "Output of `vapi --version` (or the npm version)",
+        placeholder: "0.2.0-dev.1",
+      }
     validations: { required: true }
   - type: dropdown
     id: surface
@@ -12,7 +17,11 @@ body:
     validations: { required: true }
   - type: textarea
     id: repro
-    attributes: { label: Steps to reproduce, description: "Exact commands. Never paste private keys, passphrases, or full receipts with addresses you want private." }
+    attributes:
+      {
+        label: Steps to reproduce,
+        description: "Exact commands. Never paste private keys, passphrases, or full receipts with addresses you want private.",
+      }
     validations: { required: true }
   - type: textarea
     id: expected
@@ -20,4 +29,8 @@ body:
     validations: { required: true }
   - type: textarea
     id: env
-    attributes: { label: Environment, description: "OS, Node version, agent client (Claude, Cursor, ...), network (eip155:8453, ...)" }
+    attributes:
+      {
+        label: Environment,
+        description: "OS, Node version, agent client (Claude, Cursor, ...), network (eip155:8453, ...)",
+      }
