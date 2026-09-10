@@ -11,47 +11,44 @@ telemetry off the machine by default.
 
 ## 60-second quickstart
 
-Node.js 22 or newer is required.
+Install once, then every command is `vapi …`:
 
-```sh
-npx vapi-network init
+```bash
+npm i -g vapi-network
+vapi init                      # encrypted wallet + config under ~/.vapi (or $VAPI_HOME), prints the address
 ```
 
-The command creates an encrypted wallet and configuration under `~/.vapi/`
-(or `$VAPI_HOME`) and prints its address. Fund that address with USDC on Base,
-then discover and call a service:
+Fund that address with USDC on Base. Then:
 
-```sh
-npx vapi-network search "weather"
-npx vapi-network pay <listing-ref> --max 0.02
-```
-
-After a global install you can use the shorter `vapi` binary for the same
-commands. See balances and the local receipt trail with:
-
-```sh
+```bash
+vapi search "weather"          # every catalog, merged, with provenance
+vapi inspect <listing-ref>     # request contract and the live 402 quote, before paying
+vapi pay <listing-ref> --max 0.02
 vapi balance
-vapi receipts
+vapi receipts                  # one line per paid call: quote, settlement, latency
 ```
 
-Add the single MCP server to Claude Desktop, Claude Code, Cursor, or another
-stdio MCP client:
+No install? Prefix any command with `npx vapi-network`, for example `npx vapi-network init`.
+(`npx vapi` cannot work: the bare `vapi` name on npm belongs to an unrelated package.)
+
+### Use it from an agent (MCP)
+
+Add this to Claude Desktop, Claude Code, or Cursor. The passphrase unlocks the local keystore; it never leaves the machine.
 
 ```json
 {
   "mcpServers": {
     "vapi": {
       "command": "npx",
-      "args": ["-y", "vapi-network", "mcp"]
+      "args": ["-y", "vapi-network", "mcp"],
+      "env": { "VAPI_KEYSTORE_PASSWORD": "your-passphrase" }
     }
   }
 }
 ```
 
-The server exposes product-namespaced tools such as `call.search`,
-`call.inspect`, `call.pay`, `wallet.address`, `wallet.balance`, and
-`receipts.list`. The old unnamespaced Call tools remain as deprecated aliases
-for one transition release.
+Tools: `call.search`, `call.inspect`, `call.pay`, `wallet.address`, `wallet.balance`, `receipts.list`.
+Spend caps default to $0.10 per call and $1.00 per day; the wallet checks both before it signs.
 
 ## Discovery sources
 
