@@ -145,7 +145,11 @@ provenance:
   `https://api.vapinetwork.ai/api/call/discovery` for discovery and
   `https://api.vapinetwork.ai/api/call/services` for service details. If the
   primary returns HTTP 404 or cannot be resolved, the client logs one notice
-  and tries the configured fallback at `https://console.vapinetwork.ai`.
+  and tries the configured fallback at `https://console.vapinetwork.ai`, using
+  the same canonical paths. The registry's historical `/api/marketplace/discovery`
+  and `/api/network/services` paths still answer for one release and reply with
+  `Deprecation: true` plus a `Link` header naming the successor; a base URL
+  supplied on either of them is normalized to the canonical pair.
 - **Coinbase Bazaar** reads the public x402 v2
   `/discovery/resources` catalog exposed by a facilitator.
 - **Local file** reads a JSON array of listings for private or development
