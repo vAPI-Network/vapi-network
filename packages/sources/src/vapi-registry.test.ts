@@ -201,7 +201,7 @@ describe("vAPI registry source", () => {
   it("maps native and indexed API hits into core listings", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (request) => {
       const url = new URL(request as URL);
-      return url.pathname.endsWith("/api/marketplace/discovery")
+      return url.pathname.endsWith("/api/call/discovery")
         ? Response.json(marketplacePage)
         : Response.json(callsPage);
     });

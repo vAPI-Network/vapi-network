@@ -277,6 +277,20 @@ function endpointListing(
   };
 }
 
+/**
+ * Registry endpoints this client recognizes in a supplied base URL. The
+ * product-prefixed paths are canonical; the registry keeps the two historical
+ * paths mounted for one release with `Deprecation: true` and a `Link` header
+ * naming the successor, so this client accepts them as input but always
+ * requests the canonical pair.
+ */
+const REGISTRY_ENDPOINT_PATHS = [
+  "/api/call/discovery",
+  "/api/call/services",
+  "/api/marketplace/discovery",
+  "/api/network/services",
+] as const;
+
 function registryConfig(
   baseUrl: string,
   discoveryUrl?: string,
@@ -284,26 +298,13 @@ function registryConfig(
 ): VapiRegistryConfig {
   const supplied = new URL(baseUrl);
   const path = supplied.pathname.replace(/\/+$/, "");
-  const marketplaceDiscoveryUrl = path.endsWith("/api/marketplace/discovery")
-    ? supplied.href
-    : path.endsWith("/api/network/services")
-      ? replacePath(supplied, "/api/network/services", "/api/marketplace/discovery").href
-      : path.endsWith("/api/call/discovery")
-        ? supplied.href
-        : path.endsWith("/api/call/services")
-          ? replacePath(supplied, "/api/call/services", "/api/call/discovery").href
-          : appendPath(supplied.href, "api/call/discovery").href;
-  const callsDiscoveryUrl =
-    discoveryUrl ??
-    (path.endsWith("/api/marketplace/discovery")
-      ? replacePath(supplied, "/api/marketplace/discovery", "/api/network/services").href
-      : path.endsWith("/api/network/services")
-        ? supplied.href
-        : path.endsWith("/api/call/discovery")
-          ? replacePath(supplied, "/api/call/discovery", "/api/call/services").href
-          : path.endsWith("/api/call/services")
-            ? supplied.href
-            : appendPath(supplied.href, "api/call/services").href);
+  const endpoint = REGISTRY_ENDPOINT_PATHS.find((candidate) => path.endsWith(candidate));
+  const canonical = (target: string): string =>
+    endpoint
+      ? replacePath(supplied, endpoint, target).href
+      : appendPath(supplied.href, target).href;
+  const marketplaceDiscoveryUrl = canonical("/api/call/discovery");
+  const callsDiscoveryUrl = discoveryUrl ?? canonical("/api/call/services");
   return {
     marketplaceDiscoveryUrl,
     discoveryUrl: callsDiscoveryUrl,

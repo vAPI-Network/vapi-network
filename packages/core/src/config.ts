@@ -21,8 +21,8 @@ export const DEFAULT_DISCOVERY_URL = `${DEFAULT_REGISTRY_URL}/api/call/services`
 export const DEFAULT_MARKETPLACE_DISCOVERY_URL = `${DEFAULT_REGISTRY_URL}/api/call/discovery`;
 export const DEFAULT_REGISTRY_FALLBACKS = [
   {
-    discoveryUrl: "https://console.vapinetwork.ai/api/network/services",
-    marketplaceDiscoveryUrl: "https://console.vapinetwork.ai/api/marketplace/discovery",
+    discoveryUrl: "https://console.vapinetwork.ai/api/call/services",
+    marketplaceDiscoveryUrl: "https://console.vapinetwork.ai/api/call/discovery",
   },
 ] as const;
 
