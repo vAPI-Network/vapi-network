@@ -17,7 +17,7 @@ export const WORDMARK = "vAPI Network";
 export const WELCOME = "Welcome to the vAPI Network";
 export const TAGLINE = [
   "The trusted network where agents and humans do business.",
-  "Pay-per-call APIs today. Tasks and Router Compute next.",
+  "Search APIs, pay per call, keep receipts. More coming soon.",
 ] as const;
 
 const ESC = "\u001b";
