@@ -3,6 +3,7 @@ import { stat } from "node:fs/promises";
 
 import {
   ARC_TESTNET_CAIP2,
+  BASE_MAINNET_CAIP2,
   STATS_RANGES,
   aggregateStats,
   createOnrampSession,
@@ -10,7 +11,9 @@ import {
   createKeystore,
   enableDefaultNetwork,
   enableSolanaKey,
+  exportKeystoreKeys,
   filterReceiptsByRange,
+  formatLegacyRegistryRewrites,
   formatUsdc,
   getArcGasHeadroomAtomic,
   getKeystorePassphrase,
@@ -18,9 +21,12 @@ import {
   getVapiPaths,
   isMissingFile,
   isNetworkConfigured,
+  isSolanaNetwork,
   loadConfig,
   listAccounts,
+  migrateLegacyRegistryConfig,
   migrateLegacyVapiHome,
+  readKeystoreAddress,
   readReceipts,
   readSearchEvents,
   receiptsToCsv,
@@ -29,6 +35,7 @@ import {
   writeDefaultConfig,
   type StatsRange,
   type AccountInfo,
+  type VapiConfig,
 } from "@vapi-network/core";
 import {
   callService,
@@ -56,6 +63,7 @@ Usage:
   vapi receipts export --format <json|csv> [--range <24h|7d|30d>]
   vapi stats [--range <24h|7d|30d>] [--json]
   vapi sweep <address> [--network <caip2>] [--json]
+  vapi export-key [--network <caip2>] [--json]
   vapi report "<what happened>" [--include-addresses] [--send] [--json]
   vapi mcp [--json]
   vapi serve [--json]
@@ -142,6 +150,9 @@ export async function runCli(
       case "sweep":
         await sweepCommand(args.slice(1), json, io);
         return 0;
+      case "export-key":
+        await exportKeyCommand(args.slice(1), json, io);
+        return 0;
       case "report":
         await reportCommand(args.slice(1), json, io, dependencies);
         return 0;
@@ -186,8 +197,19 @@ async function initCommand(
   if (!process.env.VAPI_HOME?.trim()) {
     migrated = await migrateLegacyVapiHome({ targetDirectory: paths.directory, notice: io.stderr });
   }
+  // Refuse before the prompt: re-running init must never cost a passphrase.
+  const adopted = migrated.includes(paths.keystore);
+  if (!adopted && (await fileExists(paths.keystore))) {
+    const address = await readKeystoreAddress(paths.keystore);
+    throw new Error(
+      [
+        `Keystore already exists at ${paths.keystore}. Refusing to replace the local payment key.`,
+        ...(address ? [`Address: ${address}`] : []),
+      ].join("\n"),
+    );
+  }
   const passphrase = await getKeystorePassphrase({ confirm: true });
-  let account = migrated.includes(paths.keystore)
+  let account = adopted
     ? await unlockKeystore(passphrase, paths.keystore)
     : await createKeystore(passphrase, paths.keystore, { enableSolana });
   if (enableSolana && !account.solana) {
@@ -198,8 +220,9 @@ async function initCommand(
   } else if (enableSolana) {
     await enableDefaultNetwork("solana", paths.config);
   }
+  const configRewrites = await migrateLegacyRegistryConfig(paths.config);
 
-  const config = await loadConfig(paths.config);
+  const config = await readConfig(paths.config, io);
   const accounts = await listAccounts({
     address: account.address,
     ...(account.solana ? { solanaAddress: account.solana.address } : {}),
@@ -211,6 +234,7 @@ async function initCommand(
     accounts,
     config: paths.config,
     keystore: paths.keystore,
+    ...(configRewrites.length > 0 ? { configRewrites } : {}),
     message: "vAPI wallet created. Its encrypted key stays on this machine.",
     nextSteps: buildNextSteps(account.address),
   };
@@ -219,6 +243,7 @@ async function initCommand(
     return;
   }
 
+  if (configRewrites.length > 0) io.stdout(formatLegacyRegistryRewrites(configRewrites));
   io.stdout(result.message);
   io.stdout(`Address: ${result.address}`);
   io.stdout(
@@ -249,7 +274,7 @@ async function fundCommand(
   });
   const fiatAmount = optionalUsdAmount(parsed.one("--amount"), "--amount");
   const paths = getVapiPaths();
-  const config = await loadConfig(paths.config);
+  const config = await readConfig(paths.config, io);
   const account = await unlockKeystore(await getKeystorePassphrase(), paths.keystore);
   const session = await createOnrampSession({
     address: account.address,
@@ -276,7 +301,7 @@ async function searchCommand(
     maximumPositionals: 1,
   });
   const limit = optionalPositiveInteger(parsed.one("--limit"), "--limit");
-  const config = await loadConfig(getVapiPaths().config);
+  const config = await readConfig(getVapiPaths().config, io);
   const page = await searchMarketplace(
     {
       ...(parsed.positionals[0] ? { query: parsed.positionals[0] } : {}),
@@ -308,7 +333,7 @@ async function inspectCommand(
     parsed.positionals[0],
     "Usage: vapi inspect <id> [--endpoint <name>]",
   );
-  const config = await loadConfig(getVapiPaths().config);
+  const config = await readConfig(getVapiPaths().config, io);
   const result = await inspectService(
     { id, ...(parsed.one("--endpoint") ? { endpoint: parsed.one("--endpoint") } : {}) },
     config,
@@ -333,7 +358,7 @@ async function payCommand(argv: string[], json: boolean, io: CliIo): Promise<voi
   });
   const target = requiredPositional(parsed.positionals[0], "Usage: vapi pay <id-or-url> [options]");
   const paths = getVapiPaths();
-  const config = await loadConfig(paths.config);
+  const config = await readConfig(paths.config, io);
   const account = await unlockKeystore(await getKeystorePassphrase(), paths.keystore);
   const bodyText = parsed.one("--body");
   const maxPriceUsd = aliasedOption(parsed, "--max", "--max-price-usd");
@@ -365,7 +390,7 @@ async function balanceCommand(
 ): Promise<void> {
   requireNoArguments(argv, "balance");
   const paths = getVapiPaths();
-  const config = await loadConfig(paths.config);
+  const config = await readConfig(paths.config, io);
   const account = await unlockKeystore(await getKeystorePassphrase(), paths.keystore);
   const wallet = await getWallet(account, config, dependencies);
   output(io, json, wallet, formatWallet(wallet));
@@ -391,7 +416,7 @@ async function accountsCommand(
     ? await enableSolanaKey(passphrase, paths.keystore)
     : await unlockKeystore(passphrase, paths.keystore);
   if (enable) await enableDefaultNetwork("solana", paths.config);
-  const config = await loadConfig(paths.config);
+  const config = await readConfig(paths.config, io);
   const accounts = await listAccounts({
     address: account.address,
     ...(account.solana ? { solanaAddress: account.solana.address } : {}),
@@ -464,7 +489,7 @@ async function sweepCommand(argv: string[], json: boolean, io: CliIo): Promise<v
   );
   const requestedNetwork = parsed.one("--network");
   const paths = getVapiPaths();
-  const config = await loadConfig(paths.config);
+  const config = await readConfig(paths.config, io);
   const account = await unlockKeystore(await getKeystorePassphrase(), paths.keystore);
   if (requestedNetwork && !isNetworkConfigured(config.networks, requestedNetwork)) {
     throw new Error(`Network ${requestedNetwork} is not configured.`);
@@ -519,6 +544,40 @@ async function reportCommand(
   output(io, json, result, formatSupportReport(result));
 }
 
+const EXPORT_KEY_WARNING =
+  "Anyone with this key can spend the wallet. Never paste it into a website or chat.";
+
+/**
+ * Prints one secret on stdout and nothing else, so `vapi export-key | pbcopy`
+ * carries exactly the key. The warning goes to stderr for the same reason.
+ */
+async function exportKeyCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set(["--network"]),
+    maximumPositionals: 0,
+  });
+  const network = parsed.one("--network") ?? BASE_MAINNET_CAIP2;
+  const solana = isSolanaNetwork(network);
+  if (!solana && !network.startsWith("eip155:")) {
+    throw new UsageError("--network must be an eip155:<chainId> or Solana network identifier.");
+  }
+  const paths = getVapiPaths();
+  const keys = await exportKeystoreKeys(await getKeystorePassphrase(), paths.keystore);
+  if (solana && !keys.solana) {
+    throw new Error(
+      `No Solana key is enabled in ${paths.keystore}. Run vapi accounts --enable solana first.`,
+    );
+  }
+  const selected = solana && keys.solana ? keys.solana : keys.evm;
+  const result = {
+    network,
+    address: selected.address,
+    privateKey: "secretKey" in selected ? selected.secretKey : selected.privateKey,
+  };
+  io.stderr(EXPORT_KEY_WARNING);
+  io.stdout(json ? JSON.stringify(result) : result.privateKey);
+}
+
 async function mcpCommand(argv: string[]): Promise<void> {
   requireNoArguments(argv, "mcp");
   const paths = getVapiPaths();
@@ -532,6 +591,11 @@ async function mcpCommand(argv: string[]): Promise<void> {
     receiptsPath: paths.receipts,
     searchesPath: paths.searches,
   });
+}
+
+/** Loads the config and reports any retired registry URL it had to repair. */
+async function readConfig(path: string, io: CliIo): Promise<VapiConfig> {
+  return await loadConfig(path, process.env, { notice: io.stderr });
 }
 
 function output(io: CliIo, json: boolean, value: unknown, human: string): void {

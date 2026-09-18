@@ -6,7 +6,17 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
-import { decryptPrivateKey, encryptPrivateKey, KeystoreError, unlockKeystore } from "./keystore.js";
+import { createKeyPairSignerFromBytes, getBase58Encoder } from "@solana/kit";
+
+import {
+  createKeystore,
+  decryptPrivateKey,
+  encryptPrivateKey,
+  exportKeystoreKeys,
+  KeystoreError,
+  readKeystoreAddress,
+  unlockKeystore,
+} from "./keystore.js";
 
 const PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" as Hex;
 const temporaryDirectories: string[] = [];
@@ -106,3 +116,47 @@ const LEGACY_V1_KEYSTORE = {
     kdfParams: { n: 2 ** 15, r: 8, p: 1, dkLen: 32 },
   },
 } as const;
+
+describe("keystore export", () => {
+  it("exports the EVM key as hex and the Solana key as a base58 64-byte secret", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-keystore-export-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "keystore.json");
+    const account = await createKeystore("export-passphrase", path, { enableSolana: true });
+
+    const exported = await exportKeystoreKeys("export-passphrase", path);
+
+    expect(exported.evm.address).toBe(account.address);
+    expect(privateKeyToAccount(exported.evm.privateKey).address).toBe(account.address);
+    expect(exported.solana?.address).toBe(account.solana?.address);
+    const secretKey = Uint8Array.from(getBase58Encoder().encode(exported.solana?.secretKey ?? ""));
+    expect(secretKey).toHaveLength(64);
+    const signer = await createKeyPairSignerFromBytes(secretKey);
+    expect(signer.address).toBe(account.solana?.address);
+  });
+
+  it("omits Solana when the keystore has no Ed25519 seed and refuses a wrong passphrase", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-keystore-export-evm-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "keystore.json");
+    await createKeystore("export-passphrase", path);
+
+    expect((await exportKeystoreKeys("export-passphrase", path)).solana).toBeUndefined();
+    await expect(exportKeystoreKeys("wrong-passphrase", path)).rejects.toThrow(KeystoreError);
+    await expect(
+      exportKeystoreKeys("export-passphrase", join(directory, "absent.json")),
+    ).rejects.toThrow(/Run vapi init/);
+  });
+
+  it("reads the stored address without the passphrase", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-keystore-address-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "keystore.json");
+    const account = await createKeystore("address-passphrase", path);
+
+    expect(await readKeystoreAddress(path)).toBe(account.address);
+    expect(await readKeystoreAddress(join(directory, "absent.json"))).toBeUndefined();
+    await writeFile(join(directory, "broken.json"), "{not json", { mode: 0o600 });
+    expect(await readKeystoreAddress(join(directory, "broken.json"))).toBeUndefined();
+  });
+});

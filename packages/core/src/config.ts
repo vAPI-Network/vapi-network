@@ -19,10 +19,13 @@ import {
 export const DEFAULT_REGISTRY_URL = "https://api.vapinetwork.ai";
 export const DEFAULT_DISCOVERY_URL = `${DEFAULT_REGISTRY_URL}/api/call/services`;
 export const DEFAULT_MARKETPLACE_DISCOVERY_URL = `${DEFAULT_REGISTRY_URL}/api/call/discovery`;
+// The retired console host is no longer a usable fallback, so the defaults name
+// the canonical registry. `registryRequest` de-duplicates endpoints, which keeps
+// this entry from costing a second request.
 export const DEFAULT_REGISTRY_FALLBACKS = [
   {
-    discoveryUrl: "https://console.vapinetwork.ai/api/call/services",
-    marketplaceDiscoveryUrl: "https://console.vapinetwork.ai/api/call/discovery",
+    discoveryUrl: DEFAULT_DISCOVERY_URL,
+    marketplaceDiscoveryUrl: DEFAULT_MARKETPLACE_DISCOVERY_URL,
   },
 ] as const;
 
@@ -170,6 +173,119 @@ export async function migrateLegacyVapiHome(options: MigrationOptions = {}): Pro
   return copied;
 }
 
+/**
+ * Hosts and paths older installs wrote into `config.json`. The console hosts are
+ * retired — `console-staging` no longer resolves at all, so every command failed
+ * the outbound URL guard before it could reach the registry.
+ */
+const LEGACY_REGISTRY_HOSTS = new Map([
+  ["console.vapinetwork.ai", "api.vapinetwork.ai"],
+  ["console-staging.vapinetwork.ai", "api-staging.vapinetwork.ai"],
+]);
+const LEGACY_REGISTRY_PATHS = new Map([
+  ["/api/network/services", "/api/call/services"],
+  ["/api/marketplace/discovery", "/api/call/discovery"],
+]);
+const REGISTRY_DOMAIN = "vapinetwork.ai";
+
+export type LegacyRegistryRewrite = {
+  field: string;
+  from: string;
+  to: string;
+};
+
+/**
+ * Rewrites one retired registry URL to its canonical form. Anything that is not
+ * a legacy vAPI registry URL — including self-hosted registries on the old
+ * paths — is returned byte for byte, so this is safe to run over any config.
+ */
+export function rewriteLegacyRegistryUrl(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return value;
+  }
+  let rewritten = false;
+  const host = LEGACY_REGISTRY_HOSTS.get(url.hostname.toLowerCase());
+  if (host) {
+    url.hostname = host;
+    rewritten = true;
+  }
+  const hostname = url.hostname.toLowerCase();
+  if (hostname === REGISTRY_DOMAIN || hostname.endsWith(`.${REGISTRY_DOMAIN}`)) {
+    const path = LEGACY_REGISTRY_PATHS.get(url.pathname.replace(/\/+$/, ""));
+    if (path) {
+      url.pathname = path;
+      rewritten = true;
+    }
+  }
+  return rewritten ? url.href : value;
+}
+
+/**
+ * Pure counterpart of {@link rewriteLegacyRegistryUrl} over a whole config. The
+ * input is never mutated, and an untouched config is returned as-is.
+ */
+export function rewriteLegacyRegistryUrls(config: VapiConfig): {
+  config: VapiConfig;
+  changes: LegacyRegistryRewrite[];
+} {
+  const changes: LegacyRegistryRewrite[] = [];
+  const rewrite = (field: string, from: string): string => {
+    const to = rewriteLegacyRegistryUrl(from);
+    if (to !== from) changes.push({ field, from, to });
+    return to;
+  };
+  const next: VapiConfig = {
+    ...config,
+    discoveryUrl: rewrite("discoveryUrl", config.discoveryUrl),
+    marketplaceDiscoveryUrl: rewrite("marketplaceDiscoveryUrl", config.marketplaceDiscoveryUrl),
+    ...(config.registryFallbacks
+      ? {
+          registryFallbacks: config.registryFallbacks.map((fallback, index) => ({
+            discoveryUrl: rewrite(
+              `registryFallbacks[${index}].discoveryUrl`,
+              fallback.discoveryUrl,
+            ),
+            marketplaceDiscoveryUrl: rewrite(
+              `registryFallbacks[${index}].marketplaceDiscoveryUrl`,
+              fallback.marketplaceDiscoveryUrl,
+            ),
+          })),
+        }
+      : {}),
+  };
+  return changes.length === 0 ? { config, changes } : { config: next, changes };
+}
+
+export function formatLegacyRegistryRewrites(changes: readonly LegacyRegistryRewrite[]): string {
+  return [
+    "Rewrote retired vAPI registry URLs in the local config:",
+    ...changes.map((change) => `  ${change.field}: ${change.from} -> ${change.to}`),
+  ].join("\n");
+}
+
+/**
+ * Rewrites retired registry URLs in `config.json` on disk. Returns what changed
+ * so the caller can report it; an absent or already-current file is a no-op.
+ */
+export async function migrateLegacyRegistryConfig(
+  path = getVapiPaths().config,
+): Promise<LegacyRegistryRewrite[]> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if (isMissingFile(error)) return [];
+    throw error;
+  }
+  const { config, changes } = rewriteLegacyRegistryUrls(configSchema.parse(JSON.parse(raw)));
+  if (changes.length === 0) return [];
+  await writeConfigFile(path, config);
+  return changes;
+}
+
 export type DefaultConfigOptions = {
   networks?: readonly string[];
 };
@@ -217,9 +333,15 @@ export function getDefaultConfig(
   };
 }
 
+export type LoadConfigOptions = {
+  /** Sink for the one-line legacy-URL notice; omitted means stay silent. */
+  notice?: (message: string) => void;
+};
+
 export async function loadConfig(
   path = getVapiPaths().config,
   source: NodeJS.ProcessEnv = process.env,
+  options: LoadConfigOptions = {},
 ): Promise<VapiConfig> {
   if (!process.env.VAPI_HOME?.trim() && path === getVapiPaths(join(homedir(), ".vapi")).config) {
     await migrateLegacyVapiHome({ targetDirectory: join(homedir(), ".vapi") });
@@ -232,8 +354,16 @@ export async function loadConfig(
     throw error;
   }
 
-  const config: VapiConfig = configSchema.parse(JSON.parse(raw));
-  config.registryFallbacks ??= DEFAULT_REGISTRY_FALLBACKS.map((fallback) => ({ ...fallback }));
+  const parsed: VapiConfig = configSchema.parse(JSON.parse(raw));
+  parsed.registryFallbacks ??= DEFAULT_REGISTRY_FALLBACKS.map((fallback) => ({ ...fallback }));
+  // Retired hosts are repaired in memory only; `vapi init` owns the file.
+  const migrated = rewriteLegacyRegistryUrls(parsed);
+  const config = migrated.config;
+  if (migrated.changes.length > 0 && options.notice) {
+    options.notice(
+      `${formatLegacyRegistryRewrites(migrated.changes)}\nRun vapi init to write the new URLs to ${path}.`,
+    );
+  }
   const baseRpcUrl = source.BASE_RPC_URL?.trim();
   const arcRpcUrl = source.ARC_TESTNET_RPC_URL?.trim();
   const solanaRpcUrl = source.SOLANA_RPC_URL?.trim();
@@ -298,14 +428,7 @@ export async function writeDefaultConfig(
     if (copied.includes(path)) return await loadConfig(path, source);
   }
   const config = getDefaultConfig(source, options);
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const temporaryPath = `${path}.${process.pid}.tmp`;
-  await writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-    flag: "wx",
-  });
-  await rename(temporaryPath, path);
+  await writeConfigFile(path, config);
   return config;
 }
 
@@ -321,6 +444,11 @@ export async function enableDefaultNetwork(
       usdc: NETWORKS[SOLANA_MAINNET_CAIP2].usdc,
     };
   }
+  await writeConfigFile(path, config);
+  return config;
+}
+
+async function writeConfigFile(path: string, config: VapiConfig): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporaryPath = `${path}.${process.pid}.tmp`;
   await writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, {
@@ -329,7 +457,6 @@ export async function enableDefaultNetwork(
     flag: "wx",
   });
   await rename(temporaryPath, path);
-  return config;
 }
 
 async function pathExists(path: string): Promise<boolean> {

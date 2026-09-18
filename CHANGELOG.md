@@ -3,6 +3,27 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## 0.2.3
+
+### Added
+
+- `vapi export-key [--network <caip2>] [--json]`: unlocks the local keystore and
+  prints the private key for the selected account — the EVM key as 0x-prefixed
+  hex by default, or the base58 Ed25519 secret key for a Solana network. The
+  warning goes to stderr and the key alone to stdout, so it can be piped.
+
+### Fixed
+
+- `vapi init` checks for an existing keystore before prompting for a passphrase,
+  and names the wallet address it is refusing to replace.
+- Config files written by older installs that still point at the retired
+  `console.vapinetwork.ai` and `console-staging.vapinetwork.ai` hosts, or at the
+  `/api/network/services` and `/api/marketplace/discovery` paths, are repaired in
+  memory on load and rewritten on disk by `vapi init`. Before this, every command
+  failed with `URL hostname … is not allowed`.
+- The `bin` entries no longer use a `./` prefix, which npm stripped from the
+  published manifest with a `"bin[vapi]" script name … was invalid` warning.
+
 ## 0.2.1
 
 ### Changed

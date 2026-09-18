@@ -1,8 +1,8 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   configSchema,
@@ -11,6 +11,9 @@ import {
   DEFAULT_REGISTRY_FALLBACKS,
   getDefaultConfig,
   loadConfig,
+  migrateLegacyRegistryConfig,
+  rewriteLegacyRegistryUrl,
+  rewriteLegacyRegistryUrls,
 } from "./config.js";
 import { BASE_MAINNET_CAIP2, NETWORKS, SOLANA_MAINNET_CAIP2 } from "./networks.js";
 
@@ -107,5 +110,109 @@ describe("vAPI config", () => {
       discoveryUrl: "https://registry.example/api/call/services",
       marketplaceDiscoveryUrl: "https://registry.example/api/call/discovery",
     });
+  });
+});
+
+describe("retired registry URLs", () => {
+  it("moves the console hosts and the pre-Call paths onto the canonical pair", () => {
+    expect(
+      rewriteLegacyRegistryUrl("https://console-staging.vapinetwork.ai/api/network/services"),
+    ).toBe("https://api-staging.vapinetwork.ai/api/call/services");
+    expect(
+      rewriteLegacyRegistryUrl("https://console.vapinetwork.ai/api/marketplace/discovery"),
+    ).toBe("https://api.vapinetwork.ai/api/call/discovery");
+    expect(rewriteLegacyRegistryUrl("https://console.vapinetwork.ai/api/call/services")).toBe(
+      "https://api.vapinetwork.ai/api/call/services",
+    );
+  });
+
+  it("returns anything that is not a retired vAPI registry URL byte for byte", () => {
+    for (const value of [
+      DEFAULT_DISCOVERY_URL,
+      "https://console.example/api/network/services",
+      "https://registry.example/base/api/call/services",
+      "https://api.vapinetwork.ai",
+      "not a url",
+      "",
+    ]) {
+      expect(rewriteLegacyRegistryUrl(value)).toBe(value);
+    }
+  });
+
+  it("rewrites both endpoints and every fallback without mutating the input", () => {
+    const config = configSchema.parse({
+      discoveryUrl: "https://console-staging.vapinetwork.ai/api/network/services",
+      marketplaceDiscoveryUrl: "https://console-staging.vapinetwork.ai/api/marketplace/discovery",
+      registryFallbacks: [
+        {
+          discoveryUrl: "https://console.vapinetwork.ai/api/network/services",
+          marketplaceDiscoveryUrl: "https://console.vapinetwork.ai/api/marketplace/discovery",
+        },
+      ],
+      networks: {},
+      spendCaps: { perCallAtomic: "100000", perDayAtomic: "1000000" },
+    });
+
+    const { config: rewritten, changes } = rewriteLegacyRegistryUrls(config);
+
+    expect(changes).toHaveLength(4);
+    expect(changes[0]).toEqual({
+      field: "discoveryUrl",
+      from: "https://console-staging.vapinetwork.ai/api/network/services",
+      to: "https://api-staging.vapinetwork.ai/api/call/services",
+    });
+    expect(rewritten.registryFallbacks).toEqual([
+      {
+        discoveryUrl: DEFAULT_DISCOVERY_URL,
+        marketplaceDiscoveryUrl: DEFAULT_MARKETPLACE_DISCOVERY_URL,
+      },
+    ]);
+    expect(config.discoveryUrl).toBe("https://console-staging.vapinetwork.ai/api/network/services");
+    expect(rewriteLegacyRegistryUrls(rewritten).config).toBe(rewritten);
+  });
+
+  it("repairs a stale config file in memory and notices it once", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-legacy-registry-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "config.json");
+    await writeFile(
+      path,
+      JSON.stringify({
+        discoveryUrl: "https://console-staging.vapinetwork.ai/api/network/services",
+        marketplaceDiscoveryUrl: "https://console-staging.vapinetwork.ai/api/marketplace/discovery",
+        networks: {},
+        spendCaps: { perCallAtomic: "100000", perDayAtomic: "1000000" },
+      }),
+    );
+    const notice = vi.fn();
+
+    const config = await loadConfig(path, {}, { notice });
+
+    expect(config).toMatchObject({
+      discoveryUrl: "https://api-staging.vapinetwork.ai/api/call/services",
+      marketplaceDiscoveryUrl: "https://api-staging.vapinetwork.ai/api/call/discovery",
+    });
+    expect(notice).toHaveBeenCalledOnce();
+    expect(notice.mock.calls[0]?.[0]).toContain("Rewrote retired vAPI registry URLs");
+    // loadConfig never writes; only vapi init owns the file.
+    expect(await readFile(path, "utf8")).toContain("console-staging.vapinetwork.ai");
+
+    expect(await migrateLegacyRegistryConfig(path)).toHaveLength(2);
+    const written = JSON.parse(await readFile(path, "utf8")) as { discoveryUrl: string };
+    expect(written.discoveryUrl).toBe("https://api-staging.vapinetwork.ai/api/call/services");
+    expect(await migrateLegacyRegistryConfig(path)).toEqual([]);
+  });
+
+  it("stays silent for a current config and for a missing file", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-current-registry-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "config.json");
+    await writeFile(path, JSON.stringify(getDefaultConfig({})));
+    const notice = vi.fn();
+
+    await loadConfig(path, {}, { notice });
+
+    expect(notice).not.toHaveBeenCalled();
+    expect(await migrateLegacyRegistryConfig(join(directory, "absent.json"))).toEqual([]);
   });
 });

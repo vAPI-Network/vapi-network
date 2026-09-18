@@ -3,7 +3,12 @@ import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { stdin, stderr } from "node:process";
 
-import { createKeyPairSignerFromPrivateKeyBytes, type KeyPairSigner } from "@solana/kit";
+import {
+  createKeyPairSignerFromPrivateKeyBytes,
+  getBase58Decoder,
+  getBase58Encoder,
+  type KeyPairSigner,
+} from "@solana/kit";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { z } from "zod";
 import type { Hex } from "viem";
@@ -267,6 +272,75 @@ export async function unlockKeystore(
     await writeKeystore(path, await encryptKeys(keys, passphrase), false);
   }
   return await paymentAccountFromKeys(keys);
+}
+
+/**
+ * The stored address, read without the passphrase. Only the encrypted key
+ * material needs the passphrase, so `vapi init` can name the wallet it refuses
+ * to replace. Returns undefined for a missing or unreadable keystore.
+ */
+export async function readKeystoreAddress(
+  path = getVapiPaths().keystore,
+): Promise<string | undefined> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  const address =
+    typeof parsed === "object" && parsed !== null ? Reflect.get(parsed, "address") : undefined;
+  return typeof address === "string" ? address : undefined;
+}
+
+export type ExportedVapiKeys = {
+  evm: { address: string; privateKey: Hex };
+  solana?: { address: string; secretKey: string };
+};
+
+/**
+ * Decrypts the keystore into the formats other wallets import: 0x-prefixed hex
+ * for the EVM key, and the base58 64-byte Ed25519 secret key for Solana. Only
+ * `vapi export-key` may call this, and it must never write the result anywhere
+ * but the caller's stdout.
+ */
+export async function exportKeystoreKeys(
+  passphrase: string,
+  path = getVapiPaths().keystore,
+): Promise<ExportedVapiKeys> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if (isMissingFile(error)) {
+      throw new KeystoreError(`No vAPI keystore found at ${path}. Run vapi init.`);
+    }
+    throw error;
+  }
+  const keys = await decryptKeys(parseAnyKeystore(JSON.parse(raw)), passphrase);
+  const evmPrivateKey = keys.evm as Hex;
+  const exported: ExportedVapiKeys = {
+    evm: { address: privateKeyToAccount(evmPrivateKey).address, privateKey: evmPrivateKey },
+  };
+  if (!keys.solana) return exported;
+
+  const seed = Uint8Array.from(Buffer.from(keys.solana, "base64"));
+  // createSolanaSigner zeroes the buffer it is handed, so it gets a copy.
+  const signer = await createSolanaSigner(Uint8Array.from(seed));
+  const publicKey = Uint8Array.from(getBase58Encoder().encode(signer.address));
+  const secretKey = new Uint8Array(seed.length + publicKey.length);
+  secretKey.set(seed);
+  secretKey.set(publicKey, seed.length);
+  const encoded = getBase58Decoder().decode(secretKey);
+  seed.fill(0);
+  secretKey.fill(0);
+  return { ...exported, solana: { address: signer.address, secretKey: encoded } };
 }
 
 /** Lazily adds a locally generated Ed25519 seed without replacing the EVM key. */
