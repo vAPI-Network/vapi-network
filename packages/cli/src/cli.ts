@@ -37,7 +37,7 @@ import {
   searchMarketplace,
   startStdioServer,
 } from "@vapi-network/mcp";
-import { animateBanner, markColorEnabled, renderBanner, shouldAnimateMark } from "./brand.js";
+import { detectColorLevel, renderBanner } from "./brand.js";
 import { CLI_VERSION } from "./version";
 
 const HELP_HEADING = "vAPI Network";
@@ -67,11 +67,6 @@ With no command, vapi shows this help. The MCP server starts only with \`vapi mc
 export type CliIo = {
   stdout(message: string): void;
   stderr(message: string): void;
-  /**
-   * Raw stdout sink for cursor control. Only an interactive terminal supplies
-   * one; without it every banner falls back to a single static frame.
-   */
-  write?(chunk: string): void;
 };
 
 export type CliDependencies = {
@@ -81,7 +76,6 @@ export type CliDependencies = {
 const processIo: CliIo = {
   stdout: (message) => process.stdout.write(`${message}\n`),
   stderr: (message) => process.stderr.write(`${message}\n`),
-  write: (chunk) => process.stdout.write(chunk),
 };
 
 class UsageError extends Error {}
@@ -109,7 +103,7 @@ export async function runCli(
       requireNoArguments(args.slice(command === undefined ? 0 : 1), command ?? "help");
       if (command === undefined && !json) {
         // The banner already carries the wordmark, so the help heading would repeat it.
-        io.stdout(staticBanner());
+        showBanner(io);
         io.stdout(HELP.slice(HELP_HEADING.length + 2));
         return 0;
       }
@@ -186,7 +180,7 @@ async function initCommand(
   });
   const networks = parseInitNetworks(parsed.one("--networks") ?? "base");
   const enableSolana = networks.includes("solana");
-  if (!json) await showBanner(io);
+  if (!json) showBanner(io);
   const paths = getVapiPaths();
   let migrated: string[] = [];
   if (!process.env.VAPI_HOME?.trim()) {
@@ -639,18 +633,15 @@ function formatNextStep(label: string, value: string, note?: string): string {
   return note === undefined ? step : `${step.padEnd(52)} ${note}`;
 }
 
-/** Reveal the mark when the terminal can animate; otherwise print one frame. */
-async function showBanner(io: CliIo): Promise<void> {
-  const write = io.write;
-  if (write === undefined || !shouldAnimateMark()) {
-    io.stdout(staticBanner());
-    return;
-  }
-  await animateBanner({ version: CLI_VERSION, write });
-}
-
-function staticBanner(): string {
-  return renderBanner({ version: CLI_VERSION, color: markColorEnabled() });
+/** Print the welcome banner once; it adapts to the terminal's width and colour support. */
+function showBanner(io: CliIo): void {
+  io.stdout(
+    renderBanner({
+      version: CLI_VERSION,
+      colorLevel: detectColorLevel(),
+      columns: process.stdout.columns,
+    }),
+  );
 }
 
 function formatAccounts(accounts: readonly AccountInfo[]): string {

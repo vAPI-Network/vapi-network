@@ -1,41 +1,46 @@
 // The vAPI mark is a 743x659 grid of nine rectangles in three rows of equal
 // height. The coordinates below are copied from the source artwork so the
 // terminal rendering stays in step with the web mark; only the scale is
-// terminal-specific. Blocks are drawn as solid cells (background colour, or
-// reverse video for `ink`), so the mark reads as rectangles rather than glyphs.
+// terminal-specific.
+//
+// The banner is printed once, statically, the way create-astro, Vercel and
+// Gemini CLI print theirs: no in-place redraws (they break as soon as a line
+// wraps), a layout picked from the terminal width, and colour downgraded to
+// what the terminal advertises (truecolour, 256 colours, 16 colours, or none).
 
 const MARK_SOURCE_WIDTH = 743;
 const MARK_SOURCE_HEIGHT = 659;
 const MARK_SOURCE_ROW_HEIGHT = 217;
-/** Terminal cells are about twice as tall as wide; 28x12 keeps the 743x659 aspect. */
-const MARK_COLUMNS = 28;
-const MARK_ROWS = 12;
-const PLAIN_BLOCK = "█";
+/** Terminal cells are about twice as tall as wide; 21x9 keeps the 743x659 aspect. */
+export const MARK_COLUMNS = 21;
+export const MARK_ROWS = 9;
+const BLOCK = "█";
 
-export const MARK_STEP_MS = 70;
 export const WORDMARK = "vAPI Network";
 export const WELCOME = "Welcome to the vAPI Network";
 export const TAGLINE = [
-  "The trusted network where agents and humans do business.",
-  "Search APIs, pay per call, keep receipts. More coming soon.",
+  "The trusted network where agents",
+  "and humans do business.",
+  "",
+  "Search APIs, pay per call, keep",
+  "receipts. More coming soon.",
 ] as const;
 
-const ESC = "\u001b";
+// Built from the char code so no raw control character sits in the source.
+const ESC = String.fromCharCode(27);
 const RESET = `${ESC}[0m`;
-const REVERSE = `${ESC}[7m`;
 const BOLD = `${ESC}[1m`;
 const DIM = `${ESC}[2m`;
-const HIDE_CURSOR = `${ESC}[?25l`;
-const SHOW_CURSOR = `${ESC}[?25h`;
+const DEFAULT_FOREGROUND = `${ESC}[39m`;
 
-/** Design-token colours; `ink` renders in the terminal's foreground, like the black mark on paper. */
+/** Design-token colours; `ink` renders in the terminal's own foreground colour. */
 export const MARK_PALETTE = {
-  orange: "#ff7300",
-  pink: "#ff337c",
-  lime: "#c3ff3d",
-  cyan: "#97efff",
-  blue: "#0041eb",
-  purple: "#8a37fb",
+  orange: { hex: "#ff7300", ansi16: 33 },
+  pink: { hex: "#ff337c", ansi16: 95 },
+  lime: { hex: "#c3ff3d", ansi16: 92 },
+  cyan: { hex: "#97efff", ansi16: 96 },
+  blue: { hex: "#0041eb", ansi16: 34 },
+  purple: { hex: "#8a37fb", ansi16: 35 },
   ink: null,
 } as const;
 
@@ -46,147 +51,139 @@ export type MarkBlock = {
   x: number;
   width: number;
   color: MarkColorName;
-  /** Reveal step; blocks that share a delay appear in the same frame. */
-  delay: number;
 };
 
 export const MARK_BLOCKS: readonly MarkBlock[] = [
-  { row: 0, x: 2, width: 90, color: "orange", delay: 0 },
-  { row: 0, x: 94, width: 35, color: "pink", delay: 1 },
-  { row: 0, x: 131, width: 16, color: "lime", delay: 2 },
-  { row: 0, x: 522, width: 219, color: "ink", delay: 1 },
-  { row: 1, x: 124, width: 50, color: "cyan", delay: 3 },
-  { row: 1, x: 176, width: 24, color: "blue", delay: 4 },
-  { row: 1, x: 202, width: 17, color: "purple", delay: 5 },
-  { row: 1, x: 402, width: 219, color: "blue", delay: 4 },
-  { row: 2, x: 282, width: 219, color: "ink", delay: 7 },
+  { row: 0, x: 2, width: 90, color: "orange" },
+  { row: 0, x: 94, width: 35, color: "pink" },
+  { row: 0, x: 131, width: 16, color: "lime" },
+  { row: 0, x: 522, width: 219, color: "ink" },
+  { row: 1, x: 124, width: 50, color: "cyan" },
+  { row: 1, x: 176, width: 24, color: "blue" },
+  { row: 1, x: 202, width: 17, color: "purple" },
+  { row: 1, x: 402, width: 219, color: "blue" },
+  { row: 2, x: 282, width: 219, color: "ink" },
 ];
 
-export type MarkRenderOptions = {
-  /** Emit ANSI colour. Defaults to false so output stays pipe-safe. */
-  color?: boolean;
-};
+/** 0 = no colour, 1 = 16 colours, 2 = 256 colours, 3 = truecolour (the supports-color scale). */
+export type ColorLevel = 0 | 1 | 2 | 3;
 
-export type BannerOptions = MarkRenderOptions & {
-  version: string;
-};
-
-export type AnimateBannerOptions = BannerOptions & {
-  write(chunk: string): void;
-  stepMs?: number;
-  sleep?(milliseconds: number): Promise<void>;
-};
-
-export type AnimationEnvironment = {
+export type TerminalEnvironment = {
   isTty?: boolean;
-  json?: boolean;
   env?: NodeJS.ProcessEnv;
 };
 
-/** Colour is off whenever `NO_COLOR` is set or stdout is not a terminal. */
-export function markColorEnabled(environment: AnimationEnvironment = {}): boolean {
-  const env = environment.env ?? process.env;
-  const isTty = environment.isTty ?? Boolean(process.stdout.isTTY);
-  return isTty && !env.NO_COLOR;
-}
-
-/** Animate only in an interactive, colour-capable, human-facing terminal. */
-export function shouldAnimateMark(environment: AnimationEnvironment = {}): boolean {
-  const env = environment.env ?? process.env;
-  if (environment.json) return false;
-  if (env.NO_COLOR || env.CI) return false;
-  return markColorEnabled(environment);
-}
+export type BannerOptions = {
+  version: string;
+  /** Defaults to 0 so output stays pipe-safe. */
+  colorLevel?: ColorLevel;
+  /** Terminal width; below the framed width the banner falls back to plain text. */
+  columns?: number;
+};
 
 /**
- * Every reveal step of the mark, oldest first. Pure: the last frame is the
- * complete mark and each frame is exactly `MARK_ROWS` lines of `MARK_COLUMNS`
- * visible cells.
+ * Colour capability the way chalk's supports-color decides it: NO_COLOR and
+ * a redirected stdout disable colour, FORCE_COLOR overrides, and otherwise
+ * the terminal's own advertisement (COLORTERM, TERM, TERM_PROGRAM) picks
+ * the level. Apple Terminal advertises 256 colours, not truecolour.
  */
-export function renderMarkFrames(options: MarkRenderOptions = {}): string[] {
-  const steps = [...new Set(MARK_BLOCKS.map((block) => block.delay))].sort(
-    (left, right) => left - right,
-  );
-  return steps.map((step) =>
-    renderFrame(
-      MARK_BLOCKS.filter((block) => block.delay <= step),
-      options.color === true,
-    ),
-  );
-}
-
-/** The framed welcome banner: the mark on the left, the welcome text on the right. */
-export function renderBanner(options: BannerOptions): string {
-  const frames = renderMarkFrames(options);
-  return renderBox(frames[frames.length - 1]!, options).join("\n");
-}
-
-/** Reveal the mark in place inside the frame, then leave the finished banner on screen. */
-export async function animateBanner(options: AnimateBannerOptions): Promise<void> {
-  const frames = renderMarkFrames({ color: options.color !== false });
-  const sleep = options.sleep ?? defaultSleep;
-  const stepMs = options.stepMs ?? MARK_STEP_MS;
-  const boxes = frames.map((frame) => renderBox(frame, options));
-  const height = boxes[0]!.length;
-  options.write(HIDE_CURSOR);
-  try {
-    for (const [index, box] of boxes.entries()) {
-      if (index > 0) options.write(`${ESC}[${height}A`);
-      options.write(box.map((line) => `\r${ESC}[2K${line}\n`).join(""));
-      if (index < boxes.length - 1) await sleep(stepMs);
-    }
-  } finally {
-    options.write(SHOW_CURSOR);
+export function detectColorLevel(environment: TerminalEnvironment = {}): ColorLevel {
+  const env = environment.env ?? process.env;
+  const isTty = environment.isTty ?? Boolean(process.stdout.isTTY);
+  if (env.NO_COLOR) return 0;
+  const forced = env.FORCE_COLOR;
+  if (forced !== undefined) {
+    if (forced === "0" || forced === "false") return 0;
+    if (forced === "2") return 2;
+    if (forced === "3") return 3;
+    return 1;
   }
+  if (!isTty) return 0;
+  const term = env.TERM ?? "";
+  const program = env.TERM_PROGRAM ?? "";
+  if (term === "dumb") return 0;
+  if (/^(truecolor|24bit)$/i.test(env.COLORTERM ?? "")) return 3;
+  if (/kitty|wezterm|ghostty|alacritty/i.test(term)) return 3;
+  if (/^(iTerm\.app|vscode|Hyper|WezTerm|ghostty)$/i.test(program)) return 3;
+  if (/-256(?:color)?$/i.test(term) || program === "Apple_Terminal") return 2;
+  return 1;
 }
 
-function renderBox(frame: string, options: BannerOptions): string[] {
-  const color = options.color === true;
-  const text: Array<{ value: string; style: string }> = [
-    { value: WELCOME, style: BOLD },
-    { value: "", style: "" },
-    ...TAGLINE.map((line) => ({ value: line, style: "" })),
-    { value: "", style: "" },
-    { value: `${WORDMARK} v${options.version}`, style: DIM },
-  ];
-  const textWidth = Math.max(...text.map((line) => line.value.length));
-  const gap = 3;
-  const inner = 2 + MARK_COLUMNS + gap + textWidth + 2;
-  const markLines = frame.split("\n");
-  const textTop = Math.floor((MARK_ROWS - text.length) / 2);
-  const lines: string[] = [];
-  lines.push(`╭${"─".repeat(inner)}╮`);
-  lines.push(`│${" ".repeat(inner)}│`);
-  for (let row = 0; row < MARK_ROWS; row += 1) {
-    const mark = markLines[row] ?? "";
-    const markPad = " ".repeat(Math.max(0, MARK_COLUMNS - visibleLength(mark)));
-    const entry = text[row - textTop];
-    const raw = entry?.value ?? "";
-    const styled = color && entry && entry.style && raw ? `${entry.style}${raw}${RESET}` : raw;
-    const textPad = " ".repeat(textWidth - raw.length);
-    lines.push(`│  ${mark}${markPad}${" ".repeat(gap)}${styled}${textPad}  │`);
-  }
-  lines.push(`│${" ".repeat(inner)}│`);
-  lines.push(`╰${"─".repeat(inner)}╯`);
-  return lines;
-}
-
-function renderFrame(blocks: readonly MarkBlock[], color: boolean): string {
+/** The complete mark: `MARK_ROWS` lines of exactly `MARK_COLUMNS` visible cells. */
+export function renderMark(colorLevel: ColorLevel = 0): string {
   const rows: string[] = [];
   for (let row = 0; row < MARK_ROWS; row += 1) {
     const sourceY = (row * MARK_SOURCE_HEIGHT) / MARK_ROWS;
     const band = Math.min(2, Math.floor(sourceY / MARK_SOURCE_ROW_HEIGHT));
     rows.push(
       renderRow(
-        blocks.filter((block) => block.row === band),
-        color,
+        MARK_BLOCKS.filter((block) => block.row === band),
+        colorLevel,
       ),
     );
   }
   return rows.join("\n");
 }
 
-function renderRow(blocks: readonly MarkBlock[], color: boolean): string {
+/** Width in columns of the framed banner. */
+export function bannerWidth(): number {
+  return frameInnerWidth() + 2;
+}
+
+/**
+ * The welcome banner: the mark on the left, the welcome text on the right,
+ * inside a rounded frame. When the terminal is narrower than the frame, the
+ * text alone is printed so nothing wraps.
+ */
+export function renderBanner(options: BannerOptions): string {
+  const colorLevel = options.colorLevel ?? 0;
+  const columns = options.columns ?? Number.POSITIVE_INFINITY;
+  const text = bannerText(options.version, colorLevel);
+  if (columns < bannerWidth()) {
+    return text.map((line) => line.styled).join("\n");
+  }
+  const inner = frameInnerWidth();
+  const markLines = renderMark(colorLevel).split("\n");
+  const lines: string[] = [];
+  lines.push(`╭${"─".repeat(inner)}╮`);
+  lines.push(`│${" ".repeat(inner)}│`);
+  for (let row = 0; row < MARK_ROWS; row += 1) {
+    const entry = text[row];
+    const value = entry?.value ?? "";
+    const styled = entry?.styled ?? "";
+    const pad = " ".repeat(TEXT_WIDTH - value.length);
+    lines.push(`│  ${markLines[row]}${" ".repeat(GAP)}${styled}${pad}  │`);
+  }
+  lines.push(`│${" ".repeat(inner)}│`);
+  lines.push(`╰${"─".repeat(inner)}╯`);
+  return lines.join("\n");
+}
+
+const GAP = 3;
+const TEXT_WIDTH = Math.max(WELCOME.length, ...TAGLINE.map((line) => line.length));
+
+function frameInnerWidth(): number {
+  return 2 + MARK_COLUMNS + GAP + TEXT_WIDTH + 2;
+}
+
+function bannerText(
+  version: string,
+  colorLevel: ColorLevel,
+): Array<{ value: string; styled: string }> {
+  const style = (value: string, code: string) =>
+    colorLevel > 0 && value ? `${code}${value}${RESET}` : value;
+  const rows = [
+    { value: WELCOME, styled: style(WELCOME, BOLD) },
+    { value: "", styled: "" },
+    ...TAGLINE.map((line) => ({ value: line, styled: line })),
+    { value: "", styled: "" },
+    { value: `${WORDMARK} v${version}`, styled: style(`${WORDMARK} v${version}`, DIM) },
+  ];
+  if (rows.length > MARK_ROWS) throw new Error("banner text is taller than the mark");
+  return rows;
+}
+
+function renderRow(blocks: readonly MarkBlock[], colorLevel: ColorLevel): string {
   const ordered = [...blocks].sort((left, right) => left.x - right.x);
   let column = 0;
   let line = "";
@@ -197,9 +194,8 @@ function renderRow(blocks: readonly MarkBlock[], color: boolean): string {
       column = start;
     }
     const width = scaleWidth(block.width);
-    line += color
-      ? `${cellPrefix(block.color)}${" ".repeat(width)}${RESET}`
-      : PLAIN_BLOCK.repeat(width);
+    const cells = BLOCK.repeat(width);
+    line += colorLevel > 0 ? `${foreground(block.color, colorLevel)}${cells}${RESET}` : cells;
     column += width;
   }
   return line + " ".repeat(Math.max(0, MARK_COLUMNS - column));
@@ -213,19 +209,29 @@ function scaleWidth(width: number): number {
   return Math.max(1, Math.round((width * MARK_COLUMNS) / MARK_SOURCE_WIDTH));
 }
 
-function cellPrefix(color: MarkColorName): string {
-  const hex = MARK_PALETTE[color];
-  if (hex === null) return REVERSE;
-  const value = Number.parseInt(hex.slice(1), 16);
-  return `${ESC}[48;2;${(value >> 16) & 0xff};${(value >> 8) & 0xff};${value & 0xff}m`;
+function foreground(color: MarkColorName, colorLevel: ColorLevel): string {
+  const entry = MARK_PALETTE[color];
+  if (entry === null) return DEFAULT_FOREGROUND;
+  const value = Number.parseInt(entry.hex.slice(1), 16);
+  const red = (value >> 16) & 0xff;
+  const green = (value >> 8) & 0xff;
+  const blue = value & 0xff;
+  if (colorLevel === 3) return `${ESC}[38;2;${red};${green};${blue}m`;
+  if (colorLevel === 2) return `${ESC}[38;5;${rgbToAnsi256(red, green, blue)}m`;
+  return `${ESC}[${entry.ansi16}m`;
 }
 
-function visibleLength(line: string): number {
-  return line.replace(new RegExp(`${ESC}\\[[0-9;?]*[A-Za-z]`, "g"), "").length;
-}
-
-function defaultSleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, milliseconds);
-  });
+/** Nearest xterm 256-colour index, the same cube mapping chalk's ansi-styles uses. */
+export function rgbToAnsi256(red: number, green: number, blue: number): number {
+  if (red === green && green === blue) {
+    if (red < 8) return 16;
+    if (red > 248) return 231;
+    return Math.round(((red - 8) / 247) * 24) + 232;
+  }
+  return (
+    16 +
+    36 * Math.round((red / 255) * 5) +
+    6 * Math.round((green / 255) * 5) +
+    Math.round((blue / 255) * 5)
+  );
 }
