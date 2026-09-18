@@ -160,13 +160,13 @@ describe("CLI JSON output", () => {
 });
 
 describe("bare invocation", () => {
-  it("shows the mark above the usage list without repeating the wordmark", async () => {
+  it("shows the welcome banner above the usage list", async () => {
     const captured = captureIo();
 
     expect(await runCli([], captured.io)).toBe(0);
     const text = captured.stdout.join("\n");
 
-    expect(text.split("vAPI Network")).toHaveLength(2);
+    expect(text.split("Welcome to the vAPI Network")).toHaveLength(2);
     expect(text).toContain("\u2588");
     expect(text).toContain("vapi fund [--amount <usd>] [--json]");
   });
