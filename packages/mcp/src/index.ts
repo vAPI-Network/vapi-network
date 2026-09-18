@@ -10,6 +10,7 @@ export {
 export { inspectService, type InspectToolInput, type InspectToolResult } from "./tools/inspect.js";
 export {
   resolveServiceEndpoint,
+  resolveServiceListing,
   searchMarketplace,
   type MarketplaceSearchInput,
 } from "./tools/search.js";

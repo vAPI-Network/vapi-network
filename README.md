@@ -31,6 +31,12 @@ vapi accounts                   # balances plus network-specific deposit guidanc
 vapi receipts                  # one line per paid call: quote, settlement, latency
 ```
 
+`vapi search` tags each listing with its group — `[vapi]`, `[added]`,
+`[partner]`, or `[external]` — and prints the network fee already inside the
+price: vAPI and added APIs carry a 5% network fee inside the quoted price, while
+partner and external listings carry none. `vapi inspect` and `--json` return the
+same `group` and `fee` fields.
+
 No install? Prefix any command with `npx vapi-network`, for example `npx vapi-network init`.
 (`npx vapi` cannot work: the bare `vapi` name on npm belongs to an unrelated package.)
 
@@ -319,12 +325,11 @@ pnpm --dir packages/cli publish:npm
 pnpm --dir packages/vapi-network publish:npm
 ```
 
-Each package's `publish:npm` script publishes its staged `./publish` directory.
-The `vapi-network` distribution goes to the `latest` npm tag; the scoped
-packages stay on `next`. Use `pnpm --dir packages/vapi-network publish:npm:next`
-to put a distribution build on `next` instead. The manual release workflow
-verifies and prints these commands; it never receives npm credentials or
-publishes automatically.
+Each package's `publish:npm` script publishes its staged `./publish` directory
+to the `latest` npm tag. Every package also has a `publish:npm:next` script that
+publishes the same tarball to `next` instead, for preview builds. The manual
+release workflow verifies and prints these commands; it never receives npm
+credentials or publishes automatically.
 
 ## License
 

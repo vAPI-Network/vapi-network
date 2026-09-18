@@ -83,7 +83,7 @@ describe("public Call discovery contract", () => {
     expect(isCallableListing("agent", "other")).toBe(false);
   });
 
-  it("rejects unknown categories, non-callable endpoint URLs, and response extras", () => {
+  it("rejects unknown categories and non-callable endpoint URLs", () => {
     expect(() => serviceSummarySchema.parse({ ...validService, category: "work" })).toThrow();
     expect(() =>
       serviceSummarySchema.parse({
@@ -91,7 +91,46 @@ describe("public Call discovery contract", () => {
         endpoints: [{ ...validService.endpoints[0], url: "not-a-url" }],
       }),
     ).toThrow();
-    expect(() => discoveryResponseSchema.parse({ services: [validService], total: 1 })).toThrow();
+  });
+
+  it("carries the registry's group and fee disclosure on a listing", () => {
+    const listing = {
+      ...validService,
+      group: "vapi",
+      fee: { bps: 500, label: "5% network fee, paid by the API's splitter" },
+    };
+
+    expect(serviceSummarySchema.parse(listing)).toEqual(listing);
+    expect(
+      serviceSummarySchema.parse({
+        ...validService,
+        group: "external",
+        fee: { bps: 0, label: "No network fee" },
+      }),
+    ).toMatchObject({ group: "external", fee: { bps: 0 } });
+    expect(() => serviceSummarySchema.parse({ ...validService, group: "affiliate" })).toThrow();
+    expect(() =>
+      serviceSummarySchema.parse({ ...validService, fee: { bps: 1.5, label: "half a bip" } }),
+    ).toThrow();
+  });
+
+  it("tolerates additive registry fields instead of failing the whole response", () => {
+    // A registry that starts sending a new field must never break an installed
+    // client; loose parsing keeps the field so `--json` consumers still see it.
+    expect(discoveryResponseSchema.parse({ services: [validService], total: 1 })).toEqual({
+      services: [validService],
+      total: 1,
+    });
+    expect(
+      serviceSummarySchema.parse({
+        ...validService,
+        somethingTheRegistryAddedLater: true,
+        endpoints: [{ ...validService.endpoints[0], newEndpointField: "ok" }],
+      }),
+    ).toMatchObject({
+      somethingTheRegistryAddedLater: true,
+      endpoints: [{ newEndpointField: "ok" }],
+    });
   });
 
   it("keeps category vocabulary, labels, and callable policy together", () => {

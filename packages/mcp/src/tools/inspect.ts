@@ -1,10 +1,12 @@
 import {
   DiscoveryCatalogError,
   type DiscoveryEndpoint,
+  type ListingFee,
+  type ListingGroup,
   type MarketplaceHit,
   type VapiConfig,
 } from "@vapi-network/core";
-import { findMarketplaceApiByRef, resolveServiceEndpoint } from "./search.js";
+import { findMarketplaceApiByRef, resolveServiceListing } from "./search.js";
 
 export type InspectToolInput = {
   id: string;
@@ -28,6 +30,9 @@ export type InspectToolResult = Omit<
 > & {
   method: string | null;
   network?: string;
+  /** Registry-owned listing disclosures; absent when the registry omits them. */
+  group?: ListingGroup;
+  fee?: ListingFee;
   payment: DiscoveryEndpoint["payment"] | null;
 };
 
@@ -36,9 +41,9 @@ export async function inspectService(
   config: VapiConfig,
   fetchImpl?: typeof fetch,
 ): Promise<InspectToolResult> {
-  let endpoint: DiscoveryEndpoint;
+  let listing: Awaited<ReturnType<typeof resolveServiceListing>>;
   try {
-    endpoint = await resolveServiceEndpoint(input.id, config, fetchImpl, input.endpoint);
+    listing = await resolveServiceListing(input.id, config, fetchImpl, input.endpoint);
   } catch (error) {
     if (
       input.endpoint ||
@@ -51,6 +56,7 @@ export async function inspectService(
     if (!hit || hit.kind !== "api" || hit.provenance !== "indexed") throw error;
     return inspectIndexedHit(hit);
   }
+  const { endpoint, service } = listing;
   return {
     name: endpoint.name,
     method: endpoint.method,
@@ -65,6 +71,8 @@ export async function inspectService(
     ...(endpoint.responseContentType === undefined
       ? {}
       : { responseContentType: endpoint.responseContentType }),
+    ...(service.group === undefined ? {} : { group: service.group }),
+    ...(service.fee === undefined ? {} : { fee: service.fee }),
     payment: endpoint.payment ?? null,
   };
 }
@@ -79,6 +87,8 @@ function inspectIndexedHit(hit: Extract<MarketplaceHit, { kind: "api"; provenanc
       "See live x402 quote",
     description: hit.card.summary,
     network: hit.execution.network,
+    ...(hit.group === undefined ? {} : { group: hit.group }),
+    ...(hit.fee === undefined ? {} : { fee: hit.fee }),
     payment: null,
   } satisfies InspectToolResult;
 }

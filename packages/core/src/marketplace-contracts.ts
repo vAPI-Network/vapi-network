@@ -1,4 +1,10 @@
 // Extracted from @vapi/marketplace-contracts; schema meaning intentionally unchanged.
+//
+// Tolerance policy: every schema here that describes something the registry
+// RETURNS is a loose object, so a registry that starts sending an additional
+// field never breaks an installed client. Only `marketplaceDiscoveryInputSchema`
+// — the request this client builds — stays strict. Loose parsing keeps unknown
+// keys, so additive server fields also reach `--json` consumers untouched.
 import { z } from "zod";
 
 export const MARKETPLACE_DISCOVERY_PROTOCOL = "vapi.marketplace.discovery/1" as const;
@@ -38,6 +44,28 @@ export const FIRST_PARTY_PROVENANCES = ["self_listed", "partner"] as const;
 export const firstPartyProvenanceSchema = z.enum(FIRST_PARTY_PROVENANCES);
 export type FirstPartyProvenance = z.infer<typeof firstPartyProvenanceSchema>;
 
+/**
+ * The presentation group the registry assigns a Call listing, and the network
+ * fee already inside its advertised price. Both are registry-owned disclosures
+ * this client only displays, so both stay optional: a registry that predates
+ * them omits them, and a newer one may extend the fee object.
+ */
+export const LISTING_GROUPS = ["vapi", "added", "partner", "external"] as const;
+export const listingGroupSchema = z.enum(LISTING_GROUPS);
+export type ListingGroup = z.infer<typeof listingGroupSchema>;
+
+export const listingFeeSchema = z.looseObject({
+  bps: z.number().int().min(0),
+  label: z.string(),
+});
+export type ListingFee = z.infer<typeof listingFeeSchema>;
+
+/** The group/fee pair the registry returns on every Call listing and discovery hit. */
+export const listingDisclosureShape = {
+  group: listingGroupSchema.optional(),
+  fee: listingFeeSchema.optional(),
+} as const;
+
 export const marketplaceBadgeCodeSchema = z.enum([
   "live_x402",
   "partner",
@@ -48,13 +76,13 @@ export const marketplaceBadgeCodeSchema = z.enum([
 ]);
 export type MarketplaceBadgeCode = z.infer<typeof marketplaceBadgeCodeSchema>;
 
-export const marketplaceBadgeSchema = z.strictObject({
+export const marketplaceBadgeSchema = z.looseObject({
   code: marketplaceBadgeCodeSchema,
   label: z.string().trim().min(1).max(80),
 });
 export type MarketplaceBadge = z.infer<typeof marketplaceBadgeSchema>;
 
-export const marketplacePublicFactSchema = z.strictObject({
+export const marketplacePublicFactSchema = z.looseObject({
   label: z.string().trim().min(1).max(80),
   value: z.string().trim().min(1).max(160),
 });
@@ -73,7 +101,7 @@ const marketplaceHrefSchema = z.union([
     .regex(/^https:\/\//),
 ]);
 
-const marketplaceCardSchema = z.strictObject({
+const marketplaceCardSchema = z.looseObject({
   title: z.string().trim().min(1).max(160),
   summary: z.string().trim().min(1).max(1_000),
   byline: z.string().trim().min(1).max(160).optional(),
@@ -85,9 +113,10 @@ const marketplaceCardSchema = z.strictObject({
 const marketplaceHitBase = {
   ref: z.string().trim().min(1).max(512),
   card: marketplaceCardSchema,
+  ...listingDisclosureShape,
 } as const;
 
-const invokeApiActionSchema = z.strictObject({
+const invokeApiActionSchema = z.looseObject({
   type: z.literal("invoke_api"),
   href: marketplaceHrefSchema,
 });
@@ -97,11 +126,11 @@ const invokeApiActionSchema = z.strictObject({
  * target from `ref`, so no target is carried on the card. These may be fronted
  * by a vAPI gateway, hence the open `executionMode`.
  */
-const firstPartyApiMarketplaceHitSchema = z.strictObject({
+const firstPartyApiMarketplaceHitSchema = z.looseObject({
   ...marketplaceHitBase,
   kind: z.literal("api"),
   provenance: firstPartyProvenanceSchema,
-  execution: z.strictObject({
+  execution: z.looseObject({
     mode: executionModeSchema,
   }),
   action: invokeApiActionSchema,
@@ -113,11 +142,11 @@ const firstPartyApiMarketplaceHitSchema = z.strictObject({
  * `direct`: vAPI never fronts a listing it merely mirrored
  * (`docs/adr/0009-mirror-external-catalogs-into-the-call-registry.md`).
  */
-const mirroredApiMarketplaceHitSchema = z.strictObject({
+const mirroredApiMarketplaceHitSchema = z.looseObject({
   ...marketplaceHitBase,
   kind: z.literal("api"),
   provenance: z.literal("indexed"),
-  execution: z.strictObject({
+  execution: z.looseObject({
     mode: z.literal("direct"),
     url: z
       .url()
@@ -139,20 +168,20 @@ export const apiMarketplaceHitSchema = z.discriminatedUnion("provenance", [
 ]);
 export type ApiMarketplaceHit = z.infer<typeof apiMarketplaceHitSchema>;
 
-export const serviceOfferMarketplaceHitSchema = z.strictObject({
+export const serviceOfferMarketplaceHitSchema = z.looseObject({
   ...marketplaceHitBase,
   kind: z.literal("service_offer"),
-  action: z.strictObject({
+  action: z.looseObject({
     type: z.literal("start_engagement"),
     href: marketplaceHrefSchema,
   }),
 });
 export type ServiceOfferMarketplaceHit = z.infer<typeof serviceOfferMarketplaceHitSchema>;
 
-export const openRequestMarketplaceHitSchema = z.strictObject({
+export const openRequestMarketplaceHitSchema = z.looseObject({
   ...marketplaceHitBase,
   kind: z.literal("open_request"),
-  action: z.strictObject({
+  action: z.looseObject({
     type: z.literal("propose_to_request"),
     href: marketplaceHrefSchema,
   }),
@@ -166,6 +195,8 @@ export const marketplaceHitSchema = z.union([
 ]);
 export type MarketplaceHit = z.infer<typeof marketplaceHitSchema>;
 
+// The client builds this request, so it stays strict: a typo in a filter is a
+// client bug and must fail here rather than travel to the registry unnoticed.
 export const marketplaceDiscoveryInputSchema = z
   .strictObject({
     q: z.string().trim().max(200).optional(),
@@ -195,7 +226,7 @@ export function isMirroredHit(hit: MarketplaceHit): boolean {
   return hit.kind === "api" && hit.provenance === "indexed";
 }
 
-export const marketplaceDiscoveryPageSchema = z.strictObject({
+export const marketplaceDiscoveryPageSchema = z.looseObject({
   protocol: z.literal(MARKETPLACE_DISCOVERY_PROTOCOL),
   items: z.array(marketplaceHitSchema),
   nextCursor: z.string().min(1).max(4_096).nullable(),

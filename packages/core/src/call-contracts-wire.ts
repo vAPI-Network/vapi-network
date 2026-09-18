@@ -1,5 +1,11 @@
 // Extracted from @vapi/call-contracts; schema meaning intentionally unchanged.
+//
+// Every schema here describes a registry RESPONSE, so all of them are loose
+// objects: additive server fields must never fail an installed client, and
+// loose parsing passes them through to `--json` consumers unchanged.
 import { z } from "zod";
+
+import { listingDisclosureShape } from "./marketplace-contracts.js";
 
 export const CALLABLE_KIND = "agent" as const;
 export const CALLABLE_CATEGORIES = ["ai", "data", "crypto", "compute", "search"] as const;
@@ -31,7 +37,7 @@ export function isCallableListing(kind: string, category: string): boolean {
 export const serviceTierSchema = z.enum(["listed", "verified", "partner"]);
 export type ServiceTier = z.infer<typeof serviceTierSchema>;
 
-export const discoveryEndpointSchema = z.strictObject({
+export const discoveryEndpointSchema = z.looseObject({
   name: z.string(),
   method: z.string(),
   url: z.url(),
@@ -44,7 +50,7 @@ export const discoveryEndpointSchema = z.strictObject({
   pathTemplate: z.string().trim().min(1).optional(),
   pathParameters: z.array(z.string().trim().min(1)).optional(),
   payment: z
-    .strictObject({
+    .looseObject({
       scheme: z.literal("exact"),
       network: z.string().regex(/^eip155:\d+$/),
       asset: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
@@ -55,12 +61,13 @@ export const discoveryEndpointSchema = z.strictObject({
 });
 export type DiscoveryEndpoint = z.infer<typeof discoveryEndpointSchema>;
 
-export const serviceSummarySchema = z.strictObject({
+export const serviceSummarySchema = z.looseObject({
   id: z.string(),
   name: z.string(),
   description: z.string(),
   category: discoveryCategorySchema,
   tier: serviceTierSchema,
+  ...listingDisclosureShape,
   verified: z.boolean(),
   wrapped: z.boolean(),
   price: z.string(),
@@ -71,7 +78,7 @@ export type ServiceSummary = z.infer<typeof serviceSummarySchema>;
 
 // The public route is both the browse/list and query/search surface. The wire
 // envelope is intentionally identical in both modes.
-export const searchServicesResponseSchema = z.strictObject({
+export const searchServicesResponseSchema = z.looseObject({
   services: z.array(serviceSummarySchema),
 });
 export type SearchServicesResponse = z.infer<typeof searchServicesResponseSchema>;

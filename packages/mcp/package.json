@@ -28,7 +28,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "pack:check": "pnpm --dir ../.. pack:check",
-    "publish:npm": "pnpm pack:check && npm publish ./publish --access public --tag next"
+    "publish:npm": "pnpm pack:check && npm publish ./publish --access public --tag latest",
+    "publish:npm:next": "pnpm pack:check && npm publish ./publish --access public --tag next"
   },
   "dependencies": {
     "@vapi-network/core": "workspace:*",
