@@ -1,12 +1,13 @@
 import { createInterface, type Interface } from "node:readline";
 import {
   MARKETPLACE_KINDS,
+  ONRAMP_NETWORK,
   STATS_RANGES,
   VAPI_CLIENT_VERSION,
   aggregateStats,
-  createOnrampSession,
   createSupportReport,
   createPublicFetch,
+  fundingPageUrl,
   getVapiPaths,
   isMirroredHit,
   isSolanaAddress,
@@ -19,6 +20,7 @@ import {
   marketplaceKindSchema,
   readReceipts,
   readSearchEvents,
+  resolveRegistryUrl,
   type VapiPaymentAccount,
   type MarketplaceHit,
   type VapiConfig,
@@ -111,19 +113,16 @@ const walletToolResultSchema = z.object({
   ),
 });
 
-const onrampToolResultSchema = z.union([
-  z.object({
-    status: z.literal("ready"),
-    address: z.string(),
-    url: z.url(),
-  }),
-  z.object({
-    status: z.literal("unavailable"),
-    address: z.string(),
-    reason: z.string(),
-    instructions: z.string(),
-  }),
-]);
+const fundingToolResultSchema = z.object({
+  address: z.string(),
+  network: z.string(),
+  url: z.url(),
+  instructions: z.string(),
+});
+
+/** What an agent should do with the funding link: only a human can finish the payment. */
+const FUNDING_PAGE_INSTRUCTIONS =
+  "Give this link to your human; only they can complete the payment. USDC lands on Base at the address above, usually within a few minutes.";
 
 const accountInfoSchema = z.object({
   caip2: z.string(),
@@ -517,26 +516,28 @@ export function createVapiServer(options: VapiServerOptions) {
     "wallet.fund",
     {
       description:
-        "Open a hosted Coinbase Onramp session that sends USDC to the local wallet, or return direct transfer instructions when the onramp is unavailable. vAPI never holds the funds.",
+        "Return the hosted funding page for the local wallet so you can hand the link to your human. The page takes a card via Coinbase (needs a Coinbase account; US guest checkout), a transfer from MetaMask/Coinbase Wallet/WalletConnect, or a bridge from another chain. No network call, no expiring link, and vAPI never holds the funds.",
       inputSchema: {
         amountUsd: z
           .number()
           .positive()
           .max(100_000)
           .optional()
-          .describe("Fiat amount in USD to prefill in the onramp."),
+          .describe("Fiat amount in USD to prefill on the funding page."),
       },
-      outputSchema: onrampToolResultSchema,
+      outputSchema: fundingToolResultSchema,
     },
     async (input) =>
-      asStructuredToolResult(() =>
-        createOnrampSession({
-          address: options.account.address,
-          ...(input.amountUsd === undefined ? {} : { fiatAmount: input.amountUsd }),
-          fetchImpl: guardedFetch,
-          allowPrivateNetwork: options.config.allowPrivateNetwork ?? false,
-        }),
-      ),
+      asStructuredToolResult(async () => ({
+        address: options.account.address,
+        network: ONRAMP_NETWORK,
+        url: fundingPageUrl(
+          resolveRegistryUrl(),
+          options.account.address,
+          input.amountUsd === undefined ? {} : { amount: input.amountUsd },
+        ),
+        instructions: FUNDING_PAGE_INSTRUCTIONS,
+      })),
   );
   server.registerTool(
     "wallet",

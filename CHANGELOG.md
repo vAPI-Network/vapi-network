@@ -35,6 +35,21 @@ scoped packages. The packages share one version and are released together.
   `--json` and piped runs never print the phrase; they carry
   `custody: "self"`, the same warning, `recoveryPhrase: "hidden"`, and point at
   `vapi backup`. The next steps gained a `vapi backup` line.
+- `vapi fund` and the `wallet.fund` MCP tool now hand out the hosted funding
+  page at `<registry>/fund/<address>` instead of a pre-minted Coinbase session.
+  The Coinbase session token is single-use and expires after five minutes, so
+  anyone who took a moment to log in landed on "Action not available". The page
+  mints the session at click time and also offers a wallet transfer
+  (MetaMask/Coinbase Wallet/WalletConnect) and a bridge from another chain.
+- Neither command touches the network any more: `vapi fund` works offline, never
+  reports `onramp_unavailable`, and prints `{ address, network, url }` with
+  `--json`. `wallet.fund` returns the same shape plus a short instruction for the
+  agent to hand the link to its human.
+
+### Deprecated
+
+- `createOnrampSession` stays exported for backwards compatibility but is no
+  longer used by the CLI or the MCP server. Use the new `fundingPageUrl`.
 
 ## 0.2.3
 
