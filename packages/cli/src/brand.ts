@@ -1,29 +1,41 @@
 // The vAPI mark is a 743x659 grid of nine rectangles in three rows of equal
 // height. The coordinates below are copied from the source artwork so the
-// terminal rendering stays in step with the web mark; only the horizontal scale
-// is terminal-specific.
+// terminal rendering stays in step with the web mark; only the scale is
+// terminal-specific. Blocks are drawn as solid cells (background colour, or
+// reverse video for `ink`), so the mark reads as rectangles rather than glyphs.
 
 const MARK_SOURCE_WIDTH = 743;
-const MARK_COLUMNS = 34;
-const MARK_ROWS = 3;
-const BLOCK = "█";
+const MARK_SOURCE_HEIGHT = 659;
+const MARK_SOURCE_ROW_HEIGHT = 217;
+/** Terminal cells are about twice as tall as wide; 28x12 keeps the 743x659 aspect. */
+const MARK_COLUMNS = 28;
+const MARK_ROWS = 12;
+const PLAIN_BLOCK = "█";
 
 export const MARK_STEP_MS = 70;
 export const WORDMARK = "vAPI Network";
+export const WELCOME = "Welcome to the vAPI Network";
+export const TAGLINE = [
+  "The trusted network where agents and humans do business.",
+  "Search APIs, pay per call, keep receipts. More coming soon.",
+] as const;
 
-const RESET = "\u001b[0m";
-const DEFAULT_FOREGROUND = "\u001b[39m";
-const HIDE_CURSOR = "\u001b[?25l";
-const SHOW_CURSOR = "\u001b[?25h";
+const ESC = "\u001b";
+const RESET = `${ESC}[0m`;
+const REVERSE = `${ESC}[7m`;
+const BOLD = `${ESC}[1m`;
+const DIM = `${ESC}[2m`;
+const HIDE_CURSOR = `${ESC}[?25l`;
+const SHOW_CURSOR = `${ESC}[?25h`;
 
-/** `ink` renders in the terminal's default foreground, like the black mark on paper. */
+/** Design-token colours; `ink` renders in the terminal's foreground, like the black mark on paper. */
 export const MARK_PALETTE = {
-  orange: "#FF6A1A",
-  pink: "#FF3D8B",
-  lime: "#B8F32D",
-  cyan: "#22D3EE",
-  blue: "#0052FF",
-  purple: "#8B5CF6",
+  orange: "#ff7300",
+  pink: "#ff337c",
+  lime: "#c3ff3d",
+  cyan: "#97efff",
+  blue: "#0041eb",
+  purple: "#8a37fb",
   ink: null,
 } as const;
 
@@ -51,7 +63,7 @@ export const MARK_BLOCKS: readonly MarkBlock[] = [
 ];
 
 export type MarkRenderOptions = {
-  /** Emit 24-bit ANSI colour. Defaults to false so output stays pipe-safe. */
+  /** Emit ANSI colour. Defaults to false so output stays pipe-safe. */
   color?: boolean;
 };
 
@@ -88,7 +100,8 @@ export function shouldAnimateMark(environment: AnimationEnvironment = {}): boole
 
 /**
  * Every reveal step of the mark, oldest first. Pure: the last frame is the
- * complete mark and each frame is exactly `MARK_ROWS` lines.
+ * complete mark and each frame is exactly `MARK_ROWS` lines of `MARK_COLUMNS`
+ * visible cells.
  */
 export function renderMarkFrames(options: MarkRenderOptions = {}): string[] {
   const steps = [...new Set(MARK_BLOCKS.map((block) => block.delay))].sort(
@@ -102,42 +115,70 @@ export function renderMarkFrames(options: MarkRenderOptions = {}): string[] {
   );
 }
 
-/** The complete mark with the wordmark and version beneath it. */
+/** The framed welcome banner: the mark on the left, the welcome text on the right. */
 export function renderBanner(options: BannerOptions): string {
   const frames = renderMarkFrames(options);
-  return [frames[frames.length - 1]!, WORDMARK, `v${options.version}`].join("\n");
+  return renderBox(frames[frames.length - 1]!, options).join("\n");
 }
 
-/** Reveal the mark in place, then print the wordmark and version. */
+/** Reveal the mark in place inside the frame, then leave the finished banner on screen. */
 export async function animateBanner(options: AnimateBannerOptions): Promise<void> {
   const frames = renderMarkFrames({ color: options.color !== false });
   const sleep = options.sleep ?? defaultSleep;
   const stepMs = options.stepMs ?? MARK_STEP_MS;
+  const boxes = frames.map((frame) => renderBox(frame, options));
+  const height = boxes[0]!.length;
   options.write(HIDE_CURSOR);
   try {
-    for (const [index, frame] of frames.entries()) {
-      if (index > 0) options.write(`\u001b[${MARK_ROWS}A`);
-      options.write(
-        frame
-          .split("\n")
-          .map((line) => `\r\u001b[2K${line}\n`)
-          .join(""),
-      );
-      if (index < frames.length - 1) await sleep(stepMs);
+    for (const [index, box] of boxes.entries()) {
+      if (index > 0) options.write(`${ESC}[${height}A`);
+      options.write(box.map((line) => `\r${ESC}[2K${line}\n`).join(""));
+      if (index < boxes.length - 1) await sleep(stepMs);
     }
   } finally {
     options.write(SHOW_CURSOR);
   }
-  options.write(`${WORDMARK}\n`);
-  options.write(`v${options.version}\n`);
+}
+
+function renderBox(frame: string, options: BannerOptions): string[] {
+  const color = options.color === true;
+  const text: Array<{ value: string; style: string }> = [
+    { value: WELCOME, style: BOLD },
+    { value: "", style: "" },
+    ...TAGLINE.map((line) => ({ value: line, style: "" })),
+    { value: "", style: "" },
+    { value: `${WORDMARK} v${options.version}`, style: DIM },
+  ];
+  const textWidth = Math.max(...text.map((line) => line.value.length));
+  const gap = 3;
+  const inner = 2 + MARK_COLUMNS + gap + textWidth + 2;
+  const markLines = frame.split("\n");
+  const textTop = Math.floor((MARK_ROWS - text.length) / 2);
+  const lines: string[] = [];
+  lines.push(`╭${"─".repeat(inner)}╮`);
+  lines.push(`│${" ".repeat(inner)}│`);
+  for (let row = 0; row < MARK_ROWS; row += 1) {
+    const mark = markLines[row] ?? "";
+    const markPad = " ".repeat(Math.max(0, MARK_COLUMNS - visibleLength(mark)));
+    const entry = text[row - textTop];
+    const raw = entry?.value ?? "";
+    const styled = color && entry && entry.style && raw ? `${entry.style}${raw}${RESET}` : raw;
+    const textPad = " ".repeat(textWidth - raw.length);
+    lines.push(`│  ${mark}${markPad}${" ".repeat(gap)}${styled}${textPad}  │`);
+  }
+  lines.push(`│${" ".repeat(inner)}│`);
+  lines.push(`╰${"─".repeat(inner)}╯`);
+  return lines;
 }
 
 function renderFrame(blocks: readonly MarkBlock[], color: boolean): string {
   const rows: string[] = [];
   for (let row = 0; row < MARK_ROWS; row += 1) {
+    const sourceY = (row * MARK_SOURCE_HEIGHT) / MARK_ROWS;
+    const band = Math.min(2, Math.floor(sourceY / MARK_SOURCE_ROW_HEIGHT));
     rows.push(
       renderRow(
-        blocks.filter((block) => block.row === row),
+        blocks.filter((block) => block.row === band),
         color,
       ),
     );
@@ -156,11 +197,12 @@ function renderRow(blocks: readonly MarkBlock[], color: boolean): string {
       column = start;
     }
     const width = scaleWidth(block.width);
-    const glyphs = BLOCK.repeat(width);
-    line += color ? `${ansiPrefix(block.color)}${glyphs}${RESET}` : glyphs;
+    line += color
+      ? `${cellPrefix(block.color)}${" ".repeat(width)}${RESET}`
+      : PLAIN_BLOCK.repeat(width);
     column += width;
   }
-  return line;
+  return line + " ".repeat(Math.max(0, MARK_COLUMNS - column));
 }
 
 function scaleColumn(x: number): number {
@@ -171,11 +213,15 @@ function scaleWidth(width: number): number {
   return Math.max(1, Math.round((width * MARK_COLUMNS) / MARK_SOURCE_WIDTH));
 }
 
-function ansiPrefix(color: MarkColorName): string {
+function cellPrefix(color: MarkColorName): string {
   const hex = MARK_PALETTE[color];
-  if (hex === null) return DEFAULT_FOREGROUND;
+  if (hex === null) return REVERSE;
   const value = Number.parseInt(hex.slice(1), 16);
-  return `\u001b[38;2;${(value >> 16) & 0xff};${(value >> 8) & 0xff};${value & 0xff}m`;
+  return `${ESC}[48;2;${(value >> 16) & 0xff};${(value >> 8) & 0xff};${value & 0xff}m`;
+}
+
+function visibleLength(line: string): number {
+  return line.replace(new RegExp(`${ESC}\\[[0-9;?]*[A-Za-z]`, "g"), "").length;
 }
 
 function defaultSleep(milliseconds: number): Promise<void> {

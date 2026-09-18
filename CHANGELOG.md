@@ -3,6 +3,16 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## 0.2.1
+
+### Changed
+
+- The terminal mark is drawn at the logo's real proportions (28x12 cells, solid
+  colour cells; the ink blocks follow the terminal's own foreground so they read
+  on light and dark themes) inside a framed welcome banner with the tagline and
+  version beside it. `vapi init` and bare `vapi` show it; `--json`, `NO_COLOR`,
+  `CI` and non-TTY output get the plain frame.
+
 ## 0.2.0
 
 First release published to the npm `latest` tag. `0.2.0-dev.x` preview builds
