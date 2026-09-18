@@ -16,8 +16,8 @@ export const MARK_STEP_MS = 70;
 export const WORDMARK = "vAPI Network";
 export const WELCOME = "Welcome to the vAPI Network";
 export const TAGLINE = [
-  "Pay-per-call APIs for agents.",
-  "One wallet. Search, pay, keep receipts.",
+  "The trusted network where agents and humans do business.",
+  "Pay-per-call APIs today. Tasks and Router Compute next.",
 ] as const;
 
 const ESC = "\u001b";
