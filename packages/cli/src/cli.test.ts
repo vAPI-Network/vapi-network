@@ -4,6 +4,9 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { privateKeyToAccount } from "viem/accounts";
+import type { Hex } from "viem";
+
 import { appendReceipt, appendSearchEvent, getVapiPaths } from "@vapi-network/core";
 
 import { runCli, type CliIo } from "./cli.js";
@@ -472,6 +475,117 @@ describe("future gateway commands", () => {
       });
     });
   }
+});
+
+describe("init safety", () => {
+  it("refuses a second init before asking for a passphrase", async () => {
+    const home = await initializedHome("vapi-cli-init-twice-");
+    const address = (
+      JSON.parse(await readFile(join(home, "keystore.json"), "utf8")) as { address: string }
+    ).address;
+    // No passphrase in the environment: reaching the prompt would fail differently.
+    delete process.env.VAPI_KEYSTORE_PASSWORD;
+    const captured = captureIo();
+
+    expect(await runCli(["init"], captured.io, { fetchImpl: zeroBalanceRpc() })).toBe(1);
+
+    const message = captured.stderr.join("\n");
+    expect(message).toContain(
+      `Keystore already exists at ${join(home, "keystore.json")}. Refusing to replace the local payment key.`,
+    );
+    expect(message).toContain(`Address: ${address}`);
+    expect(message).not.toContain("interactive terminal");
+  });
+});
+
+describe("export-key command", () => {
+  const SOLANA_MAINNET = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
+
+  it("prints only the EVM key on stdout, behind a stderr warning", async () => {
+    const home = await initializedHome("vapi-cli-export-evm-");
+    const address = (
+      JSON.parse(await readFile(join(home, "keystore.json"), "utf8")) as { address: string }
+    ).address;
+    const captured = captureIo();
+
+    expect(await runCli(["export-key"], captured.io)).toBe(0);
+
+    expect(captured.stderr).toEqual([
+      "Anyone with this key can spend the wallet. Never paste it into a website or chat.",
+    ]);
+    expect(captured.stdout).toHaveLength(1);
+    const privateKey = captured.stdout[0]!;
+    expect(privateKey).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(privateKeyToAccount(privateKey as Hex).address).toBe(address);
+  });
+
+  it("returns the network, address, and key as JSON", async () => {
+    await initializedHome("vapi-cli-export-json-");
+    const captured = captureIo();
+
+    expect(await runCli(["export-key", "--json"], captured.io)).toBe(0);
+
+    const value = JSON.parse(captured.stdout[0]!) as {
+      network: string;
+      address: string;
+      privateKey: string;
+    };
+    expect(value.network).toBe("eip155:8453");
+    expect(privateKeyToAccount(value.privateKey as Hex).address).toBe(value.address);
+  });
+
+  it("exports the Solana secret key in base58 once Solana is enabled", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-export-solana-"));
+    process.env.VAPI_HOME = home;
+    process.env.VAPI_KEYSTORE_PASSWORD = "test-only-passphrase";
+    delete process.env.SOLANA_RPC_URL;
+    expect(
+      await runCli(["init", "--networks", "base,solana", "--json"], captureIo().io, {
+        fetchImpl: zeroBalanceRpc(),
+      }),
+    ).toBe(0);
+    const solanaAddress = (
+      JSON.parse(await readFile(join(home, "keystore.json"), "utf8")) as {
+        keys: { solana?: { address: string } };
+      }
+    ).keys.solana?.address;
+    const captured = captureIo();
+
+    expect(await runCli(["export-key", "--network", SOLANA_MAINNET, "--json"], captured.io)).toBe(
+      0,
+    );
+
+    const value = JSON.parse(captured.stdout[0]!) as {
+      network: string;
+      address: string;
+      privateKey: string;
+    };
+    expect(value.network).toBe(SOLANA_MAINNET);
+    expect(value.address).toBe(solanaAddress);
+    // 64 raw bytes of Ed25519 secret key, base58-encoded.
+    expect(value.privateKey).toMatch(/^[1-9A-HJ-NP-Za-km-z]{86,88}$/);
+  });
+
+  it("explains how to enable Solana instead of exporting the EVM key", async () => {
+    const home = await initializedHome("vapi-cli-export-no-solana-");
+    const captured = captureIo();
+
+    expect(await runCli(["export-key", "--network", SOLANA_MAINNET], captured.io)).toBe(1);
+
+    expect(captured.stdout).toEqual([]);
+    expect(captured.stderr.at(-1)).toBe(
+      `No Solana key is enabled in ${join(home, "keystore.json")}. Run vapi accounts --enable solana first.`,
+    );
+  });
+
+  it("rejects a network identifier it cannot map to a key", async () => {
+    await initializedHome("vapi-cli-export-bad-network-");
+    const captured = captureIo();
+
+    expect(await runCli(["export-key", "--network", "bitcoin:mainnet"], captured.io)).toBe(2);
+    expect(captured.stdout).toEqual([]);
+    expect(captured.stderr[0]).toContain("eip155:<chainId> or Solana network identifier");
+  });
 });
 
 function captureIo(): { io: CliIo; stdout: string[]; stderr: string[] } {

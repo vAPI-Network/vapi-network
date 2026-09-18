@@ -29,6 +29,7 @@ vapi pay <listing-ref> --max 0.02
 vapi balance
 vapi accounts                   # balances plus network-specific deposit guidance
 vapi receipts                  # one line per paid call: quote, settlement, latency
+vapi export-key                # print the private key for this wallet, on stdout only
 ```
 
 `vapi search` tags each listing with its group — `[vapi]`, `[added]`,
@@ -117,6 +118,21 @@ faucet URL or instructions to that network's `config.json` entry:
 Account lookup dispatches by CAIP namespace: the EVM and Solana adapters use their corresponding
 local address and guarded RPC balance calls without coupling one wallet family to the other.
 
+## Exporting the key
+
+The wallet is yours, so the key can leave on demand:
+
+```bash
+vapi export-key                       # EVM key (eip155:8453) as 0x-prefixed hex
+vapi export-key --network solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d
+vapi export-key --json                # { "network", "address", "privateKey" }
+```
+
+The command asks for the keystore passphrase, prints a one-line warning on
+stderr, and writes the key alone on stdout so it can be piped into a password
+manager. Anyone holding that key can spend the wallet: never paste it into a
+website or a chat. Nothing else in vAPI ever logs it.
+
 ## Reporting a bug
 
 ```bash
@@ -179,8 +195,11 @@ provenance:
   `https://api.vapinetwork.ai/api/call/discovery` for discovery and
   `https://api.vapinetwork.ai/api/call/services` for service details. If the
   primary returns HTTP 404 or cannot be resolved, the client logs one notice
-  and tries the configured fallback at `https://console.vapinetwork.ai`, using
-  the same canonical paths. The registry's historical `/api/marketplace/discovery`
+  and tries the fallbacks in `registryFallbacks`, using the same canonical
+  paths; the default distribution no longer ships a distinct fallback host,
+  because the `console.vapinetwork.ai` and `console-staging.vapinetwork.ai`
+  hosts are retired. A `config.json` that still names them is repaired in
+  memory on load and rewritten on disk by `vapi init`. The registry's historical `/api/marketplace/discovery`
   and `/api/network/services` paths still answer for one release and reply with
   `Deprecation: true` plus a `Link` header naming the successor; a base URL
   supplied on either of them is normalized to the canonical pair.
