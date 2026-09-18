@@ -13,6 +13,7 @@ import {
   type MarketplaceDiscoveryPage,
   type MarketplaceHit,
   type MarketplaceKind,
+  type ResolvedListing,
   type Source,
 } from "@vapi-network/core";
 
@@ -112,9 +113,22 @@ export async function resolveServiceEndpoint(
   fetchImpl?: Fetch,
   endpointName?: string,
 ): Promise<DiscoveryEndpoint> {
+  return (await resolveServiceListing(id, config, fetchImpl, endpointName)).endpoint;
+}
+
+/**
+ * Resolve a registry ref to its endpoint together with the service record, for
+ * callers that also need the listing-level disclosures (`group`, `fee`).
+ */
+export async function resolveServiceListing(
+  id: string,
+  config: VapiRegistryConfig,
+  fetchImpl?: Fetch,
+  endpointName?: string,
+): Promise<ResolvedListing> {
   const request =
     fetchImpl ?? createPublicFetch({ allowPrivateNetwork: config.allowPrivateNetwork ?? false });
-  return (await fetchCallsDiscovery(id, config, request)).resolve(id, endpointName);
+  return (await fetchCallsDiscovery(id, config, request)).resolveListing(id, endpointName);
 }
 
 /** Resolve one exact API ref from marketplace discovery across fresh CLI processes. */

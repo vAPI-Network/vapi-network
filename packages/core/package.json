@@ -30,7 +30,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "pack:check": "pnpm --dir ../.. pack:check",
-    "publish:npm": "pnpm pack:check && npm publish ./publish --access public --tag next"
+    "publish:npm": "pnpm pack:check && npm publish ./publish --access public --tag latest",
+    "publish:npm:next": "pnpm pack:check && npm publish ./publish --access public --tag next"
   },
   "dependencies": {
     "@solana-program/token": "^0.9.0",

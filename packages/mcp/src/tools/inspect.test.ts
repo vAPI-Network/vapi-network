@@ -79,6 +79,51 @@ describe("Agent Cash listing inspection", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
+  it("reports the listing's group and network fee alongside the request contract", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        services: [
+          {
+            id: "decodepaymentauthorization",
+            name: "Decode Payment Authorization",
+            description: "Decode an x402 payment authorization.",
+            category: "crypto",
+            tier: "verified",
+            group: "vapi",
+            fee: { bps: 500, label: "5% network fee, paid by the API's splitter" },
+            verified: true,
+            wrapped: false,
+            price: "$0.005",
+            networks: ["eip155:8453"],
+            somethingTheRegistryAddedLater: "tolerated",
+            endpoints: [
+              {
+                name: "decode",
+                method: "POST",
+                url: "https://decode.example/decode",
+                price: "$0.005",
+                description: "Decode an authorization payload.",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      inspectService({ id: "decodepaymentauthorization" }, config, fetchImpl),
+    ).resolves.toEqual({
+      name: "decode",
+      method: "POST",
+      url: "https://decode.example/decode",
+      price: "$0.005",
+      description: "Decode an authorization payload.",
+      group: "vapi",
+      fee: { bps: 500, label: "5% network fee, paid by the API's splitter" },
+      payment: null,
+    });
+  });
+
   it("reports an unknown listing id without calling a provider endpoint", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (request) =>
       new URL(request instanceof Request ? request.url : request).pathname.endsWith(

@@ -3,6 +3,7 @@ export { localFileSource } from "./local-file.js";
 export {
   findMarketplaceApiByRef,
   resolveServiceEndpoint,
+  resolveServiceListing,
   searchMarketplace,
   vapiRegistrySource,
   type MarketplaceSearchInput,

@@ -6,6 +6,8 @@ import {
   MARKETPLACE_DISCOVERY_PROTOCOL,
   MARKETPLACE_KINDS,
   MARKETPLACE_RANKING_VERSION,
+  apiMarketplaceHitSchema,
+  isMirroredHit,
   marketplaceDiscoveryInputSchema,
   marketplaceDiscoveryPageSchema,
   marketplaceHitSchema,
@@ -34,11 +36,11 @@ describe("marketplace discovery wire contract", () => {
       page.items.slice(0, 2).map((item) => ("provenance" in item ? item.provenance : null)),
     ).toEqual(["self_listed", "indexed"]);
     expect(
-      page.items.slice(0, 2).map((item) => ("execution" in item ? item.execution.mode : null)),
+      page.items.slice(0, 2).map((item) => (item.kind === "api" ? item.execution.mode : null)),
     ).toEqual(["direct", "direct"]);
   });
 
-  it("keeps provenance and execution off Work kinds", () => {
+  it("never promotes a Work kind to an API hit, whatever extra axes ride along", () => {
     const [, , service, request] = marketplaceDiscoveryPageSchema.parse(fixture).items;
 
     for (const extra of [
@@ -47,15 +49,65 @@ describe("marketplace discovery wire contract", () => {
       { execution: { mode: "direct" } },
       { source: "vapi" },
     ]) {
-      expect(() => marketplaceHitSchema.parse({ ...service, ...extra })).toThrow();
-      expect(() => marketplaceHitSchema.parse({ ...request, ...extra })).toThrow();
+      // Additive keys are tolerated so a newer registry cannot break a client,
+      // but they never make a Work listing payable: only `kind` decides that.
+      expect(marketplaceHitSchema.parse({ ...service, ...extra }).kind).toBe("service_offer");
+      expect(marketplaceHitSchema.parse({ ...request, ...extra }).kind).toBe("open_request");
+      expect(() => apiMarketplaceHitSchema.parse({ ...service, ...extra })).toThrow();
+      expect(() => apiMarketplaceHitSchema.parse({ ...request, ...extra })).toThrow();
     }
   });
 
+  it("carries the registry's group and fee disclosures on every kind of hit", () => {
+    const page = marketplaceDiscoveryPageSchema.parse({
+      ...(fixture as { items: unknown[] }),
+      items: (fixture as { items: Record<string, unknown>[] }).items.map((item, index) => ({
+        ...item,
+        group: ["vapi", "external", "partner", "added"][index],
+        fee:
+          index === 0
+            ? { bps: 500, label: "5% network fee, paid by the API's splitter" }
+            : { bps: 0, label: "No network fee" },
+      })),
+    });
+
+    expect(page.items.map((item) => item.group)).toEqual(["vapi", "external", "partner", "added"]);
+    expect(page.items[0]?.fee).toEqual({
+      bps: 500,
+      label: "5% network fee, paid by the API's splitter",
+    });
+    expect(page.items.map((item) => item.fee?.bps)).toEqual([500, 0, 0, 0]);
+    // The vocabulary is closed, and bps stays a non-negative integer.
+    expect(() => marketplaceHitSchema.parse({ ...page.items[0], group: "affiliate" })).toThrow();
+    expect(() =>
+      marketplaceHitSchema.parse({ ...page.items[0], fee: { bps: -1, label: "negative" } }),
+    ).toThrow();
+    expect(() => marketplaceHitSchema.parse({ ...page.items[0], fee: { bps: 500 } })).toThrow();
+  });
+
+  it("tolerates additive registry fields and passes them through untouched", () => {
+    const page = fixture as { items: Record<string, unknown>[] };
+    const parsed = marketplaceDiscoveryPageSchema.parse({
+      ...page,
+      experimentalRanking: "rrf-v2",
+      items: page.items.map((item) => ({
+        ...item,
+        somethingTheRegistryAddedLater: { nested: true },
+        card: { ...(item.card as Record<string, unknown>), highlight: "new" },
+      })),
+    });
+
+    expect(parsed).toMatchObject({ experimentalRanking: "rrf-v2" });
+    expect(parsed.items[0]).toMatchObject({
+      somethingTheRegistryAddedLater: { nested: true },
+      card: { highlight: "new" },
+    });
+  });
+
   it("binds every marketplace kind to its one valid action and provenance policy", () => {
-    const [api, externalApi, request] = (() => {
+    const [api, externalApi] = (() => {
       const items = marketplaceDiscoveryPageSchema.parse(fixture).items;
-      return [items[0], items[1], items[3]] as const;
+      return [items[0], items[1]] as const;
     })();
 
     expect(() =>
@@ -66,21 +118,20 @@ describe("marketplace discovery wire contract", () => {
     ).toThrow();
     expect(() =>
       marketplaceHitSchema.parse({
-        ...request,
-        extraPrivateField: "must never cross the seam",
-      }),
-    ).toThrow();
-    expect(() =>
-      marketplaceHitSchema.parse({
         ...api,
         action: { type: "invoke_api", href: "http://insecure.example/pay" },
       }),
     ).toThrow();
     // A mirrored listing must carry its own target; a first-party card never does.
     expect(() => marketplaceHitSchema.parse({ ...api, provenance: "indexed" })).toThrow();
-    expect(() =>
-      marketplaceHitSchema.parse({ ...externalApi, provenance: "self_listed" }),
-    ).toThrow();
+    // The reverse now parses — an inline target is just an extra key on a
+    // first-party card — but provenance, not the key, decides what is payable:
+    // only a mirrored hit is ever called at its inline URL.
+    const relabelled = marketplaceHitSchema.parse({
+      ...externalApi,
+      provenance: "self_listed",
+    });
+    expect(isMirroredHit(relabelled)).toBe(false);
     expect(() =>
       marketplaceHitSchema.parse({
         ...externalApi,

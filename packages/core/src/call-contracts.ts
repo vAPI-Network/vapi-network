@@ -30,9 +30,20 @@ export class DiscoveryCatalogError extends Error {
   }
 }
 
+/**
+ * A resolved endpoint plus the service record that carried it. Listing-level
+ * disclosures such as `group` and `fee` live on the service, not the endpoint,
+ * so anything that has to show them needs both halves.
+ */
+export type ResolvedListing = {
+  service: DiscoveryService;
+  endpoint: CallTarget;
+};
+
 export type DiscoveryCatalog = {
   services: DiscoveryService[];
   resolve(serviceId: string, endpointName?: string): CallTarget;
+  resolveListing(serviceId: string, endpointName?: string): ResolvedListing;
 };
 
 export function parseDiscovery(raw: unknown): DiscoveryCatalog {
@@ -56,19 +67,22 @@ export function parseDiscovery(raw: unknown): DiscoveryCatalog {
     buildTargets(service);
   }
 
+  const resolveListing = (serviceId: string, endpointName?: string): ResolvedListing => {
+    const service = parsed.data.services.find((candidate) => candidate.id === serviceId);
+    if (!service) {
+      throw new DiscoveryCatalogError(
+        "service_not_found",
+        `No payable endpoint found for service ${JSON.stringify(serviceId)}.`,
+        serviceId,
+      );
+    }
+    return { service, endpoint: resolveTarget(service, endpointName) };
+  };
+
   return {
     services: parsed.data.services,
-    resolve(serviceId, endpointName) {
-      const service = parsed.data.services.find((candidate) => candidate.id === serviceId);
-      if (!service) {
-        throw new DiscoveryCatalogError(
-          "service_not_found",
-          `No payable endpoint found for service ${JSON.stringify(serviceId)}.`,
-          serviceId,
-        );
-      }
-      return resolveTarget(service, endpointName);
-    },
+    resolve: (serviceId, endpointName) => resolveListing(serviceId, endpointName).endpoint,
+    resolveListing,
   };
 }
 

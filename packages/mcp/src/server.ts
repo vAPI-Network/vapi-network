@@ -11,6 +11,8 @@ import {
   isMirroredHit,
   isSolanaAddress,
   isSupportedPaymentNetwork,
+  listingFeeSchema,
+  listingGroupSchema,
   loadConfig,
   listAccounts,
   marketplaceDiscoveryPageSchema,
@@ -82,6 +84,9 @@ const inspectToolResultSchema = z.object({
   requestSchema: z.unknown().optional(),
   responseContentType: z.string().optional(),
   network: z.string().optional(),
+  // Registry-owned listing disclosures, mirrored from call.search.
+  group: listingGroupSchema.optional(),
+  fee: listingFeeSchema.optional(),
   payment: z
     .object({
       scheme: z.literal("exact"),

@@ -124,6 +124,31 @@ describe("Agent Cash marketplace discovery", () => {
     await expect(searchMarketplace({ query: "weather" }, config, fetchImpl)).rejects.toThrow();
   });
 
+  it("passes the registry's group, fee, and any later field straight through", async () => {
+    const page = {
+      ...marketplacePage,
+      items: [
+        {
+          ...marketplacePage.items[0],
+          group: "vapi",
+          fee: { bps: 500, label: "5% network fee, paid by the API's splitter" },
+          somethingTheRegistryAddedLater: "tolerated",
+        },
+      ],
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response(JSON.stringify(page), { status: 200 }));
+
+    const result = await searchMarketplace({ query: "weather" }, config, fetchImpl);
+
+    expect(result.items[0]).toMatchObject({
+      group: "vapi",
+      fee: { bps: 500, label: "5% network fee, paid by the API's splitter" },
+      somethingTheRegistryAddedLater: "tolerated",
+    });
+  });
+
   it("resolves a vAPI API endpoint through the legacy Calls compatibility route", async () => {
     const aliasedService = {
       ...apiService,

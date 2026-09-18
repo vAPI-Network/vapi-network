@@ -309,6 +309,88 @@ describe("accounts and support commands", () => {
   });
 });
 
+describe("search output", () => {
+  const discoveryPage = {
+    protocol: "vapi.marketplace.discovery/1",
+    items: [
+      {
+        ref: "decodepaymentauthorization",
+        kind: "api",
+        provenance: "self_listed",
+        group: "vapi",
+        fee: { bps: 500, label: "5% network fee, paid by the API's splitter" },
+        execution: { mode: "direct" },
+        card: {
+          title: "decodePaymentAuthorization",
+          summary: "Decode what an EVM payment authorization actually authorizes.",
+          badges: [{ code: "live_x402", label: "Live x402" }],
+          facts: [{ label: "Price", value: "$0.005" }],
+        },
+        action: { type: "invoke_api", href: "/call/decodepaymentauthorization" },
+      },
+      {
+        ref: "https://agent402.tools/api/skill/decode-blob",
+        kind: "api",
+        provenance: "indexed",
+        group: "external",
+        fee: { bps: 0, label: "No network fee" },
+        execution: {
+          mode: "direct",
+          url: "https://agent402.tools/api/skill/decode-blob",
+          method: "POST",
+          network: "eip155:8453",
+        },
+        card: {
+          title: "agent402.tools/api/skill/decode-blob",
+          summary: "Unwrap an opaque blob layer by layer.",
+          badges: [{ code: "external_catalog", label: "External catalog" }],
+          facts: [{ label: "Price", value: "$0.007" }],
+        },
+        action: {
+          type: "invoke_api",
+          href: "/call/invoke?url=https%3A%2F%2Fagent402.tools%2Fapi%2Fskill%2Fdecode-blob",
+        },
+      },
+    ],
+    nextCursor: null,
+    unavailableKinds: [],
+    rankingVersion: "marketplace-ranking-v1",
+  };
+
+  it("tags each listing with its group and prints the network fee label", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-search-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(discoveryPage));
+    const captured = captureIo();
+
+    expect(await runCli(["search", "decode"], captured.io, { fetchImpl })).toBe(0);
+
+    const text = captured.stdout.join("\n");
+    expect(text).toContain("[vapi] decodePaymentAuthorization");
+    expect(text).toContain("[external] agent402.tools/api/skill/decode-blob");
+    expect(text).toContain("Fee: 5% network fee, paid by the API's splitter");
+    expect(text).toContain("Fee: No network fee");
+  });
+
+  it("passes the group and fee through --json untouched", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-search-json-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(discoveryPage));
+    const captured = captureIo();
+
+    expect(await runCli(["search", "decode", "--json"], captured.io, { fetchImpl })).toBe(0);
+
+    const page = JSON.parse(captured.stdout[0]!) as {
+      items: Array<{ group?: string; fee?: { bps: number; label: string } }>;
+    };
+    expect(page.items.map((item) => item.group)).toEqual(["vapi", "external"]);
+    expect(page.items[0]?.fee).toEqual({
+      bps: 500,
+      label: "5% network fee, paid by the API's splitter",
+    });
+  });
+});
+
 describe("local metrics commands", () => {
   it("prints stable stats JSON and exports flattened CSV", async () => {
     const home = await mkdtemp(join(tmpdir(), "vapi-cli-metrics-"));

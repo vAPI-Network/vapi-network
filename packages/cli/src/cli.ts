@@ -128,10 +128,10 @@ export async function runCli(
         await accountsCommand(args.slice(1), json, io, dependencies);
         return 0;
       case "search":
-        await searchCommand(args.slice(1), json, io);
+        await searchCommand(args.slice(1), json, io, dependencies);
         return 0;
       case "inspect":
-        await inspectCommand(args.slice(1), json, io);
+        await inspectCommand(args.slice(1), json, io, dependencies);
         return 0;
       case "pay":
         await payCommand(args.slice(1), json, io);
@@ -270,7 +270,12 @@ async function fundCommand(
   output(io, json, result, formatFund(session, opened, wallet));
 }
 
-async function searchCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
+async function searchCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
   const parsed = parseArguments(argv, {
     valueOptions: new Set(["--kind", "--network", "--limit", "--cursor"]),
     repeatableOptions: new Set(["--kind"]),
@@ -289,13 +294,18 @@ async function searchCommand(argv: string[], json: boolean, io: CliIo): Promise<
       ...(parsed.one("--cursor") ? { cursor: parsed.one("--cursor") } : {}),
     },
     config,
-    undefined,
+    dependencies.fetchImpl,
     { searchesPath: getVapiPaths().searches, notice: io.stderr },
   );
   output(io, json, page, formatSearch(page));
 }
 
-async function inspectCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
+async function inspectCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
   const parsed = parseArguments(argv, {
     valueOptions: new Set(["--endpoint"]),
     maximumPositionals: 1,
@@ -308,6 +318,7 @@ async function inspectCommand(argv: string[], json: boolean, io: CliIo): Promise
   const result = await inspectService(
     { id, ...(parsed.one("--endpoint") ? { endpoint: parsed.one("--endpoint") } : {}) },
     config,
+    dependencies.fetchImpl,
   );
   output(io, json, result, JSON.stringify(result, null, 2));
 }
@@ -539,10 +550,21 @@ function outputStub(io: CliIo, json: boolean): void {
   else io.stderr(message);
 }
 
+/**
+ * One block per listing. The group tag is the shortest honest answer to "whose
+ * API is this", and the fee label is the registry's own disclosure of what is
+ * already inside the price, so neither is recomputed here.
+ */
 function formatSearch(page: Awaited<ReturnType<typeof searchMarketplace>>): string {
   if (page.items.length === 0) return "No listings found.";
   return page.items
-    .map((item) => `${item.ref}\t${item.kind}\t${item.card.title}\n  ${item.card.summary}`)
+    .map((item) =>
+      [
+        `${item.ref}\t${item.kind}\t${item.group ? `[${item.group}] ` : ""}${item.card.title}`,
+        `  ${item.card.summary}`,
+        ...(item.fee ? [`  Fee: ${item.fee.label}`] : []),
+      ].join("\n"),
+    )
     .join("\n");
 }
 
