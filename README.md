@@ -18,11 +18,13 @@ npm i -g vapi-network
 vapi init                      # encrypted wallet + config under ~/.vapi (or $VAPI_HOME), prints the address
 ```
 
-Fund that address with `vapi fund` (card or Apple Pay via Coinbase Onramp) or by
-sending USDC on Base to it. Then:
+Fund that address with `vapi fund`, which opens the funding page: card via
+Coinbase (needs a Coinbase account; US guest checkout), send from
+MetaMask/Coinbase Wallet/WalletConnect, or bridge from another chain. Or send
+USDC on Base to the address yourself. Then:
 
 ```bash
-vapi fund                      # hosted onramp link, or direct-transfer instructions
+vapi fund                      # opens the hosted funding page for your address
 vapi search "weather"          # every catalog, merged, with provenance
 vapi inspect <listing-ref>     # request contract and the live 402 quote, before paying
 vapi pay <listing-ref> --max 0.02
@@ -75,28 +77,30 @@ resource is free after sign-in, the result has `outcome: "signed_in"` and the lo
 ## Fund the wallet
 
 ```bash
-vapi fund                 # ask the registry for a hosted onramp session
+vapi fund                 # open the funding page for your address
 vapi fund --amount 25     # prefill a US dollar amount
-vapi fund --json          # stable machine-readable shape
+vapi fund --json          # { address, network, url }
 ```
 
-`vapi fund` POSTs `{ address, network: "base", asset: "USDC", fiatAmount }` to
-`<registry>/api/wallet/onramp-session` through the same guarded network client as
-every other command, prints the returned URL, and opens it in your default
-browser when you are on a terminal. The onramp is **Coinbase's**: Coinbase takes
-the card or Apple Pay payment and sends USDC straight to your local address.
-**vAPI never holds your funds**, never proxies the payment, and never sees your
-card details or your private key.
+`vapi fund` prints `<registry>/fund/<your-address>` and opens it in your default
+browser when you are on a terminal. Opens the funding page: card via Coinbase
+(needs a Coinbase account; US guest checkout), send from MetaMask/Coinbase
+Wallet/WalletConnect, or bridge from another chain. The page is public, takes no
+sign-in, and mints the card session when you click — so the link keeps working
+while you log in, and nothing expires in your scrollback.
 
-When the registry replies `503 onramp_unavailable` — or cannot be reached at all
-— the command stays useful instead of failing: it prints your address and
+The command itself makes **no network call**: it works offline, and it always
+also prints
 
 ```text
 Send USDC on Base (eip155:8453) to this address; add a little ETH for gas if you plan to sweep.
 ```
 
-Either way it finishes by printing the current balance. MCP clients can use the
-`wallet.fund` tool, which returns the same `{ url }` or the same fallback text.
+Whichever route you pick, the USDC lands on your local address on Base. **vAPI
+never holds your funds**, never proxies the payment, and never sees your card
+details or your private key. MCP clients can use the `wallet.fund` tool, which
+returns the same `{ address, network, url }` plus a line telling the agent to
+hand the link to its human.
 
 ## Accounts and deposits
 

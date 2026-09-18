@@ -115,7 +115,7 @@ describe("Agent Cash MCP marketplace tools", () => {
           outcome: "paid",
           listing: { providerHost: "93.184.216.34", source: "direct" },
           policy: { capsApplied: false },
-          client: { name: "vapi-network", version: "0.2.3" },
+          client: { name: "vapi-network", version: "0.2.4" },
         },
       ],
     });
@@ -164,46 +164,39 @@ describe("Agent Cash MCP marketplace tools", () => {
     await server.close();
   });
 
-  it("returns a hosted onramp URL from wallet.fund", async () => {
-    const fetchImpl = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(Response.json({ url: "https://pay.coinbase.com/buy/session" }));
+  it("returns the hosted funding page from wallet.fund without any network call", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
     const { client, server } = await connectedServer(fetchImpl);
 
     const result = await client.callTool({ name: "wallet.fund", arguments: { amountUsd: 20 } });
 
     expect(result.isError).not.toBe(true);
+    const address = privateKeyToAccount(PRIVATE_KEY).address;
     expect(result.structuredContent).toEqual({
-      status: "ready",
-      address: privateKeyToAccount(PRIVATE_KEY).address,
-      url: "https://pay.coinbase.com/buy/session",
-    });
-    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
-      "https://api.vapinetwork.ai/api/wallet/onramp-session",
-    );
-    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toMatchObject({
+      address,
       network: "base",
-      asset: "USDC",
-      fiatAmount: 20,
+      url: `https://api.vapinetwork.ai/fund/${address}?amount=20`,
+      instructions: expect.stringContaining("Give this link to your human"),
     });
+    expect(fetchImpl).not.toHaveBeenCalled();
     await client.close();
     await server.close();
   });
 
-  it("returns direct transfer instructions when wallet.fund gets onramp_unavailable", async () => {
-    const fetchImpl = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(Response.json({ error: "onramp_unavailable" }, { status: 503 }));
+  it("omits the amount from wallet.fund when the agent has no preference", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
     const { client, server } = await connectedServer(fetchImpl);
 
+    const tools = await client.listTools();
     const result = await client.callTool({ name: "wallet.fund" });
 
-    expect(result.isError).not.toBe(true);
+    expect(tools.tools.find((tool) => tool.name === "wallet.fund")?.description).toContain(
+      "hand the link to your human",
+    );
     expect(result.structuredContent).toMatchObject({
-      status: "unavailable",
-      reason: "onramp_unavailable",
-      instructions: expect.stringContaining("Send USDC on Base (eip155:8453)"),
+      url: `https://api.vapinetwork.ai/fund/${privateKeyToAccount(PRIVATE_KEY).address}`,
     });
+    expect(fetchImpl).not.toHaveBeenCalled();
     await client.close();
     await server.close();
   });

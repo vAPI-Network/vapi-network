@@ -4,9 +4,10 @@ import { stat } from "node:fs/promises";
 import {
   ARC_TESTNET_CAIP2,
   BASE_MAINNET_CAIP2,
+  ONRAMP_FALLBACK_INSTRUCTIONS,
+  ONRAMP_NETWORK,
   STATS_RANGES,
   aggregateStats,
-  createOnrampSession,
   createSupportReport,
   createKeystore,
   enableDefaultNetwork,
@@ -15,6 +16,7 @@ import {
   filterReceiptsByRange,
   formatLegacyRegistryRewrites,
   formatUsdc,
+  fundingPageUrl,
   getArcGasHeadroomAtomic,
   getKeystorePassphrase,
   getNetworkDefinition,
@@ -30,6 +32,7 @@ import {
   readReceipts,
   readSearchEvents,
   receiptsToCsv,
+  resolveRegistryUrl,
   sweepBack,
   unlockKeystore,
   writeDefaultConfig,
@@ -69,6 +72,8 @@ Usage:
   vapi serve [--json]
   vapi version [--json]
   vapi publish [--json]
+
+\`vapi fund\` opens the funding page: card via Coinbase (needs a Coinbase account; US guest checkout), send from MetaMask/Coinbase Wallet/WalletConnect, or bridge from another chain.
 
 With no command, vapi shows this help. The MCP server starts only with \`vapi mcp\`.`;
 
@@ -124,7 +129,7 @@ export async function runCli(
         await initCommand(args.slice(1), json, io, dependencies);
         return 0;
       case "fund":
-        await fundCommand(args.slice(1), json, io, dependencies);
+        await fundCommand(args.slice(1), json, io);
         return 0;
       case "accounts":
         await accountsCommand(args.slice(1), json, io, dependencies);
@@ -262,31 +267,27 @@ async function initCommand(
   io.stdout(result.nextSteps.join("\n"));
 }
 
-async function fundCommand(
-  argv: string[],
-  json: boolean,
-  io: CliIo,
-  dependencies: CliDependencies,
-): Promise<void> {
+/**
+ * Hand out the hosted funding page. No registry call: the page itself mints the
+ * card session when the human clicks, so this works offline and the link never
+ * expires in a scrollback.
+ */
+async function fundCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
   const parsed = parseArguments(argv, {
     valueOptions: new Set(["--amount"]),
     maximumPositionals: 0,
   });
-  const fiatAmount = optionalUsdAmount(parsed.one("--amount"), "--amount");
+  const amount = optionalUsdAmount(parsed.one("--amount"), "--amount");
   const paths = getVapiPaths();
-  const config = await readConfig(paths.config, io);
   const account = await unlockKeystore(await getKeystorePassphrase(), paths.keystore);
-  const session = await createOnrampSession({
-    address: account.address,
-    ...(fiatAmount === undefined ? {} : { fiatAmount }),
-    allowPrivateNetwork: config.allowPrivateNetwork ?? false,
-    ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
-  });
-  const opened =
-    session.status === "ready" && Boolean(process.stdout.isTTY) && openInBrowser(session.url);
-  const wallet = await getWallet(account, config, dependencies);
-  const result = { ...session, opened, balances: wallet.balances };
-  output(io, json, result, formatFund(session, opened, wallet));
+  const url = fundingPageUrl(
+    resolveRegistryUrl(),
+    account.address,
+    amount === undefined ? {} : { amount },
+  );
+  const opened = Boolean(process.stdout.isTTY) && openInBrowser(url);
+  const result = { address: account.address, network: ONRAMP_NETWORK, url };
+  output(io, json, result, formatFund(result.address, url, opened));
 }
 
 async function searchCommand(
@@ -638,20 +639,14 @@ function formatBalanceLines(wallet: Awaited<ReturnType<typeof getWallet>>): stri
   );
 }
 
-function formatFund(
-  session: Awaited<ReturnType<typeof createOnrampSession>>,
-  opened: boolean,
-  wallet: Awaited<ReturnType<typeof getWallet>>,
-): string {
-  const lines =
-    session.status === "ready"
-      ? [
-          `Fund: ${session.url}`,
-          ...(opened ? ["Opened in your default browser."] : []),
-          "Coinbase Onramp takes the card or Apple Pay payment and sends USDC straight to this address; vAPI never holds your funds.",
-        ]
-      : [`Card funding is unavailable right now (${session.reason}).`, session.instructions];
-  return [`Address: ${session.address}`, ...lines, "", ...formatBalanceLines(wallet)].join("\n");
+function formatFund(address: string, url: string, opened: boolean): string {
+  return [
+    `Address: ${address}`,
+    `Fund: ${url}`,
+    ...(opened ? ["Opened in your default browser."] : []),
+    "The page takes a card via Coinbase (needs a Coinbase account; US guest checkout), a transfer from MetaMask/Coinbase Wallet/WalletConnect, or a bridge from another chain. vAPI never holds your funds.",
+    ONRAMP_FALLBACK_INSTRUCTIONS,
+  ].join("\n");
 }
 
 /**
@@ -678,11 +673,7 @@ function openInBrowser(url: string): boolean {
 function buildNextSteps(address: string): string[] {
   return [
     formatNextStep("Address", address, "(copy this to fund it)"),
-    formatNextStep(
-      "Fund",
-      "vapi fund",
-      "(card / Apple Pay via Coinbase Onramp, or send USDC on Base)",
-    ),
+    formatNextStep("Fund", "vapi fund", "(card via Coinbase, a wallet transfer, or a bridge)"),
     formatNextStep("Search", 'vapi search "weather"'),
     formatNextStep("Pay", "vapi pay <ref> --max 0.02"),
     formatNextStep(
