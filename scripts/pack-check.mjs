@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
 
-const EXPECTED_VERSION = "0.2.0-dev.3";
+const EXPECTED_VERSION = "0.2.0";
 const EXPECTED_PACKAGES = new Set([
   "@vapi-network/core",
   "@vapi-network/sources",
@@ -63,8 +63,8 @@ for (const entry of packageEntries.sort((left, right) => left.name.localeCompare
       `${manifest.name} must be version ${EXPECTED_VERSION}; received ${manifest.version}.`,
     );
   }
-  if (manifest.publishConfig?.tag !== "next" || manifest.publishConfig?.access !== "public") {
-    throw new Error(`${manifest.name} publishConfig must set tag=next and access=public.`);
+  if (manifest.publishConfig?.tag !== "latest" || manifest.publishConfig?.access !== "public") {
+    throw new Error(`${manifest.name} publishConfig must set tag=latest and access=public.`);
   }
 
   const report = JSON.parse(

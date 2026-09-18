@@ -7,6 +7,7 @@ export * from "./keystore.js";
 export * from "./marketplace-contracts.js";
 export * from "./net-guard.js";
 export * from "./networks.js";
+export * from "./onramp.js";
 export * from "./policy.js";
 export * from "./receipts.js";
 export * from "./searches.js";

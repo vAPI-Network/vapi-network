@@ -1,9 +1,11 @@
+import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 
 import {
   ARC_TESTNET_CAIP2,
   STATS_RANGES,
   aggregateStats,
+  createOnrampSession,
   createSupportReport,
   createKeystore,
   enableDefaultNetwork,
@@ -35,12 +37,16 @@ import {
   searchMarketplace,
   startStdioServer,
 } from "@vapi-network/mcp";
+import { animateBanner, markColorEnabled, renderBanner, shouldAnimateMark } from "./brand.js";
 import { CLI_VERSION } from "./version";
 
-export const HELP = `vAPI Network
+const HELP_HEADING = "vAPI Network";
+
+export const HELP = `${HELP_HEADING}
 
 Usage:
   vapi init [--networks <base,solana>] [--json]
+  vapi fund [--amount <usd>] [--json]
   vapi accounts [--enable solana] [--json]
   vapi search [query] [--kind <kind>] [--network <caip2>] [--limit <n>] [--cursor <cursor>] [--json]
   vapi inspect <id> [--endpoint <name>] [--json]
@@ -61,6 +67,11 @@ With no command, vapi shows this help. The MCP server starts only with \`vapi mc
 export type CliIo = {
   stdout(message: string): void;
   stderr(message: string): void;
+  /**
+   * Raw stdout sink for cursor control. Only an interactive terminal supplies
+   * one; without it every banner falls back to a single static frame.
+   */
+  write?(chunk: string): void;
 };
 
 export type CliDependencies = {
@@ -70,6 +81,7 @@ export type CliDependencies = {
 const processIo: CliIo = {
   stdout: (message) => process.stdout.write(`${message}\n`),
   stderr: (message) => process.stderr.write(`${message}\n`),
+  write: (chunk) => process.stdout.write(chunk),
 };
 
 class UsageError extends Error {}
@@ -95,6 +107,12 @@ export async function runCli(
 
     if (command === undefined || command === "help" || command === "--help" || command === "-h") {
       requireNoArguments(args.slice(command === undefined ? 0 : 1), command ?? "help");
+      if (command === undefined && !json) {
+        // The banner already carries the wordmark, so the help heading would repeat it.
+        io.stdout(staticBanner());
+        io.stdout(HELP.slice(HELP_HEADING.length + 2));
+        return 0;
+      }
       output(io, json, { command: "help", help: HELP }, HELP);
       return 0;
     }
@@ -102,6 +120,9 @@ export async function runCli(
     switch (command) {
       case "init":
         await initCommand(args.slice(1), json, io, dependencies);
+        return 0;
+      case "fund":
+        await fundCommand(args.slice(1), json, io, dependencies);
         return 0;
       case "accounts":
         await accountsCommand(args.slice(1), json, io, dependencies);
@@ -165,6 +186,7 @@ async function initCommand(
   });
   const networks = parseInitNetworks(parsed.one("--networks") ?? "base");
   const enableSolana = networks.includes("solana");
+  if (!json) await showBanner(io);
   const paths = getVapiPaths();
   let migrated: string[] = [];
   if (!process.env.VAPI_HOME?.trim()) {
@@ -196,6 +218,7 @@ async function initCommand(
     config: paths.config,
     keystore: paths.keystore,
     message: "vAPI wallet created. Its encrypted key stays on this machine.",
+    nextSteps: buildNextSteps(account.address),
   };
   if (json) {
     io.stdout(JSON.stringify(result));
@@ -216,6 +239,35 @@ async function initCommand(
   io.stdout(`Config: ${paths.config}`);
   io.stdout(`Keystore: ${paths.keystore}`);
   io.stdout(formatAccounts(accounts));
+  io.stdout("");
+  io.stdout(result.nextSteps.join("\n"));
+}
+
+async function fundCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set(["--amount"]),
+    maximumPositionals: 0,
+  });
+  const fiatAmount = optionalUsdAmount(parsed.one("--amount"), "--amount");
+  const paths = getVapiPaths();
+  const config = await loadConfig(paths.config);
+  const account = await unlockKeystore(await getKeystorePassphrase(), paths.keystore);
+  const session = await createOnrampSession({
+    address: account.address,
+    ...(fiatAmount === undefined ? {} : { fiatAmount }),
+    allowPrivateNetwork: config.allowPrivateNetwork ?? false,
+    ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+  });
+  const opened =
+    session.status === "ready" && Boolean(process.stdout.isTTY) && openInBrowser(session.url);
+  const wallet = await getWallet(account, config, dependencies);
+  const result = { ...session, opened, balances: wallet.balances };
+  output(io, json, result, formatFund(session, opened, wallet));
 }
 
 async function searchCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
@@ -495,15 +547,88 @@ function formatSearch(page: Awaited<ReturnType<typeof searchMarketplace>>): stri
 }
 
 function formatWallet(wallet: Awaited<ReturnType<typeof getWallet>>): string {
-  const lines = [`Address: ${wallet.address}`];
-  for (const entry of wallet.balances) {
-    lines.push(
-      entry.error
-        ? `${entry.name} (${entry.network}): unavailable — ${entry.error}`
-        : `${entry.name} (${entry.network}): ${entry.usdc} USDC (${entry.usdcAtomic} atomic)`,
-    );
+  return [`Address: ${wallet.address}`, ...formatBalanceLines(wallet)].join("\n");
+}
+
+function formatBalanceLines(wallet: Awaited<ReturnType<typeof getWallet>>): string[] {
+  return wallet.balances.map((entry) =>
+    entry.error
+      ? `${entry.name} (${entry.network}): unavailable — ${entry.error}`
+      : `${entry.name} (${entry.network}): ${entry.usdc} USDC (${entry.usdcAtomic} atomic)`,
+  );
+}
+
+function formatFund(
+  session: Awaited<ReturnType<typeof createOnrampSession>>,
+  opened: boolean,
+  wallet: Awaited<ReturnType<typeof getWallet>>,
+): string {
+  const lines =
+    session.status === "ready"
+      ? [
+          `Fund: ${session.url}`,
+          ...(opened ? ["Opened in your default browser."] : []),
+          "Coinbase Onramp takes the card or Apple Pay payment and sends USDC straight to this address; vAPI never holds your funds.",
+        ]
+      : [`Card funding is unavailable right now (${session.reason}).`, session.instructions];
+  return [`Address: ${session.address}`, ...lines, "", ...formatBalanceLines(wallet)].join("\n");
+}
+
+/**
+ * Open a funding URL without ever failing the command: a headless or locked-down
+ * machine simply keeps the printed link.
+ */
+function openInBrowser(url: string): boolean {
+  const opener =
+    process.platform === "darwin"
+      ? { command: "open", args: [url] }
+      : process.platform === "win32"
+        ? { command: "cmd", args: ["/c", "start", "", url] }
+        : { command: "xdg-open", args: [url] };
+  try {
+    const child = spawn(opener.command, opener.args, { stdio: "ignore", detached: true });
+    child.on("error", () => undefined);
+    child.unref();
+    return true;
+  } catch {
+    return false;
   }
-  return lines.join("\n");
+}
+
+function buildNextSteps(address: string): string[] {
+  return [
+    formatNextStep("Address", address, "(copy this to fund it)"),
+    formatNextStep(
+      "Fund",
+      "vapi fund",
+      "(card / Apple Pay via Coinbase Onramp, or send USDC on Base)",
+    ),
+    formatNextStep("Search", 'vapi search "weather"'),
+    formatNextStep("Pay", "vapi pay <ref> --max 0.02"),
+    formatNextStep(
+      "Agent",
+      'add {"command":"npx","args":["-y","vapi-network","mcp"]} to your MCP config',
+    ),
+  ];
+}
+
+function formatNextStep(label: string, value: string, note?: string): string {
+  const step = `${label.padEnd(10)}${value}`;
+  return note === undefined ? step : `${step.padEnd(52)} ${note}`;
+}
+
+/** Reveal the mark when the terminal can animate; otherwise print one frame. */
+async function showBanner(io: CliIo): Promise<void> {
+  const write = io.write;
+  if (write === undefined || !shouldAnimateMark()) {
+    io.stdout(staticBanner());
+    return;
+  }
+  await animateBanner({ version: CLI_VERSION, write });
+}
+
+function staticBanner(): string {
+  return renderBanner({ version: CLI_VERSION, color: markColorEnabled() });
 }
 
 function formatAccounts(accounts: readonly AccountInfo[]): string {
@@ -681,6 +806,17 @@ function optionalPositiveInteger(value: string | undefined, option: string): num
   const result = optionalNonNegativeInteger(value, option);
   if (result === 0) throw new UsageError(`${option} must be a positive integer.`);
   return result;
+}
+
+function optionalUsdAmount(value: string | undefined, option: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^\d+(?:\.\d{1,2})?$/.test(value)) {
+    throw new UsageError(`${option} must be a US dollar amount such as 20 or 19.99.`);
+  }
+  const parsed = Number(value);
+  if (parsed <= 0) throw new UsageError(`${option} must be greater than zero.`);
+  if (parsed > 100_000) throw new UsageError(`${option} must be at most 100000.`);
+  return parsed;
 }
 
 function optionalNonNegativeInteger(value: string | undefined, option: string): number | undefined {

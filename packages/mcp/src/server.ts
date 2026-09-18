@@ -4,6 +4,7 @@ import {
   STATS_RANGES,
   VAPI_CLIENT_VERSION,
   aggregateStats,
+  createOnrampSession,
   createSupportReport,
   createPublicFetch,
   getVapiPaths,
@@ -104,6 +105,20 @@ const walletToolResultSchema = z.object({
     }),
   ),
 });
+
+const onrampToolResultSchema = z.union([
+  z.object({
+    status: z.literal("ready"),
+    address: z.string(),
+    url: z.url(),
+  }),
+  z.object({
+    status: z.literal("unavailable"),
+    address: z.string(),
+    reason: z.string(),
+    instructions: z.string(),
+  }),
+]);
 
 const accountInfoSchema = z.object({
   caip2: z.string(),
@@ -492,6 +507,31 @@ export function createVapiServer(options: VapiServerOptions) {
           fetchImpl: guardedFetch,
         }),
       })),
+  );
+  server.registerTool(
+    "wallet.fund",
+    {
+      description:
+        "Open a hosted Coinbase Onramp session that sends USDC to the local wallet, or return direct transfer instructions when the onramp is unavailable. vAPI never holds the funds.",
+      inputSchema: {
+        amountUsd: z
+          .number()
+          .positive()
+          .max(100_000)
+          .optional()
+          .describe("Fiat amount in USD to prefill in the onramp."),
+      },
+      outputSchema: onrampToolResultSchema,
+    },
+    async (input) =>
+      asStructuredToolResult(() =>
+        createOnrampSession({
+          address: options.account.address,
+          ...(input.amountUsd === undefined ? {} : { fiatAmount: input.amountUsd }),
+          fetchImpl: guardedFetch,
+          allowPrivateNetwork: options.config.allowPrivateNetwork ?? false,
+        }),
+      ),
   );
   server.registerTool(
     "wallet",

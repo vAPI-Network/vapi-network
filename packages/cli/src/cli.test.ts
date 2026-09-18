@@ -42,10 +42,36 @@ describe("CLI JSON output", () => {
       message: "vAPI wallet created. Its encrypted key stays on this machine.",
     });
     expect(value.address).toMatch(/^0x[0-9a-fA-F]{40}$/);
-    expect(captured.stdout[0]).not.toContain("█");
+    expect(captured.stdout[0]).not.toContain("\u2588");
     expect(JSON.parse(await readFile(join(home, "keystore.json"), "utf8"))).not.toHaveProperty(
       "privateKey",
     );
+  });
+
+  it("returns the next steps in --json and prints them under the mark", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-next-steps-"));
+    process.env.VAPI_HOME = home;
+    process.env.VAPI_KEYSTORE_PASSWORD = "test-only-passphrase";
+    const jsonRun = captureIo();
+    expect(await runCli(["init", "--json"], jsonRun.io, { fetchImpl: zeroBalanceRpc() })).toBe(0);
+    const value = JSON.parse(jsonRun.stdout[0]!) as { address: string; nextSteps: string[] };
+
+    expect(value.nextSteps).toHaveLength(5);
+    expect(value.nextSteps[0]).toContain(value.address);
+    expect(value.nextSteps[0]).toContain("(copy this to fund it)");
+
+    const humanHome = await mkdtemp(join(tmpdir(), "vapi-cli-next-steps-human-"));
+    process.env.VAPI_HOME = humanHome;
+    const humanRun = captureIo();
+    expect(await runCli(["init"], humanRun.io, { fetchImpl: zeroBalanceRpc() })).toBe(0);
+    const text = humanRun.stdout.join("\n");
+
+    expect(text).toContain("vAPI Network");
+    expect(text).toContain("\u2588");
+    expect(text).toMatch(/Fund {6}vapi fund\s+\(card \/ Apple Pay via Coinbase Onramp/);
+    expect(text).toContain('vapi search "weather"');
+    expect(text).toContain('Agent     add {"command":"npx","args":["-y","vapi-network","mcp"]}');
+    expect(text).not.toContain("\u001b[");
   });
 
   it("reports an empty configured balance without making a network request", async () => {
@@ -130,6 +156,94 @@ describe("CLI JSON output", () => {
         },
       ],
     });
+  });
+});
+
+describe("bare invocation", () => {
+  it("shows the mark above the usage list without repeating the wordmark", async () => {
+    const captured = captureIo();
+
+    expect(await runCli([], captured.io)).toBe(0);
+    const text = captured.stdout.join("\n");
+
+    expect(text.split("vAPI Network")).toHaveLength(2);
+    expect(text).toContain("\u2588");
+    expect(text).toContain("vapi fund [--amount <usd>] [--json]");
+  });
+
+  it("keeps --json help output free of the mark", async () => {
+    const captured = captureIo();
+
+    expect(await runCli(["--json"], captured.io)).toBe(0);
+    const value = JSON.parse(captured.stdout[0]!) as { command: string; help: string };
+    expect(value.command).toBe("help");
+    expect(value.help.startsWith("vAPI Network")).toBe(true);
+    expect(captured.stdout[0]).not.toContain("\u2588");
+  });
+});
+
+describe("fund command", () => {
+  it("prints the hosted onramp URL and the balance beneath it", async () => {
+    const home = await initializedHome("vapi-cli-fund-ready-");
+    const fetchImpl = onrampRpc(async () =>
+      Response.json({ url: "https://pay.coinbase.com/buy/session" }),
+    );
+    const captured = captureIo();
+
+    expect(await runCli(["fund", "--amount", "20"], captured.io, { fetchImpl })).toBe(0);
+    expect(captured.stderr).toEqual([]);
+    expect(captured.stdout[0]).toMatch(/^Address: 0x[0-9a-fA-F]{40}\n/);
+    expect(captured.stdout[0]).toContain("Fund: https://pay.coinbase.com/buy/session");
+    expect(captured.stdout[0]).toContain("never holds your funds");
+    expect(captured.stdout[0]).toContain("Base mainnet (eip155:8453): 0 USDC");
+    const onramp = fetchImpl.mock.calls.find(([input]) =>
+      String(input).includes("/api/wallet/onramp-session"),
+    );
+    expect(JSON.parse(String(onramp?.[1]?.body))).toEqual({
+      address: expect.stringMatching(/^0x[0-9a-fA-F]{40}$/),
+      network: "base",
+      asset: "USDC",
+      fiatAmount: 20,
+    });
+    expect(home).toContain("vapi-cli-fund-ready-");
+  });
+
+  it("prints direct transfer instructions on 503 onramp_unavailable", async () => {
+    await initializedHome("vapi-cli-fund-503-");
+    const fetchImpl = onrampRpc(async () =>
+      Response.json({ error: "onramp_unavailable" }, { status: 503 }),
+    );
+    const captured = captureIo();
+
+    expect(await runCli(["fund", "--json"], captured.io, { fetchImpl })).toBe(0);
+    expect(JSON.parse(captured.stdout[0]!)).toMatchObject({
+      status: "unavailable",
+      reason: "onramp_unavailable",
+      instructions:
+        "Send USDC on Base (eip155:8453) to this address; add a little ETH for gas if you plan to sweep.",
+      opened: false,
+      balances: [{ network: "eip155:8453", usdc: "0" }],
+    });
+  });
+
+  it("stays useful when the registry cannot be reached", async () => {
+    await initializedHome("vapi-cli-fund-offline-");
+    const fetchImpl = onrampRpc(async () => {
+      throw new Error("getaddrinfo ENOTFOUND api.vapinetwork.ai");
+    });
+    const captured = captureIo();
+
+    expect(await runCli(["fund"], captured.io, { fetchImpl })).toBe(0);
+    expect(captured.stdout[0]).toContain("getaddrinfo ENOTFOUND api.vapinetwork.ai");
+    expect(captured.stdout[0]).toContain("Send USDC on Base (eip155:8453)");
+  });
+
+  it("rejects an amount that is not a dollar figure", async () => {
+    await initializedHome("vapi-cli-fund-amount-");
+    const captured = captureIo();
+
+    expect(await runCli(["fund", "--amount", "twenty"], captured.io)).toBe(2);
+    expect(captured.stderr[0]).toContain("--amount must be a US dollar amount");
   });
 });
 
@@ -294,6 +408,23 @@ function captureIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
 function restoreEnvironment(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
+}
+
+async function initializedHome(prefix: string): Promise<string> {
+  const home = await mkdtemp(join(tmpdir(), prefix));
+  process.env.VAPI_HOME = home;
+  process.env.VAPI_KEYSTORE_PASSWORD = "test-only-passphrase";
+  expect(await runCli(["init", "--json"], captureIo().io, { fetchImpl: zeroBalanceRpc() })).toBe(0);
+  return home;
+}
+
+/** One fake fetch that answers the onramp POST and every JSON-RPC balance read. */
+function onrampRpc(onramp: () => Promise<Response>) {
+  const rpc = zeroBalanceRpc();
+  return vi.fn<typeof fetch>(async (input, init) => {
+    if (String(input).includes("/api/wallet/onramp-session")) return await onramp();
+    return await rpc(input, init);
+  });
 }
 
 function zeroBalanceRpc() {

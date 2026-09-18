@@ -44,6 +44,7 @@ describe("Agent Cash MCP marketplace tools", () => {
       "wallet.address",
       "wallet.balance",
       "wallet.accounts",
+      "wallet.fund",
       "wallet",
       "receipts.list",
       "receipts.stats",
@@ -114,7 +115,7 @@ describe("Agent Cash MCP marketplace tools", () => {
           outcome: "paid",
           listing: { providerHost: "93.184.216.34", source: "direct" },
           policy: { capsApplied: false },
-          client: { name: "vapi-network", version: "0.2.0-dev.3" },
+          client: { name: "vapi-network", version: "0.2.0" },
         },
       ],
     });
@@ -159,6 +160,50 @@ describe("Agent Cash MCP marketplace tools", () => {
       ],
     });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
+    await client.close();
+    await server.close();
+  });
+
+  it("returns a hosted onramp URL from wallet.fund", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ url: "https://pay.coinbase.com/buy/session" }));
+    const { client, server } = await connectedServer(fetchImpl);
+
+    const result = await client.callTool({ name: "wallet.fund", arguments: { amountUsd: 20 } });
+
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toEqual({
+      status: "ready",
+      address: privateKeyToAccount(PRIVATE_KEY).address,
+      url: "https://pay.coinbase.com/buy/session",
+    });
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
+      "https://api.vapinetwork.ai/api/wallet/onramp-session",
+    );
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]?.[1]?.body))).toMatchObject({
+      network: "base",
+      asset: "USDC",
+      fiatAmount: 20,
+    });
+    await client.close();
+    await server.close();
+  });
+
+  it("returns direct transfer instructions when wallet.fund gets onramp_unavailable", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json({ error: "onramp_unavailable" }, { status: 503 }));
+    const { client, server } = await connectedServer(fetchImpl);
+
+    const result = await client.callTool({ name: "wallet.fund" });
+
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      status: "unavailable",
+      reason: "onramp_unavailable",
+      instructions: expect.stringContaining("Send USDC on Base (eip155:8453)"),
+    });
     await client.close();
     await server.close();
   });

@@ -7,7 +7,7 @@ import { DEFAULT_REGISTRY_URL, getVapiPaths } from "./config.js";
 import { createPublicFetch, type LookupFn } from "./net-guard.js";
 import { readReceipts } from "./receipts.js";
 
-export const VAPI_CLIENT_VERSION = "0.2.0-dev.3";
+export const VAPI_CLIENT_VERSION = "0.2.0";
 
 export type SupportSystemInfo = {
   platform: string;

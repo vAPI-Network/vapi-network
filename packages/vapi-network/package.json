@@ -1,6 +1,6 @@
 {
   "name": "vapi-network",
-  "version": "0.2.0-dev.3",
+  "version": "0.2.0",
   "description": "One local wallet for discovering and paying every x402 API",
   "license": "Apache-2.0",
   "repository": {
@@ -31,7 +31,8 @@
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit",
     "pack:check": "pnpm --dir ../.. pack:check",
-    "publish:npm": "pnpm pack:check && npm publish ./publish --access public --tag next"
+    "publish:npm": "pnpm pack:check && npm publish ./publish --access public --tag latest",
+    "publish:npm:next": "pnpm pack:check && npm publish ./publish --access public --tag next"
   },
   "dependencies": {
     "@vapi-network/cli": "workspace:*",
@@ -44,6 +45,6 @@
   },
   "publishConfig": {
     "access": "public",
-    "tag": "next"
+    "tag": "latest"
   }
 }

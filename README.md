@@ -18,9 +18,11 @@ npm i -g vapi-network
 vapi init                      # encrypted wallet + config under ~/.vapi (or $VAPI_HOME), prints the address
 ```
 
-Fund that address with USDC on Base. Then:
+Fund that address with `vapi fund` (card or Apple Pay via Coinbase Onramp) or by
+sending USDC on Base to it. Then:
 
 ```bash
+vapi fund                      # hosted onramp link, or direct-transfer instructions
 vapi search "weather"          # every catalog, merged, with provenance
 vapi inspect <listing-ref>     # request contract and the live 402 quote, before paying
 vapi pay <listing-ref> --max 0.02
@@ -49,8 +51,8 @@ Add this to Claude Desktop, Claude Code, or Cursor. The passphrase unlocks the l
 ```
 
 Tools: `call.search`, `call.inspect`, `call.pay`, `wallet.address`, `wallet.balance`,
-`wallet.accounts`, `receipts.list`, `receipts.stats`, `support.report`. Spend caps default to $0.10
-per call and $1.00 per day; the wallet checks both before it signs a payment.
+`wallet.accounts`, `wallet.fund`, `receipts.list`, `receipts.stats`, `support.report`. Spend caps
+default to $0.10 per call and $1.00 per day; the wallet checks both before it signs a payment.
 
 ## Sign-in with X
 
@@ -62,6 +64,32 @@ retries once with `SIGN-IN-WITH-X`. The proof is never sent to a redirect or a d
 If the retry returns a normal 402 quote, the usual spend-policy and payment flow continues. If the
 resource is free after sign-in, the result has `outcome: "signed_in"` and the local receipt records
 `amountAtomic: "0"`.
+
+## Fund the wallet
+
+```bash
+vapi fund                 # ask the registry for a hosted onramp session
+vapi fund --amount 25     # prefill a US dollar amount
+vapi fund --json          # stable machine-readable shape
+```
+
+`vapi fund` POSTs `{ address, network: "base", asset: "USDC", fiatAmount }` to
+`<registry>/api/wallet/onramp-session` through the same guarded network client as
+every other command, prints the returned URL, and opens it in your default
+browser when you are on a terminal. The onramp is **Coinbase's**: Coinbase takes
+the card or Apple Pay payment and sends USDC straight to your local address.
+**vAPI never holds your funds**, never proxies the payment, and never sees your
+card details or your private key.
+
+When the registry replies `503 onramp_unavailable` — or cannot be reached at all
+— the command stays useful instead of failing: it prints your address and
+
+```text
+Send USDC on Base (eip155:8453) to this address; add a little ETH for gas if you plan to sweep.
+```
+
+Either way it finishes by printing the current balance. MCP clients can use the
+`wallet.fund` tool, which returns the same `{ url }` or the same fallback text.
 
 ## Accounts and deposits
 
@@ -257,7 +285,8 @@ pnpm build
 pnpm pack:check
 ```
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for the development workflow and
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for the development workflow,
+[CHANGELOG.md](./CHANGELOG.md) for what shipped in each release, and
 [SECURITY.md](./SECURITY.md) for private vulnerability reports.
 
 CLI commands exit `0` on success, `1` on an operational failure, and `2` for
@@ -271,8 +300,7 @@ All five packages share one version and are published together. npm reads a
 package manifest before lifecycle hooks run, so the release is made from the
 generated `publish/` directories, never from the workspace package roots.
 
-First update every package to the same version, keep
-`publishConfig.tag = "next"`, and verify the exact tarballs:
+First update every package to the same version and verify the exact tarballs:
 
 ```sh
 pnpm install --frozen-lockfile
@@ -291,10 +319,12 @@ pnpm --dir packages/cli publish:npm
 pnpm --dir packages/vapi-network publish:npm
 ```
 
-Each package's `publish:npm` script publishes its staged `./publish` directory
-with `npm publish ./publish --access public --tag next`. The manual release
-workflow verifies and prints these commands; it never receives npm credentials
-or publishes automatically.
+Each package's `publish:npm` script publishes its staged `./publish` directory.
+The `vapi-network` distribution goes to the `latest` npm tag; the scoped
+packages stay on `next`. Use `pnpm --dir packages/vapi-network publish:npm:next`
+to put a distribution build on `next` instead. The manual release workflow
+verifies and prints these commands; it never receives npm credentials or
+publishes automatically.
 
 ## License
 

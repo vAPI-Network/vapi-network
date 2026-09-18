@@ -60,7 +60,9 @@ randomness, filesystem roots, and `fetch` implementations.
 - Protect every outbound service request with the network guard. Treat redirects
   and resolved IP addresses as new destinations that need validation.
 - Published package versions move together. All packages are currently
-  `0.2.0-dev.3`, with npm tag `next` and public access.
+  `0.2.0`. The `vapi-network` distribution publishes to the `latest` npm tag;
+  the scoped packages and `publish:npm:next` keep publishing to `next`. Access
+  is always public.
 - Every published tarball has zero runtime dependencies. All runtime code is
   bundled with esbuild; builds must fail if non-Node external imports leak into
   `dist`.
@@ -96,6 +98,8 @@ dependency sections, and the verifier scans every staged file for `workspace:`
 before asking npm for a dry-run tarball report. Never weaken these checks to
 make a release pass.
 
-Release publishing is manual and must use `--access public --tag next`. The
+Release publishing is manual and must use `--access public` with an explicit
+tag: `publish:npm` sends `vapi-network` to `latest` and the scoped packages to
+`next`, and `publish:npm:next` keeps a distribution preview on `next`. The
 manual GitHub workflow verifies artifacts and prints commands; it has no npm
 authentication and performs no publish.
