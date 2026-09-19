@@ -9,7 +9,9 @@ import { privateKeyToAccount } from "viem/accounts";
 import { createKeyPairSignerFromBytes, getBase58Encoder } from "@solana/kit";
 
 import {
+  changeKeystorePassphrase,
   createKeystore,
+  createKeystoreFromPrivateKey,
   createKeystoreWithPhrase,
   decryptPrivateKey,
   enableSolanaKey,
@@ -323,5 +325,82 @@ describe("keystore version 3", () => {
     await expect(createKeystoreWithPhrase("other-passphrase", path)).rejects.toThrow(
       /Refusing to replace/u,
     );
+  });
+});
+
+describe("changing the keystore passphrase", () => {
+  it("re-seals a version 2 keystore under new salt and IV, keeping the address", async () => {
+    const path = await temporaryKeystorePath("v2-passphrase-change");
+    const original = await encryptPrivateKey(PRIVATE_KEY, "old-passphrase");
+    await writeFile(path, JSON.stringify(original), { mode: 0o600 });
+
+    const account = await changeKeystorePassphrase("old-passphrase", "new-passphrase", path);
+    const rewritten = JSON.parse(await readFile(path, "utf8")) as typeof original;
+
+    expect(account.address).toBe(privateKeyToAccount(PRIVATE_KEY).address);
+    expect(rewritten).toMatchObject({ version: 2, address: account.address });
+    expect(rewritten.crypto.salt).not.toBe(original.crypto.salt);
+    expect(rewritten.crypto.iv).not.toBe(original.crypto.iv);
+    expect(JSON.stringify(rewritten)).not.toContain(PRIVATE_KEY.slice(2));
+    expect((await unlockKeystore("new-passphrase", path)).address).toBe(account.address);
+    await expect(unlockKeystore("old-passphrase", path)).rejects.toThrow(KeystoreError);
+  });
+
+  it("keeps both accounts and the recovery phrase of a version 3 keystore", async () => {
+    const path = await temporaryKeystorePath("v3-passphrase-change");
+    const created = await createKeystoreWithPhrase("old-passphrase", path, { enableSolana: true });
+
+    const account = await changeKeystorePassphrase("old-passphrase", "new-passphrase", path);
+    const rewritten = JSON.parse(await readFile(path, "utf8")) as { version: number };
+
+    expect(rewritten.version).toBe(3);
+    expect(account.address).toBe(created.account.address);
+    expect(account.solana?.address).toBe(created.account.solana?.address);
+    expect(await exportRecoveryPhrase("new-passphrase", path)).toBe(created.recoveryPhrase);
+    expect((await unlockKeystore("new-passphrase", path)).solana?.address).toBe(
+      created.account.solana?.address,
+    );
+    await expect(unlockKeystore("old-passphrase", path)).rejects.toThrow(KeystoreError);
+  });
+
+  it("refuses an empty passphrase and a wrong current one", async () => {
+    const path = await temporaryKeystorePath("passphrase-change-refusals");
+    await createKeystore("old-passphrase", path);
+
+    await expect(changeKeystorePassphrase("old-passphrase", "", path)).rejects.toThrow(
+      "Keystore passphrase cannot be empty.",
+    );
+    await expect(
+      changeKeystorePassphrase("wrong-passphrase", "new-passphrase", path),
+    ).rejects.toThrow("wrong passphrase or corrupt file");
+    expect((await unlockKeystore("old-passphrase", path)).address).toBeDefined();
+  });
+});
+
+describe("importing a private key", () => {
+  it("wraps a supplied key in a version 2 keystore", async () => {
+    const path = await temporaryKeystorePath("import-key");
+
+    const account = await createKeystoreFromPrivateKey("import-passphrase", path, {
+      privateKey: PRIVATE_KEY.toUpperCase().replace("0X", "0x"),
+    });
+    const file = JSON.parse(await readFile(path, "utf8")) as { version: number; address: string };
+
+    expect(account.address).toBe(privateKeyToAccount(PRIVATE_KEY).address);
+    expect(file).toMatchObject({ version: 2, address: account.address });
+    expect((await exportKeystoreKeys("import-passphrase", path)).evm.privateKey).toBe(PRIVATE_KEY);
+    expect(JSON.stringify(file)).not.toContain(PRIVATE_KEY.slice(2));
+  });
+
+  it("rejects a malformed key and never replaces an existing keystore", async () => {
+    const path = await temporaryKeystorePath("import-key-refusals");
+
+    await expect(
+      createKeystoreFromPrivateKey("import-passphrase", path, { privateKey: "0xnope" }),
+    ).rejects.toThrow(/64 hexadecimal characters/u);
+    await createKeystore("first-passphrase", path);
+    await expect(
+      createKeystoreFromPrivateKey("import-passphrase", path, { privateKey: PRIVATE_KEY }),
+    ).rejects.toThrow(/Refusing to replace/u);
   });
 });

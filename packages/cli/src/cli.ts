@@ -1,17 +1,20 @@
 import { spawn } from "node:child_process";
-import { stat } from "node:fs/promises";
+import { chmod, rename, stat } from "node:fs/promises";
 
 import {
   ARC_TESTNET_CAIP2,
   BASE_MAINNET_CAIP2,
   STATS_RANGES,
   aggregateStats,
+  changeKeystorePassphrase,
   createOnrampSession,
   createSupportReport,
-  createKeystore,
+  createKeystoreFromPrivateKey,
+  createKeystoreWithPhrase,
   enableDefaultNetwork,
   enableSolanaKey,
   exportKeystoreKeys,
+  exportRecoveryPhrase,
   filterReceiptsByRange,
   formatLegacyRegistryRewrites,
   formatUsdc,
@@ -22,20 +25,26 @@ import {
   isMissingFile,
   isNetworkConfigured,
   isSolanaNetwork,
+  KeystoreError,
   loadConfig,
   listAccounts,
   migrateLegacyRegistryConfig,
   migrateLegacyVapiHome,
+  promptForSecret,
   readKeystoreAddress,
+  readKeystoreVersion,
   readReceipts,
   readSearchEvents,
   receiptsToCsv,
   sweepBack,
   unlockKeystore,
+  validatePrivateKey,
+  validateRecoveryPhrase,
   writeDefaultConfig,
   type StatsRange,
   type AccountInfo,
   type VapiConfig,
+  type VapiPaymentAccount,
 } from "@vapi-network/core";
 import {
   callService,
@@ -64,6 +73,9 @@ Usage:
   vapi stats [--range <24h|7d|30d>] [--json]
   vapi sweep <address> [--network <caip2>] [--json]
   vapi export-key [--network <caip2>] [--json]
+  vapi backup [--json]
+  vapi import (--phrase | --key) [--networks <base,solana>] [--replace] [--force] [--json]
+  vapi passphrase [--json]
   vapi report "<what happened>" [--include-addresses] [--send] [--json]
   vapi mcp [--json]
   vapi serve [--json]
@@ -77,8 +89,17 @@ export type CliIo = {
   stderr(message: string): void;
 };
 
+/** Every secret the CLI reads is read here, so tests never touch a terminal. */
+export type CliPrompts = {
+  /** Reads one line from the terminal without echoing it. */
+  secret(prompt: string): Promise<string>;
+};
+
 export type CliDependencies = {
   fetchImpl?: typeof fetch;
+  prompts?: CliPrompts;
+  /** Whether a person is watching. Only then is a recovery phrase shown. */
+  interactive?: boolean;
 };
 
 const processIo: CliIo = {
@@ -86,7 +107,18 @@ const processIo: CliIo = {
   stderr: (message) => process.stderr.write(`${message}\n`),
 };
 
+const defaultPrompts: CliPrompts = { secret: (prompt) => promptForSecret(prompt) };
+
 class UsageError extends Error {}
+
+function getPrompts(dependencies: CliDependencies): CliPrompts {
+  return dependencies.prompts ?? defaultPrompts;
+}
+
+/** A recovery phrase is shown only when a person can write it down. */
+function isInteractive(dependencies: CliDependencies): boolean {
+  return dependencies.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+}
 
 /** Run one CLI invocation and return its process exit code. */
 export async function runCli(
@@ -153,6 +185,15 @@ export async function runCli(
       case "export-key":
         await exportKeyCommand(args.slice(1), json, io);
         return 0;
+      case "backup":
+        await backupCommand(args.slice(1), json, io);
+        return 0;
+      case "import":
+        await importCommand(args.slice(1), json, io, dependencies);
+        return 0;
+      case "passphrase":
+        await passphraseCommand(args.slice(1), json, io, dependencies);
+        return 0;
       case "report":
         await reportCommand(args.slice(1), json, io, dependencies);
         return 0;
@@ -208,12 +249,25 @@ async function initCommand(
       ].join("\n"),
     );
   }
+  // The custody terms come before the passphrase, so nothing exists yet when
+  // the person reads what vAPI cannot do for them.
+  if (!json) io.stdout(CUSTODY_NOTICE);
   const passphrase = await getKeystorePassphrase({ confirm: true });
-  let account = adopted
-    ? await unlockKeystore(passphrase, paths.keystore)
-    : await createKeystore(passphrase, paths.keystore, { enableSolana });
+  let account: VapiPaymentAccount;
+  let recoveryPhrase: string | undefined;
+  if (adopted) {
+    account = await unlockKeystore(passphrase, paths.keystore);
+  } else {
+    const created = await createKeystoreWithPhrase(passphrase, paths.keystore, { enableSolana });
+    account = created.account;
+    recoveryPhrase = created.recoveryPhrase;
+  }
   if (enableSolana && !account.solana) {
     account = await enableSolanaKey(passphrase, paths.keystore);
+  }
+  // Before any network call: the phrase must survive a registry outage.
+  if (recoveryPhrase !== undefined && !json) {
+    await showRecoveryPhrase(recoveryPhrase, io, dependencies);
   }
   if (!(await fileExists(paths.config))) {
     await writeDefaultConfig(paths.config, process.env, { networks });
@@ -235,6 +289,9 @@ async function initCommand(
     config: paths.config,
     keystore: paths.keystore,
     ...(configRewrites.length > 0 ? { configRewrites } : {}),
+    custody: "self",
+    warning: CUSTODY_NOTICE,
+    ...(recoveryPhrase === undefined ? {} : { recoveryPhrase: "hidden" }),
     message: "vAPI wallet created. Its encrypted key stays on this machine.",
     nextSteps: buildNextSteps(account.address),
   };
@@ -578,6 +635,210 @@ async function exportKeyCommand(argv: string[], json: boolean, io: CliIo): Promi
   io.stdout(json ? JSON.stringify(result) : result.privateKey);
 }
 
+const BACKUP_WARNING =
+  "Anyone with these words can spend the wallet. Never type them into a website or chat.";
+
+/**
+ * Prints the recovery phrase on stdout and nothing else, the same contract as
+ * `vapi export-key`. Wallets created before version 3 have no phrase, so they
+ * get the route that does back them up instead.
+ */
+async function backupCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
+  requireNoArguments(argv, "backup");
+  const paths = getVapiPaths();
+  io.stderr(BACKUP_WARNING);
+  const passphrase = await getKeystorePassphrase();
+  let recoveryPhrase: string;
+  try {
+    recoveryPhrase = await exportRecoveryPhrase(passphrase, paths.keystore);
+  } catch (error) {
+    const version = await readKeystoreVersion(paths.keystore);
+    if (version === undefined || version === 3) throw error;
+    throw new Error(
+      [
+        error instanceof Error ? error.message : String(error),
+        `Back up ${paths.keystore} together with the passphrase that opens it, or print the key itself with vapi export-key.`,
+      ].join("\n"),
+    );
+  }
+  io.stdout(json ? JSON.stringify({ recoveryPhrase }) : formatRecoveryPhrase(recoveryPhrase));
+}
+
+/**
+ * Restores a wallet from words or a private key the person types in. The secret
+ * never comes from argv, where a shell history would keep it, and an existing
+ * wallet is moved aside rather than overwritten.
+ */
+async function importCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set(["--networks"]),
+    booleanOptions: new Set(["--phrase", "--key", "--replace", "--force"]),
+    maximumPositionals: 24,
+  });
+  if (parsed.positionals.length > 0) {
+    throw new UsageError(
+      "vapi import reads the secret from a prompt. Never pass a recovery phrase or a private key as an argument.",
+    );
+  }
+  const fromPhrase = parsed.has("--phrase");
+  if (fromPhrase === parsed.has("--key")) {
+    throw new UsageError("vapi import needs exactly one of --phrase or --key.");
+  }
+  const networks = parseInitNetworks(parsed.one("--networks") ?? "base");
+  const enableSolana = networks.includes("solana");
+  if (!fromPhrase && enableSolana) {
+    throw new UsageError(
+      "vapi import --key imports one EVM key, so --networks cannot include solana. Import the recovery phrase instead.",
+    );
+  }
+
+  const paths = getVapiPaths();
+  const existed = await fileExists(paths.keystore);
+  if (existed && !parsed.has("--replace")) {
+    const address = await readKeystoreAddress(paths.keystore);
+    throw new Error(
+      [
+        `Keystore already exists at ${paths.keystore}.`,
+        ...(address ? [`Address: ${address}`] : []),
+        "Write its recovery phrase down with vapi backup first, then re-run with --replace.",
+      ].join("\n"),
+    );
+  }
+  if (existed) await refuseFundedWallet(paths, parsed.has("--force"), io, dependencies);
+
+  const prompts = getPrompts(dependencies);
+  const secret = fromPhrase
+    ? validateRecoveryPhrase(await prompts.secret("Recovery phrase: "))
+    : validatePrivateKey(await prompts.secret("Private key: "));
+  const passphrase = await getKeystorePassphrase({ confirm: true });
+  const previousKeystore = existed ? await setKeystoreAside(paths.keystore) : undefined;
+  const account = fromPhrase
+    ? (await createKeystoreWithPhrase(passphrase, paths.keystore, { phrase: secret, enableSolana }))
+        .account
+    : await createKeystoreFromPrivateKey(passphrase, paths.keystore, { privateKey: secret });
+
+  if (!(await fileExists(paths.config))) {
+    await writeDefaultConfig(paths.config, process.env, { networks });
+  } else if (enableSolana) {
+    await enableDefaultNetwork("solana", paths.config);
+  }
+  const result = {
+    address: account.address,
+    ...(account.solana ? { solanaAddress: account.solana.address } : {}),
+    keystore: paths.keystore,
+    ...(previousKeystore ? { previousKeystore } : {}),
+    message: "Wallet imported. Its encrypted key stays on this machine.",
+  };
+  output(
+    io,
+    json,
+    result,
+    [
+      result.message,
+      `Address: ${result.address}`,
+      ...(account.solana ? [`Solana address: ${account.solana.address}`] : []),
+      `Keystore: ${paths.keystore}`,
+      ...(previousKeystore ? [`Previous keystore moved to ${previousKeystore}`] : []),
+    ].join("\n"),
+  );
+}
+
+/**
+ * Replacing a wallet is final for anyone who lost its phrase, so a balance
+ * stops it. The read is the one `vapi accounts` uses and needs no passphrase.
+ */
+async function refuseFundedWallet(
+  paths: ReturnType<typeof getVapiPaths>,
+  force: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  if (force) return;
+  const address = await readKeystoreAddress(paths.keystore);
+  if (address === undefined) {
+    throw new Error(
+      `Cannot read the wallet address in ${paths.keystore}, so its balance is unknown. Re-run with --force to replace it anyway.`,
+    );
+  }
+  const config = await readConfig(paths.config, io);
+  const accounts = await listAccounts({
+    address,
+    config,
+    ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+  });
+  const base = accounts.find((account) => account.caip2 === BASE_MAINNET_CAIP2);
+  const balance = base?.usdcBalance;
+  if (!balance) {
+    throw new Error(
+      [
+        `Could not read the USDC balance of ${address} on Base${base?.error ? `: ${base.error}` : "."}`,
+        "Re-run with --force to replace the wallet anyway.",
+      ].join("\n"),
+    );
+  }
+  if (BigInt(balance.atomic) > 0n) {
+    throw new Error(
+      [
+        `${address} still holds ${balance.formatted} USDC on Base.`,
+        "Move the funds out with vapi sweep <address> first, or re-run with --force to replace the wallet anyway.",
+      ].join("\n"),
+    );
+  }
+}
+
+/** Keeps the replaced keystore, still unreadable to anyone but its owner. */
+async function setKeystoreAside(path: string): Promise<string> {
+  const stamp = new Date().toISOString().replace(/[:.]/gu, "-");
+  const previousPath = `${path}.bak-${stamp}`;
+  await rename(path, previousPath);
+  await chmod(previousPath, 0o600);
+  return previousPath;
+}
+
+/** Re-encrypts the same wallet under a new passphrase; the addresses stay. */
+async function passphraseCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  requireNoArguments(argv, "passphrase");
+  const paths = getVapiPaths();
+  const prompts = getPrompts(dependencies);
+  const current = await getKeystorePassphrase();
+  const next = await prompts.secret("New passphrase: ");
+  if (next.length === 0) throw new KeystoreError("Keystore passphrase cannot be empty.");
+  if (next === current) {
+    throw new KeystoreError("The new passphrase must differ from the current one.");
+  }
+  if ((await prompts.secret("Confirm new passphrase: ")) !== next) {
+    throw new KeystoreError("Passphrases do not match.");
+  }
+  const account = await changeKeystorePassphrase(current, next, paths.keystore);
+  if (process.env.VAPI_KEYSTORE_PASSWORD !== undefined) {
+    io.stderr(
+      "VAPI_KEYSTORE_PASSWORD still holds the old passphrase. Update it before the next run.",
+    );
+  }
+  const result = {
+    address: account.address,
+    ...(account.solana ? { solanaAddress: account.solana.address } : {}),
+    keystore: paths.keystore,
+    message: "Passphrase changed. The wallet and its addresses are unchanged.",
+  };
+  output(
+    io,
+    json,
+    result,
+    [result.message, `Address: ${result.address}`, `Keystore: ${paths.keystore}`].join("\n"),
+  );
+}
+
 async function mcpCommand(argv: string[]): Promise<void> {
   requireNoArguments(argv, "mcp");
   const paths = getVapiPaths();
@@ -675,9 +936,47 @@ function openInBrowser(url: string): boolean {
   }
 }
 
+const CUSTODY_NOTICE = [
+  "This wallet is yours. vAPI has no copy of the key and cannot recover it.",
+  "If you lose this machine and your recovery phrase, the funds are gone.",
+].join("\n");
+
+const PHRASE_GATE = "Write these 12 words down, then press Enter.";
+const PHRASE_HIDDEN = "Recovery phrase: run vapi backup to see it.";
+
+/**
+ * The phrase is shown once, to a person, and waits until they say they have it.
+ * A script or a piped run gets the pointer to `vapi backup` instead, because
+ * nothing here may end up in a log file.
+ */
+async function showRecoveryPhrase(
+  phrase: string,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  if (!isInteractive(dependencies)) {
+    io.stdout(PHRASE_HIDDEN);
+    return;
+  }
+  io.stdout("");
+  io.stdout("Recovery phrase. These 12 words restore this wallet, and nothing else does:");
+  io.stdout(formatRecoveryPhrase(phrase));
+  io.stdout("");
+  await getPrompts(dependencies).secret(`${PHRASE_GATE} `);
+}
+
+/** One numbered word per line: the shape people copy onto paper without slips. */
+function formatRecoveryPhrase(phrase: string): string {
+  return phrase
+    .split(" ")
+    .map((word, index) => `${String(index + 1).padStart(2, " ")}. ${word}`)
+    .join("\n");
+}
+
 function buildNextSteps(address: string): string[] {
   return [
     formatNextStep("Address", address, "(copy this to fund it)"),
+    formatNextStep("Back up", "vapi backup", "(write the 12 words down; vAPI cannot recover them)"),
     formatNextStep(
       "Fund",
       "vapi fund",

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,9 +7,23 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
 import type { Hex } from "viem";
 
-import { appendReceipt, appendSearchEvent, getVapiPaths } from "@vapi-network/core";
+import {
+  appendReceipt,
+  appendSearchEvent,
+  encryptPrivateKey,
+  getVapiPaths,
+  unlockKeystore,
+} from "@vapi-network/core";
 
-import { runCli, type CliIo } from "./cli.js";
+import { runCli, type CliIo, type CliPrompts } from "./cli.js";
+
+/** BIP-39's own test phrase, and the Base account every wallet derives from it. */
+const VECTOR_PHRASE =
+  "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+const VECTOR_ADDRESS = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94";
+const IMPORTED_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" as Hex;
+const BACKUP_WARNING =
+  "Anyone with these words can spend the wallet. Never type them into a website or chat.";
 
 const originalHome = process.env.VAPI_HOME;
 const originalPassword = process.env.VAPI_KEYSTORE_PASSWORD;
@@ -59,9 +73,12 @@ describe("CLI JSON output", () => {
     expect(await runCli(["init", "--json"], jsonRun.io, { fetchImpl: zeroBalanceRpc() })).toBe(0);
     const value = JSON.parse(jsonRun.stdout[0]!) as { address: string; nextSteps: string[] };
 
-    expect(value.nextSteps).toHaveLength(5);
+    expect(value.nextSteps).toHaveLength(6);
     expect(value.nextSteps[0]).toContain(value.address);
     expect(value.nextSteps[0]).toContain("(copy this to fund it)");
+    expect(value.nextSteps[1]).toBe(
+      "Back up   vapi backup                                (write the 12 words down; vAPI cannot recover them)",
+    );
 
     const humanHome = await mkdtemp(join(tmpdir(), "vapi-cli-next-steps-human-"));
     process.env.VAPI_HOME = humanHome;
@@ -590,6 +607,310 @@ describe("export-key command", () => {
   });
 });
 
+describe("custody at creation", () => {
+  it("prints the custody notice and shows the phrase once behind an Enter gate", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-init-phrase-"));
+    process.env.VAPI_HOME = home;
+    process.env.VAPI_KEYSTORE_PASSWORD = "test-only-passphrase";
+    const prompts = scriptedPrompts({ "Write these 12 words down, then press Enter. ": "" });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["init"], captured.io, {
+        fetchImpl: zeroBalanceRpc(),
+        interactive: true,
+        prompts: prompts.prompts,
+      }),
+    ).toBe(0);
+
+    const text = captured.stdout.join("\n");
+    expect(text).toContain(
+      "This wallet is yours. vAPI has no copy of the key and cannot recover it.",
+    );
+    expect(text).toContain(
+      "If you lose this machine and your recovery phrase, the funds are gone.",
+    );
+    expect(prompts.prompted).toEqual(["Write these 12 words down, then press Enter. "]);
+    expect(captured.stderr).toEqual([]);
+
+    const words = numberedWords(text);
+    expect(words).toHaveLength(12);
+    const backup = captureIo();
+    expect(await runCli(["backup", "--json"], backup.io)).toBe(0);
+    expect(JSON.parse(backup.stdout[0]!)).toEqual({ recoveryPhrase: words.join(" ") });
+  });
+
+  it("hides the phrase in --json and names vapi backup without a terminal", async () => {
+    const jsonHome = await mkdtemp(join(tmpdir(), "vapi-cli-init-json-phrase-"));
+    process.env.VAPI_HOME = jsonHome;
+    process.env.VAPI_KEYSTORE_PASSWORD = "test-only-passphrase";
+    const jsonRun = captureIo();
+
+    expect(
+      await runCli(["init", "--json"], jsonRun.io, {
+        fetchImpl: zeroBalanceRpc(),
+        interactive: true,
+        prompts: refusingPrompts(),
+      }),
+    ).toBe(0);
+
+    expect(jsonRun.stdout).toHaveLength(1);
+    expect(JSON.parse(jsonRun.stdout[0]!)).toMatchObject({
+      custody: "self",
+      recoveryPhrase: "hidden",
+      warning:
+        "This wallet is yours. vAPI has no copy of the key and cannot recover it.\nIf you lose this machine and your recovery phrase, the funds are gone.",
+    });
+    expect(numberedWords(jsonRun.stdout[0]!)).toEqual([]);
+
+    const pipedHome = await mkdtemp(join(tmpdir(), "vapi-cli-init-piped-phrase-"));
+    process.env.VAPI_HOME = pipedHome;
+    const piped = captureIo();
+
+    expect(
+      await runCli(["init"], piped.io, {
+        fetchImpl: zeroBalanceRpc(),
+        interactive: false,
+        prompts: refusingPrompts(),
+      }),
+    ).toBe(0);
+
+    const text = piped.stdout.join("\n");
+    expect(text).toContain("Recovery phrase: run vapi backup to see it.");
+    expect(numberedWords(text)).toEqual([]);
+  });
+});
+
+describe("backup command", () => {
+  it("prints the numbered words on stdout behind a stderr warning", async () => {
+    await initializedHome("vapi-cli-backup-v3-");
+    const captured = captureIo();
+
+    expect(await runCli(["backup"], captured.io)).toBe(0);
+
+    expect(captured.stderr).toEqual([BACKUP_WARNING]);
+    expect(captured.stdout).toHaveLength(1);
+    expect(numberedWords(captured.stdout[0]!)).toHaveLength(12);
+  });
+
+  it("points a keystore from before recovery phrases at vapi export-key", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-backup-v2-"));
+    process.env.VAPI_HOME = home;
+    process.env.VAPI_KEYSTORE_PASSWORD = "test-only-passphrase";
+    await writeFile(
+      join(home, "keystore.json"),
+      JSON.stringify(await encryptPrivateKey(IMPORTED_KEY, "test-only-passphrase")),
+      { mode: 0o600 },
+    );
+    const captured = captureIo();
+
+    expect(await runCli(["backup"], captured.io)).toBe(1);
+
+    expect(captured.stdout).toEqual([]);
+    expect(captured.stderr[0]).toBe(BACKUP_WARNING);
+    const message = captured.stderr.slice(1).join("\n");
+    expect(message).toContain("keystore version 2");
+    expect(message).toContain(join(home, "keystore.json"));
+    expect(message).toContain("vapi export-key");
+  });
+});
+
+describe("import command", () => {
+  it("restores the vector wallet from words typed at the prompt", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-import-phrase-"));
+    process.env.VAPI_HOME = home;
+    process.env.VAPI_KEYSTORE_PASSWORD = "test-only-passphrase";
+    const prompts = scriptedPrompts({ "Recovery phrase: ": VECTOR_PHRASE });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["import", "--phrase", "--json"], captured.io, {
+        fetchImpl: zeroBalanceRpc(),
+        prompts: prompts.prompts,
+      }),
+    ).toBe(0);
+
+    expect(captured.stderr).toEqual([]);
+    expect(JSON.parse(captured.stdout[0]!)).toEqual({
+      address: VECTOR_ADDRESS,
+      keystore: join(home, "keystore.json"),
+      message: "Wallet imported. Its encrypted key stays on this machine.",
+    });
+    expect(captured.stdout[0]).not.toContain("abandon");
+    const keystore = JSON.parse(await readFile(join(home, "keystore.json"), "utf8")) as {
+      version: number;
+    };
+    expect(keystore.version).toBe(3);
+  });
+
+  it("refuses to replace an existing wallet, and never reads the phrase from argv", async () => {
+    await initializedHome("vapi-cli-import-existing-");
+    const prompts = scriptedPrompts({ "Recovery phrase: ": VECTOR_PHRASE });
+    const refused = captureIo();
+
+    expect(
+      await runCli(["import", "--phrase"], refused.io, {
+        fetchImpl: zeroBalanceRpc(),
+        prompts: prompts.prompts,
+      }),
+    ).toBe(1);
+    expect(refused.stderr.join("\n")).toContain("Keystore already exists at");
+    expect(refused.stderr.join("\n")).toContain("--replace");
+    expect(prompts.prompted).toEqual([]);
+
+    const onArgv = captureIo();
+    expect(
+      await runCli(["import", "--phrase", "abandon", "abandon"], onArgv.io, {
+        prompts: refusingPrompts(),
+      }),
+    ).toBe(2);
+    expect(onArgv.stderr[0]).toContain("reads the secret from a prompt");
+  });
+
+  it("moves the empty wallet aside with --replace and keeps a funded one", async () => {
+    const home = await initializedHome("vapi-cli-import-replace-");
+    const previousAddress = (
+      JSON.parse(await readFile(join(home, "keystore.json"), "utf8")) as { address: string }
+    ).address;
+    const funded = captureIo();
+
+    expect(
+      await runCli(["import", "--phrase", "--replace"], funded.io, {
+        fetchImpl: fundedRpc(),
+        prompts: refusingPrompts(),
+      }),
+    ).toBe(1);
+    expect(funded.stderr.join("\n")).toContain(`${previousAddress} still holds 1 USDC on Base.`);
+    expect(funded.stderr.join("\n")).toContain("--force");
+
+    const prompts = scriptedPrompts({ "Recovery phrase: ": VECTOR_PHRASE });
+    const captured = captureIo();
+    expect(
+      await runCli(["import", "--phrase", "--replace", "--json"], captured.io, {
+        fetchImpl: zeroBalanceRpc(),
+        prompts: prompts.prompts,
+      }),
+    ).toBe(0);
+
+    const value = JSON.parse(captured.stdout[0]!) as { address: string; previousKeystore: string };
+    expect(value.address).toBe(VECTOR_ADDRESS);
+    expect(value.previousKeystore).toMatch(/keystore\.json\.bak-/u);
+    expect((await stat(value.previousKeystore)).mode & 0o777).toBe(0o600);
+    expect(
+      (JSON.parse(await readFile(value.previousKeystore, "utf8")) as { address: string }).address,
+    ).toBe(previousAddress);
+  });
+
+  it("round-trips a private key typed at the prompt", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-import-key-"));
+    process.env.VAPI_HOME = home;
+    process.env.VAPI_KEYSTORE_PASSWORD = "test-only-passphrase";
+    const prompts = scriptedPrompts({ "Private key: ": IMPORTED_KEY });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["import", "--key", "--json"], captured.io, {
+        fetchImpl: zeroBalanceRpc(),
+        prompts: prompts.prompts,
+      }),
+    ).toBe(0);
+
+    const expected = privateKeyToAccount(IMPORTED_KEY).address;
+    expect(JSON.parse(captured.stdout[0]!)).toMatchObject({ address: expected });
+    expect(captured.stdout[0]).not.toContain(IMPORTED_KEY.slice(2));
+    expect(
+      (JSON.parse(await readFile(join(home, "keystore.json"), "utf8")) as { version: number })
+        .version,
+    ).toBe(2);
+
+    const exported = captureIo();
+    expect(await runCli(["export-key"], exported.io)).toBe(0);
+    expect(exported.stdout[0]).toBe(IMPORTED_KEY);
+  });
+});
+
+describe("passphrase command", () => {
+  it("re-encrypts the wallet in place and retires the old passphrase", async () => {
+    const home = await initializedHome("vapi-cli-passphrase-");
+    const address = (
+      JSON.parse(await readFile(join(home, "keystore.json"), "utf8")) as { address: string }
+    ).address;
+    const prompts = scriptedPrompts({
+      "New passphrase: ": "second-passphrase",
+      "Confirm new passphrase: ": "second-passphrase",
+    });
+    const captured = captureIo();
+
+    expect(await runCli(["passphrase", "--json"], captured.io, { prompts: prompts.prompts })).toBe(
+      0,
+    );
+
+    expect(JSON.parse(captured.stdout[0]!)).toEqual({
+      address,
+      keystore: join(home, "keystore.json"),
+      message: "Passphrase changed. The wallet and its addresses are unchanged.",
+    });
+    expect(captured.stdout.join("\n")).not.toContain("second-passphrase");
+    expect(captured.stderr).toEqual([
+      "VAPI_KEYSTORE_PASSWORD still holds the old passphrase. Update it before the next run.",
+    ]);
+    expect((await unlockKeystore("second-passphrase", join(home, "keystore.json"))).address).toBe(
+      address,
+    );
+    await expect(
+      unlockKeystore("test-only-passphrase", join(home, "keystore.json")),
+    ).rejects.toThrow(/wrong passphrase/u);
+  });
+
+  it("refuses a new passphrase that does not match its confirmation", async () => {
+    await initializedHome("vapi-cli-passphrase-mismatch-");
+    const prompts = scriptedPrompts({
+      "New passphrase: ": "second-passphrase",
+      "Confirm new passphrase: ": "typo-passphrase",
+    });
+    const captured = captureIo();
+
+    expect(await runCli(["passphrase"], captured.io, { prompts: prompts.prompts })).toBe(1);
+    expect(captured.stderr).toEqual(["Passphrases do not match."]);
+    expect(captured.stdout).toEqual([]);
+  });
+});
+
+/** The words a numbered phrase listing shows, in order. */
+function numberedWords(text: string): string[] {
+  return text.split("\n").flatMap((line) => {
+    const match = /^ *\d+\. ([a-z]+)$/u.exec(line);
+    return match ? [match[1]!] : [];
+  });
+}
+
+function scriptedPrompts(answers: Record<string, string>): {
+  prompts: CliPrompts;
+  prompted: string[];
+} {
+  const prompted: string[] = [];
+  return {
+    prompted,
+    prompts: {
+      secret: async (prompt) => {
+        prompted.push(prompt);
+        const answer = answers[prompt];
+        if (answer === undefined) throw new Error(`Unexpected prompt ${JSON.stringify(prompt)}.`);
+        return answer;
+      },
+    },
+  };
+}
+
+/** A prompt that must never be reached. */
+function refusingPrompts(): CliPrompts {
+  return {
+    secret: async (prompt) => {
+      throw new Error(`Unexpected prompt ${JSON.stringify(prompt)}.`);
+    },
+  };
+}
+
 function captureIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];
   const stderr: string[] = [];
@@ -622,6 +943,19 @@ function onrampRpc(onramp: () => Promise<Response>) {
   return vi.fn<typeof fetch>(async (input, init) => {
     if (String(input).includes("/api/wallet/onramp-session")) return await onramp();
     return await rpc(input, init);
+  });
+}
+
+/** One USDC on Base, so a replace has something to refuse. */
+function fundedRpc() {
+  return vi.fn<typeof fetch>(async (_input, init) => {
+    const request = JSON.parse(String(init?.body)) as { id: number; method: string };
+    return Response.json({
+      jsonrpc: "2.0",
+      id: request.id,
+      result:
+        request.method === "eth_call" ? `0x${(1_000_000).toString(16).padStart(64, "0")}` : "0x0",
+    });
   });
 }
 
