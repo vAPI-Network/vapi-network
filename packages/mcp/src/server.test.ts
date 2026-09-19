@@ -44,6 +44,8 @@ describe("Agent Cash MCP marketplace tools", () => {
       "wallet.address",
       "wallet.balance",
       "wallet.accounts",
+      "wallet.list",
+      "wallet.use",
       "wallet.fund",
       "wallet",
       "receipts.list",
@@ -173,6 +175,7 @@ describe("Agent Cash MCP marketplace tools", () => {
     expect(result.isError).not.toBe(true);
     const address = privateKeyToAccount(PRIVATE_KEY).address;
     expect(result.structuredContent).toEqual({
+      wallet: "main",
       address,
       network: "base",
       url: `https://api.vapinetwork.ai/fund/${address}?amount=20`,

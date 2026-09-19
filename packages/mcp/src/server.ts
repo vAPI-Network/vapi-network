@@ -7,6 +7,7 @@ import {
   aggregateStats,
   createSupportReport,
   createPublicFetch,
+  formatUsdc,
   fundingPageUrl,
   getVapiPaths,
   isMirroredHit,
@@ -21,10 +22,13 @@ import {
   readReceipts,
   readSearchEvents,
   resolveRegistryUrl,
+  walletNameSchema,
+  type SpendCaps,
   type VapiPaymentAccount,
   type MarketplaceHit,
   type VapiConfig,
   type StatsRange,
+  type WalletStore,
 } from "@vapi-network/core";
 import { z } from "zod";
 
@@ -36,11 +40,13 @@ import {
 } from "./tools/call.js";
 import { inspectService } from "./tools/inspect.js";
 import { searchMarketplace } from "./tools/search.js";
-import { getWallet } from "./tools/wallet.js";
+import { getWallet, type WalletBalance } from "./tools/wallet.js";
+import { WalletSession, type SessionWalletInfo } from "./wallet-session.js";
 
 export { callService, type CallToolInput, type CallToolResult };
 
 export type VapiServerOptions = {
+  /** The wallet unlocked before stdio was connected. */
   account: VapiPaymentAccount;
   config: VapiConfig;
   fetchImpl?: typeof fetch;
@@ -48,11 +54,36 @@ export type VapiServerOptions = {
   receiptsPath?: string;
   searchesPath?: string;
   reportsDirectory?: string;
+  /** The wallets on this machine. Without it the server has exactly one. */
+  store?: WalletStore | undefined;
+  /** The wallet the session starts on; `VAPI_WALLET` and the default follow. */
+  wallet?: string | undefined;
+  env?: NodeJS.ProcessEnv | undefined;
+  /** The passphrase a payment unlocks with; see `WalletSession`. */
+  passphrase?: (() => string | Promise<string>) | undefined;
 };
 
 const MAX_CACHED_MARKETPLACE_REFS = 200;
 
+/**
+ * The wallet argument every wallet-aware tool takes. Left out, the session's
+ * active wallet pays, which is `VAPI_WALLET` or the machine default until
+ * `wallet.use` moves it.
+ */
+const walletArgument = {
+  wallet: walletNameSchema
+    .optional()
+    .describe(
+      "Wallet name. Without it: the session's active wallet, then VAPI_WALLET, then the machine default.",
+    ),
+};
+
+const allWalletsArgument = {
+  allWallets: z.boolean().optional().describe("Read every wallet's rows instead of one wallet's."),
+};
+
 const callToolResultSchema = z.object({
+  wallet: z.string(),
   status: z.number().int(),
   body: z.unknown(),
   payment: z
@@ -100,20 +131,53 @@ const inspectToolResultSchema = z.object({
     .nullable(),
 });
 
+const balanceSchema = z.object({
+  network: z.string(),
+  name: z.string(),
+  usdcAtomic: z.string().nullable(),
+  usdc: z.string().nullable(),
+  error: z.string().optional(),
+});
+
 const walletToolResultSchema = z.object({
+  wallet: z.string(),
   address: z.string(),
-  balances: z.array(
+  balances: z.array(balanceSchema),
+});
+
+const walletListToolResultSchema = z.object({
+  wallet: z.string().nullable(),
+  default: z.string().nullable(),
+  wallets: z.array(
     z.object({
-      network: z.string(),
       name: z.string(),
-      usdcAtomic: z.string().nullable(),
-      usdc: z.string().nullable(),
-      error: z.string().optional(),
+      address: z.string().optional(),
+      solanaAddress: z.string().optional(),
+      label: z.string().optional(),
+      isDefault: z.boolean(),
+      isActive: z.boolean(),
+      spendCaps: z.object({
+        perCallAtomic: z.string(),
+        perDayAtomic: z.string(),
+        perCallUsd: z.string(),
+        perDayUsd: z.string(),
+      }),
+      balances: z.array(balanceSchema),
+      balanceError: z.string().optional(),
     }),
   ),
 });
 
+const walletUseToolResultSchema = z.object({
+  wallet: z.string(),
+  active: z.string(),
+  address: z.string().optional(),
+  previous: z.string().nullable(),
+  scope: z.literal("session"),
+});
+
 const fundingToolResultSchema = z.object({
+  wallet: z.string(),
   address: z.string(),
   network: z.string(),
   url: z.url(),
@@ -173,6 +237,7 @@ const serviceStatsSchema = z.object({
   calls: z.number().int(),
 });
 const statsToolResultSchema = z.object({
+  wallet: z.string().nullable(),
   range: z.enum(STATS_RANGES),
   generatedAt: z.string(),
   totals: z.object({
@@ -243,8 +308,9 @@ const inspectTool = {
 
 const payTool = {
   description:
-    "Call an API retained from this process's call.search, or an explicit x402 URL, and pay it directly from the local wallet.",
+    "Call an API retained from this process's call.search, or an explicit x402 URL, and pay it directly from the local wallet. The wallet's own per-call and per-day spend caps are applied before anything is signed.",
   inputSchema: {
+    ...walletArgument,
     id: z.string().min(1).optional().describe("API ref returned by call.search."),
     url: z.url().optional().describe("Explicit published API URL for a direct call."),
     method: z.string().min(1).optional(),
@@ -431,6 +497,13 @@ export class VapiMcpServer {
 export function createVapiServer(options: VapiServerOptions) {
   const server = new VapiMcpServer();
   const searchedMarketplaceHits = new Map<string, MarketplaceHit[]>();
+  const session = new WalletSession({
+    account: options.account,
+    store: options.store,
+    wallet: options.wallet,
+    env: options.env,
+    passphrase: options.passphrase,
+  });
   const guardedFetch =
     options.fetchImpl ??
     createPublicFetch({ allowPrivateNetwork: options.config.allowPrivateNetwork ?? false });
@@ -457,39 +530,57 @@ export function createVapiServer(options: VapiServerOptions) {
   server.registerTool("call.inspect", inspectTool, inspect);
   server.registerTool("inspect", deprecatedTool(inspectTool, "call.inspect"), inspect);
 
-  const pay = async (input: CallToolInput) =>
-    asStructuredToolResult(() =>
-      callService({
-        input,
-        marketplaceHit: cachedMarketplaceHit(searchedMarketplaceHits, input.id),
-        account: options.account,
+  const pay = async (input: CallToolInput & { wallet?: string }) =>
+    asStructuredToolResult(async () => {
+      const { wallet, ...call } = input;
+      // Resolve and unlock here, not at startup: wallet.use must be able to
+      // move the session onto another wallet and have the next payment come
+      // out of that one, under that one's caps.
+      const selected = await session.payment(wallet);
+      const result = await callService({
+        input: call,
+        marketplaceHit: cachedMarketplaceHit(searchedMarketplaceHits, call.id),
+        account: selected.account,
         config: options.config,
         fetchImpl: guardedFetch,
         ledgerPath: options.ledgerPath ?? getVapiPaths().ledger,
         receiptsPath: options.receiptsPath ?? getVapiPaths().receipts,
-      }),
-    );
+        wallet: selected.wallet.name,
+        ...(selected.spendCaps ? { spendCaps: selected.spendCaps } : {}),
+      });
+      return { wallet: selected.wallet.name, ...result };
+    });
   server.registerTool("call.pay", payTool, pay);
   server.registerTool("call", deprecatedTool(payTool, "call.pay"), pay);
 
-  const balance = async () =>
-    asStructuredToolResult(() =>
-      getWallet(options.account, options.config, { fetchImpl: guardedFetch }),
-    );
+  const balance = async (input: { wallet?: string }) =>
+    asStructuredToolResult(async () => {
+      const { wallet, ...addresses } = await session.addressesFor(input.wallet);
+      return {
+        wallet: wallet.name,
+        ...(await getWallet(addresses, options.config, {
+          fetchImpl: guardedFetch,
+        })),
+      };
+    });
   server.registerTool(
     "wallet.address",
     {
-      description: "Show the address of the local non-custodial wallet.",
-      inputSchema: {},
-      outputSchema: z.object({ address: z.string() }),
+      description: "Show the address of a local non-custodial wallet.",
+      inputSchema: { ...walletArgument },
+      outputSchema: z.object({ wallet: z.string(), address: z.string() }),
     },
-    async () => asStructuredToolResult(async () => ({ address: options.account.address })),
+    async (input) =>
+      asStructuredToolResult(async () => {
+        const { wallet, address } = await session.addressesFor(input.wallet);
+        return { wallet: wallet.name, address };
+      }),
   );
   server.registerTool(
     "wallet.balance",
     {
-      description: "Show the local wallet address and USDC balances on configured networks.",
-      inputSchema: {},
+      description: "Show a local wallet's address and USDC balances on configured networks.",
+      inputSchema: { ...walletArgument },
       outputSchema: walletToolResultSchema,
     },
     balance,
@@ -498,26 +589,64 @@ export function createVapiServer(options: VapiServerOptions) {
     "wallet.accounts",
     {
       description:
-        "List configured network accounts, USDC and gas balances, and local deposit instructions.",
+        "List configured network accounts, USDC and gas balances, and local deposit instructions for one wallet.",
+      inputSchema: { ...walletArgument },
+      outputSchema: z.object({ wallet: z.string(), accounts: z.array(accountInfoSchema) }),
+    },
+    async (input) =>
+      asStructuredToolResult(async () => {
+        const { wallet, address, solana } = await session.addressesFor(input.wallet);
+        return {
+          wallet: wallet.name,
+          accounts: await listAccounts({
+            address,
+            ...(solana ? { solanaAddress: solana.address } : {}),
+            config: options.config,
+            fetchImpl: guardedFetch,
+          }),
+        };
+      }),
+  );
+  server.registerTool(
+    "wallet.list",
+    {
+      description:
+        "List every wallet on this machine with its address, spend caps and USDC balances, and say which one this session pays from. Read-only and never needs a passphrase.",
       inputSchema: {},
-      outputSchema: z.object({ accounts: z.array(accountInfoSchema) }),
+      outputSchema: walletListToolResultSchema,
     },
     async () =>
       asStructuredToolResult(async () => ({
-        accounts: await listAccounts({
-          address: options.account.address,
-          ...(options.account.solana ? { solanaAddress: options.account.solana.address } : {}),
-          config: options.config,
-          fetchImpl: guardedFetch,
-        }),
+        wallet: session.activeName ?? null,
+        default: session.store?.defaultName ?? session.activeName ?? null,
+        wallets: await Promise.all(
+          (await session.list()).map((info) => describeWallet(info, options.config, guardedFetch)),
+        ),
       })),
+  );
+  server.registerTool(
+    "wallet.use",
+    {
+      description:
+        "Point this MCP session at another wallet for the rest of the process. Session-only: it never writes wallets.json and never changes the default your human set, so their terminal keeps using their own wallet. Only a human, at the CLI, can create, rename, remove, back up or export a wallet.",
+      inputSchema: {
+        name: walletNameSchema.describe("Name of an existing wallet, as shown by wallet.list."),
+      },
+      outputSchema: walletUseToolResultSchema,
+    },
+    async (input) =>
+      asStructuredToolResult(async () => {
+        const used = await session.use(input.name);
+        return { wallet: used.active, scope: "session" as const, ...used };
+      }),
   );
   server.registerTool(
     "wallet.fund",
     {
       description:
-        "Return the hosted funding page for the local wallet so you can hand the link to your human. The page takes a card via Coinbase (needs a Coinbase account; US guest checkout), a transfer from MetaMask/Coinbase Wallet/WalletConnect, or a bridge from another chain. No network call, no expiring link, and vAPI never holds the funds.",
+        "Return the hosted funding page for a local wallet so you can hand the link to your human. The page takes a card via Coinbase (needs a Coinbase account; US guest checkout), a transfer from MetaMask/Coinbase Wallet/WalletConnect, or a bridge from another chain. No network call, no expiring link, and vAPI never holds the funds.",
       inputSchema: {
+        ...walletArgument,
         amountUsd: z
           .number()
           .positive()
@@ -528,23 +657,27 @@ export function createVapiServer(options: VapiServerOptions) {
       outputSchema: fundingToolResultSchema,
     },
     async (input) =>
-      asStructuredToolResult(async () => ({
-        address: options.account.address,
-        network: ONRAMP_NETWORK,
-        url: fundingPageUrl(
-          resolveRegistryUrl(),
-          options.account.address,
-          input.amountUsd === undefined ? {} : { amount: input.amountUsd },
-        ),
-        instructions: FUNDING_PAGE_INSTRUCTIONS,
-      })),
+      asStructuredToolResult(async () => {
+        const { wallet, address } = await session.addressesFor(input.wallet);
+        return {
+          wallet: wallet.name,
+          address,
+          network: ONRAMP_NETWORK,
+          url: fundingPageUrl(
+            resolveRegistryUrl(),
+            address,
+            input.amountUsd === undefined ? {} : { amount: input.amountUsd },
+          ),
+          instructions: FUNDING_PAGE_INSTRUCTIONS,
+        };
+      }),
   );
   server.registerTool(
     "wallet",
     deprecatedTool(
       {
-        description: "Show the local wallet address and USDC balances on configured networks.",
-        inputSchema: {},
+        description: "Show a local wallet's address and USDC balances on configured networks.",
+        inputSchema: { ...walletArgument },
         outputSchema: walletToolResultSchema,
       },
       "wallet.balance",
@@ -552,35 +685,58 @@ export function createVapiServer(options: VapiServerOptions) {
     balance,
   );
 
+  /** The wallet a ledger view is filtered by, or null for every wallet. */
+  const ledgerWallet = (input: { wallet?: string; allWallets?: boolean }): string | null =>
+    input.allWallets === true ? null : session.resolve(input.wallet).name;
+
   server.registerTool(
     "receipts.list",
     {
-      description: "List local append-only x402 call receipts, newest entries last.",
-      inputSchema: { limit: z.number().int().min(0).max(1_000).optional() },
-      outputSchema: z.object({ receipts: z.array(z.unknown()) }),
+      description: "List local append-only x402 call receipts for one wallet, newest entries last.",
+      inputSchema: {
+        ...walletArgument,
+        ...allWalletsArgument,
+        limit: z.number().int().min(0).max(1_000).optional(),
+      },
+      outputSchema: z.object({ wallet: z.string().nullable(), receipts: z.array(z.unknown()) }),
     },
     async (input) =>
-      asStructuredToolResult(async () => ({
-        receipts: await readReceipts(options.receiptsPath ?? getVapiPaths().receipts, {
-          ...(input.limit === undefined ? {} : { limit: input.limit }),
-        }),
-      })),
+      asStructuredToolResult(async () => {
+        const wallet = ledgerWallet(input);
+        return {
+          wallet,
+          receipts: await readReceipts(options.receiptsPath ?? getVapiPaths().receipts, {
+            ...(input.limit === undefined ? {} : { limit: input.limit }),
+            ...(wallet === null ? {} : { wallet }),
+          }),
+        };
+      }),
   );
   server.registerTool(
     "receipts.stats",
     {
-      description: "Aggregate local call and search metrics. No data is uploaded.",
-      inputSchema: { range: z.enum(STATS_RANGES).optional() },
+      description: "Aggregate local call and search metrics for one wallet. No data is uploaded.",
+      inputSchema: {
+        ...walletArgument,
+        ...allWalletsArgument,
+        range: z.enum(STATS_RANGES).optional(),
+      },
       outputSchema: statsToolResultSchema,
     },
     async (input) =>
       asStructuredToolResult(async () => {
         const paths = getVapiPaths();
-        return aggregateStats({
-          receipts: await readReceipts(options.receiptsPath ?? paths.receipts),
-          searches: await readSearchEvents(options.searchesPath ?? paths.searches),
-          range: (input.range ?? "24h") as StatsRange,
-        });
+        const wallet = ledgerWallet(input);
+        return {
+          wallet,
+          ...aggregateStats({
+            receipts: await readReceipts(options.receiptsPath ?? paths.receipts, {
+              ...(wallet === null ? {} : { wallet }),
+            }),
+            searches: await readSearchEvents(options.searchesPath ?? paths.searches),
+            range: (input.range ?? "24h") as StatsRange,
+          }),
+        };
       }),
   );
   server.registerTool(
@@ -610,6 +766,90 @@ export function createVapiServer(options: VapiServerOptions) {
   );
 
   return server;
+}
+
+/**
+ * One `wallet.list` row: what the registry knows, the caps in both atomic USDC
+ * and US dollars, and the balances. A wallet whose RPC call fails reports it in
+ * `balanceError` and does not take the rest of the list down with it.
+ */
+async function describeWallet(
+  info: SessionWalletInfo,
+  config: VapiConfig,
+  fetchImpl: typeof fetch,
+): Promise<{
+  name: string;
+  address?: string;
+  solanaAddress?: string;
+  label?: string;
+  isDefault: boolean;
+  isActive: boolean;
+  spendCaps: {
+    perCallAtomic: string;
+    perDayAtomic: string;
+    perCallUsd: string;
+    perDayUsd: string;
+  };
+  balances: WalletBalance[];
+  balanceError?: string;
+}> {
+  const caps = info.spendCaps ?? config.spendCaps;
+  const row = {
+    name: info.name,
+    ...(info.address === undefined ? {} : { address: info.address }),
+    ...(info.solanaAddress === undefined ? {} : { solanaAddress: info.solanaAddress }),
+    ...(info.label === undefined ? {} : { label: info.label }),
+    isDefault: info.isDefault,
+    isActive: info.isActive,
+    spendCaps: capsInBothUnits(caps),
+  };
+  if (info.address === undefined) {
+    return {
+      ...row,
+      balances: [],
+      balanceError: `Wallet ${info.name} records no address; its keystore is missing or unreadable.`,
+    };
+  }
+  try {
+    const wallet = await getWallet(
+      {
+        address: info.address as `0x${string}`,
+        ...(info.solanaAddress ? { solana: { address: info.solanaAddress } } : {}),
+      },
+      config,
+      { fetchImpl },
+    );
+    // One wallet's unreachable RPC must not take the whole list down, so the
+    // failure is reported on its row and the other wallets still answer.
+    const failed = wallet.balances.filter((entry) => entry.error !== undefined);
+    return {
+      ...row,
+      balances: wallet.balances,
+      ...(failed.length > 0 && failed.length === wallet.balances.length
+        ? { balanceError: failed[0]?.error ?? "No balance could be read." }
+        : {}),
+    };
+  } catch (error) {
+    return {
+      ...row,
+      balances: [],
+      balanceError: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function capsInBothUnits(caps: SpendCaps): {
+  perCallAtomic: string;
+  perDayAtomic: string;
+  perCallUsd: string;
+  perDayUsd: string;
+} {
+  return {
+    perCallAtomic: caps.perCallAtomic,
+    perDayAtomic: caps.perDayAtomic,
+    perCallUsd: formatUsdc(BigInt(caps.perCallAtomic)),
+    perDayUsd: formatUsdc(BigInt(caps.perDayAtomic)),
+  };
 }
 
 function deprecatedTool<T extends { description?: string }>(
