@@ -29,6 +29,7 @@ vapi pay <listing-ref> --max 0.02
 vapi balance
 vapi accounts                   # balances plus network-specific deposit guidance
 vapi receipts                  # one line per paid call: quote, settlement, latency
+vapi backup                    # print the 12-word recovery phrase, on stdout only
 vapi export-key                # print the private key for this wallet, on stdout only
 ```
 
@@ -60,6 +61,57 @@ Add this to Claude Desktop, Claude Code, or Cursor. The passphrase unlocks the l
 Tools: `call.search`, `call.inspect`, `call.pay`, `wallet.address`, `wallet.balance`,
 `wallet.accounts`, `wallet.fund`, `receipts.list`, `receipts.stats`, `support.report`. Spend caps
 default to $0.10 per call and $1.00 per day; the wallet checks both before it signs a payment.
+
+## Your wallet is yours
+
+`vapi init` generates a 12-word BIP-39 recovery phrase on your machine, derives
+the Base account (`m/44'/60'/0'/0/0`) and, with `--networks base,solana`, the
+Solana account (`m/44'/501'/0'/0'`) from it, and writes the phrase encrypted
+under your passphrase to `$VAPI_HOME/keystore.json` (`~/.vapi/keystore.json` by
+default, mode 0600). The phrase is shown once, on a terminal, and never in
+`--json` or piped output.
+
+Three things vAPI cannot do:
+
+- **See it.** No key, phrase, or passphrase ever leaves the machine.
+- **Recover it.** There is no copy anywhere to restore from.
+- **Freeze it.** Payments go straight from your wallet to the service.
+
+Back it up:
+
+```bash
+vapi backup            # the 12 words, numbered, on stdout
+vapi backup --json     # { "recoveryPhrase": "..." }
+```
+
+Write the words on paper and keep them somewhere only you reach. Anyone holding
+them can spend the wallet, so never type them into a website or a chat.
+
+Restore on another machine, or move the wallet to a new one:
+
+```bash
+vapi import --phrase                        # type the words at the prompt
+vapi import --phrase --networks base,solana # restore both accounts
+vapi import --key                           # a 0x private key instead of words
+```
+
+`vapi import` reads the secret from a prompt, never from the command line, and
+asks for a new passphrase. If this machine already has a wallet it refuses to
+touch it: pass `--replace` to move the old `keystore.json` aside to
+`keystore.json.bak-<timestamp>` first, which still needs the old passphrase to
+open. A `--replace` on a wallet that still holds USDC on Base stops as well;
+sweep the funds out first, or accept the loss with `--force`.
+
+Change the passphrase, keeping the same wallet and addresses:
+
+```bash
+vapi passphrase        # current passphrase, then the new one twice
+```
+
+Wallets created before 0.2.5 have no recovery phrase. `vapi backup` says so and
+points at `vapi export-key`, which prints the private key itself; back that key
+up, or `vapi import --key` it into a new wallet. Restoring a phrase-based
+wallet in MetaMask, Rabby, Coinbase Wallet or Phantom gives the same addresses.
 
 ## Sign-in with X
 

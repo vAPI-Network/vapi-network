@@ -380,19 +380,7 @@ export async function createKeystoreWithPhrase(
   path = getVapiPaths().keystore,
   options: CreateKeystoreOptions = {},
 ): Promise<{ account: VapiPaymentAccount; recoveryPhrase: string }> {
-  if (!process.env.VAPI_HOME?.trim() && path === getVapiPaths().keystore) {
-    await migrateLegacyVapiHome({ targetDirectory: getVapiPaths().directory });
-  }
-  try {
-    await stat(path);
-    throw new KeystoreError(
-      `Keystore already exists at ${path}. Refusing to replace the local payment key.`,
-    );
-  } catch (error) {
-    if (!isMissingFile(error)) {
-      throw error;
-    }
-  }
+  await refuseExistingKeystore(path);
 
   const recoveryPhrase =
     options.phrase === undefined
@@ -412,6 +400,87 @@ export async function createKeystoreWithPhrase(
     account: await paymentAccountFromKeys(await decryptKeys(keystore, passphrase)),
     recoveryPhrase,
   };
+}
+
+/** A new keystore may never overwrite the wallet a passphrase already opens. */
+async function refuseExistingKeystore(path: string): Promise<void> {
+  if (!process.env.VAPI_HOME?.trim() && path === getVapiPaths().keystore) {
+    await migrateLegacyVapiHome({ targetDirectory: getVapiPaths().directory });
+  }
+  try {
+    await stat(path);
+    throw new KeystoreError(
+      `Keystore already exists at ${path}. Refusing to replace the local payment key.`,
+    );
+  } catch (error) {
+    if (!isMissingFile(error)) {
+      throw error;
+    }
+  }
+}
+
+/**
+ * Wraps a private key the user already holds in a version 2 keystore, for
+ * `vapi import --key`. Such a wallet has no recovery phrase, so `vapi backup`
+ * keeps pointing at `vapi export-key` for it.
+ */
+export async function createKeystoreFromPrivateKey(
+  passphrase: string,
+  path = getVapiPaths().keystore,
+  options: { privateKey: string },
+): Promise<VapiPaymentAccount> {
+  const privateKey = validatePrivateKey(options.privateKey);
+  await refuseExistingKeystore(path);
+  const keys: EncryptedKeys = { evm: privateKey };
+  await writeKeystore(path, await encryptKeys(keys, passphrase), true);
+  return await paymentAccountFromKeys(keys);
+}
+
+/** The shape every wallet import accepts: 0x and 32 bytes of hexadecimal. */
+export function validatePrivateKey(value: string): Hex {
+  const normalized = value.trim().toLowerCase();
+  if (!/^0x[0-9a-f]{64}$/u.test(normalized)) {
+    throw new KeystoreError(
+      "A private key is 0x followed by 64 hexadecimal characters. Check for a missing character.",
+    );
+  }
+  return normalized as Hex;
+}
+
+/**
+ * Re-seals the keystore under a new passphrase: fresh salt and IV, the same
+ * keys, the same addresses, and the same atomic write as every other keystore
+ * change. A version 1 file becomes version 2, the upgrade `unlockKeystore`
+ * already performs.
+ */
+export async function changeKeystorePassphrase(
+  oldPassphrase: string,
+  newPassphrase: string,
+  path = getVapiPaths().keystore,
+): Promise<VapiPaymentAccount> {
+  if (newPassphrase.length === 0) {
+    throw new KeystoreError("Keystore passphrase cannot be empty.");
+  }
+  const existing = await readStoredKeystore(path);
+  const unlocked = await decryptSecret(existing, oldPassphrase);
+  try {
+    const resealed =
+      existing.version === 3
+        ? await encryptEntropy(unlocked.entropy!, newPassphrase, {
+            enableSolana: Boolean(existing.keys.solana),
+          })
+        : await encryptKeys(unlocked.keys, newPassphrase);
+    const previousSolana = existing.version === 1 ? undefined : existing.keys.solana?.address;
+    if (resealed.address !== existing.address || resealed.keys.solana?.address !== previousSolana) {
+      throw new KeystoreError(
+        "Re-encrypting the keystore would change its addresses. Nothing was written.",
+      );
+    }
+    await writeKeystore(path, resealed, false);
+    return await paymentAccountFromKeys(unlocked.keys);
+  } finally {
+    unlocked.entropy?.fill(0);
+  }
 }
 
 /** `createKeystoreWithPhrase` for callers that do not show the phrase. */
@@ -463,6 +532,23 @@ async function readStoredKeystore(path: string): Promise<AnyVapiKeystore> {
 export async function readKeystoreAddress(
   path = getVapiPaths().keystore,
 ): Promise<string | undefined> {
+  const field = await readKeystoreField(path, "address");
+  return typeof field === "string" ? field : undefined;
+}
+
+/**
+ * The stored format version, read without the passphrase, so a command can say
+ * why a version 1 or 2 wallet has no recovery phrase. Undefined for a missing
+ * or unreadable keystore.
+ */
+export async function readKeystoreVersion(
+  path = getVapiPaths().keystore,
+): Promise<number | undefined> {
+  const field = await readKeystoreField(path, "version");
+  return typeof field === "number" ? field : undefined;
+}
+
+async function readKeystoreField(path: string, field: string): Promise<unknown> {
   let raw: string;
   try {
     raw = await readFile(path, "utf8");
@@ -475,9 +561,7 @@ export async function readKeystoreAddress(
   } catch {
     return undefined;
   }
-  const address =
-    typeof parsed === "object" && parsed !== null ? Reflect.get(parsed, "address") : undefined;
-  return typeof address === "string" ? address : undefined;
+  return typeof parsed === "object" && parsed !== null ? Reflect.get(parsed, field) : undefined;
 }
 
 export type ExportedVapiKeys = {
@@ -642,12 +726,12 @@ export async function getKeystorePassphrase(options?: { confirm?: boolean }): Pr
     return fromEnvironment;
   }
 
-  const first = await promptForPassphrase("Keystore passphrase: ");
+  const first = await promptForSecret("Keystore passphrase: ", "Set VAPI_KEYSTORE_PASSWORD.");
   if (!first) {
     throw new KeystoreError("Keystore passphrase cannot be empty.");
   }
   if (options?.confirm) {
-    const second = await promptForPassphrase("Confirm passphrase: ");
+    const second = await promptForSecret("Confirm passphrase: ", "Set VAPI_KEYSTORE_PASSWORD.");
     if (first !== second) {
       throw new KeystoreError("Passphrases do not match.");
     }
@@ -655,10 +739,17 @@ export async function getKeystorePassphrase(options?: { confirm?: boolean }): Pr
   return first;
 }
 
-async function promptForPassphrase(prompt: string): Promise<string> {
+/**
+ * Reads one line from the terminal without echoing it, for passphrases,
+ * recovery phrases, and private keys. The prompt goes to stderr so stdout stays
+ * a clean channel, and the secret never reaches the terminal's scrollback.
+ */
+export async function promptForSecret(prompt: string, noTerminalHint?: string): Promise<string> {
   if (!stdin.isTTY || typeof stdin.setRawMode !== "function") {
     throw new KeystoreError(
-      "No interactive terminal is available for the keystore prompt. Set VAPI_KEYSTORE_PASSWORD.",
+      `No interactive terminal is available for the keystore prompt.${
+        noTerminalHint === undefined ? "" : ` ${noTerminalHint}`
+      }`,
     );
   }
 

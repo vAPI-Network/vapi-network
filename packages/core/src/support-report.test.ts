@@ -45,10 +45,10 @@ describe("support reports", () => {
     expect(result).toMatchObject({
       path: join(reportsDirectory, "2026-09-10T08-09-10-123Z.json"),
       issueUrl:
-        "https://github.com/vAPI-Network/vapi-network/issues/new?template=bug.yml&title=payment%20failed%20oddly&version=0.2.3",
+        "https://github.com/vAPI-Network/vapi-network/issues/new?template=bug.yml&title=payment%20failed%20oddly&version=0.2.5",
       report: {
         message: "payment failed oddly",
-        clientVersion: "0.2.3",
+        clientVersion: "0.2.5",
         os: { platform: "test-os", release: "1.2.3", arch: "test-arch" },
         node: "v22.0.0-test",
         receiptIds: ["receipt-1", "receipt-2", "receipt-3", "receipt-4", "receipt-5"],

@@ -3,7 +3,7 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
-## Unreleased
+## 0.2.5
 
 ### Added
 
@@ -13,6 +13,28 @@ scoped packages. The packages share one version and are released together.
   account (`m/44'/501'/0'/0'`) in MetaMask, Rabby, Coinbase Wallet or Phantom.
   Keystores written by earlier versions keep working unchanged; they have no
   phrase, and `vapi export-key` stays their backup route.
+- `vapi backup [--json]`: prints the recovery phrase for the local wallet, one
+  numbered word per line on stdout with the warning on stderr, so it can be
+  piped. A wallet created before recovery phrases is told so and pointed at its
+  keystore file and `vapi export-key`.
+- `vapi import --phrase [--networks <base,solana>] [--replace] [--force]`:
+  restores a wallet from words typed at the prompt — never from the command
+  line, where a shell history would keep them — under a new passphrase. An
+  existing keystore is left alone unless `--replace`, which first moves it to
+  `keystore.json.bak-<timestamp>`, and refuses outright while that wallet still
+  holds USDC on Base unless `--force`. `vapi import --key` does the same with a
+  0x-prefixed private key.
+- `vapi passphrase [--json]`: re-encrypts the keystore under a new passphrase.
+  The wallet, its addresses, and its recovery phrase are unchanged.
+
+### Changed
+
+- `vapi init` states the custody terms before it creates anything: vAPI has no
+  copy of the key and cannot recover it. On a terminal it then shows the 12
+  words once, numbered, and waits until you confirm you have written them down.
+  `--json` and piped runs never print the phrase; they carry
+  `custody: "self"`, the same warning, `recoveryPhrase: "hidden"`, and point at
+  `vapi backup`. The next steps gained a `vapi backup` line.
 
 ## 0.2.3
 
