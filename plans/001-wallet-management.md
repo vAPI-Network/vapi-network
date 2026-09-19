@@ -1,6 +1,6 @@
 # Plan 001: Wallet management
 
-Status: proposed 2026-09-19. Owner: Zep. Scope: `vapi-network` client only
+Status: Release 1 shipped 2026-09-19 (0.2.5); Releases 2 and 3 in progress. Owner: Zep. Scope: `vapi-network` client only
 (core, cli, mcp). The console funding page is unchanged.
 
 ## Goal
@@ -91,80 +91,135 @@ Definition of done: gate green (`typecheck`, `lint`, `format:check`, `test`,
 `pack:check`), CHANGELOG entry, version 0.2.5, the README section reviewed by
 Zep before publish.
 
-## Release 2: several wallets (0.3.0)
+## Release 2: the wallet manager (0.3.0)
+
+One machine, several wallets, one clear rule for which wallet a command
+uses. Works the same through the CLI, the MCP server and the SDK, with one
+deliberate difference: an agent can use wallets, only a human can create,
+remove, back up or export one.
 
 ### 2.1 Layout
 
 ```
 ~/.vapi/
-  config.json            # registry, networks, defaults
+  config.json              # registry, networks (no spend caps any more)
+  wallets.json             # { version: 1, default: "main", wallets: { main: {...} } }
   wallets/
-    default.json         # keystore v3 (or migrated v2)
+    main.json              # keystore (v3, or migrated v2)
     agent-claude.json
-  wallets.json           # { "default": "default" }
-  receipts.jsonl         # unchanged, rows gain "wallet": "<name>"
+    .trash/                # removed wallets, kept, 0600, never auto-deleted
+  receipts.jsonl           # rows gain "wallet": "<name>"
 ```
 
-First run of 0.3.0 moves `keystore.json` to `wallets/default.json` and writes
-`wallets.json`; the old path is left as a 0600 symlink for one release so
-external scripts do not break, then removed in 0.4.
+- Names: `[a-z0-9][a-z0-9-]{0,31}`. Shown everywhere a wallet is used.
+- `wallets.json` entry: `{ createdAt, label?, spendCaps: { perCallAtomic, perDayAtomic } }`.
+  Spend caps move from `config.json` to the wallet; an agent wallet can have
+  a small daily cap while the owner's has a large one.
+- Migration, once, on first run of 0.3.0: `keystore.json` → `wallets/main.json`,
+  `config.spendCaps` → `wallets.json` main entry, receipts rows without a
+  wallet are treated as `main`. `keystore.json` becomes a 0600 symlink to
+  `wallets/main.json` for one release so external scripts keep working.
+  A `VAPI_HOME` without a keystore migrates nothing.
 
 ### 2.2 Selection
 
-Precedence: `--wallet <name>` flag, then `VAPI_WALLET`, then `wallets.json`
-default. Every command that unlocks a keystore prints which wallet it used.
-`fund`, `balance`, `sweep`, `export-key`, `backup`, `passphrase` all take
-`--wallet`.
+Precedence: `--wallet <name>` flag, then `VAPI_WALLET`, then the default
+in `wallets.json`. Every command that touches a wallet says which one:
+`Wallet: main (0x1234…abcd)` as the first stdout line in text mode, and a
+`wallet` field in `--json`. A name that does not exist is an error listing
+the names that do.
 
-### 2.3 Commands
+### 2.3 SDK (`@vapi-network/core`)
 
-| Command                                                    | Behaviour                                                                                                                         |
-| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `vapi wallet create <name> [--networks base,solana]`       | Same flow as `init` (notice, phrase, passphrase). `init` becomes `wallet create default` plus config.                             |
-| `vapi wallet list [--json]`                                | Name, addresses, balances, default marker, spend caps.                                                                            |
-| `vapi wallet use <name>`                                   | Sets the default.                                                                                                                 |
-| `vapi wallet rename <old> <new>`                           | File and receipts rows.                                                                                                           |
-| `vapi wallet remove <name>`                                | Refuses while the balance is above zero unless `--force`; prints the backup route first.                                          |
-| `vapi wallet caps <name> --per-call <usd> --per-day <usd>` | Spend caps move from `config.json` to the wallet entry, so an agent wallet can have a small daily cap while the owner's has none. |
+`WalletStore` is the one entry point; every existing function that takes a
+keystore path keeps working.
 
-### 2.4 MCP
+| Method                                                                         | Notes                                                                                                                                     |
+| ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `WalletStore.open(home?)`                                                      | Runs the migration if needed.                                                                                                             |
+| `list()`                                                                       | Names, addresses, default marker, caps, createdAt. No passphrase.                                                                         |
+| `resolve(selection?)`                                                          | Applies the precedence above; returns `{ name, path, entry }`.                                                                            |
+| `create(name, passphrase, { phrase?, enableSolana?, label?, spendCaps? })`     | Same v3 creation as `init`; returns account and phrase.                                                                                   |
+| `importKey(name, passphrase, privateKey)`                                      | v2-style keystore.                                                                                                                        |
+| `unlock(name, passphrase)`                                                     | `unlockKeystore` on the resolved path.                                                                                                    |
+| `setDefault(name)`, `rename(old, new)`, `setSpendCaps(name, caps)`, `setLabel` | Atomic writes of `wallets.json`.                                                                                                          |
+| `remove(name, { force? })`                                                     | Refuses the default wallet and any wallet with a USDC balance unless `force`; moves the file to `wallets/.trash/<name>-<timestamp>.json`. |
+| `restore(name)`                                                                | Brings a trashed wallet back.                                                                                                             |
 
-New tools `wallet.list` and `wallet.use`; every existing `wallet.*`,
-`call.pay` and `receipts.*` tool accepts an optional `wallet` argument.
-Default behaviour unchanged, so existing agent configs keep working.
+Receipts, spend-ledger and sweep code take the wallet name so records stay
+apart per wallet.
 
-### 2.5 Funding page
+### 2.4 CLI
 
-`fund --wallet agent-claude` opens the page with `?label=agent-claude`, which
-the page shows next to the address so the user knows which wallet they are
-topping up. Console change, one line, separate PR.
+```
+vapi wallet list [--json]
+vapi wallet create <name> [--networks base,solana] [--label <text>] [--json]
+vapi wallet use <name>
+vapi wallet rename <old> <new>
+vapi wallet remove <name> [--force]        # asks you to type the name in a terminal
+vapi wallet restore <name>
+vapi wallet caps <name> [--per-call <usd>] [--per-day <usd>] [--json]
+```
+
+Existing commands gain `--wallet <name>`: `balance`, `accounts`, `fund`,
+`pay`, `sweep`, `receipts`, `stats`, `export-key`, `backup`, `import`,
+`passphrase`. `receipts` and `stats` show the selected wallet by default
+and take `--all-wallets`. `init` creates `main` when no wallet exists and
+otherwise says so and lists the wallets. `import` writes a new named wallet
+(`--wallet <name>`, default `main` only when none exists) instead of
+replacing; `--replace` keeps its meaning for an explicitly named wallet.
+
+### 2.5 MCP
+
+- New tools: `wallet.list` (names, addresses, balances, caps, which is
+  active) and `wallet.use` (sets the active wallet **for this session
+  only**; it never rewrites the human's default on disk).
+- `wallet.address`, `wallet.balance`, `wallet.accounts`, `wallet.fund`,
+  `call.pay`, `receipts.list`, `receipts.stats` accept an optional
+  `wallet` argument; without it the session's active wallet, then
+  `VAPI_WALLET`, then the default.
+- No tool creates, removes, renames, exports or backs up a wallet, and no tool
+  returns a phrase or key. Those stay in the CLI, in front of a person.
+- The unattended passphrase comes from `VAPI_KEYSTORE_PASSWORD` for the
+  active wallet, or from the secret store (Release 3).
+
+### 2.6 Funding page
+
+`fund` passes `?label=<name>`; the page shows the name next to the address.
+One-line console change, separate PR.
+
+### 2.7 Tests
+
+Migration from a 0.2.x home (with and without Solana, with legacy receipts);
+selection precedence; every `WalletStore` method including refusal cases;
+CLI commands text and JSON; MCP `wallet.use` not touching disk; spend caps
+enforced per wallet in `pay`; receipts filtered per wallet.
 
 ## Release 3: no plain-text passphrase for agents (0.3.x)
 
 - `vapi unlock [--wallet <name>]` stores the passphrase in the OS secret
-  store: macOS Keychain via the `security` CLI, Linux via `secret-tool` when
-  present. No new dependency. `vapi lock` removes it.
-- `getKeystorePassphrase` order becomes: env var (kept for CI), secret store,
-  prompt. MCP configs then hold no secret; the README's MCP snippet drops
-  `VAPI_KEYSTORE_PASSWORD`.
-- Windows uses the env var until a Credential Manager path exists.
+  store under service `vapi-network`, account `<wallet name>`: macOS
+  Keychain through the `security` binary, Linux through `secret-tool` when
+  present. `vapi lock [--wallet <name>|--all]` removes it. No dependency.
+- Passphrase resolution order becomes: `VAPI_KEYSTORE_PASSWORD` (kept for CI),
+  secret store, prompt. The README's MCP snippet drops the env var.
+- `vapi wallet list` shows which wallets are unlocked for agents.
+- Windows keeps the env var until a Credential Manager path exists.
 
 ## Risks and decisions
 
-- **Phrase on screen.** Shown once, gated on Enter, never in JSON. Same trade
-  as every wallet; documented.
-- **Solana derivation.** Hand-written SLIP-0010 must match Phantom, or a
-  restored phrase shows a different Solana address. Fixed test vectors are the
-  guard.
-- **Migration.** v1/v2 keystores never get rewritten silently; only
-  `passphrase` and `import` write a new file. The wallets-folder move in 0.3.0
-  is the one automatic migration and keeps a symlink for a release.
-- **Zero runtime dependencies.** Kept: viem already bundles BIP-39; SLIP-0010
-  is local code; secret stores use OS binaries.
+- **Agents and secrets.** The MCP surface deliberately cannot mint, remove or
+  export wallets. Agent wallets are created by the human, funded from the
+  page, and capped.
+- **Removal is a move, not a delete.** `.trash` keeps the encrypted file; the
+  passphrase is still required to use it.
+- **Migration.** One automatic layout move, with a symlink for one release;
+  keystore file contents are never rewritten by the migration.
+- **Zero runtime dependencies.** Kept.
 
 ## Order of work
 
-1. Release 1 in one PR per numbered item (1.2 first, then 1.3, then 1.1 and
-   1.4 together), each with tests, then a single publish of 0.2.5.
-2. Release 2 after 0.2.5 has been in use for a week.
-3. Release 3 independent of 2; can start once 1 ships.
+1. Release 1: shipped (PRs #14, #15, #16).
+2. Release 2 as three PRs: core `WalletStore` + migration + per-wallet
+   receipts and caps; CLI; MCP. Then 0.3.0.
+3. Release 3 as one PR; can start once the core PR of Release 2 is merged.
