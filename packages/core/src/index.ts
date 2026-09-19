@@ -1,6 +1,8 @@
 export * from "./call-contracts.js";
 export * from "./call-contracts-wire.js";
 export * from "./accounts.js";
+export * from "./agent-guard.js";
+export * from "./audit.js";
 export * from "./config.js";
 export * from "./discovery.js";
 export {
@@ -14,7 +16,29 @@ export {
   SOLANA_DERIVATION_PATH,
   validateRecoveryPhrase,
 } from "./hd.js";
-export * from "./keystore.js";
+// The keystore functions that return a recovery phrase or a private key are
+// not part of this entry point. They live behind `@vapi-network/core/secrets`
+// so a package that must never hold a secret cannot import one by accident.
+export {
+  changeKeystorePassphrase,
+  createKeystore,
+  createKeystoreFromPrivateKey,
+  enableSolanaKey,
+  encryptPrivateKey,
+  getKeystorePassphrase,
+  KeystoreError,
+  promptForSecret,
+  readKeystoreAddress,
+  readKeystoreVersion,
+  unlockKeystore,
+  validatePrivateKey,
+  type AgentCashKeystore,
+  type CreateKeystoreOptions,
+  type LegacyVapiKeystore,
+  type VapiKeystore,
+  type VapiKeystoreV3,
+  type VapiPaymentAccount,
+} from "./keystore.js";
 export * from "./marketplace-contracts.js";
 export * from "./net-guard.js";
 export * from "./networks.js";

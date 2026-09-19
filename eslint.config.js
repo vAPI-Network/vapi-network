@@ -22,6 +22,32 @@ export default tseslint.config(
     },
   },
   {
+    // The MCP server is the surface an agent drives, so it may never reach a
+    // recovery phrase or a private key. See plan 001, "Safety model".
+    files: ["packages/mcp/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "@vapi-network/core/secrets",
+              message:
+                "The MCP server must never import a secret-returning function. Secrets stay in the CLI, in front of a person.",
+            },
+          ],
+          patterns: [
+            {
+              group: ["**/core/src/secrets", "**/core/src/secrets.js"],
+              message:
+                "The MCP server must never import a secret-returning function. Secrets stay in the CLI, in front of a person.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
     files: ["**/*.mjs"],
     rules: {
       "no-undef": "off",

@@ -31,8 +31,9 @@ vapi pay <listing-ref> --max 0.02
 vapi balance
 vapi accounts                   # balances plus network-specific deposit guidance
 vapi receipts                  # one line per paid call: quote, settlement, latency
-vapi backup                    # print the 12-word recovery phrase, on stdout only
-vapi export-key                # print the private key for this wallet, on stdout only
+vapi backup                    # print the 12-word recovery phrase, on a terminal only
+vapi export-key                # print the private key for this wallet, on a terminal only
+vapi wallet list               # every wallet on this machine, with caps and the default
 ```
 
 `vapi search` tags each listing with its group — `[vapi]`, `[added]`,
@@ -64,6 +65,40 @@ Tools: `call.search`, `call.inspect`, `call.pay`, `wallet.address`, `wallet.bala
 `wallet.accounts`, `wallet.fund`, `receipts.list`, `receipts.stats`, `support.report`. Spend caps
 default to $0.10 per call and $1.00 per day; the wallet checks both before it signs a payment.
 
+## Wallets
+
+One machine can hold several wallets: your own, and a capped one per agent. The
+keystores live in `$VAPI_HOME/wallets/<name>.json`; `$VAPI_HOME/wallets.json`
+records which one is the default, what each may spend, and its label. Names are
+1 to 32 characters of lowercase letters, digits and dashes.
+
+| Command                                             | What it does                                                       |
+| --------------------------------------------------- | ------------------------------------------------------------------ |
+| `vapi wallet list [--json]`                         | Name, address, default marker, caps in USD, label                  |
+| `vapi wallet create <name> [--label <text>]`        | A new wallet, with its own phrase, caps and passphrase             |
+| `vapi wallet use <name>`                            | Makes it the default for every later command                       |
+| `vapi wallet rename <old> <new>`                    | Renames the keystore, the registry entry and the wallet's receipts |
+| `vapi wallet remove <name> [--force]`               | Moves the keystore to `wallets/.trash/`; asks you to type the name |
+| `vapi wallet restore <name>`                        | Brings a removed wallet back, same passphrase                      |
+| `vapi wallet caps <name> [--per-call \| --per-day]` | Sets the spend caps of that wallet, in US dollars                  |
+
+Every command that touches a wallet takes `--wallet <name>`: `balance`,
+`accounts`, `fund`, `pay`, `sweep`, `receipts`, `stats`, `export-key`, `backup`,
+`import`, `passphrase`, `mcp`. Without it, `VAPI_WALLET` decides, and without
+that, the default does. Each of them names the wallet it used — `Wallet: main
+(0x…)` on the first line, or a `wallet` field in `--json` — so neither you nor
+an agent can be wrong about which key just moved.
+
+```bash
+vapi wallet create agent --label "claude code"   # a wallet of its own for the agent
+vapi wallet caps agent --per-call 0.05 --per-day 1
+vapi pay <listing-ref> --wallet agent --max 0.02
+vapi receipts --wallet agent                     # or --all-wallets for every one
+```
+
+Spend caps belong to the wallet, not to the machine, and today's total is
+counted per wallet: an agent cannot spend your daily allowance.
+
 ## Your wallet is yours
 
 `vapi init` generates a 12-word BIP-39 recovery phrase on your machine, derives
@@ -82,8 +117,8 @@ Three things vAPI cannot do:
 Back it up:
 
 ```bash
-vapi backup            # the 12 words, numbered, on stdout
-vapi backup --json     # { "recoveryPhrase": "..." }
+vapi backup            # the 12 words, numbered, on a terminal
+vapi backup --json     # { "wallet": "main", "recoveryPhrase": "..." }
 ```
 
 Write the words on paper and keep them somewhere only you reach. Anyone holding
@@ -114,6 +149,42 @@ Wallets created before 0.2.5 have no recovery phrase. `vapi backup` says so and
 points at `vapi export-key`, which prints the private key itself; back that key
 up, or `vapi import --key` it into a new wallet. Restoring a phrase-based
 wallet in MetaMask, Rabby, Coinbase Wallet or Phantom gives the same addresses.
+
+### Agents and secrets
+
+An agent can drive vAPI all day without ever seeing a secret. It can search,
+inspect, pay from the wallet you gave it, read balances and receipts, and pick a
+wallet by name. It cannot see a recovery phrase, a private key or a passphrase,
+and the MCP server has no tool that creates, removes, renames, backs up or
+exports a wallet.
+
+`vapi backup` and `vapi export-key` print a secret, so they run only when a
+person is demonstrably there: stdin and stdout are both a real terminal, no
+agent or CI marker is set, and you type the wallet's own name to confirm.
+Otherwise they print nothing and say:
+
+```text
+Run this yourself in a terminal; an agent must never see these words.
+```
+
+The markers vAPI refuses on are `VAPI_NO_SECRETS`, `CLAUDECODE`, `CLAUDE_CODE`,
+`CURSOR_AGENT`, `CODEX_SANDBOX`, `OPENAI_CODEX`, `AGENT` and `CI`. Set
+`VAPI_NO_SECRETS=1` in a machine's agent configuration to switch secret printing
+off outright. `vapi init` and `vapi wallet create` still create the wallet under
+those conditions; they simply say `Recovery phrase: run vapi backup yourself in
+a terminal to see it.`
+
+In the SDK the same line is drawn by the module layout: `exportRecoveryPhrase`,
+`exportKeystoreKeys` and `createKeystoreWithPhrase` live in the separate
+`@vapi-network/core/secrets` entry point, which the MCP package is forbidden to
+import. `@vapi-network/core` itself returns accounts, never phrases or keys.
+
+Every secret export and every wallet change — create, import, remove, restore,
+rename, default, caps, passphrase — appends one JSON line to
+`$VAPI_HOME/audit.log` (mode 0600): the time, the event, the wallet, whether a
+terminal was attached, and which marker was set. The line never contains the
+secret itself, so the log answers "did anything export my phrase while the agent
+was running" without you having to trust the agent's own account of it.
 
 ## Sign-in with X
 
@@ -281,7 +352,7 @@ override either full endpoint separately. Registry fallbacks are stored in
 
 | Package                 | Purpose                                                                  |
 | ----------------------- | ------------------------------------------------------------------------ |
-| `@vapi-network/core`    | x402 protocol, wallet, spend policy, discovery merge, and receipts       |
+| `@vapi-network/core`    | x402 protocol, wallet store, spend policy, discovery merge, and receipts |
 | `@vapi-network/sources` | vAPI Registry, Coinbase Bazaar, local-file, and x402scan source adapters |
 | `@vapi-network/mcp`     | stdio MCP server with namespaced payment tools                           |
 | `@vapi-network/cli`     | `init`, discovery, payment, wallet, receipt, and MCP commands            |
@@ -305,11 +376,23 @@ By default, local state lives in `~/.vapi/`:
 
 ```text
 config.json
-keystore.json
+wallets.json          which wallet is the default, plus per-wallet caps and labels
+wallets/
+  main.json           one encrypted keystore per wallet, mode 0600
+  .trash/             removed wallets, kept encrypted, never deleted for you
+keystore.json         a 0600 symlink to wallets/main.json, for one release
+audit.log             one JSON line per secret export or wallet change
 receipts.jsonl
+searches.jsonl
 spend-ledger.json
 reports/
 ```
+
+A `~/.vapi` from 0.2.x migrates itself once, the first time a command opens the
+wallet store: `keystore.json` moves to `wallets/main.json` with its contents
+untouched, `config.json`'s spend caps become the caps of `main`, and
+`keystore.json` stays behind as a symlink so existing scripts keep working. A
+home without a keystore migrates nothing.
 
 Set `VAPI_HOME` to use a different directory. On first use of the default home,
 the client copies an existing `~/.vapi/agent-cash/` configuration into

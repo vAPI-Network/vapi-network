@@ -24,6 +24,29 @@ scoped packages. The packages share one version and are released together.
   `~/.vapi/wallets/.trash/`, where `restore` can bring it back. The default
   wallet is refused until another one is made the default, and a wallet that
   still holds USDC is refused unless you force it.
+- `vapi wallet list|create|use|rename|remove|restore|caps` manages the wallets
+  on a machine. `list` shows the address, the default marker, the caps in US
+  dollars and the label; `caps` takes `--per-call` and `--per-day` in dollars;
+  `remove` asks you to type the wallet name and prints where the keystore went.
+- `--wallet <name>` on every command that touches a wallet, with `VAPI_WALLET`
+  and the registry default behind it. Each of those commands names the wallet
+  it used: `Wallet: <name> (<address>)` on the first line in text mode, and a
+  `wallet` field in `--json`. `vapi receipts` and `vapi stats` show the selected
+  wallet and take `--all-wallets`; `vapi import` writes a named wallet.
+- An agent can no longer be shown a secret. `vapi backup` and `vapi export-key`
+  run only when stdin and stdout are a real terminal, no agent or CI marker is
+  set (`VAPI_NO_SECRETS`, `CLAUDECODE`, `CLAUDE_CODE`, `CURSOR_AGENT`,
+  `CODEX_SANDBOX`, `OPENAI_CODEX`, `AGENT`, `CI`), and the person types the
+  wallet name to confirm. Otherwise they print nothing and say so. `vapi init`
+  and `vapi wallet create` still create the wallet and point at `vapi backup`.
+- `~/.vapi/audit.log` (mode 0600) gets one JSON line per secret export and per
+  wallet change: time, event, wallet, whether a terminal was attached, and the
+  agent marker that was set. It never contains the secret itself.
+- `@vapi-network/core/secrets` is a separate package entry point for the three
+  functions that return a recovery phrase or a private key —
+  `exportRecoveryPhrase`, `exportKeystoreKeys` and `createKeystoreWithPhrase`,
+  plus `decryptPrivateKey`. They are no longer exported from
+  `@vapi-network/core`, and the MCP package is forbidden by lint to import them.
 
 ### Changed
 
@@ -32,6 +55,15 @@ scoped packages. The packages share one version and are released together.
   untouched, `config.json`'s spend caps become the caps of `main`, and
   `keystore.json` stays behind as a mode 0600 symlink for one release so
   existing scripts keep working. A home without a keystore migrates nothing.
+  The CLI itself no longer reads `keystore.json`; it resolves every path
+  through the wallet store.
+- `vapi init` on a machine that already has a wallet is no longer an error: it
+  says nothing was created and lists the wallets it found, without asking for a
+  passphrase.
+- `vapi import` writes a new named wallet instead of replacing the only one.
+  `--wallet <name>` chooses it, and `main` is assumed only on a machine that has
+  no wallet yet. `--replace` moves the named wallet to `wallets/.trash/` first,
+  still refusing a wallet that holds USDC unless `--force`.
 
 ## 0.2.5
 

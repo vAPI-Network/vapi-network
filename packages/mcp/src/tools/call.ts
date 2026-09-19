@@ -23,8 +23,10 @@ import {
   type MarketplaceExecutionMethod,
   type MarketplaceHit,
   type Receipt,
+  type SpendCaps,
   type VapiPaymentAccount,
   type VapiConfig,
+  type WalletName,
   type X402PaymentPayload,
 } from "@vapi-network/core";
 
@@ -149,6 +151,10 @@ export type CallServiceArgs = {
   lookup?: LookupFn;
   ledgerPath?: string;
   receiptsPath?: string;
+  /** The wallet that pays, so its ledger row and its receipts stay its own. */
+  wallet?: WalletName;
+  /** The caps of that wallet. Without it, the machine-wide config caps apply. */
+  spendCaps?: SpendCaps;
   now?: Date;
   nowMs?: () => number;
   timeoutMs?: number;
@@ -518,9 +524,10 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
   }
   trace.capsApplied = true;
   assertMaxPrice(quote.amountAtomic, input.maxPriceUsd);
-  await reserveSpend(quote.amountAtomic, config.spendCaps, {
+  await reserveSpend(quote.amountAtomic, args.spendCaps ?? config.spendCaps, {
     ledgerPath: args.ledgerPath ?? getVapiPaths().ledger,
     now: args.now,
+    ...(args.wallet === undefined ? {} : { wallet: args.wallet }),
   });
 
   // The reservation above is intentionally complete before this signing call.
@@ -731,7 +738,12 @@ async function recordCallReceipt(
             ? "failed_request"
             : "paid",
   };
-  await appendReceipt(receipt, args.receiptsPath);
+  await appendReceipt(receipt, args.receiptsPath, walletTag(args));
+}
+
+/** The wallet name stamped on every receipt this call writes. */
+function walletTag(args: CallServiceArgs): { wallet?: WalletName } {
+  return args.wallet === undefined ? {} : { wallet: args.wallet };
 }
 
 async function recordCallError(
@@ -773,6 +785,7 @@ async function recordCallError(
       outcome,
     },
     args.receiptsPath,
+    walletTag(args),
   );
 }
 

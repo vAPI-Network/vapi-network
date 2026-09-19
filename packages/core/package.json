@@ -22,10 +22,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./secrets": {
+      "types": "./dist/secrets.d.ts",
+      "import": "./dist/secrets.js"
     }
   },
   "scripts": {
-    "build": "node ../../scripts/build-package.mjs index=src/index.ts",
+    "build": "node ../../scripts/build-package.mjs index=src/index.ts secrets=src/secrets.ts",
     "lint": "eslint src --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
