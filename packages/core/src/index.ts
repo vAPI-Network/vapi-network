@@ -29,6 +29,7 @@ export * from "./sweep.js";
 export * from "./siwx.js";
 export * from "./svm.js";
 export * from "./wallet.js";
+export * from "./wallet-store.js";
 export * from "./x402.js";
 export {
   BROWSER_ENABLED_X402_NETWORK_CONFIG,

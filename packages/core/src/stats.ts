@@ -1,4 +1,4 @@
-import type { Receipt } from "./receipts.js";
+import { filterReceiptsByWallet, type Receipt } from "./receipts.js";
 import type { SearchEvent } from "./searches.js";
 
 export const STATS_RANGES = ["24h", "7d", "30d"] as const;
@@ -178,13 +178,16 @@ export function aggregateStats(args: {
   };
 }
 
+/** Keeps the receipts of one range, and of one wallet when `wallet` is given. */
 export function filterReceiptsByRange(
   receipts: readonly Receipt[],
   range: StatsRange,
   now = new Date(),
+  wallet?: string,
 ): Receipt[] {
   const cutoff = now.getTime() - RANGE_MS[range];
-  return receipts.filter((receipt) => inRange(receipt.timestamp, cutoff, now));
+  const rows = wallet === undefined ? receipts : filterReceiptsByWallet(receipts, wallet);
+  return rows.filter((receipt) => inRange(receipt.timestamp, cutoff, now));
 }
 
 export function receiptsToCsv(receipts: readonly Receipt[]): string {
