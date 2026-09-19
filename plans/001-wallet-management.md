@@ -91,6 +91,46 @@ Definition of done: gate green (`typecheck`, `lint`, `format:check`, `test`,
 `pack:check`), CHANGELOG entry, version 0.2.5, the README section reviewed by
 Zep before publish.
 
+## Safety model (applies to every release)
+
+An AI agent may drive the CLI, the MCP server or the SDK. The model is
+built so that it never has to see a secret to do its job.
+
+**Secrets** are the recovery phrase, a private key and a passphrase. Addresses,
+balances, receipts and wallet names are not secrets.
+
+**Where a secret may be shown**
+
+- Only by the CLI, only when stdin and stdout are a real terminal, only after
+  the person types the wallet name to confirm. `vapi backup`, `vapi export-key`
+  and the phrase step of `init` / `wallet create` refuse otherwise and print:
+  "Run this yourself in a terminal; an agent must never see these words."
+- Agent detection: stdout or stdin not a TTY, or any of the marker variables
+  `VAPI_NO_SECRETS`, `CLAUDECODE`, `CLAUDE_CODE`, `CURSOR_AGENT`, `CODEX_SANDBOX`,
+  `OPENAI_CODEX`, `AGENT`, `CI` is set. `VAPI_NO_SECRETS=1` is the documented
+  way to lock a machine's agent configs.
+- The MCP server has no tool that returns a phrase, a key or a passphrase, and
+  no tool that creates, removes, renames, backs up or exports a wallet.
+- The SDK keeps secret-returning functions (`exportRecoveryPhrase`,
+  `exportKeystoreKeys`, `createKeystoreWithPhrase`'s phrase) in a separate
+  entry point `@vapi-network/core/secrets`, not re-exported from the main
+  index. The MCP package never imports it (lint rule). Docs mark it human-only.
+
+**How an agent pays without a secret**
+
+- The passphrase for the wallet the human assigned to the agent comes from the
+  OS secret store (Release 3) or, until then, `VAPI_KEYSTORE_PASSWORD`. It
+  unlocks that wallet only.
+- The unlocked key exists in memory for one signature and is zeroed after.
+- Spend caps are per wallet and enforced in the pay path.
+
+**Traceability**
+
+- `~/.vapi/audit.log` (0600, append-only from the client's point of view)
+  gets one line per secret export, wallet creation, removal, restore, rename,
+  default change and cap change: ISO time, command, wallet name, tty yes/no,
+  agent marker if any. Never the secret itself.
+
 ## Release 2: the wallet manager (0.3.0)
 
 One machine, several wallets, one clear rule for which wallet a command
