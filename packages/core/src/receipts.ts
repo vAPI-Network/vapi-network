@@ -1,15 +1,19 @@
-import { mkdir, open, readFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { z } from "zod";
 
 import { getVapiPaths, isMissingFile } from "./config.js";
 import type { ListingProvenance } from "./discovery.js";
+import { DEFAULT_WALLET_NAME, walletNameSchema, type WalletName } from "./wallet-name.js";
 import type { X402SettlementOutcome } from "./x402.js";
 
 export interface Receipt {
   readonly id: string;
   readonly timestamp: string;
+  /** The wallet that paid. Absent on receipts written before named wallets, which belong to `main`. */
+  readonly wallet?: string;
   readonly resourceUrl: string;
   readonly method?: string;
   /** Primary discovery source retained for compatibility with early receipt writers. */
@@ -65,6 +69,7 @@ const durationSchema = z.number().nonnegative().finite();
 const receiptSchema: z.ZodType<Receipt> = z.strictObject({
   id: z.string().min(1),
   timestamp: z.iso.datetime(),
+  wallet: walletNameSchema.optional(),
   resourceUrl: z.url(),
   method: z.string().min(1).optional(),
   source: z.string().min(1).optional(),
@@ -141,12 +146,21 @@ export function parseReceipt(value: unknown): Receipt {
   return receiptSchema.parse(value);
 }
 
-/** Append exactly one receipt as one JSONL record. Existing records are never rewritten. */
+/**
+ * Append exactly one receipt as one JSONL record. Existing records are never
+ * rewritten. `options.wallet` names the wallet that paid when the receipt does
+ * not already carry one.
+ */
 export async function appendReceipt(
   receipt: Receipt,
   path = getVapiPaths().receipts,
+  options: { wallet?: string } = {},
 ): Promise<Receipt> {
-  const parsed = parseReceipt(receipt);
+  const parsed = parseReceipt(
+    receipt.wallet === undefined && options.wallet !== undefined
+      ? { ...receipt, wallet: options.wallet }
+      : receipt,
+  );
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const handle = await open(path, "a", 0o600);
   try {
@@ -159,7 +173,7 @@ export async function appendReceipt(
 
 export async function readReceipts(
   path = getVapiPaths().receipts,
-  options: { limit?: number } = {},
+  options: { limit?: number; wallet?: string } = {},
 ): Promise<Receipt[]> {
   let raw: string;
   try {
@@ -178,11 +192,67 @@ export async function readReceipts(
         throw new Error(`Invalid receipt on JSONL line ${index + 1}.`, { cause: error });
       }
     });
+  const filtered =
+    options.wallet === undefined ? records : filterReceiptsByWallet(records, options.wallet);
   const limit = options.limit;
-  if (limit === undefined) return records;
+  if (limit === undefined) return filtered;
   if (!Number.isSafeInteger(limit) || limit < 0)
     throw new Error("Receipt limit must be a non-negative integer.");
-  return limit === 0 ? [] : records.slice(-limit);
+  return limit === 0 ? [] : filtered.slice(-limit);
+}
+
+/** The wallet a receipt belongs to; rows written before named wallets are `main`. */
+export function receiptWallet(receipt: Receipt): WalletName {
+  return receipt.wallet ?? DEFAULT_WALLET_NAME;
+}
+
+/** Keeps the receipts of one wallet, counting rows without a wallet as `main`. */
+export function filterReceiptsByWallet(receipts: readonly Receipt[], name: WalletName): Receipt[] {
+  return receipts.filter((receipt) => receiptWallet(receipt) === name);
+}
+
+/**
+ * Rewrites the wallet field of every matching row after a wallet is renamed.
+ * Rows of other wallets keep their exact bytes, and the file is replaced in one
+ * atomic rename. Returns how many rows changed.
+ */
+export async function renameReceiptWallet(
+  from: WalletName,
+  to: WalletName,
+  path = getVapiPaths().receipts,
+): Promise<number> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if (isMissingFile(error)) return 0;
+    throw error;
+  }
+  let changed = 0;
+  const lines = raw.split("\n").map((line, index) => {
+    if (line.trim().length === 0) return line;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch (error) {
+      throw new Error(`Invalid receipt on JSONL line ${index + 1}.`, { cause: error });
+    }
+    const current =
+      typeof parsed === "object" && parsed !== null ? Reflect.get(parsed, "wallet") : undefined;
+    if ((typeof current === "string" ? current : DEFAULT_WALLET_NAME) !== from) return line;
+    changed += 1;
+    return JSON.stringify(parseReceipt({ ...(parsed as Receipt), wallet: to }));
+  });
+  if (changed === 0) return 0;
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporaryPath = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  await writeFile(temporaryPath, lines.join("\n"), {
+    encoding: "utf8",
+    mode: 0o600,
+    flag: "wx",
+  });
+  await rename(temporaryPath, path);
+  return changed;
 }
 
 /** Compatibility alias used by early CLI code. */

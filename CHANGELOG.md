@@ -3,6 +3,36 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## Unreleased (0.3.0)
+
+### Added
+
+- Several wallets on one machine. `~/.vapi/wallets/<name>.json` holds one
+  keystore per wallet and `~/.vapi/wallets.json` records which wallet is the
+  default, what each one may spend per call and per day, and its optional
+  label. Names are 1 to 32 characters of lowercase letters, digits and dashes.
+  The SDK entry point is `WalletStore`: list, resolve, create, import, unlock,
+  rename, re-cap, remove and restore, without ever rewriting key material.
+- Spend caps belong to the wallet, not to the machine, so an agent wallet can
+  be given a small daily allowance while your own keeps a large one. Today's
+  totals are counted per wallet in `spend-ledger.json`; rows written before
+  named wallets count as `main`.
+- Receipts record the wallet that paid. `receipts.jsonl` rows gain an optional
+  `wallet` field, rows written before named wallets read as `main`, and renaming
+  a wallet rewrites its rows in one atomic replacement.
+- Removing a wallet is a move, not a delete: the encrypted keystore goes to
+  `~/.vapi/wallets/.trash/`, where `restore` can bring it back. The default
+  wallet is refused until another one is made the default, and a wallet that
+  still holds USDC is refused unless you force it.
+
+### Changed
+
+- A `~/.vapi` from 0.2.x migrates itself once, the first time the wallet store
+  is opened: `keystore.json` moves to `wallets/main.json` with its contents
+  untouched, `config.json`'s spend caps become the caps of `main`, and
+  `keystore.json` stays behind as a mode 0600 symlink for one release so
+  existing scripts keep working. A home without a keystore migrates nothing.
+
 ## 0.2.5
 
 ### Added

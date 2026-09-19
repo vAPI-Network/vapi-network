@@ -15,10 +15,15 @@ export interface Policy {
   authorize(intent: PaymentIntent): Promise<void>;
 }
 
+/**
+ * Caps one wallet's spending. The caps belong to the wallet, not to the
+ * machine: pass the wallet's name so today's total is counted against that
+ * wallet alone.
+ */
 export class SpendPolicy implements Policy {
   constructor(
     public readonly caps: SpendCaps,
-    private readonly options: { ledgerPath?: string; now?: () => Date } = {},
+    private readonly options: { ledgerPath?: string; now?: () => Date; wallet?: string } = {},
   ) {}
 
   async authorize(intent: PaymentIntent): Promise<void> {
@@ -29,6 +34,7 @@ export class SpendPolicy implements Policy {
     return await reserveSpend(amountAtomic, this.caps, {
       ...(this.options.ledgerPath ? { ledgerPath: this.options.ledgerPath } : {}),
       ...(this.options.now ? { now: this.options.now() } : {}),
+      ...(this.options.wallet ? { wallet: this.options.wallet } : {}),
     });
   }
 }

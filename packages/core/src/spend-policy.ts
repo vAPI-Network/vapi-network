@@ -6,13 +6,31 @@ import { dirname } from "node:path";
 import { z } from "zod";
 
 import { getAgentCashPaths, isMissingFile, type SpendCaps } from "./config.js";
+import { DEFAULT_WALLET_NAME, walletNameSchema, type WalletName } from "./wallet-name.js";
 
 const ledgerSchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
   spentAtomic: z.string().regex(/^\d+$/),
 });
 
+/**
+ * One day's spend for one wallet. A row without a wallet was written before
+ * named wallets and belongs to `main`.
+ */
+const ledgerRowSchema = ledgerSchema.extend({ wallet: walletNameSchema.optional() });
+
+/**
+ * The file holds either a single legacy row, or the multi-wallet form. A home
+ * with only `main` keeps being written in the legacy shape, so a 0.2.x client
+ * can still read its own ledger.
+ */
+const ledgerFileSchema = z.union([
+  z.object({ version: z.literal(1), rows: z.array(ledgerRowSchema) }),
+  ledgerRowSchema,
+]);
+
 export type SpendLedger = z.infer<typeof ledgerSchema>;
+export type SpendLedgerRow = SpendLedger & { wallet: WalletName };
 
 export class SpendCapError extends Error {
   constructor(
@@ -28,27 +46,49 @@ export function utcDateKey(now = new Date()): string {
   return now.toISOString().slice(0, 10);
 }
 
+/** Today's spend for one wallet. Other wallets and older days read as zero. */
 export async function readSpendLedger(
   path = getAgentCashPaths().ledger,
   now = new Date(),
+  wallet: WalletName = DEFAULT_WALLET_NAME,
 ): Promise<SpendLedger> {
-  try {
-    const parsed = ledgerSchema.parse(JSON.parse(await readFile(path, "utf8")));
-    if (parsed.date === utcDateKey(now)) {
-      return parsed;
-    }
-  } catch (error) {
-    if (!isMissingFile(error)) {
-      throw error;
-    }
-  }
-  return { date: utcDateKey(now), spentAtomic: "0" };
+  const rows = await readSpendLedgerRows(path, now);
+  const row = rows.find((candidate) => candidate.wallet === wallet);
+  return { date: utcDateKey(now), spentAtomic: row?.spentAtomic ?? "0" };
 }
 
+/** Today's spend of every wallet that has spent today. */
+export async function readSpendLedgerRows(
+  path = getAgentCashPaths().ledger,
+  now = new Date(),
+): Promise<SpendLedgerRow[]> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    if (isMissingFile(error)) return [];
+    throw error;
+  }
+  const parsed = ledgerFileSchema.parse(JSON.parse(raw));
+  const rows = "rows" in parsed ? parsed.rows : [parsed];
+  const today = utcDateKey(now);
+  return rows
+    .filter((row) => row.date === today)
+    .map((row) => ({
+      date: row.date,
+      spentAtomic: row.spentAtomic,
+      wallet: row.wallet ?? DEFAULT_WALLET_NAME,
+    }));
+}
+
+/**
+ * Reserves one payment against the caps of one wallet. Per-day totals are kept
+ * per wallet, so an agent wallet cannot spend the owner's daily allowance.
+ */
 export async function reserveSpend(
   amountAtomic: bigint,
   caps: SpendCaps,
-  options?: { ledgerPath?: string; now?: Date },
+  options?: { ledgerPath?: string; now?: Date; wallet?: WalletName },
 ): Promise<SpendLedger> {
   if (amountAtomic < 0n) {
     throw new Error("Spend amount cannot be negative.");
@@ -65,21 +105,27 @@ export async function reserveSpend(
 
   const ledgerPath = options?.ledgerPath ?? getAgentCashPaths().ledger;
   const now = options?.now ?? new Date();
+  const wallet = options?.wallet ?? DEFAULT_WALLET_NAME;
   return await withLedgerLock(ledgerPath, async () => {
-    const ledger = await readSpendLedger(ledgerPath, now);
-    const nextSpent = BigInt(ledger.spentAtomic) + amountAtomic;
+    const rows = await readSpendLedgerRows(ledgerPath, now);
+    const spentAtomic = rows.find((row) => row.wallet === wallet)?.spentAtomic ?? "0";
+    const nextSpent = BigInt(spentAtomic) + amountAtomic;
     if (nextSpent > perDayAtomic) {
       throw new SpendCapError(
         "per_day_cap_exceeded",
-        `Payment quote ${amountAtomic} atomic USDC would raise today's spend to ${nextSpent}, above the per-day cap ${perDayAtomic}. Refusing to sign.`,
+        `Payment quote ${amountAtomic} atomic USDC would raise today's spend to ${nextSpent} for wallet ${wallet}, above the per-day cap ${perDayAtomic}. Refusing to sign.`,
       );
     }
-    const nextLedger = {
+    const nextRow: SpendLedgerRow = {
       date: utcDateKey(now),
       spentAtomic: nextSpent.toString(),
+      wallet,
     };
-    await writeLedgerAtomically(ledgerPath, nextLedger);
-    return nextLedger;
+    const nextRows = [...rows.filter((row) => row.wallet !== wallet), nextRow].sort((a, b) =>
+      a.wallet.localeCompare(b.wallet),
+    );
+    await writeLedgerAtomically(ledgerPath, nextRows);
+    return { date: nextRow.date, spentAtomic: nextRow.spentAtomic };
   });
 }
 
@@ -90,7 +136,11 @@ function parseAtomicCap(value: string, label: string): bigint {
   return BigInt(value);
 }
 
-async function writeLedgerAtomically(path: string, ledger: SpendLedger) {
+async function writeLedgerAtomically(path: string, rows: readonly SpendLedgerRow[]) {
+  const ledger =
+    rows.length === 1 && rows[0]!.wallet === DEFAULT_WALLET_NAME
+      ? { date: rows[0]!.date, spentAtomic: rows[0]!.spentAtomic }
+      : { version: 1 as const, rows };
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporaryPath = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   await writeFile(temporaryPath, `${JSON.stringify(ledger, null, 2)}\n`, {

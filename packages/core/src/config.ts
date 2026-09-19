@@ -29,6 +29,14 @@ export const DEFAULT_REGISTRY_FALLBACKS = [
   },
 ] as const;
 
+/**
+ * The caps a wallet starts with. Since 0.3.0 the caps that are enforced belong
+ * to the wallet entry in `wallets.json`, not to `config.json`: an agent wallet
+ * can have a small daily cap while the owner's has a large one. `spendCaps`
+ * stays in `config.json` so 0.2.x files keep parsing, and it is still the
+ * fallback for a home that has no wallet registry yet — see
+ * `spendCapsForWallet` in `wallet-store.ts`.
+ */
 export const DEFAULT_SPEND_CAPS = {
   perCallAtomic: "100000",
   perDayAtomic: "1000000",
