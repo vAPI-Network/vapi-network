@@ -88,7 +88,7 @@ describe("CLI JSON output", () => {
 
     expect(text).toContain("vAPI Network");
     expect(text).toContain("\u2588");
-    expect(text).toMatch(/Fund {6}vapi fund\s+\(card \/ Apple Pay via Coinbase Onramp/);
+    expect(text).toMatch(/Fund {6}vapi fund\s+\(card via Coinbase, a wallet transfer/);
     expect(text).toContain('vapi search "weather"');
     expect(text).toContain('Agent     add {"command":"npx","args":["-y","vapi-network","mcp"]}');
     expect(text).not.toContain("\u001b[");
@@ -205,59 +205,50 @@ describe("bare invocation", () => {
 });
 
 describe("fund command", () => {
-  it("prints the hosted onramp URL and the balance beneath it", async () => {
-    const home = await initializedHome("vapi-cli-fund-ready-");
-    const fetchImpl = onrampRpc(async () =>
-      Response.json({ url: "https://pay.coinbase.com/buy/session" }),
-    );
+  it("prints the funding page link without touching the network", async () => {
+    const home = await initializedHome("vapi-cli-fund-page-");
+    const fetchImpl = vi.fn<typeof fetch>();
     const captured = captureIo();
 
     expect(await runCli(["fund", "--amount", "20"], captured.io, { fetchImpl })).toBe(0);
     expect(captured.stderr).toEqual([]);
     expect(captured.stdout[0]).toMatch(/^Address: 0x[0-9a-fA-F]{40}\n/);
-    expect(captured.stdout[0]).toContain("Fund: https://pay.coinbase.com/buy/session");
-    expect(captured.stdout[0]).toContain("never holds your funds");
-    expect(captured.stdout[0]).toContain("Base mainnet (eip155:8453): 0 USDC");
-    const onramp = fetchImpl.mock.calls.find(([input]) =>
-      String(input).includes("/api/wallet/onramp-session"),
+    expect(captured.stdout[0]).toMatch(
+      /Fund: https:\/\/api\.vapinetwork\.ai\/fund\/0x[0-9a-fA-F]{40}\?amount=20/,
     );
-    expect(JSON.parse(String(onramp?.[1]?.body))).toEqual({
-      address: expect.stringMatching(/^0x[0-9a-fA-F]{40}$/),
-      network: "base",
-      asset: "USDC",
-      fiatAmount: 20,
-    });
-    expect(home).toContain("vapi-cli-fund-ready-");
+    expect(captured.stdout[0]).toContain("card via Coinbase");
+    expect(captured.stdout[0]).toContain("Send USDC on Base (eip155:8453)");
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(home).toContain("vapi-cli-fund-page-");
   });
 
-  it("prints direct transfer instructions on 503 onramp_unavailable", async () => {
-    await initializedHome("vapi-cli-fund-503-");
-    const fetchImpl = onrampRpc(async () =>
-      Response.json({ error: "onramp_unavailable" }, { status: 503 }),
-    );
+  it("returns the address, network and link as JSON", async () => {
+    await initializedHome("vapi-cli-fund-json-");
+    const fetchImpl = vi.fn<typeof fetch>();
     const captured = captureIo();
 
     expect(await runCli(["fund", "--json"], captured.io, { fetchImpl })).toBe(0);
-    expect(JSON.parse(captured.stdout[0]!)).toMatchObject({
-      status: "unavailable",
-      reason: "onramp_unavailable",
-      instructions:
-        "Send USDC on Base (eip155:8453) to this address; add a little ETH for gas if you plan to sweep.",
-      opened: false,
-      balances: [{ network: "eip155:8453", usdc: "0" }],
-    });
+    const value = JSON.parse(captured.stdout[0]!) as Record<string, string>;
+    expect(Object.keys(value).sort()).toEqual(["address", "network", "url"]);
+    expect(value.network).toBe("base");
+    expect(value.url).toBe(`https://api.vapinetwork.ai/fund/${value.address}`);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("stays useful when the registry cannot be reached", async () => {
-    await initializedHome("vapi-cli-fund-offline-");
-    const fetchImpl = onrampRpc(async () => {
-      throw new Error("getaddrinfo ENOTFOUND api.vapinetwork.ai");
-    });
+  it("honours VAPI_REGISTRY_URL", async () => {
+    await initializedHome("vapi-cli-fund-registry-");
+    const previous = process.env.VAPI_REGISTRY_URL;
+    process.env.VAPI_REGISTRY_URL = "https://staging.example";
     const captured = captureIo();
 
-    expect(await runCli(["fund"], captured.io, { fetchImpl })).toBe(0);
-    expect(captured.stdout[0]).toContain("getaddrinfo ENOTFOUND api.vapinetwork.ai");
-    expect(captured.stdout[0]).toContain("Send USDC on Base (eip155:8453)");
+    try {
+      expect(await runCli(["fund", "--json"], captured.io)).toBe(0);
+    } finally {
+      restoreEnvironment("VAPI_REGISTRY_URL", previous);
+    }
+    expect((JSON.parse(captured.stdout[0]!) as { url: string }).url).toContain(
+      "https://staging.example/fund/0x",
+    );
   });
 
   it("rejects an amount that is not a dollar figure", async () => {
@@ -935,15 +926,6 @@ async function initializedHome(prefix: string): Promise<string> {
   process.env.VAPI_KEYSTORE_PASSWORD = "test-only-passphrase";
   expect(await runCli(["init", "--json"], captureIo().io, { fetchImpl: zeroBalanceRpc() })).toBe(0);
   return home;
-}
-
-/** One fake fetch that answers the onramp POST and every JSON-RPC balance read. */
-function onrampRpc(onramp: () => Promise<Response>) {
-  const rpc = zeroBalanceRpc();
-  return vi.fn<typeof fetch>(async (input, init) => {
-    if (String(input).includes("/api/wallet/onramp-session")) return await onramp();
-    return await rpc(input, init);
-  });
 }
 
 /** One USDC on Base, so a replace has something to refuse. */
