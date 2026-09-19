@@ -49,6 +49,20 @@ scoped packages. The packages share one version and are released together.
   applies that wallet's own spend caps and tags its receipt with its name, and
   `receipts.list` and `receipts.stats` filter by it or take `allWallets: true`.
 
+- `vapi unlock [--wallet <name>]` and `vapi lock [--wallet <name> | --all]`
+  keep a wallet's passphrase in the OS secret store instead of in an editor's
+  configuration file: the macOS Keychain through `security`, or libsecret
+  through `secret-tool` on Linux, under the service `vapi-network` and the
+  wallet's name. `unlock` runs only on a real terminal with no agent marker
+  set, and verifies that the passphrase actually opens the wallet before
+  storing it. The passphrase is handed to the OS binary over stdin, never as a
+  command-line argument, so it never appears in `ps`. No new dependency, and
+  both events are recorded in the audit log as `wallet.unlock` and
+  `wallet.lock`. Windows keeps `VAPI_KEYSTORE_PASSWORD` until there is a
+  Credential Manager path.
+- `vapi wallet list` gains an `UNLOCKED` column, and `unlocked` in `--json`:
+  which wallets an agent can pay from without being given a passphrase.
+
 - An agent can no longer be shown a secret. `vapi backup` and `vapi export-key`
   run only when stdin and stdout are a real terminal, no agent or CI marker is
   set (`VAPI_NO_SECRETS`, `CLAUDECODE`, `CLAUDE_CODE`, `CURSOR_AGENT`,
@@ -66,13 +80,24 @@ scoped packages. The packages share one version and are released together.
 
 ### Changed
 
+- Every unlock resolves its passphrase the same way, in one place:
+  `VAPI_KEYSTORE_PASSWORD` first, then the OS secret store entry for that
+  wallet, then a prompt on a terminal. A run with none of the three names both
+  other routes, including `vapi unlock`, instead of only the environment
+  variable. A stored passphrase that no longer opens its wallet says exactly
+  that and points at `vapi unlock`; `vapi passphrase` removes the stored copy
+  when it changes the passphrase, so a stale entry cannot outlive it. The SDK
+  entry point is `resolvePassphrase` in `@vapi-network/core`, with `secretStore`
+  as the adapter underneath it.
+
 - The MCP server no longer pays from one account unlocked at startup. It
   resolves the wallet a tool call names and unlocks that wallet for that one
   payment, so `wallet.use` actually changes which key signs. Reads — addresses,
   balances, accounts and funding links — need no passphrase at all, because the
   wallet store reads a keystore's addresses without opening it. The passphrase
-  still comes from `VAPI_KEYSTORE_PASSWORD` (or the prompt `vapi mcp` gave a
-  person at a terminal); Release 3 moves it into the OS secret store.
+  still comes from `VAPI_KEYSTORE_PASSWORD`, then from the OS secret store
+  entry `vapi unlock` left for that wallet, and only then from the prompt
+  `vapi mcp` gave a person at a terminal. An agent is never prompted.
 
 - A `~/.vapi` from 0.2.x migrates itself once, the first time the wallet store
   is opened: `keystore.json` moves to `wallets/main.json` with its contents

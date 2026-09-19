@@ -7,6 +7,7 @@ import {
   getDefaultConfig,
   readAuditLog,
   type AuditEntry,
+  type SecretStore,
   type VapiConfig,
 } from "@vapi-network/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -286,6 +287,91 @@ describe("the wallet argument", () => {
   });
 });
 
+describe("the passphrase a payment unlocks with", () => {
+  const NO_ENVIRONMENT_PASSPHRASE = { VAPI_KEYSTORE_PASSWORD: undefined };
+
+  it("pays from the OS secret store when the environment holds no passphrase", async () => {
+    const home = await walletHome("vapi-mcp-unlocked-");
+    const { server } = await servedHome(
+      home,
+      paidResource("5000"),
+      { ...NO_ENVIRONMENT_PASSPHRASE, receiptsPath: join(home, "receipts.jsonl") },
+      { secretStore: secretStoreStub({ agent: PASSPHRASE }) },
+    );
+
+    const paid = await server.callTool({
+      name: "call.pay",
+      arguments: { url: "https://93.184.216.34/paid", wallet: "agent", maxPriceUsd: "0.01" },
+    });
+
+    expect(paid.isError).not.toBe(true);
+    expect(paid.structuredContent).toMatchObject({ wallet: "agent", status: 200 });
+    await server.close();
+  });
+
+  it("says when the stored passphrase no longer opens the wallet", async () => {
+    const home = await walletHome("vapi-mcp-stale-");
+    const { server } = await servedHome(
+      home,
+      paidResource("5000"),
+      { ...NO_ENVIRONMENT_PASSPHRASE, receiptsPath: join(home, "receipts.jsonl") },
+      { secretStore: secretStoreStub({ agent: "not-the-passphrase" }) },
+    );
+
+    const paid = await server.callTool({
+      name: "call.pay",
+      arguments: { url: "https://93.184.216.34/paid", wallet: "agent", maxPriceUsd: "0.01" },
+    });
+
+    expect(paid.isError).toBe(true);
+    const message = JSON.stringify(paid.content);
+    expect(message).toContain(
+      "The passphrase stored in the macOS Keychain no longer opens wallet agent.",
+    );
+    expect(message).toContain("vapi unlock --wallet agent");
+    expect(message).not.toContain("not-the-passphrase");
+    await server.close();
+  });
+
+  it("names both routes to a passphrase when it has none, and never prompts", async () => {
+    const home = await walletHome("vapi-mcp-no-passphrase-");
+    const { server } = await servedHome(
+      home,
+      paidResource("5000"),
+      { ...NO_ENVIRONMENT_PASSPHRASE, receiptsPath: join(home, "receipts.jsonl") },
+      { secretStore: secretStoreStub() },
+    );
+
+    const paid = await server.callTool({
+      name: "call.pay",
+      arguments: { url: "https://93.184.216.34/paid", wallet: "agent", maxPriceUsd: "0.01" },
+    });
+
+    expect(paid.isError).toBe(true);
+    const message = JSON.stringify(paid.content);
+    expect(message).toContain("vapi unlock --wallet agent");
+    expect(message).toContain("VAPI_KEYSTORE_PASSWORD");
+    expect(message).toContain("an agent can never be prompted for one");
+    await server.close();
+  });
+
+  it("keeps reading addresses and balances without any passphrase at all", async () => {
+    const home = await walletHome("vapi-mcp-reads-");
+    const { server } = await servedHome(home, zeroBalanceFetch(), NO_ENVIRONMENT_PASSPHRASE, {
+      secretStore: secretStoreStub(),
+    });
+
+    const address = await server.callTool({
+      name: "wallet.address",
+      arguments: { wallet: "agent" },
+    });
+
+    expect(address.isError).not.toBe(true);
+    expect(address.structuredContent).toMatchObject({ wallet: "agent" });
+    await server.close();
+  });
+});
+
 describe("the MCP secret surface", () => {
   const FORBIDDEN_TOOL_WORDS = [
     "backup",
@@ -357,6 +443,7 @@ async function servedHome(
   home: string,
   fetchImpl: typeof fetch,
   overrides: NodeJS.ProcessEnv & { receiptsPath?: string } = {},
+  options: { secretStore?: SecretStore } = {},
 ) {
   const { receiptsPath, ...env } = overrides;
   const store = await WalletStore.open(home);
@@ -369,11 +456,31 @@ async function servedHome(
     wallet: undefined,
     env: { VAPI_KEYSTORE_PASSWORD: PASSPHRASE, ...env },
     fetchImpl,
+    ...(options.secretStore ? { secretStore: options.secretStore } : {}),
     ledgerPath: join(home, "spend-ledger.json"),
     receiptsPath: receiptsPath ?? join(home, "receipts.jsonl"),
     searchesPath: join(home, "searches.jsonl"),
   });
   return { server, store, config };
+}
+
+/** An OS secret store in a plain object, so no test ever touches a keychain. */
+function secretStoreStub(entries: Record<string, string> = {}): SecretStore {
+  return {
+    available: true,
+    platform: "darwin",
+    description: "the macOS Keychain",
+    get: async (name) => entries[name],
+    has: async (name) => entries[name] !== undefined,
+    set: async (name, passphrase) => {
+      entries[name] = passphrase;
+    },
+    remove: async (name) => {
+      if (entries[name] === undefined) return false;
+      delete entries[name];
+      return true;
+    },
+  };
 }
 
 /** An RPC that answers every balance question with zero. */

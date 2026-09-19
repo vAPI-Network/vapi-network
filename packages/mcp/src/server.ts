@@ -23,6 +23,7 @@ import {
   readSearchEvents,
   resolveRegistryUrl,
   walletNameSchema,
+  type SecretStore,
   type SpendCaps,
   type VapiPaymentAccount,
   type MarketplaceHit,
@@ -61,6 +62,8 @@ export type VapiServerOptions = {
   env?: NodeJS.ProcessEnv | undefined;
   /** The passphrase a payment unlocks with; see `WalletSession`. */
   passphrase?: (() => string | Promise<string>) | undefined;
+  /** The OS secret store `vapi unlock` writes to; see `WalletSession`. */
+  secretStore?: SecretStore | undefined;
 };
 
 const MAX_CACHED_MARKETPLACE_REFS = 200;
@@ -503,6 +506,7 @@ export function createVapiServer(options: VapiServerOptions) {
     wallet: options.wallet,
     env: options.env,
     passphrase: options.passphrase,
+    secretStore: options.secretStore,
   });
   const guardedFetch =
     options.fetchImpl ??

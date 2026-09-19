@@ -23,6 +23,10 @@ export const AUDIT_EVENTS = [
   "wallet.rename",
   "wallet.default",
   "wallet.caps",
+  // A wallet's passphrase entering or leaving the OS secret store. The
+  // passphrase itself is never here; only that an agent can now use it.
+  "wallet.unlock",
+  "wallet.lock",
   // An MCP session switching its active wallet. Nothing on disk changes, but
   // the wallet the agent pays from does, so the line has to be there.
   "wallet.use.session",

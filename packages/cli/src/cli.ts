@@ -22,7 +22,6 @@ import {
   formatUsdc,
   fundingPageUrl,
   getArcGasHeadroomAtomic,
-  getKeystorePassphrase,
   getNetworkDefinition,
   getVapiPaths,
   isMissingFile,
@@ -38,9 +37,12 @@ import {
   readReceipts,
   readSearchEvents,
   receiptsToCsv,
+  resolvePassphrase,
   resolveRegistryUrl,
+  secretStore,
   secretsAllowed,
   spendCapsForWallet,
+  staleStoredPassphraseMessage,
   sweepBack,
   unlockKeystore,
   usdToAtomic,
@@ -49,11 +51,14 @@ import {
   WalletStore,
   writeDefaultConfig,
   type AuditEvent,
+  type ResolvedPassphrase,
+  type SecretStore,
   type SecretsDecision,
   type SpendCaps,
   type StatsRange,
   type AccountInfo,
   type VapiConfig,
+  type VapiPaymentAccount,
   type WalletBalanceReader,
   type WalletEntry,
   type WalletInfo,
@@ -97,6 +102,8 @@ Usage:
   vapi backup [--wallet <name>] [--json]
   vapi import (--phrase | --key) [--wallet <name>] [--networks <base,solana>] [--replace] [--force] [--json]
   vapi passphrase [--wallet <name>] [--json]
+  vapi unlock [--wallet <name>] [--json]
+  vapi lock [--wallet <name> | --all] [--json]
   vapi report "<what happened>" [--include-addresses] [--send] [--json]
   vapi mcp [--json]
   vapi serve [--json]
@@ -106,6 +113,8 @@ Usage:
 Every command that touches a wallet takes \`--wallet <name>\`, falls back to \`VAPI_WALLET\`, then to the default set by \`vapi wallet use\`, and names the wallet it used on its first line.
 
 \`vapi fund\` opens the funding page: card via Coinbase (needs a Coinbase account; US guest checkout), send from MetaMask/Coinbase Wallet/WalletConnect, or bridge from another chain.
+
+\`vapi unlock\` keeps one wallet's passphrase in the OS secret store — the macOS Keychain, or libsecret on Linux — so an agent can pay without \`VAPI_KEYSTORE_PASSWORD\` in its configuration. \`vapi lock\` takes it out again. Unlock order: \`VAPI_KEYSTORE_PASSWORD\`, then the secret store, then a prompt on a terminal. Windows still needs the variable.
 
 \`vapi backup\` and \`vapi export-key\` print a secret, so they run only on a real terminal, never for an agent, and ask you to type the wallet name first. Set \`VAPI_NO_SECRETS=1\` to switch them off entirely. Every export and every wallet change is logged to ~/.vapi/audit.log.
 
@@ -134,6 +143,8 @@ export type CliDependencies = {
   interactive?: boolean;
   /** The environment this run sees: wallet selection and agent detection. */
   env?: NodeJS.ProcessEnv;
+  /** The OS secret store `vapi unlock` and `vapi lock` act on. */
+  secretStore?: SecretStore;
 };
 
 const processIo: CliIo = {
@@ -217,6 +228,69 @@ async function targetWallet(
   return await selectWallet(await openWalletStore(), parsed, dependencies);
 }
 
+/** The OS secret store this run uses: the machine's, or the one a test injects. */
+function getSecretStore(dependencies: CliDependencies): SecretStore {
+  return dependencies.secretStore ?? secretStore();
+}
+
+/**
+ * The passphrase for the wallet this command acts on: `VAPI_KEYSTORE_PASSWORD`,
+ * then the OS secret store entry `vapi unlock` left behind, then a prompt.
+ *
+ * The variable is read from the real process environment rather than from the
+ * injected one: it belongs to the process, while `dependencies.env` models
+ * wallet selection and agent markers.
+ */
+async function walletPassphrase(
+  target: { name: string },
+  dependencies: CliDependencies,
+  options: { confirm?: boolean } = {},
+): Promise<ResolvedPassphrase> {
+  const prompts = dependencies.prompts;
+  return await resolvePassphrase(target.name, {
+    env: process.env,
+    store: getSecretStore(dependencies),
+    ...(dependencies.interactive === undefined ? {} : { interactive: dependencies.interactive }),
+    ...(options.confirm === undefined ? {} : { confirm: options.confirm }),
+    prompt: async (prompt, hint) =>
+      prompts ? await prompts.secret(prompt) : await promptForSecret(prompt, hint),
+  });
+}
+
+/**
+ * Runs one keystore operation with a resolved passphrase. A passphrase that
+ * came out of the secret store and no longer opens the wallet is worth its own
+ * sentence: the person has to know which copy went stale, and how to replace it.
+ */
+async function withResolvedPassphrase<T>(
+  resolved: ResolvedPassphrase,
+  target: { name: string },
+  dependencies: CliDependencies,
+  use: (passphrase: string) => Promise<T>,
+): Promise<T> {
+  try {
+    return await use(resolved.passphrase);
+  } catch (error) {
+    if (resolved.source !== "secret-store" || !(error instanceof KeystoreError)) throw error;
+    throw new KeystoreError(
+      staleStoredPassphraseMessage(target.name, getSecretStore(dependencies)),
+      { cause: error },
+    );
+  }
+}
+
+/** Opens the selected wallet, and keeps the passphrase for callers that need it. */
+async function unlockTarget(
+  target: WalletTarget,
+  dependencies: CliDependencies,
+): Promise<{ account: VapiPaymentAccount; passphrase: string }> {
+  const resolved = await walletPassphrase(target, dependencies);
+  const account = await withResolvedPassphrase(resolved, target, dependencies, (passphrase) =>
+    unlockKeystore(passphrase, target.path),
+  );
+  return { account, passphrase: resolved.passphrase };
+}
+
 function walletHeader(target: { name: string; address?: string }): string {
   return target.address === undefined
     ? `Wallet: ${target.name}`
@@ -280,11 +354,12 @@ async function requireSecretsAllowed(
   dependencies: CliDependencies,
   event: AuditEvent,
   wallet: string,
+  refusal: string = AGENT_SECRET_REFUSAL,
 ): Promise<void> {
   const decision = secretsDecision(dependencies);
   if (decision.allowed) return;
   await recordAudit(dependencies, event, { wallet, detail: `refused: ${decision.reason ?? ""}` });
-  throw new KeystoreError(`${AGENT_SECRET_REFUSAL} ${decision.reason ?? ""}`.trim());
+  throw new KeystoreError(`${refusal} ${decision.reason ?? ""}`.trim());
 }
 
 /**
@@ -378,6 +453,12 @@ export async function runCli(
       case "passphrase":
         await passphraseCommand(args.slice(1), json, io, dependencies);
         return 0;
+      case "unlock":
+        await unlockCommand(args.slice(1), json, io, dependencies);
+        return 0;
+      case "lock":
+        await lockCommand(args.slice(1), json, io, dependencies);
+        return 0;
       case "report":
         await reportCommand(args.slice(1), json, io, dependencies);
         return 0;
@@ -430,14 +511,16 @@ async function initCommand(
   // upgraded home is never mistaken for an empty one.
   const store = await openWalletStore();
   if (store.names().length > 0) {
-    await reportExistingWallets(store, json, io);
+    await reportExistingWallets(store, json, io, dependencies);
     return;
   }
 
   // The custody terms come before the passphrase, so nothing exists yet when
   // the person reads what vAPI cannot do for them.
   if (!json) io.stdout(CUSTODY_NOTICE);
-  const passphrase = await getKeystorePassphrase({ confirm: true });
+  const passphrase = (
+    await walletPassphrase({ name: DEFAULT_WALLET_NAME }, dependencies, { confirm: true })
+  ).passphrase;
   const created = await store.create(DEFAULT_WALLET_NAME, passphrase, { enableSolana });
   await recordAudit(dependencies, "wallet.create", { wallet: created.name });
   let account = created.account;
@@ -501,19 +584,25 @@ async function initCommand(
 const INIT_ALREADY_DONE = "This machine already has a wallet, so vapi init created nothing.";
 
 /** What `vapi init` says on a home that is already set up. */
-async function reportExistingWallets(store: WalletStore, json: boolean, io: CliIo): Promise<void> {
+async function reportExistingWallets(
+  store: WalletStore,
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
   const wallets = await store.list();
+  const unlocked = await unlockedWallets(wallets, dependencies);
   if (json) {
     io.stdout(
       JSON.stringify({
-        ...walletListResult(store, wallets),
+        ...walletListResult(store, wallets, unlocked),
         message: INIT_ALREADY_DONE,
       }),
     );
     return;
   }
   io.stdout(INIT_ALREADY_DONE);
-  io.stdout(formatWalletList(wallets));
+  io.stdout(formatWalletList(wallets, unlocked));
   io.stdout("");
   io.stdout("Add another wallet with vapi wallet create <name>.");
 }
@@ -531,7 +620,7 @@ async function walletCommand(
   const rest = argv.slice(1);
   switch (subcommand) {
     case "list":
-      await walletListCommand(rest, json, io);
+      await walletListCommand(rest, json, io, dependencies);
       return;
     case "create":
       await walletCreateCommand(rest, json, io, dependencies);
@@ -560,11 +649,41 @@ async function walletCommand(
   }
 }
 
-async function walletListCommand(argv: string[], json: boolean, io: CliIo): Promise<void> {
+async function walletListCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
   requireNoArguments(argv, "wallet list");
   const store = await openWalletStore();
   const wallets = await store.list();
-  output(io, json, walletListResult(store, wallets), formatWalletList(wallets));
+  const unlocked = await unlockedWallets(wallets, dependencies);
+  output(io, json, walletListResult(store, wallets, unlocked), formatWalletList(wallets, unlocked));
+}
+
+/**
+ * Which wallets an agent can already pay from without a prompt: the ones whose
+ * passphrase is in the OS secret store. Asking never reads the passphrase
+ * itself, and a platform or a keyring that cannot answer simply reports none.
+ */
+async function unlockedWallets(
+  wallets: readonly { name: string }[],
+  dependencies: CliDependencies,
+): Promise<Set<string>> {
+  const store = getSecretStore(dependencies);
+  const unlocked = new Set<string>();
+  if (!store.available) return unlocked;
+  for (const wallet of wallets) {
+    try {
+      if (await store.has(wallet.name)) unlocked.add(wallet.name);
+    } catch {
+      // An unreachable keyring is reported as "not unlocked", never as a
+      // failure of the listing itself.
+      return unlocked;
+    }
+  }
+  return unlocked;
 }
 
 /**
@@ -594,7 +713,7 @@ async function walletCreateCommand(
   }
 
   if (!json) io.stdout(CUSTODY_NOTICE);
-  const passphrase = await getKeystorePassphrase({ confirm: true });
+  const passphrase = (await walletPassphrase({ name }, dependencies, { confirm: true })).passphrase;
   const created = await store.create(name, passphrase, {
     enableSolana,
     ...(label === undefined ? {} : { label }),
@@ -876,6 +995,7 @@ function formatCaps(caps: SpendCaps): string {
 function walletListResult(
   store: WalletStore,
   wallets: readonly WalletInfo[],
+  unlocked: ReadonlySet<string>,
 ): { default: string | null; wallets: unknown[] } {
   return {
     default: store.defaultName ?? null,
@@ -884,6 +1004,7 @@ function walletListResult(
       ...(wallet.address === undefined ? {} : { address: wallet.address }),
       ...(wallet.solanaAddress === undefined ? {} : { solanaAddress: wallet.solanaAddress }),
       isDefault: wallet.isDefault,
+      unlocked: unlocked.has(wallet.name),
       ...(wallet.label === undefined ? {} : { label: wallet.label }),
       createdAt: wallet.createdAt,
       spendCaps: wallet.spendCaps,
@@ -894,11 +1015,14 @@ function walletListResult(
   };
 }
 
-/** One row per wallet: the default marked, the caps in dollars, the label last. */
-function formatWalletList(wallets: readonly WalletInfo[]): string {
+/**
+ * One row per wallet: the default marked, the caps in dollars, whether an
+ * agent can already unlock it, and the label last.
+ */
+function formatWalletList(wallets: readonly WalletInfo[], unlocked: ReadonlySet<string>): string {
   if (wallets.length === 0) return "No wallets yet. Run vapi init.";
   return [
-    "  NAME\tADDRESS\tPER-CALL USD\tPER-DAY USD\tLABEL",
+    "  NAME\tADDRESS\tPER-CALL USD\tPER-DAY USD\tUNLOCKED\tLABEL",
     ...wallets.map((wallet) => {
       const usd = capsInUsd(wallet.spendCaps);
       return [
@@ -906,11 +1030,13 @@ function formatWalletList(wallets: readonly WalletInfo[]): string {
         wallet.address ?? "unreadable",
         usd.perCallUsd,
         usd.perDayUsd,
+        unlocked.has(wallet.name) ? "yes" : "no",
         wallet.label ?? "",
       ].join("\t");
     }),
     "",
     "* is the default wallet. Change it with vapi wallet use <name>.",
+    "UNLOCKED says whether an agent can pay from it without a prompt; see vapi unlock.",
   ].join("\n");
 }
 
@@ -958,7 +1084,7 @@ async function fundCommand(
   });
   const amount = optionalUsdAmount(parsed.one("--amount"), "--amount");
   const target = await targetWallet(parsed, dependencies);
-  const account = await unlockKeystore(await getKeystorePassphrase(), target.path);
+  const { account } = await unlockTarget(target, dependencies);
   const url = fundingPageUrl(
     resolveRegistryUrl(),
     account.address,
@@ -1047,7 +1173,7 @@ async function payCommand(
   const config = await readConfig(paths.config, io);
   const wallet = await targetWallet(parsed, dependencies);
   const spendCaps = await spendCapsForWallet(wallet.store, wallet.name);
-  const account = await unlockKeystore(await getKeystorePassphrase(), wallet.path);
+  const { account } = await unlockTarget(wallet, dependencies);
   const bodyText = parsed.one("--body");
   const maxPriceUsd = aliasedOption(parsed, "--max", "--max-price-usd");
   const input = {
@@ -1091,7 +1217,7 @@ async function balanceCommand(
   const paths = getVapiPaths();
   const config = await readConfig(paths.config, io);
   const target = await targetWallet(parsed, dependencies);
-  const account = await unlockKeystore(await getKeystorePassphrase(), target.path);
+  const { account } = await unlockTarget(target, dependencies);
   const wallet = await getWallet(account, config, dependencies);
   outputForWallet(io, json, target, wallet, formatWallet(wallet));
 }
@@ -1112,10 +1238,10 @@ async function accountsCommand(
   }
   const paths = getVapiPaths();
   const target = await targetWallet(parsed, dependencies);
-  const passphrase = await getKeystorePassphrase();
-  const account = enable
-    ? await enableSolanaKey(passphrase, target.path)
-    : await unlockKeystore(passphrase, target.path);
+  const resolved = await walletPassphrase(target, dependencies);
+  const account = await withResolvedPassphrase(resolved, target, dependencies, (passphrase) =>
+    enable ? enableSolanaKey(passphrase, target.path) : unlockKeystore(passphrase, target.path),
+  );
   if (enable) await enableDefaultNetwork("solana", paths.config);
   const config = await readConfig(paths.config, io);
   const accounts = await listAccounts({
@@ -1260,7 +1386,7 @@ async function sweepCommand(
   const paths = getVapiPaths();
   const config = await readConfig(paths.config, io);
   const target = await targetWallet(parsed, dependencies);
-  const account = await unlockKeystore(await getKeystorePassphrase(), target.path);
+  const { account } = await unlockTarget(target, dependencies);
   if (requestedNetwork && !isNetworkConfigured(config.networks, requestedNetwork)) {
     throw new Error(`Network ${requestedNetwork} is not configured.`);
   }
@@ -1345,7 +1471,10 @@ async function exportKeyCommand(
     "That is not the wallet name. Nothing was printed.",
     dependencies,
   );
-  const keys = await exportKeystoreKeys(await getKeystorePassphrase(), target.path);
+  const resolved = await walletPassphrase(target, dependencies);
+  const keys = await withResolvedPassphrase(resolved, target, dependencies, (passphrase) =>
+    exportKeystoreKeys(passphrase, target.path),
+  );
   if (solana && !keys.solana) {
     throw new Error(
       `No Solana key is enabled in ${target.path}. Run vapi accounts --enable solana first.`,
@@ -1395,10 +1524,12 @@ async function backupCommand(
     dependencies,
   );
   io.stderr(BACKUP_WARNING);
-  const passphrase = await getKeystorePassphrase();
+  const resolved = await walletPassphrase(target, dependencies);
   let recoveryPhrase: string;
   try {
-    recoveryPhrase = await exportRecoveryPhrase(passphrase, target.path);
+    recoveryPhrase = await withResolvedPassphrase(resolved, target, dependencies, (passphrase) =>
+      exportRecoveryPhrase(passphrase, target.path),
+    );
   } catch (error) {
     const version = await readKeystoreVersion(target.path);
     if (version === undefined || version === 3) throw error;
@@ -1470,7 +1601,7 @@ async function importCommand(
   const secret = fromPhrase
     ? validateRecoveryPhrase(await prompts.secret("Recovery phrase: "))
     : validatePrivateKey(await prompts.secret("Private key: "));
-  const passphrase = await getKeystorePassphrase({ confirm: true });
+  const passphrase = (await walletPassphrase({ name }, dependencies, { confirm: true })).passphrase;
   // Only now, with both secrets in hand, is the existing wallet moved: a failed
   // prompt must never leave the machine without the wallet it had.
   let previousKeystore: string | undefined;
@@ -1555,7 +1686,8 @@ async function passphraseCommand(
   });
   const target = await targetWallet(parsed, dependencies);
   const prompts = getPrompts(dependencies);
-  const current = await getKeystorePassphrase();
+  const resolved = await walletPassphrase(target, dependencies);
+  const current = resolved.passphrase;
   const next = await prompts.secret("New passphrase: ");
   if (next.length === 0) throw new KeystoreError("Keystore passphrase cannot be empty.");
   if (next === current) {
@@ -1564,8 +1696,11 @@ async function passphraseCommand(
   if ((await prompts.secret("Confirm new passphrase: ")) !== next) {
     throw new KeystoreError("Passphrases do not match.");
   }
-  const account = await changeKeystorePassphrase(current, next, target.path);
+  const account = await withResolvedPassphrase(resolved, target, dependencies, (passphrase) =>
+    changeKeystorePassphrase(passphrase, next, target.path),
+  );
   await recordAudit(dependencies, "passphrase.change", { wallet: target.name });
+  await retireStoredPassphrase(target, dependencies, io);
   if (process.env.VAPI_KEYSTORE_PASSWORD !== undefined) {
     io.stderr(
       "VAPI_KEYSTORE_PASSWORD still holds the old passphrase. Update it before the next run.",
@@ -1586,6 +1721,142 @@ async function passphraseCommand(
   );
 }
 
+const UNLOCK_NEEDS_TERMINAL =
+  "Type the passphrase yourself in a terminal; an agent must never be handed one.";
+
+/**
+ * Hands one wallet's passphrase to the OS secret store, so an agent can pay
+ * from it without the passphrase sitting in an editor's configuration file.
+ * The passphrase is typed by a person, on a terminal, and is verified against
+ * the keystore before anything is stored: a typo must not be kept.
+ */
+async function unlockCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set([WALLET_OPTION]),
+    maximumPositionals: 0,
+  });
+  const target = await targetWallet(parsed, dependencies);
+  await requireSecretsAllowed(dependencies, "wallet.unlock", target.name, UNLOCK_NEEDS_TERMINAL);
+  const store = getSecretStore(dependencies);
+  if (!store.available) {
+    throw new KeystoreError(NO_SECRET_STORE);
+  }
+
+  const passphrase = await getPrompts(dependencies).secret(`Passphrase for ${target.name}: `);
+  if (passphrase.length === 0) throw new KeystoreError("Keystore passphrase cannot be empty.");
+  try {
+    await unlockKeystore(passphrase, target.path);
+  } catch (error) {
+    await recordAudit(dependencies, "wallet.unlock", {
+      wallet: target.name,
+      detail: "refused: the passphrase did not open the wallet",
+    });
+    throw error;
+  }
+  await store.set(target.name, passphrase);
+  await recordAudit(dependencies, "wallet.unlock", {
+    wallet: target.name,
+    detail: store.description,
+  });
+  const message = `Wallet ${target.name} is unlocked for agents. Its passphrase is in ${store.description}.`;
+  outputForWallet(
+    io,
+    json,
+    target,
+    { unlocked: true, store: store.description, message },
+    [
+      message,
+      `Drop VAPI_KEYSTORE_PASSWORD from your MCP configuration; take the passphrase back out with vapi lock --wallet ${target.name}.`,
+    ].join("\n"),
+  );
+}
+
+/**
+ * Takes a passphrase back out of the OS secret store. Nothing about the wallet
+ * changes: the keystore, its addresses and its passphrase are untouched, and
+ * the next run asks for the passphrase again.
+ */
+async function lockCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set([WALLET_OPTION]),
+    booleanOptions: new Set([ALL_WALLETS_FLAG]),
+    maximumPositionals: 0,
+  });
+  const all = parsed.has(ALL_WALLETS_FLAG);
+  if (all && parsed.one(WALLET_OPTION) !== undefined) {
+    throw new UsageError(`${WALLET_OPTION} and ${ALL_WALLETS_FLAG} cannot be used together.`);
+  }
+  const store = getSecretStore(dependencies);
+  if (!store.available) {
+    throw new KeystoreError(NO_SECRET_STORE);
+  }
+  const walletStore = await openWalletStore();
+  const target = all ? undefined : await selectWallet(walletStore, parsed, dependencies);
+  const names = target ? [target.name] : walletStore.names();
+
+  const locked: string[] = [];
+  for (const name of names) {
+    if (!(await store.remove(name))) continue;
+    locked.push(name);
+    await recordAudit(dependencies, "wallet.lock", { wallet: name, detail: store.description });
+  }
+
+  const message =
+    locked.length === 0
+      ? `No passphrase was stored in ${store.description}${target ? ` for ${target.name}` : ""}.`
+      : `Locked ${locked.join(", ")}. ${locked.length === 1 ? "Its passphrase is" : "Their passphrases are"} no longer in ${store.description}.`;
+  if (target) {
+    outputForWallet(io, json, target, { locked, store: store.description, message }, message);
+    return;
+  }
+  output(io, json, { wallet: null, locked, store: store.description, message }, message);
+}
+
+/** Every wallet on the machine, for `vapi lock`. */
+const ALL_WALLETS_FLAG = "--all";
+
+const NO_SECRET_STORE = "No OS secret store on this platform yet; use VAPI_KEYSTORE_PASSWORD.";
+
+/**
+ * A new passphrase makes the stored copy wrong, so `vapi passphrase` retires
+ * it. An entry that no longer opens its wallet is the one failure an agent
+ * cannot do anything about.
+ */
+async function retireStoredPassphrase(
+  target: WalletTarget,
+  dependencies: CliDependencies,
+  io: CliIo,
+): Promise<void> {
+  const store = getSecretStore(dependencies);
+  if (!store.available) return;
+  let removed: boolean;
+  try {
+    removed = await store.remove(target.name);
+  } catch {
+    // A keyring that will not answer is not a reason to fail a passphrase
+    // change that already succeeded.
+    return;
+  }
+  if (!removed) return;
+  await recordAudit(dependencies, "wallet.lock", {
+    wallet: target.name,
+    detail: "passphrase changed",
+  });
+  io.stderr(
+    `The old passphrase was removed from ${store.description}. Run vapi unlock --wallet ${target.name} to store the new one.`,
+  );
+}
+
 async function mcpCommand(argv: string[], dependencies: CliDependencies): Promise<void> {
   const parsed = parseArguments(argv, {
     valueOptions: new Set([WALLET_OPTION]),
@@ -1597,10 +1868,10 @@ async function mcpCommand(argv: string[], dependencies: CliDependencies): Promis
   const target = await targetWallet(parsed, dependencies);
   // Read the passphrase and unlock before connecting stdio, so a prompt can
   // never corrupt MCP frames and a wrong passphrase fails now rather than at
-  // the first payment. The server keeps it to unlock whichever wallet a tool
-  // call names; Release 3 moves it into the OS secret store.
-  const passphrase = await getKeystorePassphrase();
-  const account = await unlockKeystore(passphrase, target.path);
+  // the first payment. The server keeps it as the last resort for whichever
+  // wallet a tool call names, behind VAPI_KEYSTORE_PASSWORD and the entries
+  // vapi unlock left in the OS secret store.
+  const { account, passphrase } = await unlockTarget(target, dependencies);
   await startStdioServer({
     account,
     config,
@@ -1608,6 +1879,7 @@ async function mcpCommand(argv: string[], dependencies: CliDependencies): Promis
     wallet: target.name,
     env: getEnvironment(dependencies),
     passphrase: () => passphrase,
+    secretStore: getSecretStore(dependencies),
     ledgerPath: paths.ledger,
     receiptsPath: paths.receipts,
     searchesPath: paths.searches,
