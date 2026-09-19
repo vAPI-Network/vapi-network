@@ -47,19 +47,28 @@ No install? Prefix any command with `npx vapi-network`, for example `npx vapi-ne
 
 ### Use it from an agent (MCP)
 
-Add this to Claude Desktop, Claude Code, or Cursor. The passphrase unlocks the local keystore; it never leaves the machine.
+Add this to Claude Desktop, Claude Code, or Cursor:
 
 ```json
 {
   "mcpServers": {
     "vapi": {
       "command": "npx",
-      "args": ["-y", "vapi-network", "mcp"],
-      "env": { "VAPI_KEYSTORE_PASSWORD": "your-passphrase" }
+      "args": ["-y", "vapi-network", "mcp"]
     }
   }
 }
 ```
+
+Then hand the passphrase to your operating system once, in your own terminal:
+
+```bash
+vapi unlock            # the passphrase goes into the macOS Keychain or libsecret
+```
+
+The passphrase never leaves the machine and never has to appear in an editor's configuration file.
+`vapi lock` takes it back out. On Windows, until there is a Credential Manager path, keep using
+`"env": { "VAPI_KEYSTORE_PASSWORD": "your-passphrase" }` instead.
 
 Tools: `call.search`, `call.inspect`, `call.pay`, `wallet.list`, `wallet.use`, `wallet.address`,
 `wallet.balance`, `wallet.accounts`, `wallet.fund`, `receipts.list`, `receipts.stats`,
@@ -85,6 +94,7 @@ Give an agent its own capped wallet by creating it yourself and pinning the agen
 ```bash
 vapi wallet create agent-claude --label "claude code"
 vapi wallet caps agent-claude --per-day 5
+vapi unlock --wallet agent-claude
 ```
 
 ```json
@@ -95,7 +105,6 @@ vapi wallet caps agent-claude --per-day 5
       "args": ["-y", "vapi-network", "mcp", "--wallet", "agent-claude"],
       "env": {
         "VAPI_WALLET": "agent-claude",
-        "VAPI_KEYSTORE_PASSWORD": "your-passphrase",
         "VAPI_NO_SECRETS": "1"
       }
     }
@@ -104,7 +113,8 @@ vapi wallet caps agent-claude --per-day 5
 ```
 
 The agent pays from `agent-claude` and no more than $5 a day, whatever it asks for; your own
-wallet is not reachable from that session unless you gave the agent its passphrase too.
+wallet is not reachable from that session, because only `agent-claude` was unlocked.
+`vapi wallet list` shows which wallets are unlocked that way.
 
 ## Wallets
 
@@ -115,13 +125,15 @@ records which one is the default, what each may spend, and its label. Names are
 
 | Command                                             | What it does                                                       |
 | --------------------------------------------------- | ------------------------------------------------------------------ |
-| `vapi wallet list [--json]`                         | Name, address, default marker, caps in USD, label                  |
+| `vapi wallet list [--json]`                         | Name, address, default marker, caps in USD, unlocked, label        |
 | `vapi wallet create <name> [--label <text>]`        | A new wallet, with its own phrase, caps and passphrase             |
 | `vapi wallet use <name>`                            | Makes it the default for every later command                       |
 | `vapi wallet rename <old> <new>`                    | Renames the keystore, the registry entry and the wallet's receipts |
 | `vapi wallet remove <name> [--force]`               | Moves the keystore to `wallets/.trash/`; asks you to type the name |
 | `vapi wallet restore <name>`                        | Brings a removed wallet back, same passphrase                      |
 | `vapi wallet caps <name> [--per-call \| --per-day]` | Sets the spend caps of that wallet, in US dollars                  |
+| `vapi unlock [--wallet <name>]`                     | Keeps its passphrase in the OS secret store, for agents            |
+| `vapi lock [--wallet <name> \| --all]`              | Takes the stored passphrase back out                               |
 
 Every command that touches a wallet takes `--wallet <name>`: `balance`,
 `accounts`, `fund`, `pay`, `sweep`, `receipts`, `stats`, `export-key`, `backup`,
@@ -217,14 +229,38 @@ off outright. `vapi init` and `vapi wallet create` still create the wallet under
 those conditions; they simply say `Recovery phrase: run vapi backup yourself in
 a terminal to see it.`
 
+#### Where the passphrase lives
+
+An unlock looks in three places, in this order:
+
+1. `VAPI_KEYSTORE_PASSWORD`, kept for CI and for Windows.
+2. The OS secret store: the macOS Keychain, or libsecret on Linux, under the service
+   `vapi-network` and the wallet's name. `vapi unlock [--wallet <name>]` puts it there after
+   checking that it really opens that wallet, and `vapi lock [--wallet <name> | --all]` takes it
+   out again. Neither command is available to an agent: `unlock` only runs on a real terminal,
+   with no agent or CI marker set.
+3. A prompt, when a person is there to answer it.
+
+```bash
+vapi unlock --wallet agent-claude   # store it, once, in your own terminal
+vapi wallet list                    # the UNLOCKED column says which agents can pay
+vapi lock --all                     # take every stored passphrase back out
+```
+
+The passphrase is handed to the OS binary over its standard input, never as a command-line
+argument, so it does not appear in `ps` while it is being stored. Changing a passphrase with
+`vapi passphrase` removes the stored copy, so nothing is left that no longer opens the wallet. A
+run that finds no passphrase anywhere and has no terminal says so and names both routes; an agent
+is never prompted. Windows has no store yet and keeps `VAPI_KEYSTORE_PASSWORD`.
+
 In the SDK the same line is drawn by the module layout: `exportRecoveryPhrase`,
 `exportKeystoreKeys` and `createKeystoreWithPhrase` live in the separate
 `@vapi-network/core/secrets` entry point, which the MCP package is forbidden to
 import. `@vapi-network/core` itself returns accounts, never phrases or keys.
 
 Every secret export and every wallet change — create, import, remove, restore,
-rename, default, caps, passphrase — and every MCP session wallet switch appends
-one JSON line to
+rename, default, caps, passphrase, unlock, lock — and every MCP session wallet
+switch appends one JSON line to
 `$VAPI_HOME/audit.log` (mode 0600): the time, the event, the wallet, whether a
 terminal was attached, and which marker was set. The line never contains the
 secret itself, so the log answers "did anything export my phrase while the agent

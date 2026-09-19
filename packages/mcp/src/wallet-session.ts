@@ -5,8 +5,12 @@ import {
   appendAudit,
   assertWalletName,
   getVapiPaths,
+  secretStore,
   spendCapsForWallet,
+  staleStoredPassphraseMessage,
   unlockKeystore,
+  type PassphraseSource,
+  type SecretStore,
   type SpendCaps,
   type VapiPaymentAccount,
   type WalletName,
@@ -44,13 +48,15 @@ export type WalletSessionOptions = {
   wallet?: string | undefined;
   env?: NodeJS.ProcessEnv | undefined;
   /**
-   * The passphrase a payment unlocks with. The CLI hands over the one it read
-   * at startup — from `VAPI_KEYSTORE_PASSWORD`, or from the person who ran
-   * `vapi mcp` in a terminal — so switching wallets never needs a prompt on a
-   * stdout that belongs to MCP frames. Release 3 replaces it with the OS
-   * secret store.
+   * The passphrase a payment unlocks with when neither
+   * `VAPI_KEYSTORE_PASSWORD` nor the OS secret store has one. The CLI hands
+   * over what it read at startup — from the person who ran `vapi mcp` in a
+   * terminal — so switching wallets never needs a prompt on a stdout that
+   * belongs to MCP frames.
    */
   passphrase?: (() => string | Promise<string>) | undefined;
+  /** The OS secret store to read `vapi unlock` entries from. */
+  secretStore?: SecretStore | undefined;
   now?: (() => Date) | undefined;
 };
 
@@ -66,6 +72,7 @@ export type WalletSessionOptions = {
  */
 export class WalletSession {
   #active: WalletName | undefined;
+  #store: SecretStore | undefined;
 
   constructor(private readonly options: WalletSessionOptions) {
     this.#active = this.#initialName();
@@ -147,7 +154,7 @@ export class WalletSession {
     if (!store || wallet.path === undefined) {
       return { wallet, account: this.options.account };
     }
-    const account = await unlockKeystore(await this.#passphraseFor(wallet), wallet.path);
+    const account = await this.#unlock(wallet);
     return { wallet, account, spendCaps: await spendCapsForWallet(store, wallet.name) };
   }
 
@@ -232,14 +239,63 @@ export class WalletSession {
     return this.options.env ?? process.env;
   }
 
-  async #passphraseFor(wallet: SessionWallet): Promise<string> {
-    const supplied = await this.options.passphrase?.();
-    const passphrase = supplied ?? this.#env().VAPI_KEYSTORE_PASSWORD;
-    if (passphrase === undefined || passphrase.length === 0) {
-      throw new KeystoreError(
-        `No passphrase for wallet ${wallet.name}. Set VAPI_KEYSTORE_PASSWORD in this MCP server's environment; an agent can never be prompted for one.`,
-      );
+  /**
+   * The passphrase for one payment: `VAPI_KEYSTORE_PASSWORD`, then the OS
+   * secret store entry `vapi unlock` left for this wallet, then whatever the
+   * CLI read when it started the server. An agent is never prompted.
+   */
+  async #passphraseFor(
+    wallet: SessionWallet,
+  ): Promise<{ passphrase: string; source: PassphraseSource }> {
+    const fromEnvironment = this.#env().VAPI_KEYSTORE_PASSWORD;
+    if (fromEnvironment !== undefined && fromEnvironment.length > 0) {
+      return { passphrase: fromEnvironment, source: "environment" };
     }
-    return passphrase;
+    const store = this.#secretStore();
+    if (store.available) {
+      try {
+        const stored = await store.get(wallet.name);
+        if (stored !== undefined && stored.length > 0) {
+          return { passphrase: stored, source: "secret-store" };
+        }
+      } catch {
+        // A keyring that cannot be reached is the same as an empty one here;
+        // the error below says how to arrange a passphrase either way.
+      }
+    }
+    const supplied = await this.options.passphrase?.();
+    if (supplied !== undefined && supplied.length > 0) {
+      return { passphrase: supplied, source: "prompt" };
+    }
+    throw new KeystoreError(
+      [
+        `No passphrase for wallet ${wallet.name}.`,
+        ...(store.available
+          ? [
+              `Run vapi unlock --wallet ${wallet.name} in a terminal to put it in ${store.description},`,
+            ]
+          : []),
+        store.available ? "or set" : "Set",
+        "VAPI_KEYSTORE_PASSWORD in this MCP server's environment; an agent can never be prompted for one.",
+      ].join(" "),
+    );
+  }
+
+  /** One unlock, with the reason spelled out when a stored passphrase is stale. */
+  async #unlock(wallet: SessionWallet): Promise<VapiPaymentAccount> {
+    const resolved = await this.#passphraseFor(wallet);
+    try {
+      return await unlockKeystore(resolved.passphrase, wallet.path!);
+    } catch (error) {
+      if (resolved.source !== "secret-store" || !(error instanceof KeystoreError)) throw error;
+      throw new KeystoreError(staleStoredPassphraseMessage(wallet.name, this.#secretStore()), {
+        cause: error,
+      });
+    }
+  }
+
+  #secretStore(): SecretStore {
+    this.#store ??= this.options.secretStore ?? secretStore();
+    return this.#store;
   }
 }

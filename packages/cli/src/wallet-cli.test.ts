@@ -4,7 +4,12 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { appendReceipt, AGENT_MARKER_VARIABLES, type AuditEntry } from "@vapi-network/core";
+import {
+  appendReceipt,
+  AGENT_MARKER_VARIABLES,
+  type AuditEntry,
+  type SecretStore,
+} from "@vapi-network/core";
 
 import { runCli, type CliDependencies, type CliIo, type CliPrompts } from "./cli.js";
 
@@ -31,24 +36,29 @@ describe("vapi wallet list", () => {
   it("marks the default, converts the caps to dollars, and shows the label", async () => {
     const home = await initializedHome("vapi-wallet-list-");
     await createWallet("agent", ["--label", "for the agent"]);
+    const secretStore = secretStoreStub({ agent: "test-only-passphrase" });
     const captured = captureIo();
 
-    expect(await runCli(["wallet", "list"], captured.io, AGENT)).toBe(0);
+    expect(await runCli(["wallet", "list"], captured.io, { ...AGENT, secretStore })).toBe(0);
 
     const rows = captured.stdout[0]!.split("\n");
-    expect(rows[0]).toBe("  NAME\tADDRESS\tPER-CALL USD\tPER-DAY USD\tLABEL");
-    expect(rows[1]).toMatch(/^\* main\t0x[0-9a-fA-F]{40}\t0\.1\t1\t$/u);
-    expect(rows[2]).toMatch(/^ {2}agent\t0x[0-9a-fA-F]{40}\t0\.1\t1\tfor the agent$/u);
+    expect(rows[0]).toBe("  NAME\tADDRESS\tPER-CALL USD\tPER-DAY USD\tUNLOCKED\tLABEL");
+    expect(rows[1]).toMatch(/^\* main\t0x[0-9a-fA-F]{40}\t0\.1\t1\tno\t$/u);
+    expect(rows[2]).toMatch(/^ {2}agent\t0x[0-9a-fA-F]{40}\t0\.1\t1\tyes\tfor the agent$/u);
     expect(captured.stdout[0]).toContain("* is the default wallet.");
+    expect(captured.stdout[0]).toContain("UNLOCKED says whether an agent can pay from it");
     expect(home).toContain("vapi-wallet-list-");
   });
 
   it("returns the whole registry as JSON", async () => {
     const home = await initializedHome("vapi-wallet-list-json-");
     await createWallet("agent");
+    const secretStore = secretStoreStub({ agent: "test-only-passphrase" });
     const captured = captureIo();
 
-    expect(await runCli(["wallet", "list", "--json"], captured.io, AGENT)).toBe(0);
+    expect(await runCli(["wallet", "list", "--json"], captured.io, { ...AGENT, secretStore })).toBe(
+      0,
+    );
 
     const value = JSON.parse(captured.stdout[0]!) as {
       default: string;
@@ -56,9 +66,11 @@ describe("vapi wallet list", () => {
     };
     expect(value.default).toBe("main");
     expect(value.wallets.map((wallet) => wallet.name)).toEqual(["main", "agent"]);
+    expect(value.wallets[0]).toMatchObject({ name: "main", unlocked: false });
     expect(value.wallets[1]).toMatchObject({
       name: "agent",
       isDefault: false,
+      unlocked: true,
       keystore: join(home, "wallets", "agent.json"),
       keystoreVersion: 3,
       spendCaps: { perCallAtomic: "100000", perDayAtomic: "1000000" },
@@ -72,7 +84,9 @@ describe("vapi wallet list", () => {
     await emptyHome("vapi-wallet-list-empty-");
     const captured = captureIo();
 
-    expect(await runCli(["wallet", "list"], captured.io, AGENT)).toBe(0);
+    expect(
+      await runCli(["wallet", "list"], captured.io, { ...AGENT, secretStore: secretStoreStub() }),
+    ).toBe(0);
     expect(captured.stdout).toEqual(["No wallets yet. Run vapi init."]);
   });
 });
@@ -623,6 +637,160 @@ describe("the audit log", () => {
   });
 });
 
+describe("vapi unlock", () => {
+  it("verifies the passphrase, then hands it to the OS secret store", async () => {
+    const home = await initializedHome("vapi-unlock-");
+    const secretStore = secretStoreStub();
+    const prompts = scriptedPrompts({ "Passphrase for main: ": "test-only-passphrase" });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["unlock"], captured.io, { ...HUMAN, prompts: prompts.prompts, secretStore }),
+    ).toBe(0);
+
+    expect(captured.stdout[0]).toMatch(/^Wallet: main \(0x[0-9a-fA-F]{40}\)$/u);
+    expect(captured.stdout[1]).toContain(
+      "Wallet main is unlocked for agents. Its passphrase is in the macOS Keychain.",
+    );
+    expect(captured.stdout[1]).toContain("vapi lock --wallet main");
+    expect(captured.stdout.join("\n")).not.toContain("test-only-passphrase");
+    expect(await secretStore.get("main")).toBe("test-only-passphrase");
+    expect((await readAudit(home)).at(-1)).toMatchObject({
+      event: "wallet.unlock",
+      wallet: "main",
+      tty: true,
+      detail: "the macOS Keychain",
+    });
+  });
+
+  it("names the wallet it unlocked in JSON, never the passphrase", async () => {
+    await initializedHome("vapi-unlock-json-");
+    await createWallet("agent");
+    const secretStore = secretStoreStub();
+    const prompts = scriptedPrompts({ "Passphrase for agent: ": "test-only-passphrase" });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["unlock", "--wallet", "agent", "--json"], captured.io, {
+        ...HUMAN,
+        prompts: prompts.prompts,
+        secretStore,
+      }),
+    ).toBe(0);
+
+    expect(JSON.parse(captured.stdout[0]!)).toMatchObject({
+      wallet: "agent",
+      unlocked: true,
+      store: "the macOS Keychain",
+    });
+    expect(captured.stdout[0]).not.toContain("test-only-passphrase");
+    expect(await storedNames(secretStore, ["main", "agent"])).toEqual(["agent"]);
+  });
+
+  it("refuses to take a passphrase from anything but a terminal", async () => {
+    const home = await initializedHome("vapi-unlock-non-tty-");
+    const secretStore = secretStoreStub();
+    const captured = captureIo();
+
+    expect(
+      await runCli(["unlock"], captured.io, {
+        ...AGENT,
+        prompts: refusingPrompts(),
+        secretStore,
+      }),
+    ).toBe(1);
+
+    expect(captured.stderr).toEqual([
+      "Type the passphrase yourself in a terminal; an agent must never be handed one. stdin is not a terminal.",
+    ]);
+    expect(await secretStore.has("main")).toBe(false);
+    expect((await readAudit(home)).at(-1)).toMatchObject({
+      event: "wallet.unlock",
+      wallet: "main",
+      detail: "refused: stdin is not a terminal.",
+    });
+  });
+
+  it("stores nothing when the passphrase does not open the wallet", async () => {
+    const home = await initializedHome("vapi-unlock-wrong-");
+    const secretStore = secretStoreStub();
+    const prompts = scriptedPrompts({ "Passphrase for main: ": "not-the-passphrase" });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["unlock"], captured.io, { ...HUMAN, prompts: prompts.prompts, secretStore }),
+    ).toBe(1);
+
+    expect(captured.stderr[0]).toContain("wrong passphrase or corrupt file");
+    expect(await secretStore.has("main")).toBe(false);
+    expect((await readAudit(home)).at(-1)).toMatchObject({
+      event: "wallet.unlock",
+      wallet: "main",
+      detail: "refused: the passphrase did not open the wallet",
+    });
+  });
+});
+
+describe("vapi lock", () => {
+  it("takes one wallet's passphrase back out and audits it", async () => {
+    const home = await initializedHome("vapi-lock-");
+    await createWallet("agent");
+    const secretStore = secretStoreStub({
+      main: "test-only-passphrase",
+      agent: "test-only-passphrase",
+    });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["lock", "--wallet", "agent"], captured.io, { ...AGENT, secretStore }),
+    ).toBe(0);
+
+    expect(captured.stdout[1]).toBe(
+      "Locked agent. Its passphrase is no longer in the macOS Keychain.",
+    );
+    expect(await storedNames(secretStore, ["main", "agent"])).toEqual(["main"]);
+    expect((await readAudit(home)).at(-1)).toMatchObject({ event: "wallet.lock", wallet: "agent" });
+  });
+
+  it("clears every wallet with --all and says when there was nothing to clear", async () => {
+    await initializedHome("vapi-lock-all-");
+    await createWallet("agent");
+    const secretStore = secretStoreStub({
+      main: "test-only-passphrase",
+      agent: "test-only-passphrase",
+    });
+    const captured = captureIo();
+
+    expect(await runCli(["lock", "--all"], captured.io, { ...AGENT, secretStore })).toBe(0);
+
+    expect(captured.stdout).toEqual([
+      "Locked main, agent. Their passphrases are no longer in the macOS Keychain.",
+    ]);
+    expect(await storedNames(secretStore, ["main", "agent"])).toEqual([]);
+
+    const again = captureIo();
+    expect(await runCli(["lock", "--all", "--json"], again.io, { ...AGENT, secretStore })).toBe(0);
+    expect(JSON.parse(again.stdout[0]!)).toMatchObject({
+      wallet: null,
+      locked: [],
+      message: "No passphrase was stored in the macOS Keychain.",
+    });
+  });
+
+  it("refuses --wallet together with --all", async () => {
+    await initializedHome("vapi-lock-both-");
+    const captured = captureIo();
+
+    expect(
+      await runCli(["lock", "--all", "--wallet", "main"], captured.io, {
+        ...AGENT,
+        secretStore: secretStoreStub(),
+      }),
+    ).toBe(2);
+    expect(captured.stderr[0]).toBe("--wallet and --all cannot be used together.");
+  });
+});
+
 describe("migration of a 0.2.5 home", () => {
   it("moves keystore.json under wallets/ and adopts its config caps", async () => {
     const home = await initializedHome("vapi-wallet-migration-");
@@ -630,7 +798,12 @@ describe("migration of a 0.2.5 home", () => {
     await downgradeToSingleKeystore(home, { perCallAtomic: "500000", perDayAtomic: "5000000" });
     const captured = captureIo();
 
-    expect(await runCli(["wallet", "list", "--json"], captured.io, AGENT)).toBe(0);
+    expect(
+      await runCli(["wallet", "list", "--json"], captured.io, {
+        ...AGENT,
+        secretStore: secretStoreStub(),
+      }),
+    ).toBe(0);
 
     const value = JSON.parse(captured.stdout[0]!) as {
       default: string;
@@ -722,6 +895,32 @@ function scriptedPrompts(answers: Record<string, string>): {
     return scripted;
   };
   return { prompted, prompts: { secret: answer, line: answer } };
+}
+
+/** An OS secret store in a plain object, so no test ever touches a keychain. */
+function secretStoreStub(entries: Record<string, string> = {}): SecretStore {
+  return {
+    available: true,
+    platform: "darwin",
+    description: "the macOS Keychain",
+    get: async (name) => entries[name],
+    has: async (name) => entries[name] !== undefined,
+    set: async (name, passphrase) => {
+      entries[name] = passphrase;
+    },
+    remove: async (name) => {
+      if (entries[name] === undefined) return false;
+      delete entries[name];
+      return true;
+    },
+  };
+}
+
+/** What the stub above is holding, for a test that stored or removed an entry. */
+function storedNames(store: SecretStore, names: readonly string[]): Promise<string[]> {
+  return Promise.all(names.map(async (name) => ((await store.has(name)) ? name : ""))).then(
+    (found) => found.filter(Boolean),
+  );
 }
 
 function refusingPrompts(): CliPrompts {

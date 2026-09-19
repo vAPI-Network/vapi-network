@@ -13,6 +13,7 @@ import {
   encryptPrivateKey,
   getVapiPaths,
   unlockKeystore,
+  type SecretStore,
 } from "@vapi-network/core";
 
 import { runCli, type CliDependencies, type CliIo, type CliPrompts } from "./cli.js";
@@ -36,6 +37,25 @@ function walletKeystore(home: string, name = "main"): string {
  * which a test process cannot assume of its own.
  */
 const HUMAN: CliDependencies = { interactive: true, env: {} };
+
+/** An OS secret store in a plain object, so no test ever touches a keychain. */
+function secretStoreStub(entries: Record<string, string> = {}): SecretStore {
+  return {
+    available: true,
+    platform: "darwin",
+    description: "the macOS Keychain",
+    get: async (name) => entries[name],
+    has: async (name) => entries[name] !== undefined,
+    set: async (name, passphrase) => {
+      entries[name] = passphrase;
+    },
+    remove: async (name) => {
+      if (entries[name] === undefined) return false;
+      delete entries[name];
+      return true;
+    },
+  };
+}
 
 const originalHome = process.env.VAPI_HOME;
 const originalPassword = process.env.VAPI_KEYSTORE_PASSWORD;
@@ -513,7 +533,12 @@ describe("init safety", () => {
     delete process.env.VAPI_KEYSTORE_PASSWORD;
     const captured = captureIo();
 
-    expect(await runCli(["init"], captured.io, { fetchImpl: zeroBalanceRpc() })).toBe(0);
+    expect(
+      await runCli(["init"], captured.io, {
+        fetchImpl: zeroBalanceRpc(),
+        secretStore: secretStoreStub(),
+      }),
+    ).toBe(0);
 
     const text = captured.stdout.join("\n");
     expect(text).toContain("This machine already has a wallet, so vapi init created nothing.");
@@ -522,7 +547,12 @@ describe("init safety", () => {
     expect(captured.stderr).toEqual([]);
 
     const asJson = captureIo();
-    expect(await runCli(["init", "--json"], asJson.io, { fetchImpl: zeroBalanceRpc() })).toBe(0);
+    expect(
+      await runCli(["init", "--json"], asJson.io, {
+        fetchImpl: zeroBalanceRpc(),
+        secretStore: secretStoreStub(),
+      }),
+    ).toBe(0);
     expect(JSON.parse(asJson.stdout[0]!)).toMatchObject({
       default: "main",
       wallets: [{ name: "main", address, isDefault: true }],
@@ -925,11 +955,15 @@ describe("passphrase command", () => {
       "New passphrase: ": "second-passphrase",
       "Confirm new passphrase: ": "second-passphrase",
     });
+    const secretStore = secretStoreStub({ main: "test-only-passphrase" });
     const captured = captureIo();
 
-    expect(await runCli(["passphrase", "--json"], captured.io, { prompts: prompts.prompts })).toBe(
-      0,
-    );
+    expect(
+      await runCli(["passphrase", "--json"], captured.io, {
+        prompts: prompts.prompts,
+        secretStore,
+      }),
+    ).toBe(0);
 
     expect(JSON.parse(captured.stdout[0]!)).toEqual({
       wallet: "main",
@@ -939,8 +973,10 @@ describe("passphrase command", () => {
     });
     expect(captured.stdout.join("\n")).not.toContain("second-passphrase");
     expect(captured.stderr).toEqual([
+      "The old passphrase was removed from the macOS Keychain. Run vapi unlock --wallet main to store the new one.",
       "VAPI_KEYSTORE_PASSWORD still holds the old passphrase. Update it before the next run.",
     ]);
+    expect(await secretStore.has("main")).toBe(false);
     expect((await unlockKeystore("second-passphrase", walletKeystore(home))).address).toBe(address);
     await expect(unlockKeystore("test-only-passphrase", walletKeystore(home))).rejects.toThrow(
       /wrong passphrase/u,
@@ -955,7 +991,12 @@ describe("passphrase command", () => {
     });
     const captured = captureIo();
 
-    expect(await runCli(["passphrase"], captured.io, { prompts: prompts.prompts })).toBe(1);
+    expect(
+      await runCli(["passphrase"], captured.io, {
+        prompts: prompts.prompts,
+        secretStore: secretStoreStub(),
+      }),
+    ).toBe(1);
     expect(captured.stderr).toEqual(["Passphrases do not match."]);
     expect(captured.stdout).toEqual([]);
   });
