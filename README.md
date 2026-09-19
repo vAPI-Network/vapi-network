@@ -61,9 +61,50 @@ Add this to Claude Desktop, Claude Code, or Cursor. The passphrase unlocks the l
 }
 ```
 
-Tools: `call.search`, `call.inspect`, `call.pay`, `wallet.address`, `wallet.balance`,
-`wallet.accounts`, `wallet.fund`, `receipts.list`, `receipts.stats`, `support.report`. Spend caps
-default to $0.10 per call and $1.00 per day; the wallet checks both before it signs a payment.
+Tools: `call.search`, `call.inspect`, `call.pay`, `wallet.list`, `wallet.use`, `wallet.address`,
+`wallet.balance`, `wallet.accounts`, `wallet.fund`, `receipts.list`, `receipts.stats`,
+`support.report`. Spend caps default to $0.10 per call and $1.00 per day; the wallet checks both
+before it signs a payment.
+
+`wallet.list` shows every wallet on the machine — address, label, spend caps in US dollars, USDC
+balances, which one is the default and which one this session is paying from. `wallet.use <name>`
+moves the session onto another wallet **for this process only**: it never rewrites `wallets.json`,
+so your own terminal keeps the default you chose. `wallet.address`, `wallet.balance`,
+`wallet.accounts`, `wallet.fund`, `call.pay`, `receipts.list` and `receipts.stats` all take an
+optional `wallet` argument; without it the session's active wallet is used, then `VAPI_WALLET`,
+then the default. Every result names the wallet it used. `receipts.list` and `receipts.stats` also
+take `allWallets: true`.
+
+What the MCP server cannot do: create, rename, remove, restore, back up, import or export a
+wallet, or return a recovery phrase, a private key or a passphrase — those stay in the CLI, in
+front of a person.
+
+Give an agent its own capped wallet by creating it yourself and pinning the agent to it with
+`VAPI_WALLET`:
+
+```bash
+vapi wallet create agent-claude --label "claude code"
+vapi wallet caps agent-claude --per-day 5
+```
+
+```json
+{
+  "mcpServers": {
+    "vapi": {
+      "command": "npx",
+      "args": ["-y", "vapi-network", "mcp", "--wallet", "agent-claude"],
+      "env": {
+        "VAPI_WALLET": "agent-claude",
+        "VAPI_KEYSTORE_PASSWORD": "your-passphrase",
+        "VAPI_NO_SECRETS": "1"
+      }
+    }
+  }
+}
+```
+
+The agent pays from `agent-claude` and no more than $5 a day, whatever it asks for; your own
+wallet is not reachable from that session unless you gave the agent its passphrase too.
 
 ## Wallets
 
@@ -154,9 +195,11 @@ wallet in MetaMask, Rabby, Coinbase Wallet or Phantom gives the same addresses.
 
 An agent can drive vAPI all day without ever seeing a secret. It can search,
 inspect, pay from the wallet you gave it, read balances and receipts, and pick a
-wallet by name. It cannot see a recovery phrase, a private key or a passphrase,
+wallet by name with `wallet.use` — which changes only that session, never your
+default on disk. It cannot see a recovery phrase, a private key or a passphrase,
 and the MCP server has no tool that creates, removes, renames, backs up or
-exports a wallet.
+exports a wallet. Switching the session's wallet appends a `wallet.use.session`
+line to the audit log, so the log still answers which wallet paid for what.
 
 `vapi backup` and `vapi export-key` print a secret, so they run only when a
 person is demonstrably there: stdin and stdout are both a real terminal, no
@@ -180,7 +223,8 @@ In the SDK the same line is drawn by the module layout: `exportRecoveryPhrase`,
 import. `@vapi-network/core` itself returns accounts, never phrases or keys.
 
 Every secret export and every wallet change — create, import, remove, restore,
-rename, default, caps, passphrase — appends one JSON line to
+rename, default, caps, passphrase — and every MCP session wallet switch appends
+one JSON line to
 `$VAPI_HOME/audit.log` (mode 0600): the time, the event, the wallet, whether a
 terminal was attached, and which marker was set. The line never contains the
 secret itself, so the log answers "did anything export my phrase while the agent

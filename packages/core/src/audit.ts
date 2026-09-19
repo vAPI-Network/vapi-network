@@ -23,6 +23,9 @@ export const AUDIT_EVENTS = [
   "wallet.rename",
   "wallet.default",
   "wallet.caps",
+  // An MCP session switching its active wallet. Nothing on disk changes, but
+  // the wallet the agent pays from does, so the line has to be there.
+  "wallet.use.session",
   "passphrase.change",
 ] as const;
 

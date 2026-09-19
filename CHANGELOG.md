@@ -33,6 +33,22 @@ scoped packages. The packages share one version and are released together.
   it used: `Wallet: <name> (<address>)` on the first line in text mode, and a
   `wallet` field in `--json`. `vapi receipts` and `vapi stats` show the selected
   wallet and take `--all-wallets`; `vapi import` writes a named wallet.
+- `wallet.list` and `wallet.use` on the MCP server. `wallet.list` returns every
+  wallet with its address, label, spend caps in both atomic USDC and US dollars,
+  USDC balances, and which one is the default and which one the session pays
+  from; a wallet whose RPC is unreachable reports `balanceError` and the rest of
+  the list still answers. `wallet.use` points the session at another wallet for
+  the lifetime of that process only — it never writes `wallets.json`, so the
+  default a human chose in their terminal is untouched — and appends a
+  `wallet.use.session` line to the audit log.
+- An optional `wallet` argument on `wallet.address`, `wallet.balance`,
+  `wallet.accounts`, `wallet.fund`, `call.pay`, `receipts.list` and
+  `receipts.stats`, and on the deprecated `wallet` and `call` aliases. Without
+  it the session's active wallet is used, then `VAPI_WALLET`, then the machine
+  default. Every tool result now carries the `wallet` field it used, `call.pay`
+  applies that wallet's own spend caps and tags its receipt with its name, and
+  `receipts.list` and `receipts.stats` filter by it or take `allWallets: true`.
+
 - An agent can no longer be shown a secret. `vapi backup` and `vapi export-key`
   run only when stdin and stdout are a real terminal, no agent or CI marker is
   set (`VAPI_NO_SECRETS`, `CLAUDECODE`, `CLAUDE_CODE`, `CURSOR_AGENT`,
@@ -49,6 +65,14 @@ scoped packages. The packages share one version and are released together.
   `@vapi-network/core`, and the MCP package is forbidden by lint to import them.
 
 ### Changed
+
+- The MCP server no longer pays from one account unlocked at startup. It
+  resolves the wallet a tool call names and unlocks that wallet for that one
+  payment, so `wallet.use` actually changes which key signs. Reads — addresses,
+  balances, accounts and funding links — need no passphrase at all, because the
+  wallet store reads a keystore's addresses without opening it. The passphrase
+  still comes from `VAPI_KEYSTORE_PASSWORD` (or the prompt `vapi mcp` gave a
+  person at a terminal); Release 3 moves it into the OS secret store.
 
 - A `~/.vapi` from 0.2.x migrates itself once, the first time the wallet store
   is opened: `keystore.json` moves to `wallets/main.json` with its contents

@@ -1595,11 +1595,19 @@ async function mcpCommand(argv: string[], dependencies: CliDependencies): Promis
   const config = await loadConfig(paths.config);
   // Resolving the wallet prints nothing: an MCP server owns stdout.
   const target = await targetWallet(parsed, dependencies);
-  // Unlock before connecting stdio so a prompt can never corrupt MCP frames.
-  const account = await unlockKeystore(await getKeystorePassphrase(), target.path);
+  // Read the passphrase and unlock before connecting stdio, so a prompt can
+  // never corrupt MCP frames and a wrong passphrase fails now rather than at
+  // the first payment. The server keeps it to unlock whichever wallet a tool
+  // call names; Release 3 moves it into the OS secret store.
+  const passphrase = await getKeystorePassphrase();
+  const account = await unlockKeystore(passphrase, target.path);
   await startStdioServer({
     account,
     config,
+    store: target.store,
+    wallet: target.name,
+    env: getEnvironment(dependencies),
+    passphrase: () => passphrase,
     ledgerPath: paths.ledger,
     receiptsPath: paths.receipts,
     searchesPath: paths.searches,

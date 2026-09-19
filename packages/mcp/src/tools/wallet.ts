@@ -17,8 +17,19 @@ export type WalletBalance = {
   error?: string;
 };
 
+/**
+ * What a balance read needs to know about a wallet: its addresses, never its
+ * keys. A `VapiPaymentAccount` satisfies this, and so does the summary the
+ * wallet store reads out of a keystore without its passphrase — which is why
+ * `wallet.balance` can name another wallet without unlocking anything.
+ */
+export type WalletAddresses = {
+  address: Address;
+  solana?: { address: string } | undefined;
+};
+
 export async function getWallet(
-  account: Address | VapiPaymentAccount,
+  account: Address | WalletAddresses | VapiPaymentAccount,
   config: VapiConfig,
   options: { fetchImpl?: typeof fetch; lookup?: LookupFn } = {},
 ): Promise<{ address: Address; balances: WalletBalance[] }> {
