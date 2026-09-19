@@ -116,7 +116,7 @@ describe("CLI JSON output", () => {
     };
     const keystore = JSON.parse(await readFile(join(home, "keystore.json"), "utf8")) as {
       version: number;
-      keys: { solana?: { type: string; address: string } };
+      keys: { solana?: { type: string; address: string; path: string } };
     };
     const config = JSON.parse(await readFile(join(home, "config.json"), "utf8")) as {
       networks: Record<string, { rpcUrl: string; usdc: string }>;
@@ -125,8 +125,10 @@ describe("CLI JSON output", () => {
     const solana = value.accounts.find((account) => account.caip2.startsWith("solana:"));
     expect(solana?.address).toMatch(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
     expect(keystore).toMatchObject({
-      version: 2,
-      keys: { solana: { type: "ed25519", address: solana?.address } },
+      version: 3,
+      keys: {
+        solana: { type: "ed25519", address: solana?.address, path: "m/44'/501'/0'/0'" },
+      },
     });
     expect(config.networks).toMatchObject({
       "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d": {

@@ -65,13 +65,13 @@ same warning string so agents can relay it.
 
 ### 1.3 Commands
 
-| Command | Behaviour |
-| --- | --- |
-| `vapi backup` | Passphrase, then prints the phrase (v3) or explains the file+passphrase and `export-key` route (v1/v2). Never to stderr, never logged. |
+| Command                | Behaviour                                                                                                                                                                                                                  |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vapi backup`          | Passphrase, then prints the phrase (v3) or explains the file+passphrase and `export-key` route (v1/v2). Never to stderr, never logged.                                                                                     |
 | `vapi import --phrase` | Reads 12 or 24 words from the prompt (never argv), derives both accounts, writes a v3 keystore under a new passphrase. Refuses if a keystore exists unless `--replace` and the existing one has zero balance or `--force`. |
-| `vapi import --key` | Same with a raw hex key (Base only, v2-style keystore). |
-| `vapi passphrase` | Old passphrase, new passphrase twice, re-encrypt in place (atomic write as today). |
-| `vapi export-key` | Unchanged; for v3 it derives from the seed. |
+| `vapi import --key`    | Same with a raw hex key (Base only, v2-style keystore).                                                                                                                                                                    |
+| `vapi passphrase`      | Old passphrase, new passphrase twice, re-encrypt in place (atomic write as today).                                                                                                                                         |
+| `vapi export-key`      | Unchanged; for v3 it derives from the seed.                                                                                                                                                                                |
 
 ### 1.4 Docs
 
@@ -118,13 +118,13 @@ default. Every command that unlocks a keystore prints which wallet it used.
 
 ### 2.3 Commands
 
-| Command | Behaviour |
-| --- | --- |
-| `vapi wallet create <name> [--networks base,solana]` | Same flow as `init` (notice, phrase, passphrase). `init` becomes `wallet create default` plus config. |
-| `vapi wallet list [--json]` | Name, addresses, balances, default marker, spend caps. |
-| `vapi wallet use <name>` | Sets the default. |
-| `vapi wallet rename <old> <new>` | File and receipts rows. |
-| `vapi wallet remove <name>` | Refuses while the balance is above zero unless `--force`; prints the backup route first. |
+| Command                                                    | Behaviour                                                                                                                         |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `vapi wallet create <name> [--networks base,solana]`       | Same flow as `init` (notice, phrase, passphrase). `init` becomes `wallet create default` plus config.                             |
+| `vapi wallet list [--json]`                                | Name, addresses, balances, default marker, spend caps.                                                                            |
+| `vapi wallet use <name>`                                   | Sets the default.                                                                                                                 |
+| `vapi wallet rename <old> <new>`                           | File and receipts rows.                                                                                                           |
+| `vapi wallet remove <name>`                                | Refuses while the balance is above zero unless `--force`; prints the backup route first.                                          |
 | `vapi wallet caps <name> --per-call <usd> --per-day <usd>` | Spend caps move from `config.json` to the wallet entry, so an agent wallet can have a small daily cap while the owner's has none. |
 
 ### 2.4 MCP

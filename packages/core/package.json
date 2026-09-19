@@ -34,6 +34,7 @@
     "publish:npm:next": "pnpm pack:check && npm publish ./publish --access public --tag next"
   },
   "dependencies": {
+    "@scure/bip39": "^1.6.0",
     "@solana-program/token": "^0.9.0",
     "@solana/kit": "^5.1.0",
     "@x402/svm": "2.25.0",
@@ -42,6 +43,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.18.6",
+    "ed25519-hd-key": "^2.0.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.0"
   },
