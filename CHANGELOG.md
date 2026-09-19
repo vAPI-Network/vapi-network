@@ -3,6 +3,17 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## Unreleased
+
+### Added
+
+- New wallets are created from a 12-word BIP-39 recovery phrase and stored as
+  keystore version 3, which keeps the encrypted phrase instead of the derived
+  keys. One phrase restores the Base account (`m/44'/60'/0'/0/0`) and the Solana
+  account (`m/44'/501'/0'/0'`) in MetaMask, Rabby, Coinbase Wallet or Phantom.
+  Keystores written by earlier versions keep working unchanged; they have no
+  phrase, and `vapi export-key` stays their backup route.
+
 ## 0.2.3
 
 ### Added

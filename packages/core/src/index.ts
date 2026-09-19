@@ -3,6 +3,17 @@ export * from "./call-contracts-wire.js";
 export * from "./accounts.js";
 export * from "./config.js";
 export * from "./discovery.js";
+export {
+  deriveEvmPrivateKey,
+  deriveSolanaPrivateKey,
+  entropyToPhrase,
+  EVM_DERIVATION_PATH,
+  generateRecoveryPhrase,
+  phraseToEntropy,
+  phraseToSeed,
+  SOLANA_DERIVATION_PATH,
+  validateRecoveryPhrase,
+} from "./hd.js";
 export * from "./keystore.js";
 export * from "./marketplace-contracts.js";
 export * from "./net-guard.js";

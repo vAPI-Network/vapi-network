@@ -9,11 +9,22 @@ import {
   getBase58Encoder,
   type KeyPairSigner,
 } from "@solana/kit";
-import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { privateKeyToAccount } from "viem/accounts";
 import { z } from "zod";
 import type { Hex } from "viem";
 
 import { getVapiPaths, isMissingFile, migrateLegacyVapiHome } from "./config.js";
+import {
+  deriveEvmPrivateKey,
+  deriveSolanaPrivateKey,
+  entropyToPhrase,
+  EVM_DERIVATION_PATH,
+  generateRecoveryPhrase,
+  phraseToEntropy,
+  phraseToSeed,
+  SOLANA_DERIVATION_PATH,
+  validateRecoveryPhrase,
+} from "./hd.js";
 
 const SCRYPT_N = 2 ** 15;
 const SCRYPT_R = 8;
@@ -61,7 +72,29 @@ const keystoreSchema = z.object({
   crypto: cryptoSchema,
 });
 
+const keystoreV3Schema = z.object({
+  version: z.literal(3),
+  address: z.string(),
+  keys: z.object({
+    evm: z.object({
+      type: z.literal("secp256k1"),
+      address: z.string(),
+      path: z.string(),
+    }),
+    solana: z
+      .object({
+        type: z.literal("ed25519"),
+        address: z.string(),
+        path: z.string(),
+      })
+      .optional(),
+  }),
+  crypto: cryptoSchema,
+});
+
 export type VapiKeystore = z.infer<typeof keystoreSchema>;
+/** Keystore version 3: one BIP-39 recovery phrase behind both accounts. */
+export type VapiKeystoreV3 = z.infer<typeof keystoreV3Schema>;
 export type LegacyVapiKeystore = z.infer<typeof legacyKeystoreSchema>;
 /** @deprecated Use VapiKeystore. */
 export type AgentCashKeystore = VapiKeystore;
@@ -70,7 +103,7 @@ export type VapiPaymentAccount = ReturnType<typeof privateKeyToAccount> & {
   readonly solana?: KeyPairSigner;
 };
 
-type AnyVapiKeystore = VapiKeystore | LegacyVapiKeystore;
+type AnyVapiKeystore = VapiKeystore | LegacyVapiKeystore | VapiKeystoreV3;
 
 const encryptedKeysSchema = z.object({
   keys: z.object({
@@ -79,7 +112,21 @@ const encryptedKeysSchema = z.object({
   }),
 });
 
+const encryptedEntropySchema = z.object({ entropy: z.string() });
+
 type EncryptedKeys = z.infer<typeof encryptedKeysSchema>["keys"];
+
+/**
+ * What a passphrase opens: the usable private keys, plus the BIP-39 entropy for
+ * a version 3 file so the phrase can be shown again. Callers zero the entropy.
+ */
+type UnlockedKeystore = { keys: EncryptedKeys; entropy?: Buffer };
+
+export type CreateKeystoreOptions = {
+  enableSolana?: boolean;
+  /** Restore an existing wallet instead of generating a new phrase. */
+  phrase?: string;
+};
 
 export class KeystoreError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -119,23 +166,11 @@ export async function encryptPrivateKey(
 }
 
 async function encryptKeys(keys: EncryptedKeys, passphrase: string): Promise<VapiKeystore> {
-  if (passphrase.length === 0) {
-    throw new KeystoreError("Keystore passphrase cannot be empty.");
-  }
-
-  const salt = randomBytes(32);
-  const iv = randomBytes(12);
-  const key = await deriveKey(passphrase, salt);
-  const cipher = createCipheriv("aes-256-gcm", key, iv, { authTagLength: AUTH_TAG_LENGTH });
-  const plaintext = JSON.stringify({ keys });
-  const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
-  const authTag = cipher.getAuthTag();
+  const crypto = await sealPlaintext(JSON.stringify({ keys }), passphrase);
   const account = privateKeyToAccount(keys.evm as Hex);
   const solana = keys.solana
     ? await createSolanaSigner(Buffer.from(keys.solana, "base64"))
     : undefined;
-
-  key.fill(0);
 
   return {
     version: 2,
@@ -144,11 +179,81 @@ async function encryptKeys(keys: EncryptedKeys, passphrase: string): Promise<Vap
       evm: { type: "secp256k1", address: account.address },
       ...(solana ? { solana: { type: "ed25519", address: solana.address } } : {}),
     },
-    crypto: {
+    crypto,
+  };
+}
+
+/**
+ * Version 3 stores the BIP-39 entropy, never the derived keys: one phrase backs
+ * up both accounts and `vapi backup` can show the words again. The addresses
+ * are derived here so the file names the wallet without the passphrase.
+ */
+async function encryptEntropy(
+  entropy: Uint8Array,
+  passphrase: string,
+  options: { enableSolana?: boolean } = {},
+): Promise<VapiKeystoreV3> {
+  if (entropy.byteLength !== 16 && entropy.byteLength !== 32) {
+    throw new KeystoreError("A recovery phrase carries either 16 or 32 bytes of entropy.");
+  }
+  const seed = phraseToSeed(entropyToPhrase(entropy));
+  let evmAddress: string;
+  let solanaAddress: string | undefined;
+  try {
+    evmAddress = privateKeyToAccount(deriveEvmPrivateKey(seed, EVM_DERIVATION_PATH)).address;
+    if (options.enableSolana) {
+      // createSolanaSigner zeroes the seed it is handed.
+      solanaAddress = (
+        await createSolanaSigner(deriveSolanaPrivateKey(seed, SOLANA_DERIVATION_PATH))
+      ).address;
+    }
+  } finally {
+    seed.fill(0);
+  }
+
+  const crypto = await sealPlaintext(
+    JSON.stringify({ entropy: Buffer.from(entropy).toString("base64") }),
+    passphrase,
+  );
+
+  return {
+    version: 3,
+    address: evmAddress,
+    keys: {
+      evm: { type: "secp256k1", address: evmAddress, path: EVM_DERIVATION_PATH },
+      ...(solanaAddress
+        ? {
+            solana: {
+              type: "ed25519" as const,
+              address: solanaAddress,
+              path: SOLANA_DERIVATION_PATH,
+            },
+          }
+        : {}),
+    },
+    crypto,
+  };
+}
+
+async function sealPlaintext(
+  plaintext: string,
+  passphrase: string,
+): Promise<VapiKeystore["crypto"]> {
+  if (passphrase.length === 0) {
+    throw new KeystoreError("Keystore passphrase cannot be empty.");
+  }
+
+  const salt = randomBytes(32);
+  const iv = randomBytes(12);
+  const key = await deriveKey(passphrase, salt);
+  try {
+    const cipher = createCipheriv("aes-256-gcm", key, iv, { authTagLength: AUTH_TAG_LENGTH });
+    const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+    return {
       cipher: "aes-256-gcm",
       ciphertext: ciphertext.toString("base64"),
       iv: iv.toString("base64"),
-      authTag: authTag.toString("base64"),
+      authTag: cipher.getAuthTag().toString("base64"),
       kdf: "scrypt",
       salt: salt.toString("base64"),
       kdfParams: {
@@ -157,21 +262,36 @@ async function encryptKeys(keys: EncryptedKeys, passphrase: string): Promise<Vap
         p: SCRYPT_P,
         dkLen: KEY_LENGTH,
       },
-    },
-  };
+    };
+  } finally {
+    key.fill(0);
+  }
 }
 
-export async function decryptPrivateKey(keystore: VapiKeystore, passphrase: string): Promise<Hex> {
+export async function decryptPrivateKey(
+  keystore: VapiKeystore | VapiKeystoreV3,
+  passphrase: string,
+): Promise<Hex> {
   return (await decryptKeys(keystore, passphrase)).evm as Hex;
 }
 
 async function decryptKeys(keystore: AnyVapiKeystore, passphrase: string): Promise<EncryptedKeys> {
+  const unlocked = await decryptSecret(keystore, passphrase);
+  unlocked.entropy?.fill(0);
+  return unlocked.keys;
+}
+
+async function decryptSecret(
+  keystore: AnyVapiKeystore,
+  passphrase: string,
+): Promise<UnlockedKeystore> {
   const parsed = parseAnyKeystore(keystore);
   const salt = Buffer.from(parsed.crypto.salt, "base64");
   const iv = Buffer.from(parsed.crypto.iv, "base64");
   const authTag = Buffer.from(parsed.crypto.authTag, "base64");
   const ciphertext = Buffer.from(parsed.crypto.ciphertext, "base64");
   const key = await deriveKey(passphrase, salt);
+  let unlocked: UnlockedKeystore | undefined;
 
   try {
     if (authTag.length !== AUTH_TAG_LENGTH) {
@@ -184,31 +304,38 @@ async function decryptKeys(keystore: AnyVapiKeystore, passphrase: string): Promi
     const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString(
       "utf8",
     );
-    const keys =
-      parsed.version === 1
-        ? ({ evm: `0x${plaintext}` } satisfies EncryptedKeys)
-        : encryptedKeysSchema.parse(JSON.parse(plaintext)).keys;
+    unlocked =
+      parsed.version === 3
+        ? keysFromEntropy(parsed, plaintext)
+        : {
+            keys:
+              parsed.version === 1
+                ? ({ evm: `0x${plaintext}` } satisfies EncryptedKeys)
+                : encryptedKeysSchema.parse(JSON.parse(plaintext)).keys,
+          };
+    const keys = unlocked.keys;
     const account = privateKeyToAccount(keys.evm as Hex);
     if (account.address.toLowerCase() !== parsed.address.toLowerCase()) {
       throw new Error("Decrypted key does not match the stored address.");
     }
     if (
-      parsed.version === 2 &&
+      parsed.version !== 1 &&
       parsed.keys.evm.address.toLowerCase() !== account.address.toLowerCase()
     ) {
-      throw new Error("Decrypted EVM key does not match the v2 key metadata.");
+      throw new Error("Decrypted EVM key does not match the stored key metadata.");
     }
-    if (parsed.version === 2 && Boolean(parsed.keys.solana) !== Boolean(keys.solana)) {
-      throw new Error("Encrypted Solana key does not match the v2 key metadata.");
+    if (parsed.version !== 1 && Boolean(parsed.keys.solana) !== Boolean(keys.solana)) {
+      throw new Error("Encrypted Solana key does not match the stored key metadata.");
     }
     if (keys.solana) {
       const signer = await createSolanaSigner(Buffer.from(keys.solana, "base64"));
-      if (parsed.version === 2 && parsed.keys.solana?.address !== signer.address) {
-        throw new Error("Decrypted Solana key does not match the v2 key metadata.");
+      if (parsed.version !== 1 && parsed.keys.solana?.address !== signer.address) {
+        throw new Error("Decrypted Solana key does not match the stored key metadata.");
       }
     }
-    return keys;
+    return unlocked;
   } catch (error) {
+    unlocked?.entropy?.fill(0);
     throw new KeystoreError("Unable to unlock keystore: wrong passphrase or corrupt file.", {
       cause: error,
     });
@@ -217,11 +344,42 @@ async function decryptKeys(keystore: AnyVapiKeystore, passphrase: string): Promi
   }
 }
 
-export async function createKeystore(
+/**
+ * Rebuilds both private keys from the stored BIP-39 entropy. Nothing derived
+ * here outlives the unlock: the seed is zeroed before the keys are returned.
+ */
+function keysFromEntropy(keystore: VapiKeystoreV3, plaintext: string): UnlockedKeystore {
+  const entropy = Buffer.from(
+    encryptedEntropySchema.parse(JSON.parse(plaintext)).entropy,
+    "base64",
+  );
+  if (entropy.byteLength !== 16 && entropy.byteLength !== 32) {
+    throw new Error("Stored recovery entropy must contain 16 or 32 bytes.");
+  }
+  const seed = phraseToSeed(entropyToPhrase(Uint8Array.from(entropy)));
+  try {
+    const keys: EncryptedKeys = { evm: deriveEvmPrivateKey(seed, keystore.keys.evm.path) };
+    if (keystore.keys.solana) {
+      const solanaSeed = deriveSolanaPrivateKey(seed, keystore.keys.solana.path);
+      keys.solana = Buffer.from(solanaSeed).toString("base64");
+      solanaSeed.fill(0);
+    }
+    return { keys, entropy };
+  } finally {
+    seed.fill(0);
+  }
+}
+
+/**
+ * Creates a version 3 keystore: both accounts come from one BIP-39 recovery
+ * phrase, so the wallet can be restored in MetaMask, Rabby or Phantom from the
+ * words alone. The phrase is returned once and never written anywhere.
+ */
+export async function createKeystoreWithPhrase(
   passphrase: string,
   path = getVapiPaths().keystore,
-  options: { enableSolana?: boolean } = {},
-): Promise<VapiPaymentAccount> {
+  options: CreateKeystoreOptions = {},
+): Promise<{ account: VapiPaymentAccount; recoveryPhrase: string }> {
   if (!process.env.VAPI_HOME?.trim() && path === getVapiPaths().keystore) {
     await migrateLegacyVapiHome({ targetDirectory: getVapiPaths().directory });
   }
@@ -236,18 +394,33 @@ export async function createKeystore(
     }
   }
 
-  const privateKey = generatePrivateKey();
-  const solanaSeed = options.enableSolana ? randomBytes(32) : undefined;
-  const keystore = await encryptKeys(
-    {
-      evm: privateKey,
-      ...(solanaSeed ? { solana: solanaSeed.toString("base64") } : {}),
-    },
-    passphrase,
-  );
-  solanaSeed?.fill(0);
+  const recoveryPhrase =
+    options.phrase === undefined
+      ? generateRecoveryPhrase()
+      : validateRecoveryPhrase(options.phrase);
+  const entropy = phraseToEntropy(recoveryPhrase);
+  let keystore: VapiKeystoreV3;
+  try {
+    keystore = await encryptEntropy(entropy, passphrase, {
+      enableSolana: options.enableSolana === true,
+    });
+  } finally {
+    entropy.fill(0);
+  }
   await writeKeystore(path, keystore, true);
-  return await paymentAccountFromKeys(await decryptKeys(keystore, passphrase));
+  return {
+    account: await paymentAccountFromKeys(await decryptKeys(keystore, passphrase)),
+    recoveryPhrase,
+  };
+}
+
+/** `createKeystoreWithPhrase` for callers that do not show the phrase. */
+export async function createKeystore(
+  passphrase: string,
+  path = getVapiPaths().keystore,
+  options: CreateKeystoreOptions = {},
+): Promise<VapiPaymentAccount> {
+  return (await createKeystoreWithPhrase(passphrase, path, options)).account;
 }
 
 export async function unlockKeystore(
@@ -257,6 +430,19 @@ export async function unlockKeystore(
   if (!process.env.VAPI_HOME?.trim() && path === getVapiPaths().keystore) {
     await migrateLegacyVapiHome({ targetDirectory: getVapiPaths().directory });
   }
+  const keystore = await readStoredKeystore(path);
+  const unlocked = await decryptSecret(keystore, passphrase);
+  try {
+    if (keystore.version === 1) {
+      await writeKeystore(path, await encryptKeys(unlocked.keys, passphrase), false);
+    }
+    return await paymentAccountFromKeys(unlocked.keys);
+  } finally {
+    unlocked.entropy?.fill(0);
+  }
+}
+
+async function readStoredKeystore(path: string): Promise<AnyVapiKeystore> {
   let raw: string;
   try {
     raw = await readFile(path, "utf8");
@@ -266,12 +452,7 @@ export async function unlockKeystore(
     }
     throw error;
   }
-  const keystore = parseAnyKeystore(JSON.parse(raw));
-  const keys = await decryptKeys(keystore, passphrase);
-  if (keystore.version === 1) {
-    await writeKeystore(path, await encryptKeys(keys, passphrase), false);
-  }
-  return await paymentAccountFromKeys(keys);
+  return parseAnyKeystore(JSON.parse(raw));
 }
 
 /**
@@ -314,16 +495,7 @@ export async function exportKeystoreKeys(
   passphrase: string,
   path = getVapiPaths().keystore,
 ): Promise<ExportedVapiKeys> {
-  let raw: string;
-  try {
-    raw = await readFile(path, "utf8");
-  } catch (error) {
-    if (isMissingFile(error)) {
-      throw new KeystoreError(`No vAPI keystore found at ${path}. Run vapi init.`);
-    }
-    throw error;
-  }
-  const keys = await decryptKeys(parseAnyKeystore(JSON.parse(raw)), passphrase);
+  const keys = await decryptKeys(await readStoredKeystore(path), passphrase);
   const evmPrivateKey = keys.evm as Hex;
   const exported: ExportedVapiKeys = {
     evm: { address: privateKeyToAccount(evmPrivateKey).address, privateKey: evmPrivateKey },
@@ -343,37 +515,70 @@ export async function exportKeystoreKeys(
   return { ...exported, solana: { address: signer.address, secretKey: encoded } };
 }
 
-/** Lazily adds a locally generated Ed25519 seed without replacing the EVM key. */
+/**
+ * Adds the Solana account. A version 3 wallet derives it from the recovery
+ * phrase it already has; older files get a locally generated Ed25519 seed,
+ * which the EVM key never replaces.
+ */
 export async function enableSolanaKey(
   passphrase: string,
   path = getVapiPaths().keystore,
 ): Promise<VapiPaymentAccount> {
-  let raw: string;
+  const existing = await readStoredKeystore(path);
+  const unlocked = await decryptSecret(existing, passphrase);
   try {
-    raw = await readFile(path, "utf8");
-  } catch (error) {
-    if (isMissingFile(error)) {
-      throw new KeystoreError(`No vAPI keystore found at ${path}. Run vapi init.`);
+    if (existing.version === 3) {
+      if (unlocked.keys.solana) {
+        return await paymentAccountFromKeys(unlocked.keys);
+      }
+      const updated = await encryptEntropy(unlocked.entropy!, passphrase, { enableSolana: true });
+      await writeKeystore(path, updated, false);
+      return await paymentAccountFromKeys(await decryptKeys(updated, passphrase));
     }
-    throw error;
+
+    const keys = unlocked.keys;
+    if (!keys.solana) {
+      const seed = randomBytes(32);
+      keys.solana = seed.toString("base64");
+      seed.fill(0);
+      await writeKeystore(path, await encryptKeys(keys, passphrase), false);
+    } else if (existing.version === 1) {
+      await writeKeystore(path, await encryptKeys(keys, passphrase), false);
+    }
+    return await paymentAccountFromKeys(keys);
+  } finally {
+    unlocked.entropy?.fill(0);
   }
-  const existing = parseAnyKeystore(JSON.parse(raw));
-  const keys = await decryptKeys(existing, passphrase);
-  if (!keys.solana) {
-    const seed = randomBytes(32);
-    keys.solana = seed.toString("base64");
-    seed.fill(0);
-    await writeKeystore(path, await encryptKeys(keys, passphrase), false);
-  } else if (existing.version === 1) {
-    await writeKeystore(path, await encryptKeys(keys, passphrase), false);
+}
+
+/**
+ * The 12 or 24 words behind a version 3 wallet, for `vapi backup`. Callers must
+ * print it to the user and nowhere else. Older keystores have no phrase.
+ */
+export async function exportRecoveryPhrase(
+  passphrase: string,
+  path = getVapiPaths().keystore,
+): Promise<string> {
+  const keystore = await readStoredKeystore(path);
+  if (keystore.version !== 3) {
+    throw new KeystoreError(
+      `This wallet was created before recovery phrases (keystore version ${keystore.version}), so it has no words to write down. Back it up with vapi export-key instead.`,
+    );
   }
-  return await paymentAccountFromKeys(keys);
+  const unlocked = await decryptSecret(keystore, passphrase);
+  try {
+    return entropyToPhrase(Uint8Array.from(unlocked.entropy!));
+  } finally {
+    unlocked.entropy?.fill(0);
+  }
 }
 
 function parseAnyKeystore(value: unknown): AnyVapiKeystore {
   const version =
     typeof value === "object" && value !== null ? Reflect.get(value, "version") : undefined;
-  return version === 1 ? legacyKeystoreSchema.parse(value) : keystoreSchema.parse(value);
+  if (version === 1) return legacyKeystoreSchema.parse(value);
+  if (version === 3) return keystoreV3Schema.parse(value);
+  return keystoreSchema.parse(value);
 }
 
 async function paymentAccountFromKeys(keys: EncryptedKeys): Promise<VapiPaymentAccount> {
@@ -403,7 +608,11 @@ async function createSolanaSigner(seed: Uint8Array): Promise<KeyPairSigner> {
   }
 }
 
-async function writeKeystore(path: string, keystore: VapiKeystore, exclusive: boolean) {
+async function writeKeystore(
+  path: string,
+  keystore: VapiKeystore | VapiKeystoreV3,
+  exclusive: boolean,
+) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporaryPath = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   await writeFile(temporaryPath, `${JSON.stringify(keystore, null, 2)}\n`, {
