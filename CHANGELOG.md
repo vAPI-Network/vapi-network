@@ -3,7 +3,11 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
-## Unreleased (0.3.0)
+## 0.3.0
+
+Several wallets on one machine, a passphrase that no longer has to sit in an
+editor's configuration file, and a hard line between what a person may see and
+what an agent may.
 
 ### Added
 
@@ -11,72 +15,65 @@ scoped packages. The packages share one version and are released together.
   keystore per wallet and `~/.vapi/wallets.json` records which wallet is the
   default, what each one may spend per call and per day, and its optional
   label. Names are 1 to 32 characters of lowercase letters, digits and dashes.
-  The SDK entry point is `WalletStore`: list, resolve, create, import, unlock,
-  rename, re-cap, remove and restore, without ever rewriting key material.
-- Spend caps belong to the wallet, not to the machine, so an agent wallet can
-  be given a small daily allowance while your own keeps a large one. Today's
-  totals are counted per wallet in `spend-ledger.json`; rows written before
-  named wallets count as `main`.
+- `vapi wallet list|create|use|rename|remove|restore|caps` manages those
+  wallets. `list` shows the address, the default marker, the caps in US
+  dollars, whether the wallet is unlocked, and the label; `caps` takes
+  `--per-call` and `--per-day` in dollars; `remove` asks you to type the wallet
+  name and prints where the keystore went.
+- `--wallet <name>` on every command that touches a wallet, with `VAPI_WALLET`
+  and the machine default behind it. Each of those commands names the wallet it
+  used: `Wallet: <name> (<address>)` on the first line in text mode, and a
+  `wallet` field in `--json`. `vapi receipts` and `vapi stats` show the selected
+  wallet and take `--all-wallets`; `vapi import` writes a named wallet.
+- Spend caps belong to the wallet, not to the machine, so an agent wallet can be
+  given a small daily allowance while your own keeps a large one. Today's totals
+  are counted per wallet in `spend-ledger.json`; rows written before named
+  wallets count as `main`.
 - Receipts record the wallet that paid. `receipts.jsonl` rows gain an optional
   `wallet` field, rows written before named wallets read as `main`, and renaming
   a wallet rewrites its rows in one atomic replacement.
 - Removing a wallet is a move, not a delete: the encrypted keystore goes to
-  `~/.vapi/wallets/.trash/`, where `restore` can bring it back. The default
-  wallet is refused until another one is made the default, and a wallet that
-  still holds USDC is refused unless you force it.
-- `vapi wallet list|create|use|rename|remove|restore|caps` manages the wallets
-  on a machine. `list` shows the address, the default marker, the caps in US
-  dollars and the label; `caps` takes `--per-call` and `--per-day` in dollars;
-  `remove` asks you to type the wallet name and prints where the keystore went.
-- `--wallet <name>` on every command that touches a wallet, with `VAPI_WALLET`
-  and the registry default behind it. Each of those commands names the wallet
-  it used: `Wallet: <name> (<address>)` on the first line in text mode, and a
-  `wallet` field in `--json`. `vapi receipts` and `vapi stats` show the selected
-  wallet and take `--all-wallets`; `vapi import` writes a named wallet.
+  `~/.vapi/wallets/.trash/`, where `vapi wallet restore` can bring it back. The
+  default wallet is refused until another one is made the default, and a wallet
+  that still holds USDC is refused unless you force it.
+- `vapi unlock [--wallet <name>]` and `vapi lock [--wallet <name> | --all]` keep
+  a wallet's passphrase in the OS secret store instead of in an editor's
+  configuration file: the macOS Keychain through `security`, or libsecret
+  through `secret-tool` on Linux, under the service `vapi-network` and the
+  wallet's name. `unlock` runs only on a real terminal with no agent marker set,
+  and verifies that the passphrase actually opens the wallet before storing it.
+  The passphrase is handed to the OS binary over stdin, never as a command-line
+  argument, so it never appears in `ps`. No new dependency. Windows keeps
+  `VAPI_KEYSTORE_PASSWORD` until there is a Credential Manager path.
 - `wallet.list` and `wallet.use` on the MCP server. `wallet.list` returns every
   wallet with its address, label, spend caps in both atomic USDC and US dollars,
   USDC balances, and which one is the default and which one the session pays
   from; a wallet whose RPC is unreachable reports `balanceError` and the rest of
   the list still answers. `wallet.use` points the session at another wallet for
   the lifetime of that process only — it never writes `wallets.json`, so the
-  default a human chose in their terminal is untouched — and appends a
-  `wallet.use.session` line to the audit log.
+  default a human chose in their terminal is untouched.
 - An optional `wallet` argument on `wallet.address`, `wallet.balance`,
   `wallet.accounts`, `wallet.fund`, `call.pay`, `receipts.list` and
-  `receipts.stats`, and on the deprecated `wallet` and `call` aliases. Without
-  it the session's active wallet is used, then `VAPI_WALLET`, then the machine
-  default. Every tool result now carries the `wallet` field it used, `call.pay`
-  applies that wallet's own spend caps and tags its receipt with its name, and
-  `receipts.list` and `receipts.stats` filter by it or take `allWallets: true`.
-
-- `vapi unlock [--wallet <name>]` and `vapi lock [--wallet <name> | --all]`
-  keep a wallet's passphrase in the OS secret store instead of in an editor's
-  configuration file: the macOS Keychain through `security`, or libsecret
-  through `secret-tool` on Linux, under the service `vapi-network` and the
-  wallet's name. `unlock` runs only on a real terminal with no agent marker
-  set, and verifies that the passphrase actually opens the wallet before
-  storing it. The passphrase is handed to the OS binary over stdin, never as a
-  command-line argument, so it never appears in `ps`. No new dependency, and
-  both events are recorded in the audit log as `wallet.unlock` and
-  `wallet.lock`. Windows keeps `VAPI_KEYSTORE_PASSWORD` until there is a
-  Credential Manager path.
-- `vapi wallet list` gains an `UNLOCKED` column, and `unlocked` in `--json`:
-  which wallets an agent can pay from without being given a passphrase.
-
+  `receipts.stats`. Without it the session's active wallet is used, then
+  `VAPI_WALLET`, then the machine default. Every tool result now carries the
+  `wallet` field it used, `call.pay` applies that wallet's own spend caps and
+  tags its receipt with its name, and `receipts.list` and `receipts.stats`
+  filter by it or take `allWallets: true`.
 - An agent can no longer be shown a secret. `vapi backup` and `vapi export-key`
   run only when stdin and stdout are a real terminal, no agent or CI marker is
   set (`VAPI_NO_SECRETS`, `CLAUDECODE`, `CLAUDE_CODE`, `CURSOR_AGENT`,
   `CODEX_SANDBOX`, `OPENAI_CODEX`, `AGENT`, `CI`), and the person types the
   wallet name to confirm. Otherwise they print nothing and say so. `vapi init`
   and `vapi wallet create` still create the wallet and point at `vapi backup`.
-- `~/.vapi/audit.log` (mode 0600) gets one JSON line per secret export and per
-  wallet change: time, event, wallet, whether a terminal was attached, and the
-  agent marker that was set. It never contains the secret itself.
-- `@vapi-network/core/secrets` is a separate package entry point for the three
-  functions that return a recovery phrase or a private key —
-  `exportRecoveryPhrase`, `exportKeystoreKeys` and `createKeystoreWithPhrase`,
-  plus `decryptPrivateKey`. They are no longer exported from
-  `@vapi-network/core`, and the MCP package is forbidden by lint to import them.
+- `~/.vapi/audit.log` (mode 0600) gets one JSON line per secret export, per
+  wallet change and per MCP session wallet switch: time, event, wallet, whether
+  a terminal was attached, and the agent marker that was set. It never contains
+  the secret itself.
+- `@vapi-network/core/secrets`, a separate package entry point for the functions
+  that return a recovery phrase or a private key: `exportRecoveryPhrase`,
+  `exportKeystoreKeys`, `createKeystoreWithPhrase` and `decryptPrivateKey`.
+- `examples/wallets.ts`, which lists, creates and re-caps wallets through the
+  SDK. Both examples are type-checked by `pnpm typecheck`.
 
 ### Changed
 
@@ -87,25 +84,12 @@ scoped packages. The packages share one version and are released together.
   variable. A stored passphrase that no longer opens its wallet says exactly
   that and points at `vapi unlock`; `vapi passphrase` removes the stored copy
   when it changes the passphrase, so a stale entry cannot outlive it. The SDK
-  entry point is `resolvePassphrase` in `@vapi-network/core`, with `secretStore`
-  as the adapter underneath it.
-
+  entry point is `resolvePassphrase` in `@vapi-network/core`.
 - The MCP server no longer pays from one account unlocked at startup. It
   resolves the wallet a tool call names and unlocks that wallet for that one
   payment, so `wallet.use` actually changes which key signs. Reads — addresses,
-  balances, accounts and funding links — need no passphrase at all, because the
-  wallet store reads a keystore's addresses without opening it. The passphrase
-  still comes from `VAPI_KEYSTORE_PASSWORD`, then from the OS secret store
-  entry `vapi unlock` left for that wallet, and only then from the prompt
-  `vapi mcp` gave a person at a terminal. An agent is never prompted.
-
-- A `~/.vapi` from 0.2.x migrates itself once, the first time the wallet store
-  is opened: `keystore.json` moves to `wallets/main.json` with its contents
-  untouched, `config.json`'s spend caps become the caps of `main`, and
-  `keystore.json` stays behind as a mode 0600 symlink for one release so
-  existing scripts keep working. A home without a keystore migrates nothing.
-  The CLI itself no longer reads `keystore.json`; it resolves every path
-  through the wallet store.
+  balances, accounts and funding links — need no passphrase at all. An agent is
+  never prompted.
 - `vapi init` on a machine that already has a wallet is no longer an error: it
   says nothing was created and lists the wallets it found, without asking for a
   passphrase.
@@ -113,6 +97,51 @@ scoped packages. The packages share one version and are released together.
   `--wallet <name>` chooses it, and `main` is assumed only on a machine that has
   no wallet yet. `--replace` moves the named wallet to `wallets/.trash/` first,
   still refusing a wallet that holds USDC unless `--force`.
+- `vapi wallet list` gained an `UNLOCKED` column, and `unlocked` in `--json`:
+  which wallets an agent can pay from without being given a passphrase.
+- `vapi mcp` takes `--wallet <name>`, which the help text now lists, and `vapi
+help` is listed alongside `vapi version`.
+- The README is rebuilt around the current surface: a quickstart in the order
+  `vapi init` itself prints, one table for every CLI command and flag, one table
+  for every MCP tool, and the SDK's two entry points side by side.
+
+### Deprecated
+
+- The pre-namespace MCP tool aliases `search`, `inspect`, `call` and `wallet`
+  still work and still behave identically to `call.search`, `call.inspect`,
+  `call.pay` and `wallet.balance`, and each result carries one `DEPRECATED:`
+  line naming its replacement. They will be removed in a later release.
+- `~/.vapi/keystore.json` survives the 0.3.0 migration as a mode 0600 symlink to
+  `wallets/main.json`, for one release only. Scripts that read it directly
+  should move to `wallets/<name>.json` or to `WalletStore`.
+
+### Removed
+
+- `createOnrampSession` and its `OnrampSession` and `CreateOnrampSessionOptions`
+  types, deprecated in 0.2.5. The session token it minted was single-use and
+  expired minutes later, so a link printed in a terminal was usually dead before
+  anyone clicked it. `fundingPageUrl` — which `vapi fund` and `wallet.fund`
+  already use — mints the session at click time instead.
+- `openWallet` and `listReceipts` from `@vapi-network/core`. Nothing called
+  either; `openWallet` also defaulted to the legacy `keystore.json` path, which
+  is now a compatibility symlink. Use `WalletStore.open(...).unlock(name, …)`
+  and `readReceipts`.
+
+### Migration from 0.2.x
+
+Nothing to do by hand. The first command you run on a 0.2.x home migrates it
+once, when the wallet store is opened: `keystore.json` moves to
+`wallets/main.json` with its contents untouched, `config.json`'s spend caps
+become the caps of the wallet `main`, and `keystore.json` stays behind as a mode
+0600 symlink for one release so existing scripts keep working. A home without a
+keystore migrates nothing, and no keystore file is ever rewritten.
+
+Receipts written before this release have no `wallet` field and read as `main`,
+so `vapi receipts` and `vapi stats` show your history unchanged. Spend caps now
+live on the wallet rather than in `config.json`; set them with `vapi wallet caps
+<name> --per-call <usd> --per-day <usd>`. `VAPI_KEYSTORE_PASSWORD` is still
+honoured, and is still checked first — `vapi unlock` is the new option, not a
+replacement.
 
 ## 0.2.5
 

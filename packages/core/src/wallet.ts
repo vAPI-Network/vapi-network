@@ -1,7 +1,5 @@
 import type { Address, Hex } from "viem";
 
-import { getVapiPaths } from "./config.js";
-import { unlockKeystore } from "./keystore.js";
 import { isSolanaNetwork, type ConfiguredNetwork } from "./networks.js";
 import type { PaymentIntent, Policy } from "./policy.js";
 import { readUsdcBalance } from "./sweep.js";
@@ -46,16 +44,4 @@ export class LocalWallet implements Wallet {
     }
     return await readUsdcBalance({ network, configured, address });
   }
-}
-
-export async function openWallet(options: {
-  passphrase: string;
-  policy: Policy;
-  keystorePath?: string;
-}): Promise<Wallet> {
-  const account = await unlockKeystore(
-    options.passphrase,
-    options.keystorePath ?? getVapiPaths().keystore,
-  );
-  return new LocalWallet(account, options.policy);
 }

@@ -12,7 +12,8 @@ non-custodial.
 - `packages/mcp`: stdio MCP server and tool registration
 - `packages/cli`: command parsing and command implementations
 - `packages/vapi-network`: bundled public distribution and `vapi` binary
-- `examples`: direct SDK usage
+- `examples`: direct SDK usage, type-checked by `pnpm typecheck` through
+  `examples/tsconfig.json`
 - `scripts`: repository-wide staged publishing and tarball verification
 
 Dependencies point inward: `core` has no workspace dependency; `sources`
@@ -47,8 +48,10 @@ randomness, filesystem roots, and `fetch` implementations.
 - No telemetry leaves the machine by default. Any future exporter requires an
   explicit user opt-in and must never include secrets.
 - The configuration home is `~/.vapi/`, overridable with `VAPI_HOME`. Its stable
-  files are `keystore.json`, `config.json`, `receipts.jsonl`, `searches.jsonl`,
-  and `spend-ledger.json`.
+  entries are `config.json`, `wallets.json`, `wallets/<name>.json`,
+  `wallets/.trash/`, `audit.log`, `receipts.jsonl`, `searches.jsonl`, and
+  `spend-ledger.json`. `keystore.json` is a compatibility symlink left by the
+  0.2.x migration and is kept for one release.
 - Migration from `~/.vapi/agent-cash/` copies files, never deletes the old
   directory, never overwrites new state, and prints a notice.
 - Receipts are an append-only JSONL ledger. Spend accounting uses
@@ -57,11 +60,14 @@ randomness, filesystem roots, and `fetch` implementations.
   provenance.
 - MCP tools use product namespaces. Deprecated aliases must identify themselves
   with a one-line deprecation notice and may not silently diverge in behavior.
+  Every registered tool name is named in the root README; `tool-docs.test.ts`
+  enforces it, as `help-alignment.test.ts` does for every CLI command.
 - Protect every outbound service request with the network guard. Treat redirects
   and resolved IP addresses as new destinations that need validation.
 - Published package versions move together. All packages are currently
-  `0.2.0`. Every package's `publish:npm` goes to the `latest` npm tag, and every
-  package's `publish:npm:next` goes to `next`. Access is always public.
+  `0.3.0`, which `scripts/pack-check.mjs` and `packages/cli/src/version.ts`
+  pin as well. Every package's `publish:npm` goes to the `latest` npm tag, and
+  every package's `publish:npm:next` goes to `next`. Access is always public.
 - Every published tarball has zero runtime dependencies. All runtime code is
   bundled with esbuild; builds must fail if non-Node external imports leak into
   `dist`.

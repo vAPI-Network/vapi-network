@@ -254,6 +254,3 @@ export async function renameReceiptWallet(
   await rename(temporaryPath, path);
   return changed;
 }
-
-/** Compatibility alias used by early CLI code. */
-export const listReceipts = readReceipts;

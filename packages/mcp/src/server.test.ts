@@ -117,7 +117,7 @@ describe("Agent Cash MCP marketplace tools", () => {
           outcome: "paid",
           listing: { providerHost: "93.184.216.34", source: "direct" },
           policy: { capsApplied: false },
-          client: { name: "vapi-network", version: "0.2.5" },
+          client: { name: "vapi-network", version: "0.3.0" },
         },
       ],
     });
