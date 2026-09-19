@@ -268,6 +268,7 @@ async function sealPlaintext(
   }
 }
 
+/** Published only through `@vapi-network/core/secrets`. */
 export async function decryptPrivateKey(
   keystore: VapiKeystore | VapiKeystoreV3,
   passphrase: string,
@@ -374,6 +375,8 @@ function keysFromEntropy(keystore: VapiKeystoreV3, plaintext: string): UnlockedK
  * Creates a version 3 keystore: both accounts come from one BIP-39 recovery
  * phrase, so the wallet can be restored in MetaMask, Rabby or Phantom from the
  * words alone. The phrase is returned once and never written anywhere.
+ *
+ * Published only through `@vapi-network/core/secrets`.
  */
 export async function createKeystoreWithPhrase(
   passphrase: string,
@@ -574,6 +577,8 @@ export type ExportedVapiKeys = {
  * for the EVM key, and the base58 64-byte Ed25519 secret key for Solana. Only
  * `vapi export-key` may call this, and it must never write the result anywhere
  * but the caller's stdout.
+ *
+ * Published only through `@vapi-network/core/secrets`.
  */
 export async function exportKeystoreKeys(
   passphrase: string,
@@ -638,6 +643,8 @@ export async function enableSolanaKey(
 /**
  * The 12 or 24 words behind a version 3 wallet, for `vapi backup`. Callers must
  * print it to the user and nowhere else. Older keystores have no phrase.
+ *
+ * Published only through `@vapi-network/core/secrets`.
  */
 export async function exportRecoveryPhrase(
   passphrase: string,

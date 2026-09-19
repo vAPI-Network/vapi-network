@@ -367,13 +367,21 @@ export class WalletStore {
    * Moves a wallet's keystore to `wallets/.trash/`. Nothing is deleted: the
    * encrypted file stays, and its passphrase still opens it. The default wallet
    * and a wallet that still holds USDC are refused unless forced.
+   *
+   * `allowDefault` exists for one caller: `vapi import --replace`, which puts a
+   * new wallet under the same name back in place immediately afterwards, so the
+   * machine is never left without a default. `vapi wallet remove` never sets it.
    */
   async remove(
     name: string,
-    options: { force?: boolean; balanceReader?: WalletBalanceReader } = {},
+    options: {
+      force?: boolean;
+      balanceReader?: WalletBalanceReader;
+      allowDefault?: boolean;
+    } = {},
   ): Promise<TrashedWallet> {
     const wallet = this.resolve({ name });
-    if (wallet.name === this.registry.default) {
+    if (options.allowDefault !== true && wallet.name === this.registry.default) {
       throw new KeystoreError(
         `Wallet ${wallet.name} is the default wallet. Choose another default first with vapi wallet use <name>.`,
       );
