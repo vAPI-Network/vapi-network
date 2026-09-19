@@ -105,10 +105,11 @@ Usage:
   vapi unlock [--wallet <name>] [--json]
   vapi lock [--wallet <name> | --all] [--json]
   vapi report "<what happened>" [--include-addresses] [--send] [--json]
-  vapi mcp [--json]
+  vapi mcp [--wallet <name>] [--json]
   vapi serve [--json]
   vapi version [--json]
   vapi publish [--json]
+  vapi help [--json]
 
 Every command that touches a wallet takes \`--wallet <name>\`, falls back to \`VAPI_WALLET\`, then to the default set by \`vapi wallet use\`, and names the wallet it used on its first line.
 

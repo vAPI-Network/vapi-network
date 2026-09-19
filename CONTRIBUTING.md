@@ -24,7 +24,8 @@ pnpm build
 ```
 
 The repository is a pnpm workspace. Packages live under `packages/`, and the
-direct SDK example lives under `examples/`.
+runnable SDK examples live under `examples/`. The examples are type-checked by
+`pnpm typecheck`, so they cannot drift from the API they demonstrate.
 
 ## Make a change
 

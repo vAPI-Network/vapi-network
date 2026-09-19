@@ -1,6 +1,6 @@
 {
   "name": "vapi-network-workspace",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "private": true,
   "description": "Open-source, non-custodial access to x402 APIs",
   "license": "Apache-2.0",
@@ -12,13 +12,14 @@
   "scripts": {
     "build": "pnpm -r --if-present build",
     "test": "pnpm -r --if-present test",
-    "typecheck": "pnpm -r --if-present typecheck",
+    "typecheck": "pnpm -r --if-present typecheck && tsc -p examples/tsconfig.json",
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "example:pay": "pnpm build && node --experimental-strip-types examples/pay-with-sdk.ts",
     "prepare:publish": "pnpm build && node scripts/prepare-publish.mjs",
-    "pack:check": "pnpm prepare:publish && node scripts/pack-check.mjs"
+    "pack:check": "pnpm prepare:publish && node scripts/pack-check.mjs",
+    "example:wallets": "pnpm build && node --experimental-strip-types examples/wallets.ts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -28,7 +29,9 @@
     "prettier": "^3.6.2",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.44.1",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.0",
+    "@vapi-network/core": "workspace:*",
+    "@vapi-network/sources": "workspace:*"
   },
   "repository": {
     "type": "git",

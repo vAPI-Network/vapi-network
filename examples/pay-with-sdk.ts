@@ -1,22 +1,34 @@
+/**
+ * Discover one x402 listing, apply the wallet's own spend caps, sign locally
+ * and pay the service directly.
+ *
+ * Run it with `pnpm example:pay -- weather`. It uses the wallet `vapi init`
+ * created: `VAPI_WALLET` or the machine default, unless you pass a name as the
+ * second argument. The passphrase comes from `VAPI_KEYSTORE_PASSWORD`, then
+ * from the OS secret store `vapi unlock` writes to, then from a prompt.
+ */
 import { randomUUID } from "node:crypto";
 
 import {
-  LocalWallet,
   SpendPolicy,
+  WalletStore,
+  LocalWallet,
   appendReceipt,
   buildCompatibleX402Payment,
   classifySettlement,
   createPublicFetch,
-  getKeystorePassphrase,
   getVapiPaths,
   loadConfig,
   parse402Response,
   parseSettlementResponse,
-  unlockKeystore,
-} from "../packages/core/dist/index.js";
-import { vapiRegistrySource } from "../packages/sources/dist/index.js";
+  resolvePassphrase,
+  spendCapsForWallet,
+} from "@vapi-network/core";
+import { vapiRegistrySource } from "@vapi-network/sources";
 
 const query = process.argv[2] ?? "weather";
+const requestedWallet = process.argv[3];
+
 const paths = getVapiPaths();
 const config = await loadConfig(paths.config);
 const source = vapiRegistrySource(config.marketplaceDiscoveryUrl, {
@@ -25,10 +37,20 @@ const source = vapiRegistrySource(config.marketplaceDiscoveryUrl, {
 const [listing] = await source.search(query);
 if (!listing) throw new Error(`No payable listing found for ${JSON.stringify(query)}.`);
 
-const account = await unlockKeystore(await getKeystorePassphrase(), paths.keystore);
+// The wallet store owns the layout: one keystore per named wallet, and the
+// caps that belong to that wallet rather than to the machine.
+const store = await WalletStore.open(paths.directory);
+const selected = store.resolve(requestedWallet === undefined ? {} : { name: requestedWallet });
+const { passphrase } = await resolvePassphrase(selected.name);
+const account = await store.unlock(selected.name, passphrase);
+console.error(`Wallet: ${selected.name} (${account.address})`);
+
 const wallet = new LocalWallet(
   account,
-  new SpendPolicy(config.spendCaps, { ledgerPath: paths.ledger }),
+  new SpendPolicy(await spendCapsForWallet(store, selected.name), {
+    ledgerPath: paths.ledger,
+    wallet: selected.name,
+  }),
 );
 const guardedFetch = createPublicFetch({
   allowPrivateNetwork: config.allowPrivateNetwork ?? false,
@@ -48,10 +70,13 @@ const registeredPayment = asRecord(listing.metadata?.payment);
 const expectedPayTo =
   typeof registeredPayment?.payTo === "string" ? registeredPayment.payTo : undefined;
 const quote = await parse402Response(initial, config.networks, listing.network, expectedPayTo);
+// Policy first: a declined call must never produce a payment authorization.
 await wallet.authorize({
   amountAtomic: quote.amountAtomic,
   network: quote.accepted.network,
-  payTo: quote.accepted.payTo,
+  // The challenge is wire data, so its payTo arrives as a plain string; the
+  // 402 parser has already checked its shape against the network.
+  payTo: quote.accepted.payTo as `0x${string}`,
   resourceUrl: listing.resource.url,
 });
 const payment = await buildCompatibleX402Payment({ account: wallet, quote });
@@ -63,6 +88,7 @@ const settlement = parseSettlementResponse(response.headers);
 await appendReceipt({
   id: randomUUID(),
   timestamp: new Date().toISOString(),
+  wallet: selected.name,
   resourceUrl: listing.resource.url,
   method,
   provenance: listing.provenance,

@@ -1,6 +1,6 @@
 # Plan 001: Wallet management
 
-Status: Release 1 shipped 2026-09-19 (0.2.5); Releases 2 and 3 in progress. Owner: Zep. Scope: `vapi-network` client only
+Status: Releases 1 to 3 shipped in 0.3.0 (2026-09-19). Owner: Zep. Scope: `vapi-network` client only
 (core, cli, mcp). The console funding page is unchanged.
 
 ## Goal
@@ -259,7 +259,19 @@ enforced per wallet in `pay`; receipts filtered per wallet.
 
 ## Order of work
 
-1. Release 1: shipped (PRs #14, #15, #16).
-2. Release 2 as three PRs: core `WalletStore` + migration + per-wallet
-   receipts and caps; CLI; MCP. Then 0.3.0.
-3. Release 3 as one PR; can start once the core PR of Release 2 is merged.
+1. Release 1: shipped in 0.2.5 (PRs #14, #15, #16).
+2. Release 2: shipped in 0.3.0 as three PRs — core `WalletStore`, the layout
+   migration and per-wallet receipts and caps; the CLI wallet commands and
+   `--wallet`; the MCP `wallet.list` and `wallet.use` session.
+3. Release 3: shipped in 0.3.0 as one PR — `vapi unlock` and `vapi lock`, the
+   OS secret store, and `resolvePassphrase` as the single unlock order.
+
+Everything in this plan is now in 0.3.0. What it deliberately did not do, and
+what a later plan would pick up:
+
+- 2.6 Funding page `?label=<name>`: a console change, not a client one, and
+  still open.
+- Windows has no Credential Manager path, so it keeps
+  `VAPI_KEYSTORE_PASSWORD`.
+- The `keystore.json` compatibility symlink is kept for one release and should
+  be dropped in 0.4.0.
