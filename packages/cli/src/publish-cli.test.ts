@@ -92,19 +92,21 @@ type Recorded = { method: string; path: string; query: string; headers: Headers;
  * request the client should not have made shows up as a 404 in the recording
  * rather than as a silently accepted call.
  */
-function registryFetch(routes: Record<string, Reply>) {
+function registryFetch(routes: Record<string, Reply | ((call: Recorded) => Reply)>) {
   const calls: Recorded[] = [];
   const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
-    calls.push({
+    const call: Recorded = {
       method,
       path: url.pathname,
       query: url.search,
       headers: new Headers(init?.headers as HeadersInit),
       body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
-    });
-    const reply = routes[`${method} ${url.pathname}`];
+    };
+    calls.push(call);
+    const route = routes[`${method} ${url.pathname}`];
+    const reply = typeof route === "function" ? route(call) : route;
     if (reply === undefined) {
       return new Response(JSON.stringify({ error: `no route for ${method} ${url.pathname}` }), {
         status: 404,
@@ -702,6 +704,177 @@ describe("vapi publish activate, verify-request and list", () => {
     expect(message).toContain("https://api.vapinetwork.ai/account");
     expect(message).toContain("vapi auth set-key");
     expect(message).toContain("VAPI_API_KEY");
+  });
+});
+
+describe("vapi claim <origin>", () => {
+  const ORIGIN = "https://weather.example";
+
+  /** The C-4 claim message, for the wallet the client asked about. */
+  function claimMessage(call: Recorded, overrides: { domain?: string; origin?: string } = {}) {
+    const wallet = new URLSearchParams(call.query).get("wallet") ?? "";
+    return [
+      `${overrides.domain ?? "api.vapinetwork.ai"} wants you to sign in with your Ethereum account:`,
+      wallet,
+      "",
+      `Claim the vAPI Call listings served from ${overrides.origin ?? ORIGIN}`,
+      "",
+      "URI: https://api.vapinetwork.ai",
+      "Version: 1",
+      "Chain ID: 8453",
+      "Nonce: c0ffee0123456789",
+      "Issued At: 2026-09-21T10:00:00.000Z",
+    ].join("\n");
+  }
+
+  function claimRegistry(claim: Reply, message = claimMessage) {
+    return registryFetch({
+      "GET /api/call/listings/claim-nonce": (call) => ({ body: { message: message(call) } }),
+      "POST /api/call/listings/claim": claim,
+    });
+  }
+
+  it("signs the registry's claim message with the payee wallet and names what it claimed", async () => {
+    const home = await initializedHome("vapi-claim-");
+    process.env.VAPI_API_KEY = KEY;
+    const registry = claimRegistry({ body: { claimed: ["weather-forecast", "weather-alerts"] } });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["claim", ORIGIN], captured.io, {
+        ...AGENT,
+        fetchImpl: registry.fetchImpl,
+        prompts: refusingPrompts(),
+      }),
+    ).toBe(0);
+
+    expect(registry.paths()).toEqual([
+      "GET /api/call/listings/claim-nonce",
+      "POST /api/call/listings/claim",
+    ]);
+    for (const call of registry.calls) {
+      expect(call.headers.get("authorization")).toBe(`Bearer ${KEY}`);
+    }
+    const query = new URLSearchParams(registry.calls[0]!.query);
+    expect(query.get("origin")).toBe(ORIGIN);
+    const wallet = query.get("wallet") as `0x${string}`;
+    expect(wallet).toMatch(WALLET);
+    const posted = registry.calls[1]!.body as {
+      origin: string;
+      message: string;
+      signature: `0x${string}`;
+    };
+    expect(posted.origin).toBe(ORIGIN);
+    expect(posted.message).toBe(claimMessage(registry.calls[0]!));
+    expect(
+      await verifyMessage({
+        address: wallet,
+        message: posted.message,
+        signature: posted.signature,
+      }),
+    ).toBe(true);
+
+    const text = captured.stdout.join("\n");
+    expect(text).toMatch(/^Wallet: main \(0x[0-9a-fA-F]{40}\)$/mu);
+    expect(text).toContain("Claimed 2 listings served from https://weather.example:");
+    expect(text).toContain("  weather-forecast\n  weather-alerts");
+    expect((await readAuditLog(home)).at(-1)).toMatchObject({
+      event: "listing.claim",
+      wallet: "main",
+      detail: "https://weather.example weather-forecast,weather-alerts",
+    });
+  });
+
+  it("answers --json with the claimed slugs", async () => {
+    await initializedHome("vapi-claim-json-");
+    process.env.VAPI_API_KEY = KEY;
+    const registry = claimRegistry({ body: { claimed: ["weather-forecast"] } });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["claim", `${ORIGIN}/`, "--json"], captured.io, {
+        ...AGENT,
+        fetchImpl: registry.fetchImpl,
+      }),
+    ).toBe(0);
+    expect(JSON.parse(captured.stdout[0]!)).toEqual({
+      wallet: "main",
+      origin: ORIGIN,
+      claimed: ["weather-forecast"],
+    });
+  });
+
+  it.each([
+    [
+      403,
+      "not_payee",
+      "This wallet is not the payee of the listings served from https://weather.example.",
+    ],
+    [404, "no_listings", "vAPI has no unclaimed listing served from https://weather.example."],
+    [
+      409,
+      "already_owned",
+      "The listings served from https://weather.example already have an owner.",
+    ],
+  ])("turns a %s %s into a sentence", async (status, error, sentence) => {
+    await initializedHome(`vapi-claim-${status}-`);
+    process.env.VAPI_API_KEY = KEY;
+    const registry = claimRegistry({ status, body: { error } });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["claim", ORIGIN], captured.io, { ...AGENT, fetchImpl: registry.fetchImpl }),
+    ).toBe(1);
+    expect(captured.stderr.join("\n")).toContain(sentence);
+  });
+
+  it("signs nothing when the message is not bound to this registry and origin", async () => {
+    await initializedHome("vapi-claim-unbound-");
+    process.env.VAPI_API_KEY = KEY;
+    for (const overrides of [{ domain: "evil.example" }, { origin: "https://other.example" }]) {
+      const registry = claimRegistry({ body: { claimed: [] } }, (call) =>
+        claimMessage(call, overrides),
+      );
+      const captured = captureIo();
+
+      expect(
+        await runCli(["claim", ORIGIN], captured.io, { ...AGENT, fetchImpl: registry.fetchImpl }),
+      ).toBe(1);
+      expect(registry.paths()).toEqual(["GET /api/call/listings/claim-nonce"]);
+      expect(captured.stderr.join("\n")).toContain("so nothing was signed");
+    }
+  });
+
+  it("takes an https origin and nothing else, before it calls anyone", async () => {
+    await initializedHome("vapi-claim-usage-");
+    process.env.VAPI_API_KEY = KEY;
+    const registry = registryFetch({});
+
+    for (const value of ["http://weather.example", "https://weather.example/api", "weather"]) {
+      const captured = captureIo();
+      expect(
+        await runCli(["claim", value], captured.io, { ...AGENT, fetchImpl: registry.fetchImpl }),
+      ).toBe(2);
+    }
+    expect(registry.calls).toEqual([]);
+  });
+
+  it("asks for a key before it opens the wallet", async () => {
+    await initializedHome("vapi-claim-no-key-");
+    delete process.env.VAPI_API_KEY;
+    const registry = registryFetch({});
+    const captured = captureIo();
+
+    expect(
+      await runCli(["claim", ORIGIN], captured.io, {
+        ...AGENT,
+        fetchImpl: registry.fetchImpl,
+        secretStore: secretStoreStub(),
+        prompts: refusingPrompts(),
+      }),
+    ).toBe(1);
+    expect(registry.calls).toEqual([]);
+    expect(captured.stderr.join("\n")).toContain("No vAPI API key on this machine.");
   });
 });
 

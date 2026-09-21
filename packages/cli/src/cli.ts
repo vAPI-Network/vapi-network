@@ -93,6 +93,7 @@ import {
 import { detectColorLevel, renderBanner } from "./brand.js";
 import {
   API_KEY_CONSOLE_PATH,
+  assertClaimMessage,
   buildPayoutSiweMessage,
   createListingsClient,
   formatProbeSteps,
@@ -152,6 +153,7 @@ Usage:
   vapi publish activate <slug> [--json]
   vapi publish verify-request <slug> [--json]
   vapi publish list [--json]
+  vapi claim <origin> [--wallet <name>] [--json]
   vapi mcp [--wallet <name>] [--json]
   vapi serve [--json]
   vapi version [--json]
@@ -170,6 +172,8 @@ Every command that touches a wallet takes \`--wallet <name>\`, falls back to \`V
 \`vapi backup\` and \`vapi export-key\` print a secret, so they run only on a real terminal, never for an agent, and ask you to type the wallet name first. Set \`VAPI_NO_SECRETS=1\` to switch them off entirely. Every export and every wallet change is logged to ~/.vapi/audit.log.
 
 \`vapi publish <url>\` lists an API you own. vAPI probes the URL — an origin, one endpoint, or an OpenAPI document — you choose which endpoints to list, and your wallet signs one line naming where the payouts go. Listing is permissionless: a listing that passed the probe goes live with \`vapi publish activate <slug>\`, and \`vapi publish verify-request <slug>\` asks for the review that puts it in the default search. Deploying the FeeSplitter that receives the payouts is a wallet transaction and stays in the console.
+
+\`vapi claim <origin>\` takes ownership of the listings vAPI indexed from your API. The wallet their payments go to signs one line, \`Claim the vAPI Call listings served from <origin>\`; the listings stay paid directly to that wallet, and \`vapi publish list\` shows them.
 
 \`vapi auth set-key\` types the registry API key once, on a terminal, into the same OS secret store as the passphrase. A key is a secret: it is never an argument, \`VAPI_API_KEY\` is the route for CI, and no agent or MCP tool can reach it.
 
@@ -530,6 +534,9 @@ export async function runCli(
         return 0;
       case "publish":
         return await publishCommand(args.slice(1), json, io, dependencies);
+      case "claim":
+        await claimCommand(args.slice(1), json, io, dependencies);
+        return 0;
       case "mcp":
         await mcpCommand(args.slice(1), dependencies);
         return 0;
@@ -2062,10 +2069,14 @@ function parseProbeMode(value: string | undefined): ProbeMode | undefined {
 }
 
 /** Payouts are an EVM transfer, so a wallet without an EVM key cannot receive them. */
-function requireEvmAddress(address: string | undefined, wallet: string): Address {
+function requireEvmAddress(
+  address: string | undefined,
+  wallet: string,
+  retry = "vapi publish <url> --wallet <name>",
+): Address {
   if (address === undefined || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
     throw new Error(
-      `Wallet ${wallet} has no EVM account, so it cannot receive vAPI Call payouts. Publish with a wallet that has one: vapi publish <url> --wallet <name>.`,
+      `Wallet ${wallet} has no EVM account, so it cannot receive vAPI Call payouts. Use a wallet that has one: ${retry}.`,
     );
   }
   return address as Address;
@@ -2257,6 +2268,75 @@ function formatMyListings(result: { listings?: readonly unknown[] }): string {
         typeof record.name === "string" ? record.name : "",
       ].join("\t");
     }),
+  ].join("\n");
+}
+
+const CLAIM_USAGE = "Usage: vapi claim <origin> [--wallet <name>]";
+
+/**
+ * `vapi claim <origin>`: the owner of an API vAPI indexed from a public
+ * catalog takes the listings over. The registry sends an EIP-4361 message; the
+ * wallet the listings already pay signs it on the same path \`vapi publish\`
+ * signs its payout line, and the registry recovers the signer to match it
+ * against their payTo. Nothing is paid and the payout path does not change. A
+ * human act, like publishing: there is no MCP tool for it.
+ */
+async function claimCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set([WALLET_OPTION]),
+    maximumPositionals: 1,
+  });
+  const origin = claimOrigin(requiredPositional(parsed.positionals[0], CLAIM_USAGE));
+  const { client, baseUrl } = await listingsClient(io, dependencies);
+  const wallet = await targetWallet(parsed, dependencies);
+  const { account } = await unlockTarget(wallet, dependencies);
+  const address = requireEvmAddress(
+    account.address,
+    wallet.name,
+    `vapi claim ${origin} --wallet <name>`,
+  );
+  const nonce = await client.claimNonce(origin, address);
+  const message = typeof nonce.message === "string" ? nonce.message : "";
+  assertClaimMessage(message, { baseUrl, origin, address });
+  const signature = await account.signMessage({ message });
+  const result = await client.claim({ origin, message, signature });
+  const claimed = (Array.isArray(result.claimed) ? result.claimed : []).filter(
+    (slug): slug is string => typeof slug === "string",
+  );
+  await recordAudit(dependencies, "listing.claim", {
+    wallet: wallet.name,
+    detail: `${origin} ${claimed.join(",")}`.trim(),
+  });
+  outputForWallet(io, json, wallet, { origin, claimed }, formatClaimed(origin, claimed));
+}
+
+/** An https origin, and nothing more: a claim covers every listing served from it. */
+function claimOrigin(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new UsageError(`${CLAIM_USAGE}. ${JSON.stringify(value)} is not a URL.`);
+  }
+  if (url.protocol !== "https:" || url.pathname !== "/" || url.search !== "" || url.hash !== "") {
+    throw new UsageError(
+      `vapi claim takes an https origin such as https://api.example, not ${JSON.stringify(value)}.`,
+    );
+  }
+  return url.origin;
+}
+
+function formatClaimed(origin: string, claimed: readonly string[]): string {
+  if (claimed.length === 0) return `Nothing was claimed from ${origin}.`;
+  return [
+    `Claimed ${claimed.length} listing${claimed.length === 1 ? "" : "s"} served from ${origin}:`,
+    ...claimed.map((slug) => `  ${slug}`),
+    "They are still paid directly to this wallet, with no vAPI fee. vapi publish list shows them; vapi publish verify-request <slug> asks for review.",
   ].join("\n");
 }
 

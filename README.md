@@ -246,6 +246,7 @@ to stdout. Exit codes are `0` for success, `1` for an operational failure, and
 | `vapi publish activate <slug>`       | —                                                                                                                                                                                           | Takes a listing live once its FeeSplitter is deployed                       |
 | `vapi publish verify-request <slug>` | —                                                                                                                                                                                           | Asks vAPI to review the listing                                             |
 | `vapi publish list`                  | —                                                                                                                                                                                           | Every listing this API key owns                                             |
+| `vapi claim <origin>`                | `--wallet <name>`                                                                                                                                                                           | Takes over the listings vAPI indexed from your API, signed by their payee   |
 | `vapi mcp`                           | `--wallet <name>`                                                                                                                                                                           | Serves the MCP tools over stdio                                             |
 | `vapi serve`                         | —                                                                                                                                                                                           | Preview only; exits `2` with a message                                      |
 | `vapi version`                       | —                                                                                                                                                                                           | The client version, also as `--version` or `-v`                             |
@@ -295,6 +296,27 @@ transaction against the factory, so it stays in the console at
 network and the exact next step. An active listing answers
 `vapi search --include-unverified`, and `vapi publish verify-request <slug>`
 asks for the review that puts it in the default search.
+
+### Claim a listing vAPI indexed
+
+vAPI mirrors public x402 catalogs, so your API may already be listed without
+you. If it is, you can own those listings instead of publishing new ones:
+
+```bash
+vapi claim https://weather.example --wallet payout   # the wallet the listings pay
+```
+
+The registry sends an EIP-4361 message bound to its own host and to Base, with
+the statement `Claim the vAPI Call listings served from <origin>`. vapi checks
+that the message says exactly that for this wallet before it signs anything,
+signs it the same way `vapi publish` signs its payout line, and the registry
+matches the signer against the listings' `payTo`. Every unowned indexed listing
+served from that origin that pays this wallet becomes yours; they stay paid
+directly to it with no vAPI fee, `vapi publish list` shows them, and `vapi
+publish verify-request <slug>` asks for review. A wallet that is not the payee,
+an origin with nothing to claim, and listings that already have an owner each
+get their own sentence and exit `1`. Like publishing, claiming needs `vapi auth
+set-key` and has no MCP tool.
 
 The API key is a secret like any other here. `vapi auth set-key` reads it from
 a prompt, never from an argument, and keeps it in the same OS secret store as

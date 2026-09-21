@@ -39,6 +39,8 @@ export const AUDIT_EVENTS = [
   // The slug is not a secret, so it is worth having in the trail.
   "listing.publish",
   "listing.status",
+  // The wallet proving it is the payee of indexed listings, to own them.
+  "listing.claim",
 ] as const;
 
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];

@@ -35,6 +35,9 @@ export const PAYOUT_CHAIN_ID = "eip155:8453" as const;
  */
 export const PAYOUT_STATEMENT = "Confirm this wallet receives vAPI Call payouts";
 
+/** The sentence a claim message states, completed with the origin being claimed. */
+export const CLAIM_STATEMENT_PREFIX = "Claim the vAPI Call listings served from";
+
 /** Where a person creates the key this client authenticates with. */
 export const API_KEY_CONSOLE_PATH = "/account";
 
@@ -132,6 +135,13 @@ export type ListingStatusResult = Readonly<{
 export type MyListings = Readonly<{ listings?: readonly unknown[] }> &
   Readonly<Record<string, unknown>>;
 
+export type ClaimNonce = Readonly<{ message?: string }> & Readonly<Record<string, unknown>>;
+
+export type ClaimInput = { origin: string; message: string; signature: string };
+
+export type ClaimResult = Readonly<{ claimed?: readonly unknown[] }> &
+  Readonly<Record<string, unknown>>;
+
 /**
  * A refusal from the registry, already turned into the sentence a person
  * should read. The status is kept so a caller can tell a rejection from an
@@ -165,6 +175,8 @@ export type ListingsClient = {
   create(input: CreateListingInput): Promise<CreatedListing>;
   status(slug: string, action: ListingStatusAction): Promise<ListingStatusResult>;
   mine(): Promise<MyListings>;
+  claimNonce(origin: string, wallet: string): Promise<ClaimNonce>;
+  claim(input: ClaimInput): Promise<ClaimResult>;
 };
 
 /** Appends one absolute path to the registry base, keeping any mount prefix. */
@@ -239,7 +251,59 @@ export function createListingsClient(options: ListingsClientOptions): ListingsCl
     async mine() {
       return (await call("/api/call/listings/mine", { method: "GET" })) as MyListings;
     },
+    async claimNonce(origin, wallet) {
+      return (await call("/api/call/listings/claim-nonce", {
+        method: "GET",
+        query: { origin, wallet },
+      })) as ClaimNonce;
+    },
+    async claim(input) {
+      try {
+        return (await call("/api/call/listings/claim", {
+          method: "POST",
+          body: input,
+        })) as ClaimResult;
+      } catch (error) {
+        throw claimRefusal(error, input.origin);
+      }
+    },
   };
+}
+
+/** The three refusals a claim can meet, each as the sentence that explains it. */
+function claimRefusal(error: unknown, origin: string): unknown {
+  if (!(error instanceof RegistryApiError)) return error;
+  const sentences: Partial<Record<number, string>> = {
+    403: `This wallet is not the payee of the listings served from ${origin}. Sign with the wallet their payments go to: vapi claim ${origin} --wallet <name>.`,
+    404: `vAPI has no unclaimed listing served from ${origin}. To list it yourself, run vapi publish ${origin}.`,
+    409: `The listings served from ${origin} already have an owner. vapi publish list shows the ones this key owns.`,
+  };
+  const sentence = sentences[error.status];
+  return sentence === undefined ? error : new RegistryApiError(error.status, sentence, error.body);
+}
+
+/**
+ * Refuses to sign a claim message that is not the one the claim contract
+ * describes: an EIP-4361 message from this registry's host, for this wallet,
+ * on Base, stating the origin being claimed. The registry writes the message,
+ * so this is the line that keeps a wallet from signing anything else it sends.
+ */
+export function assertClaimMessage(
+  message: string,
+  expected: { baseUrl: string; origin: string; address: Address },
+): void {
+  const lines = message.split("\n").map((line) => line.trim());
+  const host = new URL(expected.baseUrl).host;
+  const bound =
+    lines[0] === `${host} wants you to sign in with your Ethereum account:` &&
+    lines[1]?.toLowerCase() === expected.address.toLowerCase() &&
+    lines.includes(`${CLAIM_STATEMENT_PREFIX} ${expected.origin}`) &&
+    lines.includes(`Chain ID: ${PAYOUT_CHAIN_ID.slice("eip155:".length)}`);
+  if (!bound) {
+    throw new Error(
+      `vAPI sent a claim message that is not bound to ${host}, this wallet, Base and ${expected.origin}, so nothing was signed.`,
+    );
+  }
 }
 
 /**

@@ -26,6 +26,15 @@ payment. Nothing is blocked; nothing is decided for you.
   `vapi publish verify-request <slug>` asks for the review that ends the
   `[unverified]` tag, and `vapi publish list` shows what this key owns.
   `--json` emits the registry's raw responses.
+- `vapi claim <origin>`: the owner of an API vAPI indexed from a public
+  catalog takes those listings over. vapi fetches the registry's EIP-4361 claim
+  message for the local wallet, refuses to sign one that is not bound to the
+  registry's host, this wallet, Base and that origin, signs it on the same path
+  as the publish payout line, and prints the slugs it claimed. A wallet that is
+  not the payee (403), an origin with nothing to claim (404) and listings that
+  already have an owner (409) each get a sentence. Needs `vapi auth set-key`;
+  like publishing, there is no MCP tool for it. Each claim writes a
+  `listing.claim` audit line.
 - `vapi auth set-key`, `vapi auth status` and `vapi auth clear` for the registry
   API key. The key is typed on a prompt and never passed as an argument, is kept
   in the same OS secret store as the wallet passphrase — or in
