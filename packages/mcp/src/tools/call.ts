@@ -175,6 +175,8 @@ type CallExecution = {
 };
 
 type CallTrace = {
+  /** The id of the one receipt this call writes, known before any message names it. */
+  readonly receiptId: string;
   readonly startedAt: Date;
   readonly startedMs: number;
   readonly nowMs: () => number;
@@ -192,6 +194,7 @@ type CallTrace = {
   method?: string;
   quote?: NonNullable<Receipt["quote"]>;
   payer?: string;
+  authorization?: NonNullable<Receipt["authorization"]>;
   settlement?: NonNullable<Receipt["settlement"]>;
   status?: number;
   capsApplied: boolean;
@@ -553,9 +556,15 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
     trace.payer = isSvmPaymentRequirements(quote.accepted)
       ? account.solana?.address
       : account.address;
+    if ("authorization" in payment.payload.payload) {
+      const { from, nonce, validBefore } = payment.payload.payload.authorization;
+      trace.authorization = { from, nonce, validBefore };
+    }
   } finally {
     trace.phases.signMs = elapsed(trace, signStarted);
   }
+  // Every "do not retry" below names the receipt `vapi pay --resume` settles it with.
+  const resumeId = args.receiptsPath === undefined ? undefined : trace.receiptId;
   const paidHeaders = new Headers(challengeAttempt.request.headers);
   for (const [name, value] of Object.entries(payment.headers)) {
     paidHeaders.set(name, value);
@@ -581,6 +590,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
       payment.payload,
       trace.payer ?? account.address,
       null,
+      resumeId,
       error,
     );
   }
@@ -611,6 +621,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
         payment.payload,
         trace.payer ?? account.address,
         settlement,
+        resumeId,
       );
     }
     if (paidResponse.status === 402 && settlementOutcome !== "succeeded") {
@@ -633,6 +644,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
         payment.payload,
         trace.payer ?? account.address,
         settlement,
+        resumeId,
       );
     }
     if (!paidResponse.ok && settlementOutcome !== "succeeded") {
@@ -643,6 +655,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
         payment.payload,
         trace.payer ?? account.address,
         settlement,
+        resumeId,
       );
     }
     let body: unknown;
@@ -659,6 +672,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
         payment.payload,
         trace.payer ?? account.address,
         settlement,
+        resumeId,
         error,
       );
     } finally {
@@ -706,7 +720,7 @@ async function recordCallReceipt(
     ? args.config.networks[trace.identityNetwork]?.usdc
     : undefined;
   const receipt: Receipt = {
-    id: randomUUID(),
+    id: trace.receiptId,
     timestamp: trace.startedAt.toISOString(),
     resourceUrl: execution.resourceUrl,
     method: execution.method,
@@ -720,6 +734,7 @@ async function recordCallReceipt(
             payTo: payment.payTo,
           },
           payer: trace.payer ?? args.account.address,
+          ...(trace.authorization ? { authorization: trace.authorization } : {}),
           settlement: {
             outcome: classifySettlement(evidence),
             ...(transaction ? { transaction } : {}),
@@ -778,7 +793,7 @@ async function recordCallError(
   const settlement = errorSettlement(error, trace);
   await appendReceipt(
     {
-      id: randomUUID(),
+      id: trace.receiptId,
       timestamp: trace.startedAt.toISOString(),
       resourceUrl,
       ...(trace.method
@@ -789,6 +804,7 @@ async function recordCallError(
       ...receiptContext(args, trace, resourceUrl),
       ...(trace.quote ? { quote: trace.quote } : {}),
       ...(trace.payer && outcome !== "declined_policy" ? { payer: trace.payer } : {}),
+      ...(trace.authorization ? { authorization: trace.authorization } : {}),
       ...(settlement ? { settlement } : {}),
       ...(trace.status === undefined ? {} : { status: trace.status }),
       latencyMs: elapsed(trace, trace.startedMs),
@@ -804,6 +820,7 @@ function createCallTrace(args: CallServiceArgs): CallTrace {
   const nowMs = args.nowMs ?? (() => performance.now());
   const marketplace = args.marketplaceHit;
   return {
+    receiptId: randomUUID(),
     startedAt: args.now ?? new Date(),
     startedMs: nowMs(),
     nowMs,
@@ -1249,17 +1266,27 @@ async function fetchAttempt(
   }
 }
 
+/**
+ * A payment that may or may not have settled. An EVM authorization can be
+ * settled against the chain later, so when this call wrote a receipt the
+ * message names the one command that does it; a Solana payment cannot be yet.
+ */
 function settlementUnknown(
   message: string,
   quote: Awaited<ReturnType<typeof parse402Response>>,
   payment: X402PaymentPayload,
   payer: string,
   receipt: unknown | null,
+  resumeId: string | undefined,
   cause?: unknown,
 ): VapiCallError {
+  const resume =
+    resumeId !== undefined && "authorization" in payment.payload
+      ? ` Check whether it settled with \`vapi pay --resume ${resumeId}\` before paying again.`
+      : "";
   return new VapiCallError(
     "settlement_unknown",
-    message,
+    `${message}${resume}`,
     {
       network: quote.accepted.network,
       asset: quote.accepted.asset,

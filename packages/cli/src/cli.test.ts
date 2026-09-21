@@ -621,6 +621,139 @@ describe("inspect output", () => {
   });
 });
 
+describe("vapi pay --resume", () => {
+  const PAYER = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94";
+  const VALID_BEFORE = 1_790_000_000;
+
+  async function homeWithLostPayment(overrides: Record<string, unknown> = {}): Promise<void> {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-resume-"));
+    process.env.VAPI_HOME = home;
+    await appendReceipt(
+      {
+        id: "lost-1",
+        timestamp: "2026-09-21T10:00:00.000Z",
+        wallet: "agent",
+        resourceUrl: "https://vendor.example/paid",
+        method: "POST",
+        quote: {
+          network: "eip155:8453",
+          asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          amountAtomic: "2500",
+          payTo: "0x1111111111111111111111111111111111111111",
+        },
+        payer: PAYER,
+        authorization: {
+          from: PAYER,
+          nonce: `0x${"ab".repeat(32)}`,
+          validBefore: String(VALID_BEFORE),
+        },
+        settlement: { outcome: "unknown" },
+        outcome: "settlement_unknown",
+        ...overrides,
+      },
+      getVapiPaths().receipts,
+    );
+  }
+
+  /** A Base node: the latest block at `chainTime`, and the nonce `used` or not. */
+  function baseNode(used: boolean, chainTime: number) {
+    return vi.fn<typeof fetch>(async (_input, init) => {
+      const request = JSON.parse(String(init?.body)) as { id: number; method: string };
+      return Response.json({
+        jsonrpc: "2.0",
+        id: request.id,
+        result:
+          request.method === "eth_getBlockByNumber"
+            ? {
+                number: "0x10",
+                hash: `0x${"cd".repeat(32)}`,
+                timestamp: `0x${chainTime.toString(16)}`,
+              }
+            : `0x${(used ? "1" : "0").padStart(64, "0")}`,
+      });
+    });
+  }
+
+  it("says a settled payment must not be paid again, without opening a wallet", async () => {
+    await homeWithLostPayment();
+    const captured = captureIo();
+
+    expect(
+      await runCli(["pay", "--resume", "lost-1"], captured.io, {
+        fetchImpl: baseNode(true, VALID_BEFORE - 30),
+      }),
+    ).toBe(0);
+
+    const text = captured.stdout.join("\n");
+    expect(text).toMatch(/^Wallet: agent$/mu);
+    expect(text).toContain("Receipt: lost-1 — POST https://vendor.example/paid");
+    expect(text).toContain(
+      "Settled: the authorization was used on-chain, so the payment went through. Do not pay again.",
+    );
+  });
+
+  it("tells an expired authorization from a pending one, in --json", async () => {
+    await homeWithLostPayment();
+    const expired = captureIo();
+    expect(
+      await runCli(["pay", "--resume", "lost-1", "--json"], expired.io, {
+        fetchImpl: baseNode(false, VALID_BEFORE),
+      }),
+    ).toBe(0);
+    expect(JSON.parse(expired.stdout[0]!)).toMatchObject({
+      wallet: "agent",
+      receipt: "lost-1",
+      state: "expired",
+      authorizer: PAYER,
+      validBefore: String(VALID_BEFORE),
+      validBeforeAt: new Date(VALID_BEFORE * 1_000).toISOString(),
+      message:
+        "Expired: the authorization was never used and can no longer settle. Paying again is safe.",
+    });
+
+    const pending = captureIo();
+    expect(
+      await runCli(["pay", "--resume", "lost-1"], pending.io, {
+        fetchImpl: baseNode(false, VALID_BEFORE - 1),
+      }),
+    ).toBe(0);
+    expect(pending.stdout.join("\n")).toContain(
+      `Pending: the authorization is unused but can still settle. Wait until ${new Date(VALID_BEFORE * 1_000).toISOString()}, then run vapi pay --resume lost-1 again; paying now could pay twice.`,
+    );
+  });
+
+  it("says a Solana receipt cannot be checked yet", async () => {
+    await homeWithLostPayment({
+      quote: {
+        network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        amountAtomic: "2500",
+      },
+      authorization: undefined,
+    });
+    const captured = captureIo();
+    const fetchImpl = baseNode(false, 0);
+
+    expect(await runCli(["pay", "--resume", "lost-1"], captured.io, { fetchImpl })).toBe(1);
+    expect(captured.stderr.join("\n")).toContain(
+      "checking a Solana payment's settlement is not supported yet",
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("names a receipt it cannot find, and refuses to mix --resume with a payment", async () => {
+    await homeWithLostPayment();
+    const missing = captureIo();
+    expect(await runCli(["pay", "--resume", "nope"], missing.io, {})).toBe(1);
+    expect(missing.stderr.join("\n")).toContain('No receipt "nope" in');
+
+    const mixed = captureIo();
+    expect(
+      await runCli(["pay", "https://vendor.example/paid", "--resume", "lost-1"], mixed.io, {}),
+    ).toBe(2);
+  });
+});
+
 describe("the verification notice vapi pay prints", () => {
   it("says nothing for a verified listing, or for a call with no listing at all", () => {
     expect(verificationNotice("verified")).toEqual([]);

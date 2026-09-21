@@ -70,4 +70,28 @@ describe("receipts ledger", () => {
       }),
     ).toMatchObject({ outcome: "paid", client: { version: "0.2.0-dev.3" } });
   });
+
+  it("keeps the signed authorization a lost response is settled against", () => {
+    const authorization = {
+      from: "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+      nonce: `0x${"ab".repeat(32)}`,
+      validBefore: "1790000000",
+    };
+    const receipt = {
+      id: "lost",
+      timestamp: "2026-09-21T10:00:00.000Z",
+      resourceUrl: "https://api.example/paid",
+      quote: {
+        network: "eip155:8453",
+        asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        amountAtomic: "2500",
+      },
+      authorization,
+      outcome: "settlement_unknown",
+    };
+    expect(parseReceipt(receipt).authorization).toEqual(authorization);
+    expect(() =>
+      parseReceipt({ ...receipt, authorization: { ...authorization, nonce: "0x1234" } }),
+    ).toThrow();
+  });
 });

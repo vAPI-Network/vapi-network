@@ -226,6 +226,7 @@ to stdout. Exit codes are `0` for success, `1` for an operational failure, and
 | `vapi search [query]`                | `--kind <kind>` (repeatable), `--network <caip2>`, `--limit <n>`, `--cursor <cursor>`, `--include-unverified`                                                                               | Merged discovery across every configured source, tagged by group and tier   |
 | `vapi inspect <id>`                  | `--endpoint <name>`                                                                                                                                                                         | Verification, fee, liveness, conformance, contract and live quote, for free |
 | `vapi pay <id-or-url>`               | `--method`, `--endpoint`, `--body <json>`, `--content-type`, `--network <caip2>`, `--expected-pay-to`, `--max <usd>`, `--wallet <name>`                                                     | Calls the API and pays it from the local wallet, naming an unverified tier  |
+| `vapi pay --resume <receipt-id>`     | —                                                                                                                                                                                           | After a lost response: did that payment settle? Reads the chain, never pays |
 | `vapi balance`                       | `--wallet <name>`                                                                                                                                                                           | The wallet's address and USDC balances                                      |
 | `vapi receipts`                      | `--limit <n>`, `--wallet <name>`, `--all-wallets`                                                                                                                                           | The local append-only call ledger, newest last                              |
 | `vapi receipts export`               | `--format <json\|csv>`, `--range <24h\|7d\|30d>`, `--wallet <name>`, `--all-wallets`                                                                                                        | Raw receipts for a spreadsheet or dashboard                                 |
@@ -251,7 +252,15 @@ to stdout. Exit codes are `0` for success, `1` for an operational failure, and
 | `vapi help`                          | —                                                                                                                                                                                           | The same help bare `vapi` shows, also as `--help` or `-h`                   |
 
 `vapi pay` also accepts `--max-price-usd` as a long-standing alias for `--max`;
-the two cannot be combined. `mcp --json` is accepted as a no-op, because the
+the two cannot be combined. When a paid call loses its response, `vapi pay` refuses to guess
+and names its receipt: `vapi pay --resume <receipt-id>` asks the token contract
+on that receipt's network, with EIP-3009 `authorizationState(authorizer,
+nonce)`, whether the signed authorization was used. **Settled** means the
+payment went through — do not pay again. **Expired** means it was never used
+and the chain is past its `validBefore`, so it never can be — paying again is
+safe. **Pending** means it is unused but still valid — wait until the time it
+prints. It unlocks no wallet and signs nothing. EVM only for now; a Solana
+receipt says so, and a receipt written before 0.4.0 does not record the nonce. `mcp --json` is accepted as a no-op, because the
 stdio transport is already JSON-RPC.
 
 ## Publish an API
@@ -369,7 +378,10 @@ that way.
 `wallet` is optional on every tool that takes it: without it the session's
 active wallet is used, then `VAPI_WALLET`, then the machine default. Every
 result names the wallet it used. `call.pay` applies that wallet's own spend caps
-before it signs and tags the receipt with its name. `wallet.use` moves the
+before it signs and tags the receipt with its name. When a paid call's outcome
+is uncertain, `call.pay` fails with `settlement_unknown`, says not to retry
+automatically, and names the `vapi pay --resume <receipt-id>` that settles the
+question on-chain. `wallet.use` moves the
 session onto another wallet **for this process only** — it never rewrites
 `wallets.json`, so your own terminal keeps the default you chose — and appends a
 `wallet.use.session` line to the audit log. Reads need no passphrase at all.

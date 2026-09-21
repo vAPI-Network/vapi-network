@@ -15,6 +15,7 @@ import {
   aggregateStats,
   appendAudit,
   assertWalletName,
+  checkReceiptSettlement,
   changeKeystorePassphrase,
   createSupportReport,
   enableDefaultNetwork,
@@ -39,6 +40,7 @@ import {
   readKeystoreVersion,
   readReceipts,
   readSearchEvents,
+  receiptWallet,
   receiptsToCsv,
   resolvePassphrase,
   resolveRegistryUrl,
@@ -130,6 +132,7 @@ Usage:
   vapi search [query] [--kind <kind>] [--network <caip2>] [--limit <n>] [--cursor <cursor>] [--include-unverified] [--json]
   vapi inspect <id> [--endpoint <name>] [--json]
   vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--wallet <name>] [--json]
+  vapi pay --resume <receipt-id> [--json]
   vapi balance [--wallet <name>] [--json]
   vapi receipts [--limit <n>] [--wallet <name>] [--all-wallets] [--json]
   vapi receipts export --format <json|csv> [--range <24h|7d|30d>] [--wallet <name>] [--all-wallets]
@@ -157,6 +160,8 @@ Usage:
 Every command that touches a wallet takes \`--wallet <name>\`, falls back to \`VAPI_WALLET\`, then to the default set by \`vapi wallet use\`, and names the wallet it used on its first line.
 
 \`vapi search\` answers with vAPI-verified listings plus the mirrored external catalogs. \`--include-unverified\` also returns self-listed APIs that passed vAPI's automated x402 probe but were never reviewed; every result is tagged \`[verified]\`, \`[requested]\`, \`[unverified]\` or \`[external]\`.
+
+\`vapi pay --resume <receipt-id>\` answers the one question a lost response leaves: did that payment settle? It reads the signed authorization's state on-chain — settled, expired, or still pending — and never pays.
 
 \`vapi fund\` opens the funding page: card via Coinbase (needs a Coinbase account; US guest checkout), send from MetaMask/Coinbase Wallet/WalletConnect, or bridge from another chain.
 
@@ -1219,6 +1224,10 @@ async function payCommand(
   io: CliIo,
   dependencies: CliDependencies,
 ): Promise<void> {
+  if (argv.includes(RESUME_OPTION)) {
+    await payResumeCommand(argv, json, io, dependencies);
+    return;
+  }
   const parsed = parseArguments(argv, {
     valueOptions: new Set([
       "--method",
@@ -1266,6 +1275,61 @@ async function payCommand(
     wallet,
     result as unknown as Record<string, unknown>,
     [...verificationNotice(result.verification), JSON.stringify(result, null, 2)].join("\n"),
+  );
+}
+
+const RESUME_OPTION = "--resume";
+
+const SETTLEMENT_STATE_WORDS = {
+  settled:
+    "Settled: the authorization was used on-chain, so the payment went through. Do not pay again.",
+  expired:
+    "Expired: the authorization was never used and can no longer settle. Paying again is safe.",
+  pending: "Pending: the authorization is unused but can still settle.",
+} as const;
+
+/**
+ * `vapi pay --resume <receipt-id>`: after a paid call lost its response, asks
+ * the chain whether the signed authorization settled before anyone pays again.
+ * It reads only — no wallet is unlocked, nothing is signed or paid.
+ */
+async function payResumeCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set([RESUME_OPTION]),
+    maximumPositionals: 0,
+  });
+  const id = parsed.one(RESUME_OPTION)!;
+  const paths = getVapiPaths();
+  const receipt = (await readReceipts(paths.receipts)).find((candidate) => candidate.id === id);
+  if (receipt === undefined) {
+    throw new Error(
+      `No receipt ${JSON.stringify(id)} in ${paths.receipts}. vapi receipts lists them.`,
+    );
+  }
+  const config = await readConfig(paths.config, io);
+  const check = await checkReceiptSettlement(receipt, config, {
+    ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+  });
+  const validBeforeAt = new Date(Number(check.validBefore) * 1_000).toISOString();
+  const message =
+    check.state === "pending"
+      ? `${SETTLEMENT_STATE_WORDS.pending} Wait until ${validBeforeAt}, then run vapi pay --resume ${id} again; paying now could pay twice.`
+      : SETTLEMENT_STATE_WORDS[check.state];
+  outputForWallet(
+    io,
+    json,
+    { name: receiptWallet(receipt) },
+    { receipt: id, resourceUrl: receipt.resourceUrl, ...check, validBeforeAt, message },
+    [
+      `Receipt: ${id} — ${receipt.method ?? "call"} ${receipt.resourceUrl}`,
+      `Authorization: nonce ${check.nonce} from ${check.authorizer}, USDC ${check.token} on ${check.network}, valid before ${validBeforeAt}`,
+      message,
+    ].join("\n"),
   );
 }
 

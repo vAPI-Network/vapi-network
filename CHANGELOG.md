@@ -51,6 +51,17 @@ payment. Nothing is blocked; nothing is decided for you.
   when the listing it just paid was not verified. Neither prompts nor blocks.
 - `verification` in `--json` on `search`, `inspect` and `pay`, and on the
   `call.search`, `call.inspect` and `call.pay` MCP results.
+- `vapi pay --resume <receipt-id>`: after a paid call lost its response, asks
+  the receipt's token contract, with EIP-3009 `authorizationState(authorizer,
+nonce)`, whether the signed authorization was used — `settled` (do not pay
+  again), `expired` (never used and past `validBefore` by chain time, so paying
+  again is safe) or `pending` (wait until the time it prints). It unlocks no
+  wallet and signs nothing. EVM only; a Solana receipt says it is not supported
+  yet. Receipts now record `authorization: { from, nonce, validBefore }` for
+  every EVM payment they sign; older receipts parse unchanged and are named as
+  predating it. Every `settlement_unknown` "do not retry automatically" message
+  from `vapi pay` and `call.pay` now ends with the exact `vapi pay --resume`
+  command for its receipt.
 - `vapi inspect` prints a `Liveness:` line — uptime over seven days of hourly
   re-probes, p50 and p95 latency — and a `Conformance:` line — declared x402
   version, whether the 402 follows it, where the offer travels, issue codes —
