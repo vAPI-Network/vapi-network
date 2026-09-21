@@ -26,6 +26,14 @@ payment. Nothing is blocked; nothing is decided for you.
   `vapi publish verify-request <slug>` asks for the review that ends the
   `[unverified]` tag, and `vapi publish list` shows what this key owns.
   `--json` emits the registry's raw responses.
+- `vapi publish` handles large catalogs: more than 20 endpoints — the
+  registry's cap per listing — become several listings of up to 20, named
+  `Name (k/n)` in probe order, each with its own payout-line signature, and
+  every endpoint gets a result line (`listed`, `failed`, `pending`, `skipped`).
+  A batch refused on its merits does not stop the next; a rejected key, a rate
+  limit or an outage does. `--resume` reads `vapi publish list` and skips every
+  endpoint this key already lists, so a stopped run picks up where it ended.
+  `--json` carries the created `listings` and per-endpoint `results`.
 - `vapi claim <origin>`: the owner of an API vAPI indexed from a public
   catalog takes those listings over. vapi fetches the registry's EIP-4361 claim
   message for the local wallet, refuses to sign one that is not bound to the

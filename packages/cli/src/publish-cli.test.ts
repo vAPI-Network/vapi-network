@@ -215,7 +215,23 @@ describe("vapi publish <url>", () => {
     const value = JSON.parse(captured.stdout[0]!) as Record<string, unknown>;
     expect(value.wallet).toBe("main");
     expect(value.probe).toEqual(PROBE_BODY);
-    expect(value.listing).toEqual(LISTING_BODY);
+    expect(value.listings).toEqual([LISTING_BODY]);
+    expect(value.results).toEqual([
+      {
+        name: "forecast",
+        method: "GET",
+        url: "https://weather.example/forecast",
+        result: "listed",
+        slug: "weather-call",
+      },
+      {
+        name: "alerts",
+        method: "POST",
+        url: "https://weather.example/alerts",
+        result: "listed",
+        slug: "weather-call",
+      },
+    ]);
     expect(value.splitters).toEqual(SPLITTERS_BODY);
     expect(nonceWallet(registry)).toMatch(WALLET);
   });
@@ -524,6 +540,215 @@ describe("vapi publish <url>", () => {
       wallet: "main",
       detail: "weather-call",
     });
+  });
+});
+
+describe("vapi publish for a large catalog", () => {
+  /** A probe that found `count` endpoints, `op-1` … `op-<count>`. */
+  function catalogProbe(count: number) {
+    return {
+      ...PROBE_BODY,
+      operations: Array.from({ length: count }, (_, index) => ({
+        name: `op-${index + 1}`,
+        method: "GET",
+        url: `https://weather.example/op/${index + 1}`,
+      })),
+    };
+  }
+
+  /** A registry whose create route answers each batch with the next slug, or a failure. */
+  function catalogRegistry(count: number, creates: Reply[] = [], mine: unknown[] = []) {
+    let created = 0;
+    return registryFetch({
+      "POST /api/call/listings/probe": { body: catalogProbe(count) },
+      "GET /api/call/listings/payout-nonce": { body: NONCE_BODY },
+      "POST /api/call/listings": () => {
+        created += 1;
+        return (
+          creates[created - 1] ?? {
+            status: 201,
+            body: { ok: true, listing: { slug: `weather-call-${created}`, status: "draft" } },
+          }
+        );
+      },
+      "GET /api/call/listings/splitters": { body: SPLITTERS_BODY },
+      "GET /api/call/listings/mine": { body: { listings: mine } },
+    });
+  }
+
+  type CreateBody = { name: string; endpoints: { name: string }[]; siweMessage: string };
+  const createBodies = (registry: { calls: Recorded[] }) =>
+    registry.calls
+      .filter((call) => call.method === "POST" && call.path === "/api/call/listings")
+      .map((call) => call.body as CreateBody);
+
+  it("lists a 45-endpoint catalog as three signed listings, one result line per endpoint", async () => {
+    const home = await initializedHome("vapi-publish-batches-");
+    process.env.VAPI_API_KEY = KEY;
+    const registry = catalogRegistry(45);
+    const captured = captureIo();
+
+    expect(
+      await runCli(
+        ["publish", "https://weather.example", "--yes", "--category", "data"],
+        captured.io,
+        { ...AGENT, fetchImpl: registry.fetchImpl, prompts: refusingPrompts() },
+      ),
+    ).toBe(0);
+
+    const bodies = createBodies(registry);
+    expect(bodies.map((body) => body.name)).toEqual([
+      "Weather Call (1/3)",
+      "Weather Call (2/3)",
+      "Weather Call (3/3)",
+    ]);
+    expect(bodies.map((body) => body.endpoints.length)).toEqual([20, 20, 5]);
+    expect(bodies[2]!.endpoints.map((endpoint) => endpoint.name)).toEqual([
+      "op-41",
+      "op-42",
+      "op-43",
+      "op-44",
+      "op-45",
+    ]);
+    // Every listing carries its own nonce and its own signature of the payout line.
+    expect(registry.paths().filter((path) => path.endsWith("/payout-nonce"))).toHaveLength(3);
+    for (const body of bodies) expect(body.siweMessage).toContain("vAPI Call payouts");
+
+    const text = captured.stdout.join("\n");
+    expect(text).toContain("Publishing 45 endpoints as 3 listings of up to 20 each.");
+    expect(text).toContain("  listed  op-1\tGET https://weather.example/op/1\tweather-call-1");
+    expect(text).toContain("  listed  op-45\tGET https://weather.example/op/45\tweather-call-3");
+    expect(text.match(/^ {2}listed /gmu)).toHaveLength(45);
+    expect(text).toContain("Listed Weather Call (3/3) as weather-call-3 with 5 endpoints.");
+    const audit = (await readAuditLog(home)).filter((entry) => entry.event === "listing.publish");
+    expect(audit.map((entry) => entry.detail)).toEqual([
+      "weather-call-1",
+      "weather-call-2",
+      "weather-call-3",
+    ]);
+  });
+
+  it("keeps going past a batch refused on its merits, then says how to resume", async () => {
+    await initializedHome("vapi-publish-batch-422-");
+    process.env.VAPI_API_KEY = KEY;
+    const refused: Reply = { status: 422, body: { message: "Endpoint op-25 is not payable." } };
+    const registry = catalogRegistry(45, [
+      { status: 201, body: { listing: { slug: "weather-call-1" } } },
+      refused,
+    ]);
+    const captured = captureIo();
+
+    expect(
+      await runCli(
+        ["publish", "https://weather.example", "--yes", "--category", "data", "--json"],
+        captured.io,
+        { ...AGENT, fetchImpl: registry.fetchImpl, prompts: refusingPrompts() },
+      ),
+    ).toBe(1);
+
+    expect(createBodies(registry)).toHaveLength(3);
+    const value = JSON.parse(captured.stdout[0]!) as {
+      results: { result: string; error?: string }[];
+      listings: unknown[];
+      error: string;
+      exitCode: number;
+    };
+    expect(value.listings).toHaveLength(2);
+    expect(value.results.filter((result) => result.result === "failed")).toHaveLength(20);
+    expect(value.results.filter((result) => result.result === "listed")).toHaveLength(25);
+    expect(value.error).toContain("Endpoint op-25 is not payable.");
+    expect(value.exitCode).toBe(1);
+  });
+
+  it("stops at a rate limit, marks the rest pending and points at --resume", async () => {
+    await initializedHome("vapi-publish-batch-429-");
+    process.env.VAPI_API_KEY = KEY;
+    const registry = catalogRegistry(45, [
+      { status: 201, body: { listing: { slug: "weather-call-1" } } },
+      { status: 429, headers: { "retry-after": "30" } },
+    ]);
+    const captured = captureIo();
+
+    expect(
+      await runCli(
+        ["publish", "https://weather.example", "--yes", "--category", "data"],
+        captured.io,
+        { ...AGENT, fetchImpl: registry.fetchImpl, prompts: refusingPrompts() },
+      ),
+    ).toBe(1);
+
+    expect(createBodies(registry)).toHaveLength(2);
+    const text = captured.stdout.join("\n");
+    expect(text.match(/^ {2}failed /gmu)).toHaveLength(20);
+    expect(text.match(/^ {2}pending /gmu)).toHaveLength(5);
+    const errors = captured.stderr.join("\n");
+    expect(errors).toContain("vAPI rate-limited this request. Try again in 30 seconds.");
+    expect(errors).toContain("with --resume to list the rest");
+  });
+
+  it("resumes: skips what this key already lists and numbers the rest as before", async () => {
+    await initializedHome("vapi-publish-resume-");
+    process.env.VAPI_API_KEY = KEY;
+    const firstBatch = Array.from({ length: 20 }, (_, index) => ({
+      name: `op-${index + 1}`,
+      method: "GET",
+      url: `https://weather.example/op/${index + 1}`,
+    }));
+    const registry = catalogRegistry(45, [], [{ slug: "weather-call-1", endpoints: firstBatch }]);
+    const captured = captureIo();
+
+    expect(
+      await runCli(
+        ["publish", "https://weather.example", "--yes", "--category", "data", "--resume"],
+        captured.io,
+        { ...AGENT, fetchImpl: registry.fetchImpl, prompts: refusingPrompts() },
+      ),
+    ).toBe(0);
+
+    expect(createBodies(registry).map((body) => body.name)).toEqual([
+      "Weather Call (2/3)",
+      "Weather Call (3/3)",
+    ]);
+    const text = captured.stdout.join("\n");
+    expect(text.match(/^ {2}skipped /gmu)).toHaveLength(20);
+    expect(text).toContain(
+      "  skipped op-1\tGET https://weather.example/op/1\talready listed as weather-call-1",
+    );
+  });
+
+  it("signs nothing when --resume finds every endpoint already listed", async () => {
+    await initializedHome("vapi-publish-resume-done-");
+    process.env.VAPI_API_KEY = KEY;
+    const registry = catalogRegistry(
+      2,
+      [],
+      [
+        {
+          slug: "weather-call",
+          endpoints: [
+            { method: "get", url: "https://weather.example/op/1" },
+            { method: "GET", url: "https://weather.example/op/2" },
+          ],
+        },
+      ],
+    );
+    const captured = captureIo();
+
+    expect(
+      await runCli(
+        ["publish", "https://weather.example", "--yes", "--category", "data", "--resume"],
+        captured.io,
+        { ...AGENT, fetchImpl: registry.fetchImpl, prompts: refusingPrompts() },
+      ),
+    ).toBe(0);
+
+    expect(registry.paths()).toEqual([
+      "POST /api/call/listings/probe",
+      "GET /api/call/listings/mine",
+    ]);
+    expect(captured.stdout.join("\n")).toContain(
+      "Every selected endpoint is already listed by this key; nothing was signed.",
+    );
   });
 });
 

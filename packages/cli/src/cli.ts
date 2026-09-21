@@ -102,11 +102,13 @@ import {
   PROBE_MODES,
   readProbeOperations,
   readProbeRejection,
+  RegistryApiError,
   type CreatedListing,
   type ListingCategory,
   type ListingEndpointInput,
   type ListingsClient,
   type ListingStatusAction,
+  type MyListings,
   type ProbeMode,
   type ProbeOperation,
   type ProbeRejection,
@@ -149,7 +151,7 @@ Usage:
   vapi auth set-key [--json]
   vapi auth status [--json]
   vapi auth clear [--json]
-  vapi publish <url> [--method <method>] [--mode <origin|endpoint|openapi>] [--name <text>] [--description <text>] [--category <ai|data|crypto|compute|search>] [--select <names>] [--wallet <name>] [--yes] [--json]
+  vapi publish <url> [--method <method>] [--mode <origin|endpoint|openapi>] [--name <text>] [--description <text>] [--category <ai|data|crypto|compute|search>] [--select <names>] [--wallet <name>] [--yes] [--resume] [--json]
   vapi publish activate <slug> [--json]
   vapi publish verify-request <slug> [--json]
   vapi publish list [--json]
@@ -171,7 +173,7 @@ Every command that touches a wallet takes \`--wallet <name>\`, falls back to \`V
 
 \`vapi backup\` and \`vapi export-key\` print a secret, so they run only on a real terminal, never for an agent, and ask you to type the wallet name first. Set \`VAPI_NO_SECRETS=1\` to switch them off entirely. Every export and every wallet change is logged to ~/.vapi/audit.log.
 
-\`vapi publish <url>\` lists an API you own. vAPI probes the URL — an origin, one endpoint, or an OpenAPI document — you choose which endpoints to list, and your wallet signs one line naming where the payouts go. Listing is permissionless: a listing that passed the probe goes live with \`vapi publish activate <slug>\`, and \`vapi publish verify-request <slug>\` asks for the review that puts it in the default search. Deploying the FeeSplitter that receives the payouts is a wallet transaction and stays in the console.
+\`vapi publish <url>\` lists an API you own. vAPI probes the URL — an origin, one endpoint, or an OpenAPI document — you choose which endpoints to list, and your wallet signs one line naming where the payouts go. Listing is permissionless: a listing that passed the probe goes live with \`vapi publish activate <slug>\`, and \`vapi publish verify-request <slug>\` asks for the review that puts it in the default search. Deploying the FeeSplitter that receives the payouts is a wallet transaction and stays in the console. A catalog of more than 20 endpoints is listed as several listings of up to 20, with one result line per endpoint; \`--resume\` skips every endpoint this key already lists.
 
 \`vapi claim <origin>\` takes ownership of the listings vAPI indexed from your API. The wallet their payments go to signs one line, \`Claim the vAPI Call listings served from <origin>\`; the listings stay paid directly to that wallet, and \`vapi publish list\` shows them.
 
@@ -1710,7 +1712,7 @@ async function authClearCommand(
 const YES_OPTION = "--yes";
 
 const PUBLISH_USAGE =
-  "Usage: vapi publish <url> [--method <method>] [--mode <origin|endpoint|openapi>] [--name <text>] [--description <text>] [--category <ai|data|crypto|compute|search>] [--select <names>] [--wallet <name>] [--yes]";
+  "Usage: vapi publish <url> [--method <method>] [--mode <origin|endpoint|openapi>] [--name <text>] [--description <text>] [--category <ai|data|crypto|compute|search>] [--select <names>] [--wallet <name>] [--yes] [--resume]";
 
 const PUBLISH_NEEDS_TERMINAL =
   "vapi publish needs a terminal to choose endpoints. Name them with --select <name,name>, or pass --yes to list every endpoint the probe found.";
@@ -1774,7 +1776,7 @@ async function publishListingCommand(
       "--select",
       WALLET_OPTION,
     ]),
-    booleanOptions: new Set([YES_OPTION]),
+    booleanOptions: new Set([YES_OPTION, RESUME_OPTION]),
     maximumPositionals: 1,
   });
   const url = requiredPositional(parsed.positionals[0], PUBLISH_USAGE);
@@ -1846,55 +1848,238 @@ async function publishListingCommand(
     }),
   );
 
+  const batches = publishBatches(
+    selected.map((operation) => toListingEndpoint(operation, description)),
+    name,
+  );
+  // --resume trusts the registry's own record of what this key already lists,
+  // so a run that stopped halfway, for whatever reason, picks up exactly there.
+  const listed = parsed.has(RESUME_OPTION)
+    ? listedEndpointSlugs(await client.mine())
+    : new Map<string, string>();
+  const results: PublishedEndpoint[] = [];
+  const pending = batches.map((batch) => ({
+    name: batch.name,
+    endpoints: batch.endpoints.filter((endpoint) => {
+      const slug = listed.get(endpointKey(endpoint));
+      if (slug !== undefined) results.push(endpointResult(endpoint, "skipped", { slug }));
+      return slug === undefined;
+    }),
+  }));
+  const say = (line: string) => {
+    if (!json) io.stdout(line);
+  };
+  if (!json) io.stdout("");
+  for (const result of results) say(formatPublishedEndpoint(result));
+  if (pending.every((batch) => batch.endpoints.length === 0)) {
+    const message = "Every selected endpoint is already listed by this key; nothing was signed.";
+    if (json) io.stdout(JSON.stringify({ probe, listings: [], results, message }));
+    else io.stdout(message);
+    return 0;
+  }
+
   const wallet = await targetWallet(parsed, dependencies);
   const { account } = await unlockTarget(wallet, dependencies);
   const payoutWallet = requireEvmAddress(account.address, wallet.name);
-  const nonce = await client.payoutNonce(payoutWallet);
-  const siweMessage = payoutSiweMessage(nonce, baseUrl, payoutWallet, dependencies);
-  const signature = await account.signMessage({ message: siweMessage });
+  say(walletHeader(wallet));
+  if (batches.length > 1) {
+    say(
+      `Publishing ${selected.length} endpoints as ${batches.length} listings of up to ${PUBLISH_BATCH_SIZE} each.`,
+    );
+  }
 
-  const created = await client.create({
-    name,
-    description,
-    category,
-    endpoints: selected.map((operation) => toListingEndpoint(operation, description)),
-    payoutWallet,
-    siweMessage,
-    signature,
-  });
-  const slug = listingSlug(created);
-  await recordAudit(dependencies, "listing.publish", {
-    wallet: wallet.name,
-    detail: slug ?? url,
-  });
+  // One listing per batch, each with its own nonce and its own signature of
+  // the same payout line. A batch the registry refuses on its merits does not
+  // stop the next one; a refusal that would repeat (a bad key, a rate limit)
+  // or an outage does, and --resume picks up from there.
+  const created: CreatedListing[] = [];
+  const failures: Error[] = [];
+  let stopped = false;
+  for (const batch of pending) {
+    if (batch.endpoints.length === 0) continue;
+    if (stopped) {
+      for (const endpoint of batch.endpoints) {
+        const result = endpointResult(endpoint, "not_attempted");
+        results.push(result);
+        say(formatPublishedEndpoint(result));
+      }
+      continue;
+    }
+    let listing: CreatedListing;
+    try {
+      const nonce = await client.payoutNonce(payoutWallet);
+      const siweMessage = payoutSiweMessage(nonce, baseUrl, payoutWallet, dependencies);
+      const signature = await account.signMessage({ message: siweMessage });
+      listing = await client.create({
+        name: batch.name,
+        description,
+        category,
+        endpoints: batch.endpoints,
+        payoutWallet,
+        siweMessage,
+        signature,
+      });
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      failures.push(failure);
+      stopped = !refusedOnItsMerits(failure);
+      for (const endpoint of batch.endpoints) {
+        const result = endpointResult(endpoint, "failed", { error: failure.message });
+        results.push(result);
+        say(formatPublishedEndpoint(result));
+      }
+      continue;
+    }
+    created.push(listing);
+    const slug = listingSlug(listing);
+    await recordAudit(dependencies, "listing.publish", {
+      wallet: wallet.name,
+      detail: slug ?? url,
+    });
+    for (const endpoint of batch.endpoints) {
+      const result = endpointResult(endpoint, "listed", slug === undefined ? {} : { slug });
+      results.push(result);
+      say(formatPublishedEndpoint(result));
+    }
+    say(formatCreatedListing(listing, batch.name, payoutWallet, batch.endpoints.length));
+  }
 
-  // The listing already exists, so a splitter lookup that fails is a line of
+  // The listings already exist, so a splitter lookup that fails is a line of
   // advice the person loses, never the slug they need next.
   let splitters: SplitterStates | undefined;
   let splittersError: string | undefined;
-  try {
-    splitters = await client.splitters(payoutWallet);
-  } catch (error) {
-    splittersError = error instanceof Error ? error.message : String(error);
+  if (created.length > 0) {
+    try {
+      splitters = await client.splitters(payoutWallet);
+    } catch (error) {
+      splittersError = error instanceof Error ? error.message : String(error);
+    }
   }
+  const failed = failures.length > 0;
+  const resumeHint = `Run the same vapi publish command with ${RESUME_OPTION} to list the rest; it skips what is already listed.`;
 
   if (json) {
     io.stdout(
       JSON.stringify({
         wallet: wallet.name,
         probe,
-        listing: created,
+        listings: created,
+        results,
         ...(splitters === undefined ? {} : { splitters }),
         ...(splittersError === undefined ? {} : { splittersError }),
+        ...(failed
+          ? {
+              error: [...new Set(failures.map((failure) => failure.message))].join("\n"),
+              exitCode: 1,
+            }
+          : {}),
       }),
     );
-    return 0;
+    return failed ? 1 : 0;
   }
-  io.stdout("");
-  io.stdout(walletHeader(wallet));
-  io.stdout(formatCreatedListing(created, name, payoutWallet, selected.length));
-  for (const line of formatSplitters(splitters, splittersError, slug, baseUrl)) io.stdout(line);
-  return 0;
+  if (created.length > 0) {
+    const slug = created.length === 1 ? listingSlug(created[0]!) : undefined;
+    for (const line of formatSplitters(splitters, splittersError, slug, baseUrl)) io.stdout(line);
+  }
+  if (!failed) return 0;
+  for (const message of new Set(failures.map((failure) => failure.message))) io.stderr(message);
+  if (batches.length > 1 || created.length > 0) io.stderr(resumeHint);
+  return 1;
+}
+
+/** The registry's cap on endpoints per listing; a larger catalog becomes several. */
+const PUBLISH_BATCH_SIZE = 20;
+/** The registry's cap on a listing name. */
+const LISTING_NAME_MAX_LENGTH = 100;
+
+type ListingBatch = { name: string; endpoints: ListingEndpointInput[] };
+
+/**
+ * Splits the chosen endpoints, in probe order, into listings of at most
+ * {@link PUBLISH_BATCH_SIZE}. A catalog that fits keeps its name; a larger one
+ * is numbered `Name (2/4)`. The split depends only on the selection, so a
+ * resumed run numbers every batch the way the first run did.
+ */
+function publishBatches(endpoints: readonly ListingEndpointInput[], name: string): ListingBatch[] {
+  const count = Math.ceil(endpoints.length / PUBLISH_BATCH_SIZE);
+  return Array.from({ length: count }, (_, index) => {
+    const suffix = count === 1 ? "" : ` (${index + 1}/${count})`;
+    return {
+      name: `${name.slice(0, LISTING_NAME_MAX_LENGTH - suffix.length).trimEnd()}${suffix}`,
+      endpoints: endpoints.slice(index * PUBLISH_BATCH_SIZE, (index + 1) * PUBLISH_BATCH_SIZE),
+    };
+  });
+}
+
+/** One endpoint by what makes it callable: its method and its URL. */
+function endpointKey(endpoint: { method?: unknown; url?: unknown }): string {
+  const method = typeof endpoint.method === "string" ? endpoint.method.toUpperCase() : "GET";
+  const url = typeof endpoint.url === "string" ? endpoint.url : "";
+  try {
+    return `${method} ${new URL(url).href}`;
+  } catch {
+    return `${method} ${url}`;
+  }
+}
+
+/** Every endpoint this key already lists, mapped to the slug that lists it. */
+function listedEndpointSlugs(mine: MyListings): Map<string, string> {
+  const listed = new Map<string, string>();
+  for (const listing of Array.isArray(mine.listings) ? mine.listings : []) {
+    if (typeof listing !== "object" || listing === null) continue;
+    const { slug, endpoints } = listing as { slug?: unknown; endpoints?: unknown };
+    if (typeof slug !== "string" || !Array.isArray(endpoints)) continue;
+    for (const endpoint of endpoints) {
+      if (typeof endpoint === "object" && endpoint !== null) {
+        listed.set(endpointKey(endpoint as Record<string, unknown>), slug);
+      }
+    }
+  }
+  return listed;
+}
+
+/**
+ * A refusal of this batch alone — a 4xx about its content — rather than one
+ * every later batch would meet too: a rejected key, a rate limit, an outage.
+ */
+function refusedOnItsMerits(error: Error): boolean {
+  return (
+    error instanceof RegistryApiError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 401 &&
+    error.status !== 429
+  );
+}
+
+type PublishedEndpoint = {
+  name: string;
+  method: string;
+  url: string;
+  result: "listed" | "skipped" | "failed" | "not_attempted";
+  slug?: string;
+  error?: string;
+};
+
+function endpointResult(
+  endpoint: ListingEndpointInput,
+  result: PublishedEndpoint["result"],
+  detail: { slug?: string; error?: string } = {},
+): PublishedEndpoint {
+  return { name: endpoint.name, method: endpoint.method, url: endpoint.url, result, ...detail };
+}
+
+function formatPublishedEndpoint(endpoint: PublishedEndpoint): string {
+  const detail =
+    endpoint.result === "listed"
+      ? (endpoint.slug ?? "")
+      : endpoint.result === "skipped"
+        ? `already listed as ${endpoint.slug ?? "?"}`
+        : endpoint.result === "failed"
+          ? (endpoint.error?.split("\n")[0] ?? "")
+          : "not attempted";
+  const label = endpoint.result === "not_attempted" ? "pending" : endpoint.result;
+  return `  ${label.padEnd(7)} ${endpoint.name}\t${endpoint.method} ${endpoint.url}\t${detail}`;
 }
 
 /** Moves one listing through the registry's states: live, or up for review. */
