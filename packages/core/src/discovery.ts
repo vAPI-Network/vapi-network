@@ -1,4 +1,5 @@
 import type { X402Resource } from "./x402.js";
+import type { ListingVerification } from "./marketplace-contracts.js";
 import { appendSearchEvent } from "./searches.js";
 
 export type ListingProvenance = Readonly<{
@@ -20,13 +21,31 @@ export interface Listing {
   /** Raw x402 accepts entries; source adapters intentionally tolerate new schemes. */
   readonly accepts?: readonly unknown[];
   readonly metadata?: Readonly<Record<string, unknown>>;
+  /**
+   * How far the listing got through vAPI review, when its catalog says. A
+   * catalog that has no notion of vAPI verification leaves it undefined rather
+   * than claiming `none`.
+   */
+  readonly verification?: ListingVerification;
   readonly provenance: readonly ListingProvenance[];
 }
+
+/**
+ * What a caller may ask of every source at search time. A source that has no
+ * notion of an option ignores it rather than failing.
+ */
+export type SourceSearchOptions = Readonly<{
+  /**
+   * Include self-listed APIs vAPI has not verified. Default results are
+   * vAPI-verified listings plus mirrored external catalogs.
+   */
+  includeUnverified?: boolean;
+}>;
 
 /** Discovery adapter seam. A null inspect result means the reference is unknown. */
 export interface Source {
   readonly id: string;
-  search(query?: string): Promise<Listing[]>;
+  search(query?: string, options?: SourceSearchOptions): Promise<Listing[]>;
   inspect(ref: string): Promise<Listing | null>;
 }
 
@@ -65,15 +84,21 @@ export function normalizeResourceUrl(value: string): string {
 export async function discover(
   sources: readonly Source[],
   query?: string,
-  options: { searchesPath?: string; now?: Date; nowMs?: () => number } = {},
+  options: {
+    searchesPath?: string;
+    now?: Date;
+    nowMs?: () => number;
+  } & SourceSearchOptions = {},
 ): Promise<{ listings: Listing[]; errors: ReadonlyArray<{ source: string; error: unknown }> }> {
   const nowMs = options.nowMs ?? (() => performance.now());
   const startedAt = options.now ?? new Date();
+  const searchOptions: SourceSearchOptions =
+    options.includeUnverified === undefined ? {} : { includeUnverified: options.includeUnverified };
   const settled = await Promise.all(
     sources.map(async (source) => {
       const started = nowMs();
       try {
-        const listings = await source.search(query);
+        const listings = await source.search(query, searchOptions);
         return {
           status: "fulfilled" as const,
           source: source.id,
@@ -159,6 +184,9 @@ function mergeListing(first: Listing, next: Listing): Listing {
     ...optional("network", preferred(first.network, next.network)),
     ...optional("price", preferred(first.price, next.price)),
     ...(accepts ? { accepts: [...accepts] } : {}),
+    ...((first.verification ?? next.verification) === undefined
+      ? {}
+      : { verification: (first.verification ?? next.verification)! }),
     ...(first.metadata || next.metadata
       ? { metadata: { ...(next.metadata ?? {}), ...(first.metadata ?? {}) } }
       : {}),

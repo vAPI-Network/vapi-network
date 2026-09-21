@@ -65,8 +65,9 @@ randomness, filesystem roots, and `fetch` implementations.
 - Protect every outbound service request with the network guard. Treat redirects
   and resolved IP addresses as new destinations that need validation.
 - Published package versions move together. All packages are currently
-  `0.3.0`, which `scripts/pack-check.mjs` and `packages/cli/src/version.ts`
-  pin as well. Every package's `publish:npm` goes to the `latest` npm tag, and
+  `0.4.0`, which `scripts/pack-check.mjs`, `packages/cli/src/version.ts` and
+  `VAPI_CLIENT_VERSION` in `packages/core/src/support-report.ts` pin as well.
+  Every package's `publish:npm` goes to the `latest` npm tag, and
   every package's `publish:npm:next` goes to `next`. Access is always public.
 - Every published tarball has zero runtime dependencies. All runtime code is
   bundled with esbuild; builds must fail if non-Node external imports leak into

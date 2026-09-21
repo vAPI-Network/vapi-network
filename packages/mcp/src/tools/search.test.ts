@@ -96,7 +96,11 @@ describe("Agent Cash marketplace discovery", () => {
         config,
         fetchImpl,
       ),
-    ).resolves.toEqual(marketplacePage);
+      // The page predates the verification tier, so every item reads as `none`.
+    ).resolves.toEqual({
+      ...marketplacePage,
+      items: marketplacePage.items.map((item) => ({ ...item, verification: "none" })),
+    });
 
     const requestUrl = new URL(fetchImpl.mock.calls[0]![0] as URL);
     expect(requestUrl.pathname).toBe("/api/marketplace/discovery");
@@ -105,6 +109,19 @@ describe("Agent Cash marketplace discovery", () => {
     expect(requestUrl.searchParams.get("network")).toBe("eip155:8453");
     expect(requestUrl.searchParams.get("limit")).toBe("7");
     expect(requestUrl.searchParams.get("cursor")).toBe("opaque-cursor");
+    expect(requestUrl.searchParams.get("includeUnverified")).toBeNull();
+  });
+
+  it("asks for unverified listings only when the caller opts in", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => new Response(JSON.stringify(marketplacePage)));
+
+    await searchMarketplace({ query: "weather", includeUnverified: true }, config, fetchImpl);
+
+    expect(new URL(fetchImpl.mock.calls[0]![0] as URL).searchParams.get("includeUnverified")).toBe(
+      "true",
+    );
   });
 
   it("rejects a kind/action mismatch from the app", async () => {

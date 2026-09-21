@@ -32,11 +32,33 @@ const validService = {
 };
 
 describe("public Call discovery contract", () => {
+  // A registry that predates the verification tier sends no `verification`, so
+  // every parse of `validService` answers with the safe default.
+  const defaulted = { ...validService, verification: "none" };
+
   it("accepts the current service and response wire shapes", () => {
-    expect(serviceSummarySchema.parse(validService)).toEqual(validService);
-    const response = { services: [validService] };
-    expect(discoveryResponseSchema.parse(response)).toEqual(response);
-    expect(listServicesResponseSchema.parse(response)).toEqual(response);
+    expect(serviceSummarySchema.parse(validService)).toEqual(defaulted);
+    expect(discoveryResponseSchema.parse({ services: [validService] })).toEqual({
+      services: [defaulted],
+    });
+    expect(listServicesResponseSchema.parse({ services: [validService] })).toEqual({
+      services: [defaulted],
+    });
+  });
+
+  it("reads the verification tier of a listing, and defaults an unknown one to none", () => {
+    for (const verification of ["none", "requested", "verified"]) {
+      expect(serviceSummarySchema.parse({ ...validService, verification })).toMatchObject({
+        verification,
+      });
+    }
+    // A tier this client does not know must not read as a vAPI endorsement.
+    expect(
+      serviceSummarySchema.parse({ ...validService, verification: "platinum" }).verification,
+    ).toBe("none");
+    expect(serviceSummarySchema.parse({ ...validService, verification: null }).verification).toBe(
+      "none",
+    );
   });
 
   it("carries browser-playground request and response metadata without weakening the wire", () => {
@@ -100,7 +122,7 @@ describe("public Call discovery contract", () => {
       fee: { bps: 500, label: "5% network fee, paid by the API's splitter" },
     };
 
-    expect(serviceSummarySchema.parse(listing)).toEqual(listing);
+    expect(serviceSummarySchema.parse(listing)).toEqual({ ...listing, verification: "none" });
     expect(
       serviceSummarySchema.parse({
         ...validService,
@@ -118,7 +140,7 @@ describe("public Call discovery contract", () => {
     // A registry that starts sending a new field must never break an installed
     // client; loose parsing keeps the field so `--json` consumers still see it.
     expect(discoveryResponseSchema.parse({ services: [validService], total: 1 })).toEqual({
-      services: [validService],
+      services: [defaulted],
       total: 1,
     });
     expect(

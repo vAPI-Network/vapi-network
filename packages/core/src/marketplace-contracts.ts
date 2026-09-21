@@ -60,10 +60,33 @@ export const listingFeeSchema = z.looseObject({
 });
 export type ListingFee = z.infer<typeof listingFeeSchema>;
 
-/** The group/fee pair the registry returns on every Call listing and discovery hit. */
+/**
+ * How far a listing got through vAPI review, per
+ * `docs/adr/0018-open-listing-and-verification-tiers.md`. Listing is
+ * permissionless, so this is a tier rather than a gate: `none` passed the
+ * automated x402 probe and nothing more, `requested` is waiting for review, and
+ * `verified` was reviewed by vAPI. Rows mirrored from an external catalog are
+ * always `none` — vAPI reviewed nothing it merely mirrored.
+ */
+export const LISTING_VERIFICATIONS = ["none", "requested", "verified"] as const;
+export const listingVerificationSchema = z.enum(LISTING_VERIFICATIONS);
+export type ListingVerification = z.infer<typeof listingVerificationSchema>;
+
+/**
+ * The verification field as it is read off the wire. A registry that predates
+ * the tier omits it and a later one may add a tier this client does not know;
+ * both read as `none`, which is the safe answer for "we cannot show that vAPI
+ * vouched for this".
+ */
+export const listingVerificationFieldSchema = listingVerificationSchema
+  .default("none")
+  .catch("none");
+
+/** The disclosures the registry returns on every Call listing and discovery hit. */
 export const listingDisclosureShape = {
   group: listingGroupSchema.optional(),
   fee: listingFeeSchema.optional(),
+  verification: listingVerificationFieldSchema,
 } as const;
 
 export const marketplaceBadgeCodeSchema = z.enum([

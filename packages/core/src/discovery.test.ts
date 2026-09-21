@@ -53,4 +53,41 @@ describe("discovery merge", () => {
     expect(result.listings).toHaveLength(1);
     expect(result.errors).toMatchObject([{ source: "offline" }]);
   });
+
+  it("keeps the verification tier of the source that won the merge", () => {
+    expect(
+      mergeListings([
+        [listing("https://api.example/pay", "vapi", { verification: "verified" })],
+        [listing("https://api.example/pay", "bazaar", { verification: "none" })],
+      ])[0]?.verification,
+    ).toBe("verified");
+    // A catalog with no notion of vAPI verification claims nothing.
+    expect(
+      mergeListings([
+        [listing("https://api.example/pay", "bazaar")],
+        [listing("https://api.example/pay", "vapi", { verification: "requested" })],
+      ])[0]?.verification,
+    ).toBe("requested");
+    expect(mergeListings([[listing("https://api.example/pay", "bazaar")]])[0]).not.toHaveProperty(
+      "verification",
+    );
+  });
+
+  it("passes the trust switch to every source, and only when it was given", async () => {
+    const seen: unknown[] = [];
+    const source: Source = {
+      id: "vapi",
+      search: async (_query, options) => {
+        seen.push(options);
+        return [];
+      },
+      inspect: async () => null,
+    };
+
+    await discover([source], "weather");
+    await discover([source], "weather", { includeUnverified: true });
+    await discover([source], "weather", { includeUnverified: false });
+
+    expect(seen).toEqual([{}, { includeUnverified: true }, { includeUnverified: false }]);
+  });
 });

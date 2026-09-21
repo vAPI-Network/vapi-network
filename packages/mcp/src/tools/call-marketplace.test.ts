@@ -40,6 +40,7 @@ describe("Agent Cash marketplace call boundary", () => {
         marketplaceHit: {
           ref: "research-brief",
           kind: "service_offer",
+          verification: "none" as const,
           card: {
             title: "Research brief",
             summary: "Evidence-backed market research.",
@@ -67,6 +68,7 @@ describe("Agent Cash marketplace call boundary", () => {
         ref: "https://93.184.216.34/weather",
         kind: "api",
         provenance: "indexed",
+        verification: "none" as const,
         execution: {
           mode: "direct",
           url: "https://93.184.216.34/weather",
@@ -89,7 +91,12 @@ describe("Agent Cash marketplace call boundary", () => {
       fetchImpl,
     });
 
-    expect(result).toEqual({ status: 200, body: { ok: true }, payment: null });
+    expect(result).toEqual({
+      status: 200,
+      body: { ok: true },
+      verification: "none",
+      payment: null,
+    });
     expect(fetchImpl).toHaveBeenCalledOnce();
     const request = fetchImpl.mock.calls[0]![0] as Request;
     expect(request.url).toBe("https://93.184.216.34/weather");
@@ -213,6 +220,7 @@ describe("Agent Cash marketplace call boundary", () => {
           ref: "https://93.184.216.34/weather",
           kind: "api",
           provenance: "indexed",
+          verification: "none" as const,
           execution: {
             mode: "direct",
             url: "https://93.184.216.34/weather",
@@ -254,6 +262,7 @@ describe("Agent Cash marketplace call boundary", () => {
           ref: "https://93.184.216.34/weather",
           kind: "api",
           provenance: "indexed",
+          verification: "none" as const,
           execution: {
             mode: "direct",
             url: "https://93.184.216.34/weather",
@@ -286,6 +295,7 @@ describe("Agent Cash marketplace call boundary", () => {
           ref: "https://93.184.216.34/weather",
           kind: "api",
           provenance: "indexed",
+          verification: "none" as const,
           execution: {
             mode: "direct",
             url: "https://93.184.216.34/weather",
@@ -421,7 +431,12 @@ describe("Agent Cash marketplace call boundary", () => {
       lookup: async () => ["93.184.216.34"],
     });
 
-    expect(result).toEqual({ status: 200, body: { decoded: true }, payment: null });
+    expect(result).toEqual({
+      status: 200,
+      body: { decoded: true },
+      verification: "none",
+      payment: null,
+    });
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     const request = fetchImpl.mock.calls[1]![0] as Request;
     await expect(request.json()).resolves.toEqual({
@@ -466,6 +481,7 @@ describe("Agent Cash marketplace call boundary", () => {
     expect(result).toEqual({
       status: 400,
       body: { error: "authorization was malformed" },
+      verification: "none",
       payment: null,
       expectedRequest: {
         contentType: "application/json",
@@ -818,6 +834,7 @@ function apiHit(input: { ref: string; href?: string }) {
     ref: input.ref,
     kind: "api" as const,
     provenance: "self_listed" as const,
+    verification: "none" as const,
     execution: { mode: "direct" as const },
     card: {
       title: "Weather API",

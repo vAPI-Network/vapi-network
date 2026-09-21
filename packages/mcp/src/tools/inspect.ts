@@ -3,6 +3,7 @@ import {
   type DiscoveryEndpoint,
   type ListingFee,
   type ListingGroup,
+  type ListingVerification,
   type MarketplaceHit,
   type VapiConfig,
 } from "@vapi-network/core";
@@ -33,6 +34,11 @@ export type InspectToolResult = Omit<
   /** Registry-owned listing disclosures; absent when the registry omits them. */
   group?: ListingGroup;
   fee?: ListingFee;
+  /**
+   * How far the listing got through vAPI review. Reads as `none` for a registry
+   * that predates the tier, and for every mirrored external row.
+   */
+  verification: ListingVerification;
   payment: DiscoveryEndpoint["payment"] | null;
 };
 
@@ -73,6 +79,7 @@ export async function inspectService(
       : { responseContentType: endpoint.responseContentType }),
     ...(service.group === undefined ? {} : { group: service.group }),
     ...(service.fee === undefined ? {} : { fee: service.fee }),
+    verification: service.verification,
     payment: endpoint.payment ?? null,
   };
 }
@@ -89,6 +96,7 @@ function inspectIndexedHit(hit: Extract<MarketplaceHit, { kind: "api"; provenanc
     network: hit.execution.network,
     ...(hit.group === undefined ? {} : { group: hit.group }),
     ...(hit.fee === undefined ? {} : { fee: hit.fee }),
+    verification: hit.verification,
     payment: null,
   } satisfies InspectToolResult;
 }

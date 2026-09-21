@@ -16,7 +16,13 @@ import {
   type SecretStore,
 } from "@vapi-network/core";
 
-import { runCli, type CliDependencies, type CliIo, type CliPrompts } from "./cli.js";
+import {
+  runCli,
+  verificationNotice,
+  type CliDependencies,
+  type CliIo,
+  type CliPrompts,
+} from "./cli.js";
 
 /** BIP-39's own test phrase, and the Base account every wallet derives from it. */
 const VECTOR_PHRASE =
@@ -415,10 +421,69 @@ describe("search output", () => {
     expect(await runCli(["search", "decode"], captured.io, { fetchImpl })).toBe(0);
 
     const text = captured.stdout.join("\n");
-    expect(text).toContain("[vapi] decodePaymentAuthorization");
+    // The page sends no tier, so the first-party listing is not vouched for.
+    expect(text).toContain("[vapi] [unverified] decodePaymentAuthorization");
+    // A mirrored row says `external` once, not `[external] [external]`.
     expect(text).toContain("[external] agent402.tools/api/skill/decode-blob");
+    expect(text).not.toContain("[external] [external]");
     expect(text).toContain("Fee: 5% network fee, paid by the API's splitter");
     expect(text).toContain("Fee: No network fee");
+  });
+
+  it.each([
+    { verification: "verified", tag: "[vapi] [verified] decodePaymentAuthorization" },
+    { verification: "requested", tag: "[vapi] [requested] decodePaymentAuthorization" },
+    { verification: "none", tag: "[vapi] [unverified] decodePaymentAuthorization" },
+  ])("shows $verification as $tag", async ({ verification, tag }) => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-search-tier-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        ...discoveryPage,
+        items: [{ ...discoveryPage.items[0], verification }],
+      }),
+    );
+    const captured = captureIo();
+
+    expect(await runCli(["search", "decode"], captured.io, { fetchImpl })).toBe(0);
+
+    expect(captured.stdout.join("\n")).toContain(tag);
+  });
+
+  it("sends the trust switch only when --include-unverified is given", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-search-switch-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => Response.json(discoveryPage));
+    const captured = captureIo();
+
+    expect(await runCli(["search", "decode"], captured.io, { fetchImpl })).toBe(0);
+    expect(
+      await runCli(["search", "decode", "--include-unverified"], captured.io, { fetchImpl }),
+    ).toBe(0);
+
+    const switches = fetchImpl.mock.calls.map((call) =>
+      new URL(call[0] as URL).searchParams.get("includeUnverified"),
+    );
+    expect(switches).toEqual([null, "true"]);
+  });
+
+  it("passes the verification tier through --json", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-search-verification-json-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        ...discoveryPage,
+        items: [{ ...discoveryPage.items[0], verification: "verified" }],
+      }),
+    );
+    const captured = captureIo();
+
+    expect(await runCli(["search", "decode", "--json"], captured.io, { fetchImpl })).toBe(0);
+
+    const page = JSON.parse(captured.stdout[0]!) as { items: Array<{ verification?: string }> };
+    expect(page.items.map((item) => item.verification)).toEqual(["verified"]);
   });
 
   it("passes the group and fee through --json untouched", async () => {
@@ -437,6 +502,91 @@ describe("search output", () => {
       bps: 500,
       label: "5% network fee, paid by the API's splitter",
     });
+  });
+});
+
+describe("inspect output", () => {
+  function servicesResponse(overrides: Record<string, unknown> = {}) {
+    return {
+      services: [
+        {
+          id: "decodepaymentauthorization",
+          name: "Decode Payment Authorization",
+          description: "Decode an x402 payment authorization.",
+          category: "crypto",
+          tier: "verified",
+          group: "vapi",
+          fee: { bps: 500, label: "5% network fee, paid by the API's splitter" },
+          verified: true,
+          wrapped: false,
+          price: "$0.005",
+          networks: ["eip155:8453"],
+          endpoints: [
+            {
+              name: "decode",
+              method: "POST",
+              url: "https://decode.example/decode",
+              price: "$0.005",
+              description: "Decode an authorization payload.",
+            },
+          ],
+          ...overrides,
+        },
+      ],
+    };
+  }
+
+  it("says how far vAPI reviewed the listing, and what fee is inside the price", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json(servicesResponse({ verification: "verified" })));
+    const captured = captureIo();
+
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization"], captured.io, { fetchImpl }),
+    ).toBe(0);
+
+    const text = captured.stdout.join("\n");
+    expect(text).toContain("Verification: verified");
+    expect(text).toContain("Fee: 5% network fee, paid by the API's splitter");
+  });
+
+  it("calls a listing the registry never reviewed unverified, in text and in --json", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-unverified-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => Response.json(servicesResponse()));
+    const captured = captureIo();
+
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization"], captured.io, { fetchImpl }),
+    ).toBe(0);
+    expect(captured.stdout.join("\n")).toContain("Verification: unverified");
+
+    const asJson = captureIo();
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization", "--json"], asJson.io, { fetchImpl }),
+    ).toBe(0);
+    expect(JSON.parse(asJson.stdout[0]!)).toMatchObject({ verification: "none" });
+  });
+});
+
+describe("the verification notice vapi pay prints", () => {
+  it("says nothing for a verified listing, or for a call with no listing at all", () => {
+    expect(verificationNotice("verified")).toEqual([]);
+    expect(verificationNotice(undefined)).toEqual([]);
+  });
+
+  it("is one line that neither prompts nor blocks", () => {
+    expect(verificationNotice("none")).toEqual([
+      "Verification: unverified — vAPI has not reviewed this listing. Check its request contract and its price with vapi inspect.",
+    ]);
+    expect(verificationNotice("requested")).toEqual([
+      "Verification: requested — vAPI review is pending. Check its request contract and its price with vapi inspect.",
+    ]);
   });
 });
 

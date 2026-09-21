@@ -10,6 +10,7 @@ import {
   type DiscoveryCatalog,
   type DiscoveryEndpoint,
   type Listing,
+  type ListingVerification,
   type MarketplaceDiscoveryPage,
   type MarketplaceHit,
   type MarketplaceKind,
@@ -25,6 +26,13 @@ export type MarketplaceSearchInput = {
   network?: string;
   limit?: number;
   cursor?: string;
+  /**
+   * The registry's one trust switch. Left out or false, discovery answers with
+   * vAPI-verified listings plus the mirrored external catalogs; true also
+   * returns self-listed APIs that passed the automated x402 probe but were
+   * never reviewed.
+   */
+  includeUnverified?: boolean;
 };
 
 export type VapiRegistryConfig = Readonly<{
@@ -66,6 +74,7 @@ export async function searchMarketplace(
     network: input.network,
     limit: input.limit,
     cursor: input.cursor,
+    includeUnverified: input.includeUnverified,
   });
   const startedAt = options.now ?? new Date();
   const attempts: SearchAttempt[] = [];
@@ -84,6 +93,12 @@ export async function searchMarketplace(
         if (normalized.network !== undefined) url.searchParams.set("network", normalized.network);
         if (normalized.limit !== undefined) url.searchParams.set("limit", String(normalized.limit));
         if (normalized.cursor !== undefined) url.searchParams.set("cursor", normalized.cursor);
+        // Only the opt-in is worth sending: `false` is the registry default, and
+        // an explicit `includeUnverified=false` would only make cached URLs and
+        // search logs harder to read.
+        if (normalized.includeUnverified === true) {
+          url.searchParams.set("includeUnverified", "true");
+        }
       },
     });
     const page = marketplaceDiscoveryPageSchema.parse(await response.json());
@@ -131,14 +146,19 @@ export async function resolveServiceListing(
   return (await fetchCallsDiscovery(id, config, request)).resolveListing(id, endpointName);
 }
 
-/** Resolve one exact API ref from marketplace discovery across fresh CLI processes. */
+/**
+ * Resolve one exact API ref from marketplace discovery across fresh CLI
+ * processes. Resolving a ref the caller already holds is not a browse, so the
+ * verification tier must not hide it: the answer carries the tier and the
+ * interfaces disclose it instead.
+ */
 export async function findMarketplaceApiByRef(
   ref: string,
   config: VapiRegistryConfig,
   fetchImpl?: Fetch,
 ): Promise<MarketplaceHit | null> {
   const page = await searchMarketplace(
-    { query: ref, kinds: ["api"], limit: 50 },
+    { query: ref, kinds: ["api"], limit: 50, includeUnverified: true },
     config,
     fetchImpl,
   );
@@ -158,38 +178,39 @@ export function vapiRegistrySource(
 
   return {
     id: "vapi",
-    async search(query) {
-      const page = await searchMarketplace({ query, kinds: ["api"] }, config, fetchImpl);
+    async search(query, searchOptions) {
+      const page = await searchMarketplace(
+        {
+          query,
+          kinds: ["api"],
+          ...(searchOptions?.includeUnverified === undefined
+            ? {}
+            : { includeUnverified: searchOptions.includeUnverified }),
+        },
+        config,
+        fetchImpl,
+      );
       const mapped = await Promise.all(
         page.items.map(async (hit): Promise<Listing | null> => {
           if (hit.kind !== "api") return null;
           if (hit.provenance === "indexed") {
-            return {
-              resource: { url: hit.execution.url, description: hit.card.summary },
-              name: hit.card.title,
-              description: hit.card.summary,
-              ...(hit.execution.method === null ? {} : { method: hit.execution.method }),
-              network: hit.execution.network,
-              ...optionalPrice(hit.card.facts),
-              metadata: { card: hit.card, action: hit.action, execution: hit.execution },
-              provenance: [
-                {
-                  source: "vapi",
-                  sourceUrl: config.marketplaceDiscoveryUrl,
-                  ref: hit.ref,
-                },
-              ],
-            };
+            return mirroredListing(hit, config);
           }
 
           try {
             const endpoint = await resolveServiceEndpoint(hit.ref, config, fetchImpl);
-            return endpointListing(endpoint, hit.ref, config, {
-              card: hit.card,
-              action: hit.action,
-              execution: hit.execution,
-              registryProvenance: hit.provenance,
-            });
+            return endpointListing(
+              endpoint,
+              hit.ref,
+              config,
+              {
+                card: hit.card,
+                action: hit.action,
+                execution: hit.execution,
+                registryProvenance: hit.provenance,
+              },
+              hit.verification,
+            );
           } catch (error) {
             // Marketplace cards deliberately omit executable targets. A stale or
             // ambiguous compatibility record cannot form a valid core Listing.
@@ -202,8 +223,8 @@ export function vapiRegistrySource(
     },
     async inspect(ref) {
       try {
-        const endpoint = await resolveServiceEndpoint(ref, config, fetchImpl);
-        return endpointListing(endpoint, ref, config);
+        const { endpoint, service } = await resolveServiceListing(ref, config, fetchImpl);
+        return endpointListing(endpoint, ref, config, {}, service.verification);
       } catch (resolutionError) {
         if (
           !(resolutionError instanceof DiscoveryCatalogError) ||
@@ -211,25 +232,15 @@ export function vapiRegistrySource(
         ) {
           throw resolutionError;
         }
-        const page = await searchMarketplace({ query: ref, kinds: ["api"] }, config, fetchImpl);
+        // An exact ref, so the trust switch must not hide the answer.
+        const page = await searchMarketplace(
+          { query: ref, kinds: ["api"], includeUnverified: true },
+          config,
+          fetchImpl,
+        );
         const hit = page.items.find((item) => item.kind === "api" && item.ref === ref);
         if (hit?.kind === "api" && hit.provenance === "indexed") {
-          return {
-            resource: { url: hit.execution.url, description: hit.card.summary },
-            name: hit.card.title,
-            description: hit.card.summary,
-            ...(hit.execution.method === null ? {} : { method: hit.execution.method }),
-            network: hit.execution.network,
-            ...optionalPrice(hit.card.facts),
-            metadata: { card: hit.card, action: hit.action, execution: hit.execution },
-            provenance: [
-              {
-                source: "vapi",
-                sourceUrl: config.marketplaceDiscoveryUrl,
-                ref: hit.ref,
-              },
-            ],
-          };
+          return mirroredListing(hit, config);
         }
         if (page.items.some((item) => item.kind === "api" && item.ref === ref)) {
           throw resolutionError;
@@ -251,9 +262,35 @@ async function fetchCallsDiscovery(
     request: fetchImpl,
     configureUrl(url) {
       url.searchParams.set("q", query);
+      // Same reason as `findMarketplaceApiByRef`: this resolves one ref the
+      // caller already chose, so an unverified listing must still resolve. Its
+      // tier travels with it and `inspect`/`pay` say so.
+      url.searchParams.set("includeUnverified", "true");
     },
   });
   return parseDiscovery(await response.json());
+}
+
+/**
+ * A row mirrored from an external catalog. vAPI reviewed nothing it merely
+ * mirrored, so its verification is always `none`; the field is carried through
+ * from the registry rather than assumed here.
+ */
+function mirroredListing(
+  hit: Extract<MarketplaceHit, { kind: "api"; provenance: "indexed" }>,
+  config: VapiRegistryConfig,
+): Listing {
+  return {
+    resource: { url: hit.execution.url, description: hit.card.summary },
+    name: hit.card.title,
+    description: hit.card.summary,
+    ...(hit.execution.method === null ? {} : { method: hit.execution.method }),
+    network: hit.execution.network,
+    ...optionalPrice(hit.card.facts),
+    verification: hit.verification,
+    metadata: { card: hit.card, action: hit.action, execution: hit.execution },
+    provenance: [{ source: "vapi", sourceUrl: config.marketplaceDiscoveryUrl, ref: hit.ref }],
+  };
 }
 
 function endpointListing(
@@ -261,6 +298,7 @@ function endpointListing(
   ref: string,
   config: VapiRegistryConfig,
   metadata: Readonly<Record<string, unknown>> = {},
+  verification?: ListingVerification,
 ): Listing {
   return {
     resource: {
@@ -275,6 +313,7 @@ function endpointListing(
     method: endpoint.method,
     ...(endpoint.payment?.network === undefined ? {} : { network: endpoint.payment.network }),
     price: endpoint.price,
+    ...(verification === undefined ? {} : { verification }),
     metadata: {
       ...metadata,
       ...(endpoint.operationId === undefined ? {} : { operationId: endpoint.operationId }),

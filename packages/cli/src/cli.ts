@@ -25,6 +25,7 @@ import {
   getNetworkDefinition,
   getVapiPaths,
   isMissingFile,
+  isMirroredHit,
   isNetworkConfigured,
   isSolanaNetwork,
   KeystoreError,
@@ -51,6 +52,7 @@ import {
   WalletStore,
   writeDefaultConfig,
   type AuditEvent,
+  type ListingVerification,
   type ResolvedPassphrase,
   type SecretStore,
   type SecretsDecision,
@@ -90,7 +92,7 @@ Usage:
   vapi wallet caps <name> [--per-call <usd>] [--per-day <usd>] [--json]
   vapi fund [--amount <usd>] [--wallet <name>] [--json]
   vapi accounts [--enable solana] [--wallet <name>] [--json]
-  vapi search [query] [--kind <kind>] [--network <caip2>] [--limit <n>] [--cursor <cursor>] [--json]
+  vapi search [query] [--kind <kind>] [--network <caip2>] [--limit <n>] [--cursor <cursor>] [--include-unverified] [--json]
   vapi inspect <id> [--endpoint <name>] [--json]
   vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--wallet <name>] [--json]
   vapi balance [--wallet <name>] [--json]
@@ -112,6 +114,8 @@ Usage:
   vapi help [--json]
 
 Every command that touches a wallet takes \`--wallet <name>\`, falls back to \`VAPI_WALLET\`, then to the default set by \`vapi wallet use\`, and names the wallet it used on its first line.
+
+\`vapi search\` answers with vAPI-verified listings plus the mirrored external catalogs. \`--include-unverified\` also returns self-listed APIs that passed vAPI's automated x402 probe but were never reviewed; every result is tagged \`[verified]\`, \`[requested]\`, \`[unverified]\` or \`[external]\`.
 
 \`vapi fund\` opens the funding page: card via Coinbase (needs a Coinbase account; US guest checkout), send from MetaMask/Coinbase Wallet/WalletConnect, or bridge from another chain.
 
@@ -188,6 +192,9 @@ function getLinePrompt(dependencies: CliDependencies): (prompt: string) => Promi
 }
 
 const WALLET_OPTION = "--wallet";
+
+/** The one trust switch `vapi search` exposes; see `searchCommand`. */
+const INCLUDE_UNVERIFIED_OPTION = "--include-unverified";
 
 /** The wallet one invocation acts on, resolved before any passphrase is read. */
 type WalletTarget = {
@@ -1104,6 +1111,7 @@ async function searchCommand(
 ): Promise<void> {
   const parsed = parseArguments(argv, {
     valueOptions: new Set(["--kind", "--network", "--limit", "--cursor"]),
+    booleanOptions: new Set([INCLUDE_UNVERIFIED_OPTION]),
     repeatableOptions: new Set(["--kind"]),
     maximumPositionals: 1,
   });
@@ -1118,6 +1126,8 @@ async function searchCommand(
       ...(parsed.one("--network") ? { network: parsed.one("--network") } : {}),
       ...(limit === undefined ? {} : { limit }),
       ...(parsed.one("--cursor") ? { cursor: parsed.one("--cursor") } : {}),
+      // Only the opt-in travels: `false` is the registry default.
+      ...(parsed.has(INCLUDE_UNVERIFIED_OPTION) ? { includeUnverified: true } : {}),
     },
     config,
     dependencies.fetchImpl,
@@ -1146,7 +1156,7 @@ async function inspectCommand(
     config,
     dependencies.fetchImpl,
   );
-  output(io, json, result, JSON.stringify(result, null, 2));
+  output(io, json, result, formatInspect(result));
 }
 
 async function payCommand(
@@ -1201,7 +1211,7 @@ async function payCommand(
     json,
     wallet,
     result as unknown as Record<string, unknown>,
-    JSON.stringify(result, null, 2),
+    [...verificationNotice(result.verification), JSON.stringify(result, null, 2)].join("\n"),
   );
 }
 
@@ -1903,21 +1913,73 @@ function outputStub(io: CliIo, json: boolean): void {
 }
 
 /**
+ * The short word for how far a listing got through vAPI review. A mirrored
+ * external row is called `external` rather than `unverified`: vAPI reviewed
+ * nothing it merely mirrored, and saying "unverified" would read as a verdict
+ * on a catalog vAPI never claimed to judge.
+ */
+export function verificationTag(listing: {
+  verification?: ListingVerification;
+  external?: boolean;
+}): "verified" | "requested" | "unverified" | "external" {
+  if (listing.external) return "external";
+  if (listing.verification === "verified") return "verified";
+  return listing.verification === "requested" ? "requested" : "unverified";
+}
+
+/**
  * One block per listing. The group tag is the shortest honest answer to "whose
- * API is this", and the fee label is the registry's own disclosure of what is
- * already inside the price, so neither is recomputed here.
+ * API is this", the verification tag is how far vAPI reviewed it, and the fee
+ * label is the registry's own disclosure of what is already inside the price,
+ * so none of the three is recomputed here. A group that already says `external`
+ * is not repeated by the verification tag.
  */
 function formatSearch(page: Awaited<ReturnType<typeof searchMarketplace>>): string {
   if (page.items.length === 0) return "No listings found.";
   return page.items
-    .map((item) =>
-      [
-        `${item.ref}\t${item.kind}\t${item.group ? `[${item.group}] ` : ""}${item.card.title}`,
+    .map((item) => {
+      const tags = [
+        ...(item.group ? [item.group] : []),
+        verificationTag({ verification: item.verification, external: isMirroredHit(item) }),
+      ];
+      const prefix = [...new Set(tags)].map((tag) => `[${tag}] `).join("");
+      return [
+        `${item.ref}\t${item.kind}\t${prefix}${item.card.title}`,
         `  ${item.card.summary}`,
         ...(item.fee ? [`  Fee: ${item.fee.label}`] : []),
-      ].join("\n"),
-    )
+      ].join("\n");
+    })
     .join("\n");
+}
+
+/**
+ * `inspect` answers with the whole record, so the two disclosures a human
+ * decides on — how far vAPI reviewed this listing, and what network fee is
+ * already inside the price — are said in words above it.
+ */
+function formatInspect(result: Awaited<ReturnType<typeof inspectService>>): string {
+  return [
+    `Verification: ${verificationTag({
+      verification: result.verification,
+      external: result.group === "external",
+    })}`,
+    ...(result.fee ? [`Fee: ${result.fee.label}`] : []),
+    JSON.stringify(result, null, 2),
+  ].join("\n");
+}
+
+/**
+ * One line, above the result, when the listing that was just paid is not
+ * vAPI-verified. It never blocks and never prompts: the payment has already
+ * happened, and the point is that the next one is an informed choice.
+ */
+export function verificationNotice(verification: ListingVerification | undefined): string[] {
+  if (verification === undefined || verification === "verified") return [];
+  const state =
+    verification === "requested"
+      ? "requested — vAPI review is pending"
+      : "unverified — vAPI has not reviewed this listing";
+  return [`Verification: ${state}. Check its request contract and its price with vapi inspect.`];
 }
 
 function formatWallet(wallet: Awaited<ReturnType<typeof getWallet>>): string {

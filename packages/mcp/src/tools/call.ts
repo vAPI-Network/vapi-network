@@ -19,6 +19,7 @@ import {
   marketplaceExecutionMethodSchema,
   marketplaceHitSchema,
   reserveSpend,
+  type ListingVerification,
   type LookupFn,
   type MarketplaceExecutionMethod,
   type MarketplaceHit,
@@ -38,7 +39,7 @@ import {
   parseSettlementResponse,
 } from "../x402.js";
 import { buildSIWxProof, parseSIWxResponse } from "../siwx.js";
-import { findMarketplaceApiByRef, resolveServiceEndpoint } from "./search.js";
+import { findMarketplaceApiByRef, resolveServiceListing } from "./search.js";
 
 export type CallToolInput = {
   id?: string;
@@ -112,6 +113,8 @@ type ResolvedCallEndpoint = {
   name?: string;
   url: string;
   method: string;
+  /** The tier of the listing behind this endpoint; absent for a raw URL call. */
+  verification?: ListingVerification;
   registered: boolean;
   resolvedListing: boolean;
   requiresExplicitMethod?: boolean;
@@ -126,6 +129,11 @@ type ResolvedCallEndpoint = {
 export type CallToolResult = {
   status: number;
   body: unknown;
+  /**
+   * How far the paid listing got through vAPI review. Absent when there was no
+   * listing to disclose — a call made against an explicit URL.
+   */
+  verification?: ListingVerification;
   outcome?: "signed_in";
   payment: null | {
     network: string;
@@ -412,6 +420,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
           status: initialResponse.status,
           body: await initial.waitFor(readResponseBody(initialResponse), initialResponse),
           payment: null,
+          ...verificationFor(endpoint),
           ...expectedRequestFor(endpoint, initialResponse.status),
         },
       };
@@ -489,6 +498,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
             body: await challengeAttempt.waitFor(readResponseBody(signedResponse), signedResponse),
             payment: null,
             ...(signedResponse.ok ? { outcome: "signed_in" as const } : {}),
+            ...verificationFor(endpoint),
             ...expectedRequestFor(endpoint, signedResponse.status),
           },
         };
@@ -670,6 +680,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
           settlement,
           proof: paidResponse.headers.get("x-vapi-payment-proof"),
         },
+        ...verificationFor(endpoint),
         ...expectedRequestFor(endpoint, paidResponse.status),
       },
     };
@@ -925,11 +936,7 @@ async function resolveCallEndpoint(
 ): Promise<ResolvedCallEndpoint> {
   if (!marketplaceHit) {
     try {
-      return {
-        ...(await resolveServiceEndpoint(id, config, fetchImpl, endpointName)),
-        registered: true,
-        resolvedListing: true,
-      };
+      return registeredEndpoint(await resolveServiceListing(id, config, fetchImpl, endpointName));
     } catch (error) {
       if (!(error instanceof DiscoveryCatalogError) || error.code !== "service_not_found") {
         throw error;
@@ -955,17 +962,43 @@ async function resolveCallEndpoint(
     return {
       url: marketplaceHit.execution.url,
       method: publishedMethod ?? "",
+      verification: marketplaceHit.verification,
       registered: publishedMethod !== null,
       resolvedListing: false,
       requiresExplicitMethod: publishedMethod === null,
       payment: { network: marketplaceHit.execution.network },
     };
   }
+  return registeredEndpoint(
+    await resolveServiceListing(marketplaceHit.ref, config, fetchImpl, endpointName),
+    marketplaceHit.verification,
+  );
+}
+
+/**
+ * A listing vAPI holds a record for. The tier travels with the endpoint so the
+ * interfaces can disclose it on the result without a second round trip.
+ */
+function registeredEndpoint(
+  listing: Awaited<ReturnType<typeof resolveServiceListing>>,
+  verification?: ListingVerification,
+): ResolvedCallEndpoint {
   return {
-    ...(await resolveServiceEndpoint(marketplaceHit.ref, config, fetchImpl, endpointName)),
+    ...listing.endpoint,
+    verification: verification ?? listing.service.verification,
     registered: true,
     resolvedListing: true,
   };
+}
+
+/**
+ * The tier of the listing that was paid, for the result. A call made against an
+ * explicit URL has no listing, and so discloses nothing.
+ */
+function verificationFor(
+  endpoint: ResolvedCallEndpoint | null,
+): Pick<CallToolResult, "verification"> {
+  return endpoint?.verification === undefined ? {} : { verification: endpoint.verification };
 }
 
 function assertRequiredRequestKeys(

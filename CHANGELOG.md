@@ -3,6 +3,51 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## 0.4.0
+
+Listing on vAPI became permissionless, so "is this listed?" stopped being a
+useful question and "how far did vAPI review it?" took its place. The registry
+now returns a verification tier on every listing, and the client's job is to
+carry that tier all the way to whoever is about to spend money — one switch to
+widen the search, one word on every result, and one line before an unverified
+payment. Nothing is blocked; nothing is decided for you.
+
+### Added
+
+- `verification` on every discovery hit and every service record, one of
+  `"none"`, `"requested"` or `"verified"`. A registry that predates the tier,
+  or one that starts sending a tier this client does not know, reads as
+  `"none"` — the client never invents an endorsement. Rows mirrored from an
+  external catalog are always `"none"`.
+- `vapi search --include-unverified` and the `includeUnverified` argument on
+  `call.search`: the one trust switch. Without it, results are vAPI-verified
+  listings plus the mirrored external catalogs; with it, self-listed APIs that
+  passed vAPI's automated x402 probe but were never reviewed are returned too.
+  Only the opt-in is sent to the registry.
+- `vapi search` tags every result with its tier next to its group —
+  `[verified]`, `[requested]`, `[unverified]`, or `[external]` for a mirrored
+  row, which is never repeated when the group already says `external`.
+- `vapi inspect` prints a `Verification:` line and the network fee label above
+  the record, and `vapi pay` prints one line naming the tier before the result
+  when the listing it just paid was not verified. Neither prompts nor blocks.
+- `verification` in `--json` on `search`, `inspect` and `pay`, and on the
+  `call.search`, `call.inspect` and `call.pay` MCP results.
+- `includeUnverified` on `discover()` and on the `Source.search` seam, and
+  `verification` on core's `Listing`. Sources that have no notion of vAPI
+  verification ignore the option and claim no tier.
+
+### Changed
+
+- `call.pay`'s tool description now tells an agent to prefer a verified listing
+  and to read the request contract and the price with `call.inspect` before
+  paying one that is not.
+- Resolving one exact ref — `vapi inspect`, `vapi pay`, and the registry
+  source's `inspect` — always asks the registry for unverified listings too.
+  Resolving a ref the caller already holds is not a browse, so the tier is
+  disclosed rather than used to hide the answer.
+- Every package, `scripts/pack-check.mjs`, `CLI_VERSION` and
+  `VAPI_CLIENT_VERSION` move to 0.4.0.
+
 ## 0.3.0
 
 Several wallets on one machine, a passphrase that no longer has to sit in an
