@@ -14,6 +14,25 @@ payment. Nothing is blocked; nothing is decided for you.
 
 ### Added
 
+- `vapi publish <url>`: listing an API from the terminal. vAPI probes the URL —
+  an origin, one endpoint, or an OpenAPI document — and prints every probe step;
+  a refusal prints its code, reason and hint and exits `2` before anything is
+  signed. You choose which of the endpoints it found to list, on a terminal or
+  with `--select`/`--yes`, and the local wallet signs one EIP-4361 line,
+  `Confirm this wallet receives vAPI Call payouts`, bound to the registry's host
+  and to Base. The answer names the slug, the FeeSplitter address per network
+  and the one step that stays in the console, because deploying the splitter is
+  a wallet transaction. `vapi publish activate <slug>` takes the listing live,
+  `vapi publish verify-request <slug>` asks for the review that ends the
+  `[unverified]` tag, and `vapi publish list` shows what this key owns.
+  `--json` emits the registry's raw responses.
+- `vapi auth set-key`, `vapi auth status` and `vapi auth clear` for the registry
+  API key. The key is typed on a prompt and never passed as an argument, is kept
+  in the same OS secret store as the wallet passphrase — or in
+  `~/.vapi/config.json` at mode 0600 where there is none — and is masked
+  wherever it is reported. `VAPI_API_KEY` overrides both, for CI. It lives
+  behind `@vapi-network/core/api-key`, which `packages/mcp` is lint-forbidden to
+  import: there is no publish tool and no agent path to a provider credential.
 - `verification` on every discovery hit and every service record, one of
   `"none"`, `"requested"` or `"verified"`. A registry that predates the tier,
   or one that starts sending a tier this client does not know, reads as

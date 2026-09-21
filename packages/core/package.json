@@ -26,10 +26,14 @@
     "./secrets": {
       "types": "./dist/secrets.d.ts",
       "import": "./dist/secrets.js"
+    },
+    "./api-key": {
+      "types": "./dist/api-key.d.ts",
+      "import": "./dist/api-key.js"
     }
   },
   "scripts": {
-    "build": "node ../../scripts/build-package.mjs index=src/index.ts secrets=src/secrets.ts",
+    "build": "node ../../scripts/build-package.mjs index=src/index.ts secrets=src/secrets.ts api-key=src/api-key.ts",
     "lint": "eslint src --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

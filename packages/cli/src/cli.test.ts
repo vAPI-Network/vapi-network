@@ -645,32 +645,33 @@ describe("local metrics commands", () => {
   });
 });
 
-describe("future gateway commands", () => {
-  for (const command of ["serve", "publish"] as const) {
-    it(`${command} exits 2 with the promised message`, async () => {
-      const captured = captureIo();
-      expect(await runCli([command], captured.io)).toBe(2);
-      expect(captured.stdout).toEqual([]);
-      expect(captured.stderr).toEqual(["gateway daemon lands in 0.3"]);
-    });
+/**
+ * `vapi publish` is a real command since 0.4.0, so only the gateway daemon is
+ * still a stub. Its tests live in `publish-cli.test.ts`.
+ */
+describe("the gateway daemon preview", () => {
+  it("serve exits 2 with the promised message", async () => {
+    const captured = captureIo();
+    expect(await runCli(["serve"], captured.io)).toBe(2);
+    expect(captured.stdout).toEqual([]);
+    expect(captured.stderr).toEqual(["gateway daemon lands in 0.3"]);
+  });
 
-    it(`${command} remains a stub when its future arguments are supplied`, async () => {
-      const captured = captureIo();
-      const argumentsForPreview = command === "serve" ? ["--port", "4020"] : ["openapi.json"];
-      expect(await runCli([command, ...argumentsForPreview], captured.io)).toBe(2);
-      expect(captured.stderr).toEqual(["gateway daemon lands in 0.3"]);
-    });
+  it("serve remains a stub when its future arguments are supplied", async () => {
+    const captured = captureIo();
+    expect(await runCli(["serve", "--port", "4020"], captured.io)).toBe(2);
+    expect(captured.stderr).toEqual(["gateway daemon lands in 0.3"]);
+  });
 
-    it(`${command} has machine-readable JSON output`, async () => {
-      const captured = captureIo();
-      expect(await runCli([command, "--json"], captured.io)).toBe(2);
-      expect(captured.stderr).toEqual([]);
-      expect(JSON.parse(captured.stdout[0]!)).toEqual({
-        error: "gateway daemon lands in 0.3",
-        exitCode: 2,
-      });
+  it("serve has machine-readable JSON output", async () => {
+    const captured = captureIo();
+    expect(await runCli(["serve", "--json"], captured.io)).toBe(2);
+    expect(captured.stderr).toEqual([]);
+    expect(JSON.parse(captured.stdout[0]!)).toEqual({
+      error: "gateway daemon lands in 0.3",
+      exitCode: 2,
     });
-  }
+  });
 });
 
 describe("init safety", () => {

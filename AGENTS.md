@@ -52,6 +52,14 @@ randomness, filesystem roots, and `fetch` implementations.
   `wallets/.trash/`, `audit.log`, `receipts.jsonl`, `searches.jsonl`, and
   `spend-ledger.json`. `keystore.json` is a compatibility symlink left by the
   0.2.x migration and is kept for one release.
+- The registry API key is a secret and lives behind `@vapi-network/core/api-key`,
+  its own package entry point, exactly as recovery phrases and private keys live
+  behind `@vapi-network/core/secrets`. `packages/mcp` is lint-forbidden to import
+  either. It is read from `VAPI_API_KEY`, then the OS secret store, then the
+  `apiKey` field of `config.json`; the config schema drops that field so the
+  parsed config an MCP session holds can never carry it, and `writeConfigFile`
+  preserves it across a rewrite. Publishing is a human act: no MCP tool creates,
+  activates or retires a listing.
 - Migration from `~/.vapi/agent-cash/` copies files, never deletes the old
   directory, never overwrites new state, and prints a notice.
 - Receipts are an append-only JSONL ledger. Spend accounting uses

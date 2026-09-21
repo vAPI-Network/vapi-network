@@ -31,6 +31,14 @@ export const AUDIT_EVENTS = [
   // the wallet the agent pays from does, so the line has to be there.
   "wallet.use.session",
   "passphrase.change",
+  // The registry API key a provider publishes with entering or leaving this
+  // machine. The key itself is never in the line; only that one is now here.
+  "auth.key.set",
+  "auth.key.clear",
+  // A listing this machine created or moved through the registry's states.
+  // The slug is not a secret, so it is worth having in the trail.
+  "listing.publish",
+  "listing.status",
 ] as const;
 
 export type AuditEvent = (typeof AUDIT_EVENTS)[number];

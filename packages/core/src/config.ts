@@ -456,10 +456,38 @@ export async function enableDefaultNetwork(
   return config;
 }
 
+/**
+ * Fields `config.json` keeps but the parsed config never carries. Today that
+ * is `apiKey`, the registry key `vapi auth set-key` writes when a machine has
+ * no OS secret store: the config schema drops it, because the parsed object
+ * travels into the MCP server and a credential must not ride along. A rewrite
+ * still has to keep it, or enabling a network would quietly sign a provider
+ * out. `@vapi-network/core/api-key` owns reading and writing the value.
+ */
+const PRESERVED_CONFIG_FIELDS = ["apiKey"] as const;
+
+async function readPreservedConfigFields(path: string): Promise<Record<string, unknown>> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+  const record = parsed as Record<string, unknown>;
+  return Object.fromEntries(
+    PRESERVED_CONFIG_FIELDS.filter((field) => record[field] !== undefined).map((field) => [
+      field,
+      record[field],
+    ]),
+  );
+}
+
 async function writeConfigFile(path: string, config: VapiConfig): Promise<void> {
+  const preserved = await readPreservedConfigFields(path);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporaryPath = `${path}.${process.pid}.tmp`;
-  await writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, {
+  await writeFile(temporaryPath, `${JSON.stringify({ ...config, ...preserved }, null, 2)}\n`, {
     encoding: "utf8",
     mode: 0o600,
     flag: "wx",

@@ -203,42 +203,88 @@ Every command accepts `--json`, which writes one JSON value — success or error
 to stdout. Exit codes are `0` for success, `1` for an operational failure, and
 `2` for invalid usage or an announced preview-only command.
 
-| Command                          | Options                                                                                                                                 | What it does                                                                 |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `vapi init`                      | `--networks <base,solana>`                                                                                                              | Creates `~/.vapi`, the wallet `main` and the config. Says so if one exists.  |
-| `vapi wallet list`               | —                                                                                                                                       | Name, address, default marker, caps in USD, unlocked, label                  |
-| `vapi wallet create <name>`      | `--networks <base,solana>`, `--label <text>`                                                                                            | A new wallet, with its own phrase, caps and passphrase                       |
-| `vapi wallet use <name>`         | —                                                                                                                                       | Makes it the default for every later command                                 |
-| `vapi wallet rename <old> <new>` | —                                                                                                                                       | Renames the keystore, the registry entry and that wallet's receipts          |
-| `vapi wallet remove <name>`      | `--force`                                                                                                                               | Moves the keystore to `wallets/.trash/`; asks you to type the name           |
-| `vapi wallet restore <name>`     | —                                                                                                                                       | Brings a removed wallet back, same passphrase                                |
-| `vapi wallet caps <name>`        | `--per-call <usd>`, `--per-day <usd>`                                                                                                   | Sets that wallet's spend caps, in US dollars                                 |
-| `vapi fund`                      | `--amount <usd>`, `--wallet <name>`                                                                                                     | Prints and opens the hosted funding page. Makes no network call.             |
-| `vapi accounts`                  | `--enable solana`, `--wallet <name>`                                                                                                    | One deposit account per configured network, with balances and guidance       |
-| `vapi search [query]`            | `--kind <kind>` (repeatable), `--network <caip2>`, `--limit <n>`, `--cursor <cursor>`, `--include-unverified`                           | Merged discovery across every configured source, tagged by group and tier    |
-| `vapi inspect <id>`              | `--endpoint <name>`                                                                                                                     | A listing's verification, fee, request contract and live 402 quote, for free |
-| `vapi pay <id-or-url>`           | `--method`, `--endpoint`, `--body <json>`, `--content-type`, `--network <caip2>`, `--expected-pay-to`, `--max <usd>`, `--wallet <name>` | Calls the API and pays it from the local wallet, naming an unverified tier   |
-| `vapi balance`                   | `--wallet <name>`                                                                                                                       | The wallet's address and USDC balances                                       |
-| `vapi receipts`                  | `--limit <n>`, `--wallet <name>`, `--all-wallets`                                                                                       | The local append-only call ledger, newest last                               |
-| `vapi receipts export`           | `--format <json\|csv>`, `--range <24h\|7d\|30d>`, `--wallet <name>`, `--all-wallets`                                                    | Raw receipts for a spreadsheet or dashboard                                  |
-| `vapi stats`                     | `--range <24h\|7d\|30d>`, `--wallet <name>`, `--all-wallets`                                                                            | Spend, outcomes, latency percentiles and top services                        |
-| `vapi sweep <address>`           | `--network <caip2>`, `--wallet <name>`                                                                                                  | Moves the USDC balance out to an address you own                             |
-| `vapi export-key`                | `--network <caip2>`, `--wallet <name>`                                                                                                  | Prints the private key. Terminal only, never for an agent.                   |
-| `vapi backup`                    | `--wallet <name>`                                                                                                                       | Prints the 12 words. Terminal only, never for an agent.                      |
-| `vapi import`                    | `--phrase` or `--key`, `--wallet <name>`, `--networks <base,solana>`, `--replace`, `--force`                                            | Restores a wallet from a prompt, never from argv                             |
-| `vapi passphrase`                | `--wallet <name>`                                                                                                                       | Re-encrypts the keystore under a new passphrase                              |
-| `vapi unlock`                    | `--wallet <name>`                                                                                                                       | Puts that wallet's passphrase in the OS secret store                         |
-| `vapi lock`                      | `--wallet <name>`, `--all`                                                                                                              | Takes a stored passphrase back out                                           |
-| `vapi report "<what>"`           | `--include-addresses`, `--send`                                                                                                         | Writes a privacy-preserving local bug report                                 |
-| `vapi mcp`                       | `--wallet <name>`                                                                                                                       | Serves the MCP tools over stdio                                              |
-| `vapi serve`                     | —                                                                                                                                       | Preview only; exits `2` with a message                                       |
-| `vapi publish`                   | —                                                                                                                                       | Preview only; exits `2` with a message                                       |
-| `vapi version`                   | —                                                                                                                                       | The client version, also as `--version` or `-v`                              |
-| `vapi help`                      | —                                                                                                                                       | The same help bare `vapi` shows, also as `--help` or `-h`                    |
+| Command                              | Options                                                                                                                                                                                     | What it does                                                                 |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `vapi init`                          | `--networks <base,solana>`                                                                                                                                                                  | Creates `~/.vapi`, the wallet `main` and the config. Says so if one exists.  |
+| `vapi wallet list`                   | —                                                                                                                                                                                           | Name, address, default marker, caps in USD, unlocked, label                  |
+| `vapi wallet create <name>`          | `--networks <base,solana>`, `--label <text>`                                                                                                                                                | A new wallet, with its own phrase, caps and passphrase                       |
+| `vapi wallet use <name>`             | —                                                                                                                                                                                           | Makes it the default for every later command                                 |
+| `vapi wallet rename <old> <new>`     | —                                                                                                                                                                                           | Renames the keystore, the registry entry and that wallet's receipts          |
+| `vapi wallet remove <name>`          | `--force`                                                                                                                                                                                   | Moves the keystore to `wallets/.trash/`; asks you to type the name           |
+| `vapi wallet restore <name>`         | —                                                                                                                                                                                           | Brings a removed wallet back, same passphrase                                |
+| `vapi wallet caps <name>`            | `--per-call <usd>`, `--per-day <usd>`                                                                                                                                                       | Sets that wallet's spend caps, in US dollars                                 |
+| `vapi fund`                          | `--amount <usd>`, `--wallet <name>`                                                                                                                                                         | Prints and opens the hosted funding page. Makes no network call.             |
+| `vapi accounts`                      | `--enable solana`, `--wallet <name>`                                                                                                                                                        | One deposit account per configured network, with balances and guidance       |
+| `vapi search [query]`                | `--kind <kind>` (repeatable), `--network <caip2>`, `--limit <n>`, `--cursor <cursor>`, `--include-unverified`                                                                               | Merged discovery across every configured source, tagged by group and tier    |
+| `vapi inspect <id>`                  | `--endpoint <name>`                                                                                                                                                                         | A listing's verification, fee, request contract and live 402 quote, for free |
+| `vapi pay <id-or-url>`               | `--method`, `--endpoint`, `--body <json>`, `--content-type`, `--network <caip2>`, `--expected-pay-to`, `--max <usd>`, `--wallet <name>`                                                     | Calls the API and pays it from the local wallet, naming an unverified tier   |
+| `vapi balance`                       | `--wallet <name>`                                                                                                                                                                           | The wallet's address and USDC balances                                       |
+| `vapi receipts`                      | `--limit <n>`, `--wallet <name>`, `--all-wallets`                                                                                                                                           | The local append-only call ledger, newest last                               |
+| `vapi receipts export`               | `--format <json\|csv>`, `--range <24h\|7d\|30d>`, `--wallet <name>`, `--all-wallets`                                                                                                        | Raw receipts for a spreadsheet or dashboard                                  |
+| `vapi stats`                         | `--range <24h\|7d\|30d>`, `--wallet <name>`, `--all-wallets`                                                                                                                                | Spend, outcomes, latency percentiles and top services                        |
+| `vapi sweep <address>`               | `--network <caip2>`, `--wallet <name>`                                                                                                                                                      | Moves the USDC balance out to an address you own                             |
+| `vapi export-key`                    | `--network <caip2>`, `--wallet <name>`                                                                                                                                                      | Prints the private key. Terminal only, never for an agent.                   |
+| `vapi backup`                        | `--wallet <name>`                                                                                                                                                                           | Prints the 12 words. Terminal only, never for an agent.                      |
+| `vapi import`                        | `--phrase` or `--key`, `--wallet <name>`, `--networks <base,solana>`, `--replace`, `--force`                                                                                                | Restores a wallet from a prompt, never from argv                             |
+| `vapi passphrase`                    | `--wallet <name>`                                                                                                                                                                           | Re-encrypts the keystore under a new passphrase                              |
+| `vapi unlock`                        | `--wallet <name>`                                                                                                                                                                           | Puts that wallet's passphrase in the OS secret store                         |
+| `vapi lock`                          | `--wallet <name>`, `--all`                                                                                                                                                                  | Takes a stored passphrase back out                                           |
+| `vapi report "<what>"`               | `--include-addresses`, `--send`                                                                                                                                                             | Writes a privacy-preserving local bug report                                 |
+| `vapi auth set-key`                  | —                                                                                                                                                                                           | Types the registry API key on a prompt into the OS secret store              |
+| `vapi auth status`                   | —                                                                                                                                                                                           | Whether this machine has a key and where it comes from, masked               |
+| `vapi auth clear`                    | —                                                                                                                                                                                           | Takes the stored key back out                                                |
+| `vapi publish <url>`                 | `--method`, `--mode <origin\|endpoint\|openapi>`, `--name <text>`, `--description <text>`, `--category <ai\|data\|crypto\|compute\|search>`, `--select <names>`, `--wallet <name>`, `--yes` | Probes your API, lists the endpoints you pick, signs the payout wallet       |
+| `vapi publish activate <slug>`       | —                                                                                                                                                                                           | Takes a listing live once its FeeSplitter is deployed                        |
+| `vapi publish verify-request <slug>` | —                                                                                                                                                                                           | Asks vAPI to review the listing                                              |
+| `vapi publish list`                  | —                                                                                                                                                                                           | Every listing this API key owns                                              |
+| `vapi mcp`                           | `--wallet <name>`                                                                                                                                                                           | Serves the MCP tools over stdio                                              |
+| `vapi serve`                         | —                                                                                                                                                                                           | Preview only; exits `2` with a message                                       |
+| `vapi version`                       | —                                                                                                                                                                                           | The client version, also as `--version` or `-v`                              |
+| `vapi help`                          | —                                                                                                                                                                                           | The same help bare `vapi` shows, also as `--help` or `-h`                    |
 
 `vapi pay` also accepts `--max-price-usd` as a long-standing alias for `--max`;
 the two cannot be combined. `mcp --json` is accepted as a no-op, because the
 stdio transport is already JSON-RPC.
+
+## Publish an API
+
+Listing on vAPI is permissionless. vAPI probes the URL you hand it; if it
+answers x402, the listing exists, and you decide when it goes live.
+
+```bash
+vapi auth set-key                        # paste the key from the console, once
+vapi publish https://weather.example     # probe, pick endpoints, sign the payout wallet
+vapi publish activate weather-call       # once the FeeSplitter is deployed
+vapi publish verify-request weather-call # ask for the review that ends the [unverified] tag
+vapi publish list
+```
+
+`vapi publish` takes an origin, a single endpoint, or an OpenAPI document, plus
+`--mode` when the registry should not have to guess which. It prints every
+probe step; on a refusal it prints the code, the reason and the hint, and exits
+`2` without signing anything. On a terminal it asks which endpoints to list — a
+script names them with `--select forecast,alerts`, or takes all of them with
+`--yes`, and then has to supply `--name`, `--description` and `--category`
+itself.
+
+Your wallet signs one line, `Confirm this wallet receives vAPI Call payouts`,
+so the registry knows where the money goes. It is an EIP-4361 message bound to
+the registry's own host and to Base: nothing is paid, nothing is approved, and
+no key leaves the machine.
+
+Payouts arrive through a FeeSplitter you own. Deploying it is a wallet
+transaction against the factory, so it stays in the console at
+`<registry>/providers`; `vapi publish` prints the address it will have on each
+network and the exact next step. An active listing answers
+`vapi search --include-unverified`, and `vapi publish verify-request <slug>`
+asks for the review that puts it in the default search.
+
+The API key is a secret like any other here. `vapi auth set-key` reads it from
+a prompt, never from an argument, and keeps it in the same OS secret store as
+your passphrase — or in `~/.vapi/config.json` at mode 0600 on a platform that
+has none. `VAPI_API_KEY` is the route for CI. No agent can reach it: there is
+no publish tool on the MCP server, and the key lives behind its own package
+entry point that `packages/mcp` is forbidden to import.
 
 ## MCP
 
@@ -444,6 +490,7 @@ reports/              what vapi report writes
 | `VAPI_WALLET`            | The wallet to use when no `--wallet` is given                               |
 | `VAPI_REGISTRY_URL`      | Replace the registry base; the canonical discovery paths derive from it     |
 | `VAPI_KEYSTORE_PASSWORD` | The passphrase, for CI and for Windows. Checked before the OS secret store. |
+| `VAPI_API_KEY`           | The registry key `vapi publish` authenticates with, for CI                  |
 | `VAPI_NO_SECRETS`        | Set to `1` to stop `vapi backup` and `vapi export-key` printing anything    |
 
 `ARC_TESTNET_RPC_URL` and `SOLANA_RPC_URL` point those two networks at an
