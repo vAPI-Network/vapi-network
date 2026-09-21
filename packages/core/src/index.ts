@@ -3,6 +3,7 @@ export * from "./call-contracts-wire.js";
 export * from "./accounts.js";
 export * from "./agent-guard.js";
 export * from "./audit.js";
+export * from "./authorization-state.js";
 export * from "./config.js";
 export * from "./discovery.js";
 export {

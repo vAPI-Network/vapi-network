@@ -1,8 +1,11 @@
 import {
   DiscoveryCatalogError,
   type DiscoveryEndpoint,
+  type ListingConformance,
   type ListingFee,
   type ListingGroup,
+  type ListingLiveness,
+  type ListingVerification,
   type MarketplaceHit,
   type VapiConfig,
 } from "@vapi-network/core";
@@ -33,6 +36,15 @@ export type InspectToolResult = Omit<
   /** Registry-owned listing disclosures; absent when the registry omits them. */
   group?: ListingGroup;
   fee?: ListingFee;
+  /**
+   * How far the listing got through vAPI review. Reads as `none` for a registry
+   * that predates the tier, and for every mirrored external row.
+   */
+  verification: ListingVerification;
+  /** Seven days of the registry's hourly re-probe; absent when it sends none. */
+  liveness?: ListingLiveness;
+  /** How closely the listing's 402 follows its declared x402 version. */
+  conformance?: ListingConformance;
   payment: DiscoveryEndpoint["payment"] | null;
 };
 
@@ -73,6 +85,8 @@ export async function inspectService(
       : { responseContentType: endpoint.responseContentType }),
     ...(service.group === undefined ? {} : { group: service.group }),
     ...(service.fee === undefined ? {} : { fee: service.fee }),
+    verification: service.verification,
+    ...healthOf(service),
     payment: endpoint.payment ?? null,
   };
 }
@@ -89,6 +103,19 @@ function inspectIndexedHit(hit: Extract<MarketplaceHit, { kind: "api"; provenanc
     network: hit.execution.network,
     ...(hit.group === undefined ? {} : { group: hit.group }),
     ...(hit.fee === undefined ? {} : { fee: hit.fee }),
+    verification: hit.verification,
+    ...healthOf(hit),
     payment: null,
   } satisfies InspectToolResult;
+}
+
+/** The registry's liveness and conformance record, carried only when present. */
+function healthOf(listing: {
+  liveness?: ListingLiveness | undefined;
+  conformance?: ListingConformance | undefined;
+}): Pick<InspectToolResult, "liveness" | "conformance"> {
+  return {
+    ...(listing.liveness === undefined ? {} : { liveness: listing.liveness }),
+    ...(listing.conformance === undefined ? {} : { conformance: listing.conformance }),
+  };
 }

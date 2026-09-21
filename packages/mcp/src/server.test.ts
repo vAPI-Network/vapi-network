@@ -60,6 +60,40 @@ describe("Agent Cash MCP marketplace tools", () => {
     await server.close();
   });
 
+  it("offers includeUnverified on call.search and tells call.pay to prefer verified listings", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const { client, server } = await connectedServer(fetchImpl);
+
+    const tools = await client.listTools();
+
+    const search = tools.tools.find((tool) => tool.name === "call.search");
+    const searchInput = search?.inputSchema as {
+      properties: Record<string, { type?: string; description?: string }>;
+      required?: string[];
+    };
+    expect(searchInput.properties.includeUnverified?.type).toBe("boolean");
+    expect(searchInput.required ?? []).not.toContain("includeUnverified");
+    expect(searchInput.properties.includeUnverified?.description).toBe(
+      "Default results are vAPI-verified listings plus mirrored external catalogs; includeUnverified: true adds unverified self-listed APIs, which passed vAPI's automated x402 probe but were not reviewed.",
+    );
+
+    const pay = tools.tools.find((tool) => tool.name === "call.pay");
+    expect(pay?.description).toContain('Prefer a listing whose verification is "verified"');
+    expect(pay?.description).toContain("call.inspect");
+
+    // Both results disclose the tier the registry assigned.
+    const inspectOutput = tools.tools.find((tool) => tool.name === "call.inspect")
+      ?.outputSchema as { properties: Record<string, unknown> };
+    expect(inspectOutput.properties).toHaveProperty("verification");
+    const payOutput = tools.tools.find((tool) => tool.name === "call.pay")?.outputSchema as {
+      properties: Record<string, unknown>;
+    };
+    expect(payOutput.properties).toHaveProperty("verification");
+
+    await client.close();
+    await server.close();
+  });
+
   it("keeps deprecated aliases behavior-compatible and emits one deprecation line", async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
@@ -117,7 +151,7 @@ describe("Agent Cash MCP marketplace tools", () => {
           outcome: "paid",
           listing: { providerHost: "93.184.216.34", source: "direct" },
           policy: { capsApplied: false },
-          client: { name: "vapi-network", version: "0.3.0" },
+          client: { name: "vapi-network", version: "0.4.0" },
         },
       ],
     });
@@ -316,7 +350,11 @@ describe("Agent Cash MCP marketplace tools", () => {
     });
     expect(searchResult.isError).not.toBe(true);
     expect(JSON.stringify(searchResult.content)).toContain("research-brief");
-    expect(searchResult.structuredContent).toEqual(page);
+    // The page predates the verification tier, so every item reads as `none`.
+    expect(searchResult.structuredContent).toEqual({
+      ...page,
+      items: page.items.map((item) => ({ ...item, verification: "none" })),
+    });
 
     const callResult = await client.callTool({
       name: "call",
@@ -552,6 +590,8 @@ function externalApiHit(ref: string, network = "eip155:8453"): MarketplaceHit {
     ref,
     kind: "api",
     provenance: "indexed",
+    // A mirrored catalog row is never vAPI-verified.
+    verification: "none",
     execution: {
       mode: "direct",
       url: "https://93.184.216.34/weather",
@@ -568,11 +608,15 @@ function externalApiHit(ref: string, network = "eip155:8453"): MarketplaceHit {
   };
 }
 
-function nativeApiHit(ref: string): MarketplaceHit {
+function nativeApiHit(
+  ref: string,
+  verification: MarketplaceHit["verification"] = "verified",
+): MarketplaceHit {
   return {
     ref,
     kind: "api",
     provenance: "self_listed",
+    verification,
     execution: { mode: "direct" },
     card: {
       title: "Native weather API",
@@ -588,6 +632,7 @@ function workHit(ref: string): MarketplaceHit {
   return {
     ref,
     kind: "service_offer",
+    verification: "none",
     card: {
       title: "Research brief",
       summary: "Evidence-backed market research.",

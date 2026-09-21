@@ -85,6 +85,36 @@ describe("marketplace discovery wire contract", () => {
     expect(() => marketplaceHitSchema.parse({ ...page.items[0], fee: { bps: 500 } })).toThrow();
   });
 
+  it("carries the verification tier on every kind of hit, defaulting to none", () => {
+    const page = fixture as { items: Record<string, unknown>[] };
+
+    // The shared fixture predates the tier, so every hit reads as `none`.
+    expect(
+      marketplaceDiscoveryPageSchema.parse(fixture).items.map((item) => item.verification),
+    ).toEqual(["none", "none", "none", "none"]);
+
+    const tiered = marketplaceDiscoveryPageSchema.parse({
+      ...page,
+      items: page.items.map((item, index) => ({
+        ...item,
+        verification: ["verified", "none", "requested", "verified"][index],
+      })),
+    });
+    expect(tiered.items.map((item) => item.verification)).toEqual([
+      "verified",
+      "none",
+      "requested",
+      "verified",
+    ]);
+
+    // A tier this client does not know must never read as a vAPI endorsement.
+    for (const unknown of ["platinum", null, 7, ""]) {
+      expect(
+        marketplaceHitSchema.parse({ ...page.items[0], verification: unknown }).verification,
+      ).toBe("none");
+    }
+  });
+
   it("tolerates additive registry fields and passes them through untouched", () => {
     const page = fixture as { items: Record<string, unknown>[] };
     const parsed = marketplaceDiscoveryPageSchema.parse({
@@ -225,5 +255,9 @@ describe("marketplace discovery wire contract", () => {
     expect(() => marketplaceDiscoveryInputSchema.parse({ kinds: ["api", "api"] })).toThrow();
     expect(() => marketplaceDiscoveryInputSchema.parse({ limit: 51 })).toThrow();
     expect(() => marketplaceDiscoveryInputSchema.parse({ q: "x".repeat(201) })).toThrow();
+    // The request this client builds stays strict: a garbage trust switch is a
+    // client bug and must fail here, not travel to the registry.
+    expect(() => marketplaceDiscoveryInputSchema.parse({ includeUnverified: "yes" })).toThrow();
+    expect(marketplaceDiscoveryInputSchema.parse({})).toEqual({});
   });
 });

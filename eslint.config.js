@@ -23,7 +23,8 @@ export default tseslint.config(
   },
   {
     // The MCP server is the surface an agent drives, so it may never reach a
-    // recovery phrase or a private key. See plan 001, "Safety model".
+    // recovery phrase, a private key, or the registry key a provider publishes
+    // with. See plan 001, "Safety model". There is no publish tool on purpose.
     files: ["packages/mcp/**/*.ts"],
     rules: {
       "no-restricted-imports": [
@@ -35,12 +36,22 @@ export default tseslint.config(
               message:
                 "The MCP server must never import a secret-returning function. Secrets stay in the CLI, in front of a person.",
             },
+            {
+              name: "@vapi-network/core/api-key",
+              message:
+                "The MCP server must never reach the registry API key. Publishing is a human act, in the CLI.",
+            },
           ],
           patterns: [
             {
               group: ["**/core/src/secrets", "**/core/src/secrets.js"],
               message:
                 "The MCP server must never import a secret-returning function. Secrets stay in the CLI, in front of a person.",
+            },
+            {
+              group: ["**/core/src/api-key", "**/core/src/api-key.js"],
+              message:
+                "The MCP server must never reach the registry API key. Publishing is a human act, in the CLI.",
             },
           ],
         },

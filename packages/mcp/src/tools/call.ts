@@ -19,6 +19,7 @@ import {
   marketplaceExecutionMethodSchema,
   marketplaceHitSchema,
   reserveSpend,
+  type ListingVerification,
   type LookupFn,
   type MarketplaceExecutionMethod,
   type MarketplaceHit,
@@ -38,7 +39,7 @@ import {
   parseSettlementResponse,
 } from "../x402.js";
 import { buildSIWxProof, parseSIWxResponse } from "../siwx.js";
-import { findMarketplaceApiByRef, resolveServiceEndpoint } from "./search.js";
+import { findMarketplaceApiByRef, resolveServiceListing } from "./search.js";
 
 export type CallToolInput = {
   id?: string;
@@ -112,6 +113,8 @@ type ResolvedCallEndpoint = {
   name?: string;
   url: string;
   method: string;
+  /** The tier of the listing behind this endpoint; absent for a raw URL call. */
+  verification?: ListingVerification;
   registered: boolean;
   resolvedListing: boolean;
   requiresExplicitMethod?: boolean;
@@ -126,6 +129,11 @@ type ResolvedCallEndpoint = {
 export type CallToolResult = {
   status: number;
   body: unknown;
+  /**
+   * How far the paid listing got through vAPI review. Absent when there was no
+   * listing to disclose — a call made against an explicit URL.
+   */
+  verification?: ListingVerification;
   outcome?: "signed_in";
   payment: null | {
     network: string;
@@ -167,6 +175,8 @@ type CallExecution = {
 };
 
 type CallTrace = {
+  /** The id of the one receipt this call writes, known before any message names it. */
+  readonly receiptId: string;
   readonly startedAt: Date;
   readonly startedMs: number;
   readonly nowMs: () => number;
@@ -184,6 +194,7 @@ type CallTrace = {
   method?: string;
   quote?: NonNullable<Receipt["quote"]>;
   payer?: string;
+  authorization?: NonNullable<Receipt["authorization"]>;
   settlement?: NonNullable<Receipt["settlement"]>;
   status?: number;
   capsApplied: boolean;
@@ -412,6 +423,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
           status: initialResponse.status,
           body: await initial.waitFor(readResponseBody(initialResponse), initialResponse),
           payment: null,
+          ...verificationFor(endpoint),
           ...expectedRequestFor(endpoint, initialResponse.status),
         },
       };
@@ -489,6 +501,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
             body: await challengeAttempt.waitFor(readResponseBody(signedResponse), signedResponse),
             payment: null,
             ...(signedResponse.ok ? { outcome: "signed_in" as const } : {}),
+            ...verificationFor(endpoint),
             ...expectedRequestFor(endpoint, signedResponse.status),
           },
         };
@@ -543,9 +556,15 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
     trace.payer = isSvmPaymentRequirements(quote.accepted)
       ? account.solana?.address
       : account.address;
+    if ("authorization" in payment.payload.payload) {
+      const { from, nonce, validBefore } = payment.payload.payload.authorization;
+      trace.authorization = { from, nonce, validBefore };
+    }
   } finally {
     trace.phases.signMs = elapsed(trace, signStarted);
   }
+  // Every "do not retry" below names the receipt `vapi pay --resume` settles it with.
+  const resumeId = args.receiptsPath === undefined ? undefined : trace.receiptId;
   const paidHeaders = new Headers(challengeAttempt.request.headers);
   for (const [name, value] of Object.entries(payment.headers)) {
     paidHeaders.set(name, value);
@@ -571,6 +590,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
       payment.payload,
       trace.payer ?? account.address,
       null,
+      resumeId,
       error,
     );
   }
@@ -601,6 +621,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
         payment.payload,
         trace.payer ?? account.address,
         settlement,
+        resumeId,
       );
     }
     if (paidResponse.status === 402 && settlementOutcome !== "succeeded") {
@@ -623,6 +644,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
         payment.payload,
         trace.payer ?? account.address,
         settlement,
+        resumeId,
       );
     }
     if (!paidResponse.ok && settlementOutcome !== "succeeded") {
@@ -633,6 +655,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
         payment.payload,
         trace.payer ?? account.address,
         settlement,
+        resumeId,
       );
     }
     let body: unknown;
@@ -649,6 +672,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
         payment.payload,
         trace.payer ?? account.address,
         settlement,
+        resumeId,
         error,
       );
     } finally {
@@ -670,6 +694,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
           settlement,
           proof: paidResponse.headers.get("x-vapi-payment-proof"),
         },
+        ...verificationFor(endpoint),
         ...expectedRequestFor(endpoint, paidResponse.status),
       },
     };
@@ -695,7 +720,7 @@ async function recordCallReceipt(
     ? args.config.networks[trace.identityNetwork]?.usdc
     : undefined;
   const receipt: Receipt = {
-    id: randomUUID(),
+    id: trace.receiptId,
     timestamp: trace.startedAt.toISOString(),
     resourceUrl: execution.resourceUrl,
     method: execution.method,
@@ -709,6 +734,7 @@ async function recordCallReceipt(
             payTo: payment.payTo,
           },
           payer: trace.payer ?? args.account.address,
+          ...(trace.authorization ? { authorization: trace.authorization } : {}),
           settlement: {
             outcome: classifySettlement(evidence),
             ...(transaction ? { transaction } : {}),
@@ -767,7 +793,7 @@ async function recordCallError(
   const settlement = errorSettlement(error, trace);
   await appendReceipt(
     {
-      id: randomUUID(),
+      id: trace.receiptId,
       timestamp: trace.startedAt.toISOString(),
       resourceUrl,
       ...(trace.method
@@ -778,6 +804,7 @@ async function recordCallError(
       ...receiptContext(args, trace, resourceUrl),
       ...(trace.quote ? { quote: trace.quote } : {}),
       ...(trace.payer && outcome !== "declined_policy" ? { payer: trace.payer } : {}),
+      ...(trace.authorization ? { authorization: trace.authorization } : {}),
       ...(settlement ? { settlement } : {}),
       ...(trace.status === undefined ? {} : { status: trace.status }),
       latencyMs: elapsed(trace, trace.startedMs),
@@ -793,6 +820,7 @@ function createCallTrace(args: CallServiceArgs): CallTrace {
   const nowMs = args.nowMs ?? (() => performance.now());
   const marketplace = args.marketplaceHit;
   return {
+    receiptId: randomUUID(),
     startedAt: args.now ?? new Date(),
     startedMs: nowMs(),
     nowMs,
@@ -925,11 +953,7 @@ async function resolveCallEndpoint(
 ): Promise<ResolvedCallEndpoint> {
   if (!marketplaceHit) {
     try {
-      return {
-        ...(await resolveServiceEndpoint(id, config, fetchImpl, endpointName)),
-        registered: true,
-        resolvedListing: true,
-      };
+      return registeredEndpoint(await resolveServiceListing(id, config, fetchImpl, endpointName));
     } catch (error) {
       if (!(error instanceof DiscoveryCatalogError) || error.code !== "service_not_found") {
         throw error;
@@ -955,17 +979,43 @@ async function resolveCallEndpoint(
     return {
       url: marketplaceHit.execution.url,
       method: publishedMethod ?? "",
+      verification: marketplaceHit.verification,
       registered: publishedMethod !== null,
       resolvedListing: false,
       requiresExplicitMethod: publishedMethod === null,
       payment: { network: marketplaceHit.execution.network },
     };
   }
+  return registeredEndpoint(
+    await resolveServiceListing(marketplaceHit.ref, config, fetchImpl, endpointName),
+    marketplaceHit.verification,
+  );
+}
+
+/**
+ * A listing vAPI holds a record for. The tier travels with the endpoint so the
+ * interfaces can disclose it on the result without a second round trip.
+ */
+function registeredEndpoint(
+  listing: Awaited<ReturnType<typeof resolveServiceListing>>,
+  verification?: ListingVerification,
+): ResolvedCallEndpoint {
   return {
-    ...(await resolveServiceEndpoint(marketplaceHit.ref, config, fetchImpl, endpointName)),
+    ...listing.endpoint,
+    verification: verification ?? listing.service.verification,
     registered: true,
     resolvedListing: true,
   };
+}
+
+/**
+ * The tier of the listing that was paid, for the result. A call made against an
+ * explicit URL has no listing, and so discloses nothing.
+ */
+function verificationFor(
+  endpoint: ResolvedCallEndpoint | null,
+): Pick<CallToolResult, "verification"> {
+  return endpoint?.verification === undefined ? {} : { verification: endpoint.verification };
 }
 
 function assertRequiredRequestKeys(
@@ -1216,17 +1266,27 @@ async function fetchAttempt(
   }
 }
 
+/**
+ * A payment that may or may not have settled. An EVM authorization can be
+ * settled against the chain later, so when this call wrote a receipt the
+ * message names the one command that does it; a Solana payment cannot be yet.
+ */
 function settlementUnknown(
   message: string,
   quote: Awaited<ReturnType<typeof parse402Response>>,
   payment: X402PaymentPayload,
   payer: string,
   receipt: unknown | null,
+  resumeId: string | undefined,
   cause?: unknown,
 ): VapiCallError {
+  const resume =
+    resumeId !== undefined && "authorization" in payment.payload
+      ? ` Check whether it settled with \`vapi pay --resume ${resumeId}\` before paying again.`
+      : "";
   return new VapiCallError(
     "settlement_unknown",
-    message,
+    `${message}${resume}`,
     {
       network: quote.accepted.network,
       asset: quote.accepted.asset,

@@ -16,7 +16,13 @@ import {
   type SecretStore,
 } from "@vapi-network/core";
 
-import { runCli, type CliDependencies, type CliIo, type CliPrompts } from "./cli.js";
+import {
+  runCli,
+  verificationNotice,
+  type CliDependencies,
+  type CliIo,
+  type CliPrompts,
+} from "./cli.js";
 
 /** BIP-39's own test phrase, and the Base account every wallet derives from it. */
 const VECTOR_PHRASE =
@@ -415,10 +421,69 @@ describe("search output", () => {
     expect(await runCli(["search", "decode"], captured.io, { fetchImpl })).toBe(0);
 
     const text = captured.stdout.join("\n");
-    expect(text).toContain("[vapi] decodePaymentAuthorization");
+    // The page sends no tier, so the first-party listing is not vouched for.
+    expect(text).toContain("[vapi] [unverified] decodePaymentAuthorization");
+    // A mirrored row says `external` once, not `[external] [external]`.
     expect(text).toContain("[external] agent402.tools/api/skill/decode-blob");
+    expect(text).not.toContain("[external] [external]");
     expect(text).toContain("Fee: 5% network fee, paid by the API's splitter");
     expect(text).toContain("Fee: No network fee");
+  });
+
+  it.each([
+    { verification: "verified", tag: "[vapi] [verified] decodePaymentAuthorization" },
+    { verification: "requested", tag: "[vapi] [requested] decodePaymentAuthorization" },
+    { verification: "none", tag: "[vapi] [unverified] decodePaymentAuthorization" },
+  ])("shows $verification as $tag", async ({ verification, tag }) => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-search-tier-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        ...discoveryPage,
+        items: [{ ...discoveryPage.items[0], verification }],
+      }),
+    );
+    const captured = captureIo();
+
+    expect(await runCli(["search", "decode"], captured.io, { fetchImpl })).toBe(0);
+
+    expect(captured.stdout.join("\n")).toContain(tag);
+  });
+
+  it("sends the trust switch only when --include-unverified is given", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-search-switch-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => Response.json(discoveryPage));
+    const captured = captureIo();
+
+    expect(await runCli(["search", "decode"], captured.io, { fetchImpl })).toBe(0);
+    expect(
+      await runCli(["search", "decode", "--include-unverified"], captured.io, { fetchImpl }),
+    ).toBe(0);
+
+    const switches = fetchImpl.mock.calls.map((call) =>
+      new URL(call[0] as URL).searchParams.get("includeUnverified"),
+    );
+    expect(switches).toEqual([null, "true"]);
+  });
+
+  it("passes the verification tier through --json", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-search-verification-json-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        ...discoveryPage,
+        items: [{ ...discoveryPage.items[0], verification: "verified" }],
+      }),
+    );
+    const captured = captureIo();
+
+    expect(await runCli(["search", "decode", "--json"], captured.io, { fetchImpl })).toBe(0);
+
+    const page = JSON.parse(captured.stdout[0]!) as { items: Array<{ verification?: string }> };
+    expect(page.items.map((item) => item.verification)).toEqual(["verified"]);
   });
 
   it("passes the group and fee through --json untouched", async () => {
@@ -437,6 +502,271 @@ describe("search output", () => {
       bps: 500,
       label: "5% network fee, paid by the API's splitter",
     });
+  });
+});
+
+describe("inspect output", () => {
+  function servicesResponse(overrides: Record<string, unknown> = {}) {
+    return {
+      services: [
+        {
+          id: "decodepaymentauthorization",
+          name: "Decode Payment Authorization",
+          description: "Decode an x402 payment authorization.",
+          category: "crypto",
+          tier: "verified",
+          group: "vapi",
+          fee: { bps: 500, label: "5% network fee, paid by the API's splitter" },
+          verified: true,
+          wrapped: false,
+          price: "$0.005",
+          networks: ["eip155:8453"],
+          endpoints: [
+            {
+              name: "decode",
+              method: "POST",
+              url: "https://decode.example/decode",
+              price: "$0.005",
+              description: "Decode an authorization payload.",
+            },
+          ],
+          ...overrides,
+        },
+      ],
+    };
+  }
+
+  it("says how far vAPI reviewed the listing, and what fee is inside the price", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json(servicesResponse({ verification: "verified" })));
+    const captured = captureIo();
+
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization"], captured.io, { fetchImpl }),
+    ).toBe(0);
+
+    const text = captured.stdout.join("\n");
+    expect(text).toContain("Verification: verified");
+    expect(text).toContain("Fee: 5% network fee, paid by the API's splitter");
+  });
+
+  it("calls a listing the registry never reviewed unverified, in text and in --json", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-unverified-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => Response.json(servicesResponse()));
+    const captured = captureIo();
+
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization"], captured.io, { fetchImpl }),
+    ).toBe(0);
+    expect(captured.stdout.join("\n")).toContain("Verification: unverified");
+
+    const asJson = captureIo();
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization", "--json"], asJson.io, { fetchImpl }),
+    ).toBe(0);
+    expect(JSON.parse(asJson.stdout[0]!)).toMatchObject({ verification: "none" });
+  });
+
+  it("says how the listing has behaved lately when the registry knows", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-health-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () =>
+      Response.json(
+        servicesResponse({
+          liveness: { uptime7d: 0.9941, latencyP50Ms: 212.4, latencyP95Ms: null, checks7d: 168 },
+          conformance: {
+            declaredVersion: 2,
+            versionConformant: false,
+            offerTransport: "header",
+            issues: ["v2_missing_resource", "offer_header_only"],
+          },
+        }),
+      ),
+    );
+    const captured = captureIo();
+
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization"], captured.io, { fetchImpl }),
+    ).toBe(0);
+
+    const text = captured.stdout.join("\n");
+    expect(text).toContain("Liveness: 99.4% up over 7 days (168 checks) · p50 212 ms");
+    expect(text).not.toContain("p95");
+    expect(text).toContain(
+      "Conformance: x402 v2, not conformant, offer in the PAYMENT-REQUIRED header only · issues: v2_missing_resource, offer_header_only",
+    );
+  });
+
+  it("stays silent about liveness and conformance a registry does not send", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-no-health-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => Response.json(servicesResponse()));
+    const captured = captureIo();
+
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization"], captured.io, { fetchImpl }),
+    ).toBe(0);
+
+    const text = captured.stdout.join("\n");
+    expect(text).not.toContain("Liveness:");
+    expect(text).not.toContain("Conformance:");
+  });
+});
+
+describe("vapi pay --resume", () => {
+  const PAYER = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94";
+  const VALID_BEFORE = 1_790_000_000;
+
+  async function homeWithLostPayment(overrides: Record<string, unknown> = {}): Promise<void> {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-resume-"));
+    process.env.VAPI_HOME = home;
+    await appendReceipt(
+      {
+        id: "lost-1",
+        timestamp: "2026-09-21T10:00:00.000Z",
+        wallet: "agent",
+        resourceUrl: "https://vendor.example/paid",
+        method: "POST",
+        quote: {
+          network: "eip155:8453",
+          asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          amountAtomic: "2500",
+          payTo: "0x1111111111111111111111111111111111111111",
+        },
+        payer: PAYER,
+        authorization: {
+          from: PAYER,
+          nonce: `0x${"ab".repeat(32)}`,
+          validBefore: String(VALID_BEFORE),
+        },
+        settlement: { outcome: "unknown" },
+        outcome: "settlement_unknown",
+        ...overrides,
+      },
+      getVapiPaths().receipts,
+    );
+  }
+
+  /** A Base node: the latest block at `chainTime`, and the nonce `used` or not. */
+  function baseNode(used: boolean, chainTime: number) {
+    return vi.fn<typeof fetch>(async (_input, init) => {
+      const request = JSON.parse(String(init?.body)) as { id: number; method: string };
+      return Response.json({
+        jsonrpc: "2.0",
+        id: request.id,
+        result:
+          request.method === "eth_getBlockByNumber"
+            ? {
+                number: "0x10",
+                hash: `0x${"cd".repeat(32)}`,
+                timestamp: `0x${chainTime.toString(16)}`,
+              }
+            : `0x${(used ? "1" : "0").padStart(64, "0")}`,
+      });
+    });
+  }
+
+  it("says a settled payment must not be paid again, without opening a wallet", async () => {
+    await homeWithLostPayment();
+    const captured = captureIo();
+
+    expect(
+      await runCli(["pay", "--resume", "lost-1"], captured.io, {
+        fetchImpl: baseNode(true, VALID_BEFORE - 30),
+      }),
+    ).toBe(0);
+
+    const text = captured.stdout.join("\n");
+    expect(text).toMatch(/^Wallet: agent$/mu);
+    expect(text).toContain("Receipt: lost-1 — POST https://vendor.example/paid");
+    expect(text).toContain(
+      "Settled: the authorization was used on-chain, so the payment went through (or the payer cancelled it, which this client never does). Do not pay again.",
+    );
+  });
+
+  it("tells an expired authorization from a pending one, in --json", async () => {
+    await homeWithLostPayment();
+    const expired = captureIo();
+    expect(
+      await runCli(["pay", "--resume", "lost-1", "--json"], expired.io, {
+        fetchImpl: baseNode(false, VALID_BEFORE),
+      }),
+    ).toBe(0);
+    expect(JSON.parse(expired.stdout[0]!)).toMatchObject({
+      wallet: "agent",
+      receipt: "lost-1",
+      state: "expired",
+      authorizer: PAYER,
+      validBefore: String(VALID_BEFORE),
+      validBeforeAt: new Date(VALID_BEFORE * 1_000).toISOString(),
+      message:
+        "Expired: the authorization was never used and can no longer settle. Paying again is safe.",
+    });
+
+    const pending = captureIo();
+    expect(
+      await runCli(["pay", "--resume", "lost-1"], pending.io, {
+        fetchImpl: baseNode(false, VALID_BEFORE - 1),
+      }),
+    ).toBe(0);
+    expect(pending.stdout.join("\n")).toContain(
+      `Pending: the authorization is unused but can still settle. Wait until ${new Date(VALID_BEFORE * 1_000).toISOString()}, then run vapi pay --resume lost-1 again; paying now could pay twice.`,
+    );
+  });
+
+  it("says a Solana receipt cannot be checked yet", async () => {
+    await homeWithLostPayment({
+      quote: {
+        network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+        asset: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        amountAtomic: "2500",
+      },
+      authorization: undefined,
+    });
+    const captured = captureIo();
+    const fetchImpl = baseNode(false, 0);
+
+    expect(await runCli(["pay", "--resume", "lost-1"], captured.io, { fetchImpl })).toBe(1);
+    expect(captured.stderr.join("\n")).toContain(
+      "checking a Solana payment's settlement is not supported yet",
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("names a receipt it cannot find, and refuses to mix --resume with a payment", async () => {
+    await homeWithLostPayment();
+    const missing = captureIo();
+    expect(await runCli(["pay", "--resume", "nope"], missing.io, {})).toBe(1);
+    expect(missing.stderr.join("\n")).toContain('No receipt "nope" in');
+
+    const mixed = captureIo();
+    expect(
+      await runCli(["pay", "https://vendor.example/paid", "--resume", "lost-1"], mixed.io, {}),
+    ).toBe(2);
+  });
+});
+
+describe("the verification notice vapi pay prints", () => {
+  it("says nothing for a verified listing, or for a call with no listing at all", () => {
+    expect(verificationNotice("verified")).toEqual([]);
+    expect(verificationNotice(undefined)).toEqual([]);
+  });
+
+  it("is one line that neither prompts nor blocks", () => {
+    expect(verificationNotice("none")).toEqual([
+      "Verification: unverified — vAPI has not reviewed this listing. Check its request contract and its price with vapi inspect.",
+    ]);
+    expect(verificationNotice("requested")).toEqual([
+      "Verification: requested — vAPI review is pending. Check its request contract and its price with vapi inspect.",
+    ]);
   });
 });
 
@@ -495,32 +825,33 @@ describe("local metrics commands", () => {
   });
 });
 
-describe("future gateway commands", () => {
-  for (const command of ["serve", "publish"] as const) {
-    it(`${command} exits 2 with the promised message`, async () => {
-      const captured = captureIo();
-      expect(await runCli([command], captured.io)).toBe(2);
-      expect(captured.stdout).toEqual([]);
-      expect(captured.stderr).toEqual(["gateway daemon lands in 0.3"]);
-    });
+/**
+ * `vapi publish` is a real command since 0.4.0, so only the gateway daemon is
+ * still a stub. Its tests live in `publish-cli.test.ts`.
+ */
+describe("the gateway daemon preview", () => {
+  it("serve exits 2 with the promised message", async () => {
+    const captured = captureIo();
+    expect(await runCli(["serve"], captured.io)).toBe(2);
+    expect(captured.stdout).toEqual([]);
+    expect(captured.stderr).toEqual(["gateway daemon lands in 0.3"]);
+  });
 
-    it(`${command} remains a stub when its future arguments are supplied`, async () => {
-      const captured = captureIo();
-      const argumentsForPreview = command === "serve" ? ["--port", "4020"] : ["openapi.json"];
-      expect(await runCli([command, ...argumentsForPreview], captured.io)).toBe(2);
-      expect(captured.stderr).toEqual(["gateway daemon lands in 0.3"]);
-    });
+  it("serve remains a stub when its future arguments are supplied", async () => {
+    const captured = captureIo();
+    expect(await runCli(["serve", "--port", "4020"], captured.io)).toBe(2);
+    expect(captured.stderr).toEqual(["gateway daemon lands in 0.3"]);
+  });
 
-    it(`${command} has machine-readable JSON output`, async () => {
-      const captured = captureIo();
-      expect(await runCli([command, "--json"], captured.io)).toBe(2);
-      expect(captured.stderr).toEqual([]);
-      expect(JSON.parse(captured.stdout[0]!)).toEqual({
-        error: "gateway daemon lands in 0.3",
-        exitCode: 2,
-      });
+  it("serve has machine-readable JSON output", async () => {
+    const captured = captureIo();
+    expect(await runCli(["serve", "--json"], captured.io)).toBe(2);
+    expect(captured.stderr).toEqual([]);
+    expect(JSON.parse(captured.stdout[0]!)).toEqual({
+      error: "gateway daemon lands in 0.3",
+      exitCode: 2,
     });
-  }
+  });
 });
 
 describe("init safety", () => {

@@ -349,6 +349,11 @@ export function discardBody(response: Response | null | undefined): void {
   void response?.body?.cancel().catch(() => undefined);
 }
 
+/** Decodes a `PAYMENT-REQUIRED` header: base64 of the JSON payment offer. Throws when it is not. */
+export function decodePaymentRequiredHeader(value: string): unknown {
+  return decodeBase64Json(value);
+}
+
 export async function parse402Response(
   response: Response,
   configuredNetworks: X402NetworkConfig,
@@ -360,7 +365,7 @@ export async function parse402Response(
   if (header) {
     try {
       const quote = parse402Challenge(
-        decodeBase64Json(header),
+        decodePaymentRequiredHeader(header),
         configuredNetworks,
         response.url,
         requiredNetwork,

@@ -14,7 +14,7 @@ import {
   getDefaultConfig,
   readReceipts,
 } from "@vapi-network/core";
-import { callService } from "./tools/call.js";
+import { callService, VapiCallError } from "./tools/call.js";
 import {
   buildEip3009TypedData,
   buildX402Payment,
@@ -311,7 +311,7 @@ describe("x402 v2 challenge parsing", () => {
       outcome: "declined_policy",
       quote: { amountAtomic: "2500" },
       policy: { capsApplied: true },
-      client: { name: "vapi-network", version: "0.3.0" },
+      client: { name: "vapi-network", version: "0.4.0" },
       error: { code: "per_call_cap_exceeded" },
     });
     expect(receipt).not.toHaveProperty("payer");
@@ -690,6 +690,80 @@ describe("x402 v2 challenge parsing", () => {
       });
     },
   );
+
+  it("records the signed authorization and names the receipt that settles a lost response", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-call-"));
+    temporaryDirectories.push(directory);
+    const receiptsPath = join(directory, "receipts.jsonl");
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(challenge()), {
+          status: 402,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockRejectedValueOnce(new Error("socket hang up")) as unknown as typeof fetch;
+
+    const failure = await callService({
+      input: { url: "https://vendor.example/paid" },
+      account,
+      config: getDefaultConfig(),
+      fetchImpl,
+      lookup: async () => ["93.184.216.34"],
+      ledgerPath: join(directory, "ledger.json"),
+      receiptsPath,
+      now: new Date("2026-09-21T10:00:00.000Z"),
+    }).then(
+      () => {
+        throw new Error("A lost paid response must not resolve.");
+      },
+      (error: unknown) => error as VapiCallError,
+    );
+
+    const [receipt] = await readReceipts(receiptsPath);
+    expect(receipt).toMatchObject({
+      outcome: "settlement_unknown",
+      quote: { network: BASE_MAINNET_CAIP2, amountAtomic: "2500" },
+      authorization: {
+        from: account.address,
+        nonce: failure.possibleSettlement?.authorizationNonce,
+        // 2026-09-21T10:00:00Z plus the provider's 60-second window.
+        validBefore: String(Date.parse("2026-09-21T10:00:00.000Z") / 1_000 + 60),
+      },
+    });
+    expect(failure.message).toBe(
+      `The paid request lost its response. Do not retry automatically; inspect the authorization and settlement state first. Check whether it settled with \`vapi pay --resume ${receipt!.id}\` before paying again.`,
+    );
+  });
+
+  it("names no resume command when the call keeps no receipt", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-call-"));
+    temporaryDirectories.push(directory);
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(challenge()), {
+          status: 402,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockRejectedValueOnce(new Error("socket hang up")) as unknown as typeof fetch;
+
+    await expect(
+      callService({
+        input: { url: "https://vendor.example/paid" },
+        account: privateKeyToAccount(PRIVATE_KEY),
+        config: getDefaultConfig(),
+        fetchImpl,
+        lookup: async () => ["93.184.216.34"],
+        ledgerPath: join(directory, "ledger.json"),
+      }),
+    ).rejects.toThrow(
+      /^The paid request lost its response\. Do not retry automatically; inspect the authorization and settlement state first\.$/,
+    );
+  });
 
   it("times out an unreadable paid body as an ambiguous settlement", async () => {
     const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-call-"));

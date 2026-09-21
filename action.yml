@@ -1,0 +1,72 @@
+name: x402 conformance check
+description: >-
+  Check that an x402-paid API answers with a conformant 402, using the published
+  vapi-network CLI (`vapi check --json`). No wallet, no payment, no registry call.
+author: vAPI Network
+branding:
+  icon: check-circle
+  color: orange
+
+inputs:
+  url:
+    description: The http(s) URL of the paid endpoint to check.
+    required: true
+  fail-on:
+    description: >-
+      `fail` (the default) fails the step when a rule fails; `warn` also fails
+      it on a warning.
+    required: false
+    default: fail
+
+outputs:
+  report:
+    description: The full `vapi check --json` report.
+    value: ${{ steps.check.outputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      with:
+        node-version: 22
+
+    - id: check
+      shell: bash
+      # Inputs travel as environment variables, never interpolated into the
+      # script, so a URL cannot inject shell.
+      env:
+        VAPI_CHECK_URL: ${{ inputs.url }}
+        VAPI_CHECK_FAIL_ON: ${{ inputs.fail-on }}
+      run: |
+        case "$VAPI_CHECK_FAIL_ON" in
+          fail|warn) ;;
+          *) echo "::error::fail-on must be fail or warn, not '$VAPI_CHECK_FAIL_ON'."; exit 2 ;;
+        esac
+        set +e
+        npx --yes vapi-network@latest check "$VAPI_CHECK_URL" --json > "$RUNNER_TEMP/vapi-check.json"
+        code=$?
+        set -e
+        {
+          echo "report<<VAPI_CHECK_REPORT"
+          cat "$RUNNER_TEMP/vapi-check.json"
+          echo "VAPI_CHECK_REPORT"
+        } >> "$GITHUB_OUTPUT"
+        node - "$RUNNER_TEMP/vapi-check.json" "$code" "$VAPI_CHECK_FAIL_ON" <<'NODE'
+        const [path, code, failOn] = process.argv.slice(2);
+        const report = JSON.parse(require("node:fs").readFileSync(path, "utf8"));
+        if (!Array.isArray(report.rules)) {
+          console.log(`::error::${report.error ?? "vapi check did not produce a report."}`);
+          process.exit(Number(code) || 1);
+        }
+        console.log(`vapi check ${report.method} ${report.url}: HTTP ${report.status}`);
+        for (const rule of report.rules) {
+          const issues = rule.issues.length ? ` [${rule.issues.join(", ")}]` : "";
+          const line = `${rule.rule}: ${rule.detail}${issues}`;
+          if (rule.result === "fail") console.log(`::error title=x402 ${rule.rule}::${line}`);
+          else if (rule.result === "warn") console.log(`::warning title=x402 ${rule.rule}::${line}`);
+          else console.log(`pass  ${line}`);
+        }
+        const { pass, warn, fail } = report.summary;
+        console.log(`${pass} passed, ${warn} warnings, ${fail} failed.`);
+        process.exit(fail > 0 || (failOn === "warn" && warn > 0) ? 1 : 0);
+        NODE

@@ -52,6 +52,14 @@ randomness, filesystem roots, and `fetch` implementations.
   `wallets/.trash/`, `audit.log`, `receipts.jsonl`, `searches.jsonl`, and
   `spend-ledger.json`. `keystore.json` is a compatibility symlink left by the
   0.2.x migration and is kept for one release.
+- The registry API key is a secret and lives behind `@vapi-network/core/api-key`,
+  its own package entry point, exactly as recovery phrases and private keys live
+  behind `@vapi-network/core/secrets`. `packages/mcp` is lint-forbidden to import
+  either. It is read from `VAPI_API_KEY`, then the OS secret store, then the
+  `apiKey` field of `config.json`; the config schema drops that field so the
+  parsed config an MCP session holds can never carry it, and `writeConfigFile`
+  preserves it across a rewrite. Publishing is a human act: no MCP tool creates,
+  activates or retires a listing.
 - Migration from `~/.vapi/agent-cash/` copies files, never deletes the old
   directory, never overwrites new state, and prints a notice.
 - Receipts are an append-only JSONL ledger. Spend accounting uses
@@ -65,8 +73,9 @@ randomness, filesystem roots, and `fetch` implementations.
 - Protect every outbound service request with the network guard. Treat redirects
   and resolved IP addresses as new destinations that need validation.
 - Published package versions move together. All packages are currently
-  `0.3.0`, which `scripts/pack-check.mjs` and `packages/cli/src/version.ts`
-  pin as well. Every package's `publish:npm` goes to the `latest` npm tag, and
+  `0.4.0`, which `scripts/pack-check.mjs`, `packages/cli/src/version.ts` and
+  `VAPI_CLIENT_VERSION` in `packages/core/src/support-report.ts` pin as well.
+  Every package's `publish:npm` goes to the `latest` npm tag, and
   every package's `publish:npm:next` goes to `next`. Access is always public.
 - Every published tarball has zero runtime dependencies. All runtime code is
   bundled with esbuild; builds must fail if non-Node external imports leak into

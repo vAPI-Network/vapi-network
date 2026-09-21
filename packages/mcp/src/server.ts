@@ -13,8 +13,11 @@ import {
   isMirroredHit,
   isSolanaAddress,
   isSupportedPaymentNetwork,
+  listingConformanceSchema,
   listingFeeSchema,
   listingGroupSchema,
+  listingLivenessSchema,
+  listingVerificationSchema,
   loadConfig,
   listAccounts,
   marketplaceDiscoveryPageSchema,
@@ -89,6 +92,8 @@ const callToolResultSchema = z.object({
   wallet: z.string(),
   status: z.number().int(),
   body: z.unknown(),
+  // Absent when the call went to an explicit URL, which has no listing.
+  verification: listingVerificationSchema.optional(),
   payment: z
     .object({
       network: z.string(),
@@ -123,6 +128,9 @@ const inspectToolResultSchema = z.object({
   // Registry-owned listing disclosures, mirrored from call.search.
   group: listingGroupSchema.optional(),
   fee: listingFeeSchema.optional(),
+  verification: listingVerificationSchema,
+  liveness: listingLivenessSchema.optional(),
+  conformance: listingConformanceSchema.optional(),
   payment: z
     .object({
       scheme: z.literal("exact"),
@@ -295,6 +303,12 @@ const searchTool = {
     network: z.string().trim().min(1).max(160).optional(),
     limit: z.number().int().min(1).max(50).optional(),
     cursor: z.string().trim().min(1).max(4_096).optional(),
+    includeUnverified: z
+      .boolean()
+      .optional()
+      .describe(
+        "Default results are vAPI-verified listings plus mirrored external catalogs; includeUnverified: true adds unverified self-listed APIs, which passed vAPI's automated x402 probe but were not reviewed.",
+      ),
   },
   outputSchema: marketplaceDiscoveryPageSchema,
 };
@@ -311,7 +325,7 @@ const inspectTool = {
 
 const payTool = {
   description:
-    "Call an API retained from this process's call.search, or an explicit x402 URL, and pay it directly from the local wallet. The wallet's own per-call and per-day spend caps are applied before anything is signed.",
+    "Call an API retained from this process's call.search, or an explicit x402 URL, and pay it directly from the local wallet. The wallet's own per-call and per-day spend caps are applied before anything is signed. Prefer a listing whose verification is \"verified\"; before paying one that is not, read its request contract and its price with call.inspect.",
   inputSchema: {
     ...walletArgument,
     id: z.string().min(1).optional().describe("API ref returned by call.search."),
@@ -518,6 +532,7 @@ export function createVapiServer(options: VapiServerOptions) {
     network?: string;
     limit?: number;
     cursor?: string;
+    includeUnverified?: boolean;
   }) =>
     asStructuredToolResult(async () => {
       const page = await searchMarketplace(input, options.config, guardedFetch, {

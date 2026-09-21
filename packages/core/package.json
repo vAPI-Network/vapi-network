@@ -1,6 +1,6 @@
 {
   "name": "@vapi-network/core",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Non-custodial x402 protocol, wallet policy, discovery, and receipts core",
   "license": "Apache-2.0",
   "repository": {
@@ -26,10 +26,14 @@
     "./secrets": {
       "types": "./dist/secrets.d.ts",
       "import": "./dist/secrets.js"
+    },
+    "./api-key": {
+      "types": "./dist/api-key.d.ts",
+      "import": "./dist/api-key.js"
     }
   },
   "scripts": {
-    "build": "node ../../scripts/build-package.mjs index=src/index.ts secrets=src/secrets.ts",
+    "build": "node ../../scripts/build-package.mjs index=src/index.ts secrets=src/secrets.ts api-key=src/api-key.ts",
     "lint": "eslint src --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

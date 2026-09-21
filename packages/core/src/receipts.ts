@@ -26,6 +26,18 @@ export interface Receipt {
     payTo?: string;
   }>;
   readonly payer?: string;
+  /**
+   * The EIP-3009 authorization this call signed, kept so a payment whose
+   * response was lost can be settled against the chain later with
+   * `vapi pay --resume`. The token and the network are the quote's `asset` and
+   * `network`. Absent on receipts written before 0.4.0, on Solana payments,
+   * and on calls that signed no payment.
+   */
+  readonly authorization?: Readonly<{
+    from: string;
+    nonce: string;
+    validBefore: string;
+  }>;
   readonly settlement?: Readonly<{
     outcome: X402SettlementOutcome;
     transaction?: string;
@@ -91,6 +103,13 @@ const receiptSchema: z.ZodType<Receipt> = z.strictObject({
     })
     .optional(),
   payer: z.string().optional(),
+  authorization: z
+    .strictObject({
+      from: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+      nonce: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+      validBefore: z.string().regex(/^\d+$/),
+    })
+    .optional(),
   settlement: z
     .strictObject({
       outcome: z.enum(["succeeded", "rejected", "unknown"]),

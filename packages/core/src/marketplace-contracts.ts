@@ -60,10 +60,64 @@ export const listingFeeSchema = z.looseObject({
 });
 export type ListingFee = z.infer<typeof listingFeeSchema>;
 
-/** The group/fee pair the registry returns on every Call listing and discovery hit. */
+/**
+ * How far a listing got through vAPI review, per
+ * `docs/adr/0018-open-listing-and-verification-tiers.md`. Listing is
+ * permissionless, so this is a tier rather than a gate: `none` passed the
+ * automated x402 probe and nothing more, `requested` is waiting for review, and
+ * `verified` was reviewed by vAPI. Rows mirrored from an external catalog are
+ * always `none` — vAPI reviewed nothing it merely mirrored.
+ */
+export const LISTING_VERIFICATIONS = ["none", "requested", "verified"] as const;
+export const listingVerificationSchema = z.enum(LISTING_VERIFICATIONS);
+export type ListingVerification = z.infer<typeof listingVerificationSchema>;
+
+/**
+ * The verification field as it is read off the wire. A registry that predates
+ * the tier omits it and a later one may add a tier this client does not know;
+ * both read as `none`, which is the safe answer for "we cannot show that vAPI
+ * vouched for this".
+ */
+export const listingVerificationFieldSchema = listingVerificationSchema
+  .default("none")
+  .catch("none");
+
+/**
+ * How a listing answered vAPI's hourly re-probe over the last seven days. p95
+ * rather than p99: about 168 samples a week would make p99 two data points.
+ */
+export const listingLivenessSchema = z.looseObject({
+  uptime7d: z.number().min(0).max(1),
+  latencyP50Ms: z.number().nonnegative().nullable(),
+  latencyP95Ms: z.number().nonnegative().nullable(),
+  checks7d: z.number().int().nonnegative(),
+});
+export type ListingLiveness = z.infer<typeof listingLivenessSchema>;
+
+/**
+ * How closely the listing's 402 follows the x402 version it declares, as the
+ * registry's probe read it. `issues` are stable snake_case codes, the same
+ * ones `vapi check` reports.
+ */
+export const listingConformanceSchema = z.looseObject({
+  declaredVersion: z.union([z.literal(1), z.literal(2)]).nullable(),
+  versionConformant: z.boolean(),
+  offerTransport: z.enum(["body", "header", "both"]),
+  issues: z.array(z.string()),
+});
+export type ListingConformance = z.infer<typeof listingConformanceSchema>;
+
+/**
+ * The disclosures the registry returns on every Call listing and discovery hit.
+ * `liveness` and `conformance` are newer than most registries, so a missing or
+ * malformed value reads as absent instead of failing the listing around it.
+ */
 export const listingDisclosureShape = {
   group: listingGroupSchema.optional(),
   fee: listingFeeSchema.optional(),
+  verification: listingVerificationFieldSchema,
+  liveness: listingLivenessSchema.optional().catch(undefined),
+  conformance: listingConformanceSchema.optional().catch(undefined),
 } as const;
 
 export const marketplaceBadgeCodeSchema = z.enum([

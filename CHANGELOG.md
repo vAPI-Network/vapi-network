@@ -3,6 +3,116 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## 0.4.0
+
+Listing on vAPI became permissionless, so "is this listed?" stopped being a
+useful question and "how far did vAPI review it?" took its place. The registry
+now returns a verification tier on every listing, and the client's job is to
+carry that tier all the way to whoever is about to spend money — one switch to
+widen the search, one word on every result, and one line before an unverified
+payment. Nothing is blocked; nothing is decided for you.
+
+### Added
+
+- `vapi publish <url>`: listing an API from the terminal. vAPI probes the URL —
+  an origin, one endpoint, or an OpenAPI document — and prints every probe step;
+  a refusal prints its code, reason and hint and exits `2` before anything is
+  signed. You choose which of the endpoints it found to list, on a terminal or
+  with `--select`/`--yes`, and the local wallet signs one EIP-4361 line,
+  `Confirm this wallet receives vAPI Call payouts`, bound to the registry's host
+  and to Base. The answer names the slug, the FeeSplitter address per network
+  and the one step that stays in the console, because deploying the splitter is
+  a wallet transaction. `vapi publish activate <slug>` takes the listing live,
+  `vapi publish verify-request <slug>` asks for the review that ends the
+  `[unverified]` tag, and `vapi publish list` shows what this key owns.
+  `--json` emits the registry's raw responses.
+- `vapi publish` handles large catalogs: more than 20 endpoints — the
+  registry's cap per listing — become several listings of up to 20, named
+  `Name (k/n)` in probe order, each with its own payout-line signature, and
+  every endpoint gets a result line (`listed`, `failed`, `pending`, `skipped`).
+  A batch refused on its merits does not stop the next; a rejected key, a rate
+  limit or an outage does. `--resume` reads `vapi publish list` and skips every
+  endpoint this key already lists, so a stopped run picks up where it ended.
+  `--json` carries the created `listings` and per-endpoint `results`.
+- `vapi claim <origin>`: the owner of an API vAPI indexed from a public
+  catalog takes those listings over. vapi fetches the registry's EIP-4361 claim
+  message for the local wallet, refuses to sign one that is not bound to the
+  registry's host, this wallet, Base and that origin, signs it on the same path
+  as the publish payout line, and prints the slugs it claimed. A wallet that is
+  not the payee (403), an origin with nothing to claim (404) and listings that
+  already have an owner (409) each get a sentence. Needs `vapi auth set-key`;
+  like publishing, there is no MCP tool for it. Each claim writes a
+  `listing.claim` audit line.
+- `vapi check <url>`: a free, local x402 conformance doctor. It fetches the URL
+  without paying, decodes the 402 from the v2 `PAYMENT-REQUIRED` header and the
+  JSON body, and grades status, offer transport, declared version and its
+  required fields, the `exact` scheme, canonical USDC on a known network,
+  `payTo`, `maxTimeoutSeconds`, the origin's `/.well-known/x402` and
+  `/openapi.json` `x-payment-info` — each pass, warn or fail with the
+  registry's snake_case issue codes. `--json` returns one report; exit `0`
+  when nothing failed, `1` when a rule failed, `2` for usage. No wallet, no
+  payment, no registry call. The repository root is now also a composite
+  GitHub Action, "x402 conformance check", with `url` and `fail-on`
+  (`fail` | `warn`) inputs, running the published CLI's `check --json`.
+- `vapi auth set-key`, `vapi auth status` and `vapi auth clear` for the registry
+  API key. The key is typed on a prompt and never passed as an argument, is kept
+  in the same OS secret store as the wallet passphrase — or in
+  `~/.vapi/config.json` at mode 0600 where there is none — and is masked
+  wherever it is reported. `VAPI_API_KEY` overrides both, for CI. It lives
+  behind `@vapi-network/core/api-key`, which `packages/mcp` is lint-forbidden to
+  import: there is no publish tool and no agent path to a provider credential.
+- `verification` on every discovery hit and every service record, one of
+  `"none"`, `"requested"` or `"verified"`. A registry that predates the tier,
+  or one that starts sending a tier this client does not know, reads as
+  `"none"` — the client never invents an endorsement. Rows mirrored from an
+  external catalog are always `"none"`.
+- `vapi search --include-unverified` and the `includeUnverified` argument on
+  `call.search`: the one trust switch. Without it, results are vAPI-verified
+  listings plus the mirrored external catalogs; with it, self-listed APIs that
+  passed vAPI's automated x402 probe but were never reviewed are returned too.
+  Only the opt-in is sent to the registry.
+- `vapi search` tags every result with its tier next to its group —
+  `[verified]`, `[requested]`, `[unverified]`, or `[external]` for a mirrored
+  row, which is never repeated when the group already says `external`.
+- `vapi inspect` prints a `Verification:` line and the network fee label above
+  the record, and `vapi pay` prints one line naming the tier before the result
+  when the listing it just paid was not verified. Neither prompts nor blocks.
+- `verification` in `--json` on `search`, `inspect` and `pay`, and on the
+  `call.search`, `call.inspect` and `call.pay` MCP results.
+- `vapi pay --resume <receipt-id>`: after a paid call lost its response, asks
+  the receipt's token contract, with EIP-3009 `authorizationState(authorizer,
+nonce)`, whether the signed authorization was used — `settled` (do not pay
+  again), `expired` (never used and past `validBefore` by chain time, so paying
+  again is safe) or `pending` (wait until the time it prints). It unlocks no
+  wallet and signs nothing. EVM only; a Solana receipt says it is not supported
+  yet. Receipts now record `authorization: { from, nonce, validBefore }` for
+  every EVM payment they sign; older receipts parse unchanged and are named as
+  predating it. Every `settlement_unknown` "do not retry automatically" message
+  from `vapi pay` and `call.pay` now ends with the exact `vapi pay --resume`
+  command for its receipt.
+- `vapi inspect` prints a `Liveness:` line — uptime over seven days of hourly
+  re-probes, p50 and p95 latency — and a `Conformance:` line — declared x402
+  version, whether the 402 follows it, where the offer travels, issue codes —
+  when the registry sends `liveness` and `conformance`. Both are optional on
+  every discovery hit and service record, reach `--json` and `call.inspect`
+  unchanged, and a malformed value reads as absent rather than failing the
+  listing.
+- `includeUnverified` on `discover()` and on the `Source.search` seam, and
+  `verification` on core's `Listing`. Sources that have no notion of vAPI
+  verification ignore the option and claim no tier.
+
+### Changed
+
+- `call.pay`'s tool description now tells an agent to prefer a verified listing
+  and to read the request contract and the price with `call.inspect` before
+  paying one that is not.
+- Resolving one exact ref — `vapi inspect`, `vapi pay`, and the registry
+  source's `inspect` — always asks the registry for unverified listings too.
+  Resolving a ref the caller already holds is not a browse, so the tier is
+  disclosed rather than used to hide the answer.
+- Every package, `scripts/pack-check.mjs`, `CLI_VERSION` and
+  `VAPI_CLIENT_VERSION` move to 0.4.0.
+
 ## 0.3.0
 
 Several wallets on one machine, a passphrase that no longer has to sit in an

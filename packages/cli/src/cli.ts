@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 
+import type { Address } from "viem";
+
 import {
   ARC_TESTNET_CAIP2,
   BASE_MAINNET_CAIP2,
@@ -13,7 +15,9 @@ import {
   aggregateStats,
   appendAudit,
   assertWalletName,
+  checkReceiptSettlement,
   changeKeystorePassphrase,
+  createPublicFetch,
   createSupportReport,
   enableDefaultNetwork,
   enableSolanaKey,
@@ -25,10 +29,12 @@ import {
   getNetworkDefinition,
   getVapiPaths,
   isMissingFile,
+  isMirroredHit,
   isNetworkConfigured,
   isSolanaNetwork,
   KeystoreError,
   loadConfig,
+  MARKETPLACE_EXECUTION_METHODS,
   listAccounts,
   migrateLegacyRegistryConfig,
   migrateLegacyVapiHome,
@@ -36,6 +42,7 @@ import {
   readKeystoreVersion,
   readReceipts,
   readSearchEvents,
+  receiptWallet,
   receiptsToCsv,
   resolvePassphrase,
   resolveRegistryUrl,
@@ -51,6 +58,9 @@ import {
   WalletStore,
   writeDefaultConfig,
   type AuditEvent,
+  type ListingConformance,
+  type ListingLiveness,
+  type ListingVerification,
   type ResolvedPassphrase,
   type SecretStore,
   type SecretsDecision,
@@ -65,6 +75,16 @@ import {
   type WalletName,
 } from "@vapi-network/core";
 import { exportKeystoreKeys, exportRecoveryPhrase } from "@vapi-network/core/secrets";
+// The registry key lives behind its own entry point, like the secrets above:
+// no agent and no MCP tool may reach a provider credential.
+import {
+  API_KEY_ENV,
+  apiKeyStatus,
+  clearApiKey,
+  describeApiKeySource,
+  resolveApiKey,
+  storeApiKey,
+} from "@vapi-network/core/api-key";
 import {
   callService,
   getWallet,
@@ -73,6 +93,31 @@ import {
   startStdioServer,
 } from "@vapi-network/mcp";
 import { detectColorLevel, renderBanner } from "./brand.js";
+import { checkX402, formatCheckReport } from "./check.js";
+import {
+  API_KEY_CONSOLE_PATH,
+  assertClaimMessage,
+  buildPayoutSiweMessage,
+  createListingsClient,
+  formatProbeSteps,
+  listingsUrl,
+  LISTING_CATEGORIES,
+  PROBE_MODES,
+  readProbeOperations,
+  readProbeRejection,
+  RegistryApiError,
+  type CreatedListing,
+  type ListingCategory,
+  type ListingEndpointInput,
+  type ListingsClient,
+  type ListingStatusAction,
+  type MyListings,
+  type ProbeMode,
+  type ProbeOperation,
+  type ProbeRejection,
+  type ProbeResult,
+  type SplitterStates,
+} from "./publish-client.js";
 import { CLI_VERSION } from "./version";
 
 const HELP_HEADING = "vAPI Network";
@@ -90,9 +135,11 @@ Usage:
   vapi wallet caps <name> [--per-call <usd>] [--per-day <usd>] [--json]
   vapi fund [--amount <usd>] [--wallet <name>] [--json]
   vapi accounts [--enable solana] [--wallet <name>] [--json]
-  vapi search [query] [--kind <kind>] [--network <caip2>] [--limit <n>] [--cursor <cursor>] [--json]
+  vapi search [query] [--kind <kind>] [--network <caip2>] [--limit <n>] [--cursor <cursor>] [--include-unverified] [--json]
   vapi inspect <id> [--endpoint <name>] [--json]
   vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--wallet <name>] [--json]
+  vapi pay --resume <receipt-id> [--json]
+  vapi check <url> [--method <method>] [--json]
   vapi balance [--wallet <name>] [--json]
   vapi receipts [--limit <n>] [--wallet <name>] [--all-wallets] [--json]
   vapi receipts export --format <json|csv> [--range <24h|7d|30d>] [--wallet <name>] [--all-wallets]
@@ -105,19 +152,38 @@ Usage:
   vapi unlock [--wallet <name>] [--json]
   vapi lock [--wallet <name> | --all] [--json]
   vapi report "<what happened>" [--include-addresses] [--send] [--json]
+  vapi auth set-key [--json]
+  vapi auth status [--json]
+  vapi auth clear [--json]
+  vapi publish <url> [--method <method>] [--mode <origin|endpoint|openapi>] [--name <text>] [--description <text>] [--category <ai|data|crypto|compute|search>] [--select <names>] [--wallet <name>] [--yes] [--resume] [--json]
+  vapi publish activate <slug> [--json]
+  vapi publish verify-request <slug> [--json]
+  vapi publish list [--json]
+  vapi claim <origin> [--wallet <name>] [--json]
   vapi mcp [--wallet <name>] [--json]
   vapi serve [--json]
   vapi version [--json]
-  vapi publish [--json]
   vapi help [--json]
 
 Every command that touches a wallet takes \`--wallet <name>\`, falls back to \`VAPI_WALLET\`, then to the default set by \`vapi wallet use\`, and names the wallet it used on its first line.
+
+\`vapi search\` answers with vAPI-verified listings plus the mirrored external catalogs. \`--include-unverified\` also returns self-listed APIs that passed vAPI's automated x402 probe but were never reviewed; every result is tagged \`[verified]\`, \`[requested]\`, \`[unverified]\` or \`[external]\`.
+
+\`vapi check <url>\` grades an x402 API's 402 without paying: status, transport, declared version and its required fields, the exact scheme, canonical USDC, payTo, maxTimeoutSeconds, and the origin's /.well-known/x402 and openapi.json. No wallet, no payment, no registry call. It exits 1 when a rule fails.
+
+\`vapi pay --resume <receipt-id>\` answers the one question a lost response leaves: did that payment settle? It reads the signed authorization's state on-chain — settled, expired, or still pending — and never pays.
 
 \`vapi fund\` opens the funding page: card via Coinbase (needs a Coinbase account; US guest checkout), send from MetaMask/Coinbase Wallet/WalletConnect, or bridge from another chain.
 
 \`vapi unlock\` keeps one wallet's passphrase in the OS secret store — the macOS Keychain, or libsecret on Linux — so an agent can pay without \`VAPI_KEYSTORE_PASSWORD\` in its configuration. \`vapi lock\` takes it out again. Unlock order: \`VAPI_KEYSTORE_PASSWORD\`, then the secret store, then a prompt on a terminal. Windows still needs the variable.
 
 \`vapi backup\` and \`vapi export-key\` print a secret, so they run only on a real terminal, never for an agent, and ask you to type the wallet name first. Set \`VAPI_NO_SECRETS=1\` to switch them off entirely. Every export and every wallet change is logged to ~/.vapi/audit.log.
+
+\`vapi publish <url>\` lists an API you own. vAPI probes the URL — an origin, one endpoint, or an OpenAPI document — you choose which endpoints to list, and your wallet signs one line naming where the payouts go. Listing is permissionless: a listing that passed the probe goes live with \`vapi publish activate <slug>\`, and \`vapi publish verify-request <slug>\` asks for the review that puts it in the default search. Deploying the FeeSplitter that receives the payouts is a wallet transaction and stays in the console. A catalog of more than 20 endpoints is listed as several listings of up to 20, with one result line per endpoint; \`--resume\` skips every endpoint this key already lists.
+
+\`vapi claim <origin>\` takes ownership of the listings vAPI indexed from your API. The wallet their payments go to signs one line, \`Claim the vAPI Call listings served from <origin>\`; the listings stay paid directly to that wallet, and \`vapi publish list\` shows them.
+
+\`vapi auth set-key\` types the registry API key once, on a terminal, into the same OS secret store as the passphrase. A key is a secret: it is never an argument, \`VAPI_API_KEY\` is the route for CI, and no agent or MCP tool can reach it.
 
 With no command, vapi shows this help. The MCP server starts only with \`vapi mcp\`.`;
 
@@ -146,6 +212,8 @@ export type CliDependencies = {
   env?: NodeJS.ProcessEnv;
   /** The OS secret store `vapi unlock` and `vapi lock` act on. */
   secretStore?: SecretStore;
+  /** Injected clock, so a signed message is reproducible in a test. */
+  now?: () => Date;
 };
 
 const processIo: CliIo = {
@@ -188,6 +256,9 @@ function getLinePrompt(dependencies: CliDependencies): (prompt: string) => Promi
 }
 
 const WALLET_OPTION = "--wallet";
+
+/** The one trust switch `vapi search` exposes; see `searchCommand`. */
+const INCLUDE_UNVERIFIED_OPTION = "--include-unverified";
 
 /** The wallet one invocation acts on, resolved before any passphrase is read. */
 type WalletTarget = {
@@ -354,12 +425,15 @@ async function recordAudit(
 async function requireSecretsAllowed(
   dependencies: CliDependencies,
   event: AuditEvent,
-  wallet: string,
+  wallet: string | undefined,
   refusal: string = AGENT_SECRET_REFUSAL,
 ): Promise<void> {
   const decision = secretsDecision(dependencies);
   if (decision.allowed) return;
-  await recordAudit(dependencies, event, { wallet, detail: `refused: ${decision.reason ?? ""}` });
+  await recordAudit(dependencies, event, {
+    ...(wallet === undefined ? {} : { wallet }),
+    detail: `refused: ${decision.reason ?? ""}`,
+  });
   throw new KeystoreError(`${refusal} ${decision.reason ?? ""}`.trim());
 }
 
@@ -463,11 +537,20 @@ export async function runCli(
       case "report":
         await reportCommand(args.slice(1), json, io, dependencies);
         return 0;
+      case "auth":
+        await authCommand(args.slice(1), json, io, dependencies);
+        return 0;
+      case "publish":
+        return await publishCommand(args.slice(1), json, io, dependencies);
+      case "claim":
+        await claimCommand(args.slice(1), json, io, dependencies);
+        return 0;
+      case "check":
+        return await checkCommand(args.slice(1), json, io, dependencies);
       case "mcp":
         await mcpCommand(args.slice(1), dependencies);
         return 0;
       case "serve":
-      case "publish":
         outputStub(io, json);
         return 2;
       default:
@@ -1104,6 +1187,7 @@ async function searchCommand(
 ): Promise<void> {
   const parsed = parseArguments(argv, {
     valueOptions: new Set(["--kind", "--network", "--limit", "--cursor"]),
+    booleanOptions: new Set([INCLUDE_UNVERIFIED_OPTION]),
     repeatableOptions: new Set(["--kind"]),
     maximumPositionals: 1,
   });
@@ -1118,6 +1202,8 @@ async function searchCommand(
       ...(parsed.one("--network") ? { network: parsed.one("--network") } : {}),
       ...(limit === undefined ? {} : { limit }),
       ...(parsed.one("--cursor") ? { cursor: parsed.one("--cursor") } : {}),
+      // Only the opt-in travels: `false` is the registry default.
+      ...(parsed.has(INCLUDE_UNVERIFIED_OPTION) ? { includeUnverified: true } : {}),
     },
     config,
     dependencies.fetchImpl,
@@ -1146,7 +1232,7 @@ async function inspectCommand(
     config,
     dependencies.fetchImpl,
   );
-  output(io, json, result, JSON.stringify(result, null, 2));
+  output(io, json, result, formatInspect(result));
 }
 
 async function payCommand(
@@ -1155,6 +1241,10 @@ async function payCommand(
   io: CliIo,
   dependencies: CliDependencies,
 ): Promise<void> {
+  if (argv.includes(RESUME_OPTION)) {
+    await payResumeCommand(argv, json, io, dependencies);
+    return;
+  }
   const parsed = parseArguments(argv, {
     valueOptions: new Set([
       "--method",
@@ -1201,7 +1291,101 @@ async function payCommand(
     json,
     wallet,
     result as unknown as Record<string, unknown>,
-    JSON.stringify(result, null, 2),
+    [...verificationNotice(result.verification), JSON.stringify(result, null, 2)].join("\n"),
+  );
+}
+
+const CHECK_USAGE = "Usage: vapi check <url> [--method <method>]";
+
+/**
+ * A local x402 conformance doctor for a provider's own API. Returns the exit
+ * code itself: a failed rule is a `1` with the whole report, not a thrown error.
+ */
+async function checkCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<number> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set(["--method"]),
+    maximumPositionals: 1,
+  });
+  const url = requiredPositional(parsed.positionals[0], CHECK_USAGE);
+  if (!isHttpUrl(url)) throw new UsageError(`vapi check takes an http(s) URL. ${CHECK_USAGE}`);
+  const method = (parsed.one("--method") ?? "GET").trim().toUpperCase();
+  if (!(MARKETPLACE_EXECUTION_METHODS as readonly string[]).includes(method)) {
+    throw new UsageError(`--method must be one of ${MARKETPLACE_EXECUTION_METHODS.join(", ")}.`);
+  }
+  const config = await readConfig(getVapiPaths().config, io);
+  const fetchImpl =
+    dependencies.fetchImpl ??
+    createPublicFetch({ allowPrivateNetwork: config.allowPrivateNetwork ?? false });
+  let report: Awaited<ReturnType<typeof checkX402>>;
+  try {
+    report = await checkX402(new URL(url), { method, fetchImpl });
+  } catch (error) {
+    throw new Error(
+      `Could not reach ${url}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  output(io, json, report, formatCheckReport(report));
+  return report.summary.fail > 0 ? 1 : 0;
+}
+
+const RESUME_OPTION = "--resume";
+
+const SETTLEMENT_STATE_WORDS = {
+  settled:
+    "Settled: the authorization was used on-chain, so the payment went through (or the payer cancelled it, which this client never does). Do not pay again.",
+  expired:
+    "Expired: the authorization was never used and can no longer settle. Paying again is safe.",
+  pending: "Pending: the authorization is unused but can still settle.",
+} as const;
+
+/**
+ * `vapi pay --resume <receipt-id>`: after a paid call lost its response, asks
+ * the chain whether the signed authorization settled before anyone pays again.
+ * It reads only — no wallet is unlocked, nothing is signed or paid.
+ */
+async function payResumeCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set([RESUME_OPTION]),
+    maximumPositionals: 0,
+  });
+  const id = parsed.one(RESUME_OPTION)!;
+  const paths = getVapiPaths();
+  const receipt = (await readReceipts(paths.receipts)).find((candidate) => candidate.id === id);
+  if (receipt === undefined) {
+    throw new Error(
+      `No receipt ${JSON.stringify(id)} in ${paths.receipts}. vapi receipts lists them.`,
+    );
+  }
+  const config = await readConfig(paths.config, io);
+  const check = await checkReceiptSettlement(receipt, config, {
+    ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+  });
+  const validBeforeAt = new Date(Number(check.validBefore) * 1_000).toISOString();
+  const message =
+    check.state === "pending"
+      ? `${SETTLEMENT_STATE_WORDS.pending} Wait until ${validBeforeAt}, then run vapi pay --resume ${id} again; paying now could pay twice.`
+      : SETTLEMENT_STATE_WORDS[check.state];
+  outputForWallet(
+    io,
+    json,
+    { name: receiptWallet(receipt) },
+    { receipt: id, resourceUrl: receipt.resourceUrl, ...check, validBeforeAt, message },
+    [
+      `Receipt: ${id} — ${receipt.method ?? "call"} ${receipt.resourceUrl}`,
+      `Authorization: nonce ${check.nonce} from ${check.authorizer}, USDC ${check.token} on ${check.network}, valid before ${validBeforeAt}`,
+      message,
+    ].join("\n"),
   );
 }
 
@@ -1439,6 +1623,953 @@ async function reportCommand(
     ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
   });
   output(io, json, result, formatSupportReport(result));
+}
+
+const AUTH_USAGE = "Usage: vapi auth set-key|status|clear";
+
+/**
+ * The registry key a provider publishes with — the only credential this client
+ * holds. It is handled like every other secret here: typed by a person on a
+ * terminal, kept in the OS secret store when the machine has one, and never an
+ * argument. Nothing in `vapi auth` ever prints the key itself.
+ *
+ * Written as an if-chain rather than a switch on purpose: `help-alignment.test.ts`
+ * reads every `case` label one block deep as a `vapi wallet` subcommand.
+ */
+async function authCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const subcommand = argv[0];
+  const rest = argv.slice(1);
+  if (subcommand === "set-key") {
+    await authSetKeyCommand(rest, json, io, dependencies);
+    return;
+  }
+  if (subcommand === "status") {
+    await authStatusCommand(rest, json, io, dependencies);
+    return;
+  }
+  if (subcommand === "clear") {
+    await authClearCommand(rest, json, io, dependencies);
+    return;
+  }
+  if (subcommand === undefined) throw new UsageError(AUTH_USAGE);
+  throw new UsageError(`Unknown auth subcommand ${JSON.stringify(subcommand)}. ${AUTH_USAGE}`);
+}
+
+const API_KEY_IN_ARGV =
+  "vapi auth set-key reads the key from a prompt. Never pass an API key as an argument: it would stay in the shell history and be visible to every process on the machine.";
+
+const API_KEY_NEEDS_TERMINAL = `Type the API key yourself in a terminal; an agent must never be handed one. In CI, set ${API_KEY_ENV} instead.`;
+
+/** Takes the key on a prompt and hands it to the OS secret store, or to config.json. */
+async function authSetKeyCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  if (argv.length > 0) throw new UsageError(API_KEY_IN_ARGV);
+  await requireSecretsAllowed(dependencies, "auth.key.set", undefined, API_KEY_NEEDS_TERMINAL);
+  const key = await getPrompts(dependencies).secret("vAPI API key: ");
+  const stored = await storeApiKey(key, {
+    store: getSecretStore(dependencies),
+    configPath: getVapiPaths().config,
+  });
+  await recordAudit(dependencies, "auth.key.set", { detail: stored.source });
+  const message = `The vAPI API key ${stored.masked} is stored in ${stored.location}.`;
+  output(
+    io,
+    json,
+    { stored: true, source: stored.source, location: stored.location, key: stored.masked, message },
+    [message, "List an API with vapi publish <url>; remove the key with vapi auth clear."].join(
+      "\n",
+    ),
+  );
+}
+
+/** Whether this machine has a key, and where it comes from. Never the key itself. */
+async function authStatusCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  requireNoArguments(argv, "auth status");
+  const paths = getVapiPaths();
+  const status = await apiKeyStatus({
+    store: getSecretStore(dependencies),
+    configPath: paths.config,
+  });
+  if (!status.present) {
+    const message = noApiKeyMessage(registryBaseUrl(await readConfig(paths.config, io)));
+    output(io, json, { present: false, message }, message);
+    return;
+  }
+  const message = `The vAPI API key ${status.masked} is read from ${status.location}.`;
+  output(
+    io,
+    json,
+    {
+      present: true,
+      source: status.source,
+      location: status.location,
+      key: status.masked,
+      message,
+    },
+    message,
+  );
+}
+
+/** Removes the key from everywhere this client put it. */
+async function authClearCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  requireNoArguments(argv, "auth clear");
+  const store = getSecretStore(dependencies);
+  const result = await clearApiKey({ store, configPath: getVapiPaths().config });
+  if (result.cleared.length > 0) {
+    await recordAudit(dependencies, "auth.key.clear", { detail: result.cleared.join(", ") });
+  }
+  const message =
+    result.cleared.length === 0
+      ? "No vAPI API key was stored on this machine."
+      : `Removed the vAPI API key from ${result.cleared
+          .map((source) => describeApiKeySource(source, store))
+          .join(" and ")}.`;
+  output(
+    io,
+    json,
+    { cleared: result.cleared, envStillSet: result.envStillSet, message },
+    [
+      message,
+      ...(result.envStillSet
+        ? [`${API_KEY_ENV} is still set in this environment; unset it to finish signing out.`]
+        : []),
+    ].join("\n"),
+  );
+}
+
+const YES_OPTION = "--yes";
+
+const PUBLISH_USAGE =
+  "Usage: vapi publish <url> [--method <method>] [--mode <origin|endpoint|openapi>] [--name <text>] [--description <text>] [--category <ai|data|crypto|compute|search>] [--select <names>] [--wallet <name>] [--yes] [--resume]";
+
+const PUBLISH_NEEDS_TERMINAL =
+  "vapi publish needs a terminal to choose endpoints. Name them with --select <name,name>, or pass --yes to list every endpoint the probe found.";
+
+/**
+ * The provider side of the registry. `vapi publish <url>` probes, lets the
+ * person choose, signs one payout line with the local wallet and creates the
+ * listing; the three subcommands move it afterwards. Returns the exit code
+ * itself, because a probe the registry refuses is a `2` with the registry's
+ * own words rather than a thrown error.
+ */
+async function publishCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<number> {
+  const subcommand = argv[0];
+  if (subcommand === "activate") {
+    await publishStatusCommand(
+      argv.slice(1),
+      "activate",
+      "vapi publish activate <slug>",
+      json,
+      io,
+      dependencies,
+    );
+    return 0;
+  }
+  if (subcommand === "verify-request") {
+    await publishStatusCommand(
+      argv.slice(1),
+      "request_verification",
+      "vapi publish verify-request <slug>",
+      json,
+      io,
+      dependencies,
+    );
+    return 0;
+  }
+  if (subcommand === "list") {
+    await publishListCommand(argv.slice(1), json, io, dependencies);
+    return 0;
+  }
+  return await publishListingCommand(argv, json, io, dependencies);
+}
+
+async function publishListingCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<number> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set([
+      "--method",
+      "--mode",
+      "--name",
+      "--description",
+      "--category",
+      "--select",
+      WALLET_OPTION,
+    ]),
+    booleanOptions: new Set([YES_OPTION, RESUME_OPTION]),
+    maximumPositionals: 1,
+  });
+  const url = requiredPositional(parsed.positionals[0], PUBLISH_USAGE);
+  if (!isHttpUrl(url)) {
+    throw new UsageError(
+      "vapi publish takes the http(s) URL of the API you own: its origin, one endpoint, or an OpenAPI document.",
+    );
+  }
+  const method = parsed.one("--method");
+  const mode = parseProbeMode(parsed.one("--mode"));
+  const { client, baseUrl } = await listingsClient(io, dependencies);
+
+  const probe = await client.probe({
+    url,
+    ...(method === undefined ? {} : { method }),
+    ...(mode === undefined ? {} : { mode }),
+  });
+  const steps = formatProbeSteps(probe);
+  if (!json) {
+    io.stdout(`Probe: ${url}`);
+    for (const line of steps) io.stdout(line);
+  }
+  const rejection = readProbeRejection(probe);
+  if (rejection) {
+    if (json) {
+      io.stdout(JSON.stringify({ probe }));
+      return 2;
+    }
+    io.stderr(formatProbeRejection(rejection));
+    return 2;
+  }
+
+  const operations = readProbeOperations(probe);
+  if (operations.length === 0) {
+    throw new Error(
+      `The probe found no callable endpoint behind ${url}. Point vapi publish at one endpoint, or at an OpenAPI document that describes them.`,
+    );
+  }
+  const interactive = !json && isInteractive(dependencies);
+  const selected = await selectOperations(operations, {
+    select: parsed.one("--select"),
+    all: parsed.has(YES_OPTION),
+    interactive,
+    io,
+    dependencies,
+  });
+  const asking = interactive && !parsed.has(YES_OPTION);
+  const name = await publishField(parsed.one("--name") ?? probeString(probe, ["name", "title"]), {
+    asking,
+    prompt: "Listing name: ",
+    missing: "vapi publish needs a name for the listing: --name <text>.",
+    dependencies,
+  });
+  const description = await publishField(
+    parsed.one("--description") ?? probeString(probe, ["description", "summary"]),
+    {
+      asking,
+      prompt: "One-line description: ",
+      missing: "vapi publish needs a description: --description <text>.",
+      dependencies,
+    },
+  );
+  const category = parseCategory(
+    await publishField(parsed.one("--category") ?? probeCategory(probe), {
+      asking,
+      prompt: `Category (${LISTING_CATEGORIES.join(", ")}): `,
+      missing: `vapi publish needs a category: --category <${LISTING_CATEGORIES.join("|")}>.`,
+      dependencies,
+    }),
+  );
+
+  const batches = publishBatches(
+    selected.map((operation) => toListingEndpoint(operation, description)),
+    name,
+  );
+  // --resume trusts the registry's own record of what this key already lists,
+  // so a run that stopped halfway, for whatever reason, picks up exactly there.
+  const listed = parsed.has(RESUME_OPTION)
+    ? listedEndpointSlugs(await client.mine())
+    : new Map<string, string>();
+  const results: PublishedEndpoint[] = [];
+  const pending = batches.map((batch) => ({
+    name: batch.name,
+    endpoints: batch.endpoints.filter((endpoint) => {
+      const slug = listed.get(endpointKey(endpoint));
+      if (slug !== undefined) results.push(endpointResult(endpoint, "skipped", { slug }));
+      return slug === undefined;
+    }),
+  }));
+  const say = (line: string) => {
+    if (!json) io.stdout(line);
+  };
+  if (!json) io.stdout("");
+  for (const result of results) say(formatPublishedEndpoint(result));
+  if (pending.every((batch) => batch.endpoints.length === 0)) {
+    const message = "Every selected endpoint is already listed by this key; nothing was signed.";
+    if (json) io.stdout(JSON.stringify({ probe, listings: [], results, message }));
+    else io.stdout(message);
+    return 0;
+  }
+
+  const wallet = await targetWallet(parsed, dependencies);
+  const { account } = await unlockTarget(wallet, dependencies);
+  const payoutWallet = requireEvmAddress(account.address, wallet.name);
+  say(walletHeader(wallet));
+  if (batches.length > 1) {
+    say(
+      `Publishing ${selected.length} endpoints as ${batches.length} listings of up to ${PUBLISH_BATCH_SIZE} each.`,
+    );
+  }
+
+  // One listing per batch, each with its own nonce and its own signature of
+  // the same payout line. A batch the registry refuses on its merits does not
+  // stop the next one; a refusal that would repeat (a bad key, a rate limit)
+  // or an outage does, and --resume picks up from there.
+  const created: CreatedListing[] = [];
+  const failures: Error[] = [];
+  let stopped = false;
+  for (const batch of pending) {
+    if (batch.endpoints.length === 0) continue;
+    if (stopped) {
+      for (const endpoint of batch.endpoints) {
+        const result = endpointResult(endpoint, "not_attempted");
+        results.push(result);
+        say(formatPublishedEndpoint(result));
+      }
+      continue;
+    }
+    let listing: CreatedListing;
+    try {
+      const nonce = await client.payoutNonce(payoutWallet);
+      const siweMessage = payoutSiweMessage(nonce, baseUrl, payoutWallet, dependencies);
+      const signature = await account.signMessage({ message: siweMessage });
+      listing = await client.create({
+        name: batch.name,
+        description,
+        category,
+        endpoints: batch.endpoints,
+        payoutWallet,
+        siweMessage,
+        signature,
+      });
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      failures.push(failure);
+      stopped = !refusedOnItsMerits(failure);
+      for (const endpoint of batch.endpoints) {
+        const result = endpointResult(endpoint, "failed", { error: failure.message });
+        results.push(result);
+        say(formatPublishedEndpoint(result));
+      }
+      continue;
+    }
+    created.push(listing);
+    const slug = listingSlug(listing);
+    await recordAudit(dependencies, "listing.publish", {
+      wallet: wallet.name,
+      detail: slug ?? url,
+    });
+    for (const endpoint of batch.endpoints) {
+      const result = endpointResult(endpoint, "listed", slug === undefined ? {} : { slug });
+      results.push(result);
+      say(formatPublishedEndpoint(result));
+    }
+    say(formatCreatedListing(listing, batch.name, payoutWallet, batch.endpoints.length));
+  }
+
+  // The listings already exist, so a splitter lookup that fails is a line of
+  // advice the person loses, never the slug they need next.
+  let splitters: SplitterStates | undefined;
+  let splittersError: string | undefined;
+  if (created.length > 0) {
+    try {
+      splitters = await client.splitters(payoutWallet);
+    } catch (error) {
+      splittersError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  const failed = failures.length > 0;
+  const resumeHint = `Run the same vapi publish command with ${RESUME_OPTION} to list the rest; it skips what is already listed.`;
+
+  if (json) {
+    io.stdout(
+      JSON.stringify({
+        wallet: wallet.name,
+        probe,
+        listings: created,
+        results,
+        ...(splitters === undefined ? {} : { splitters }),
+        ...(splittersError === undefined ? {} : { splittersError }),
+        ...(failed
+          ? {
+              error: [...new Set(failures.map((failure) => failure.message))].join("\n"),
+              exitCode: 1,
+            }
+          : {}),
+      }),
+    );
+    return failed ? 1 : 0;
+  }
+  if (created.length > 0) {
+    const slug = created.length === 1 ? listingSlug(created[0]!) : undefined;
+    for (const line of formatSplitters(splitters, splittersError, slug, baseUrl)) io.stdout(line);
+  }
+  if (!failed) return 0;
+  for (const message of new Set(failures.map((failure) => failure.message))) io.stderr(message);
+  if (batches.length > 1 || created.length > 0) io.stderr(resumeHint);
+  return 1;
+}
+
+/** The registry's cap on endpoints per listing; a larger catalog becomes several. */
+const PUBLISH_BATCH_SIZE = 20;
+/** The registry's cap on a listing name. */
+const LISTING_NAME_MAX_LENGTH = 100;
+
+type ListingBatch = { name: string; endpoints: ListingEndpointInput[] };
+
+/**
+ * Splits the chosen endpoints, in probe order, into listings of at most
+ * {@link PUBLISH_BATCH_SIZE}. A catalog that fits keeps its name; a larger one
+ * is numbered `Name (2/4)`. The split depends only on the selection, so a
+ * resumed run numbers every batch the way the first run did.
+ */
+function publishBatches(endpoints: readonly ListingEndpointInput[], name: string): ListingBatch[] {
+  const count = Math.ceil(endpoints.length / PUBLISH_BATCH_SIZE);
+  return Array.from({ length: count }, (_, index) => {
+    const suffix = count === 1 ? "" : ` (${index + 1}/${count})`;
+    return {
+      name: `${name.slice(0, LISTING_NAME_MAX_LENGTH - suffix.length).trimEnd()}${suffix}`,
+      endpoints: endpoints.slice(index * PUBLISH_BATCH_SIZE, (index + 1) * PUBLISH_BATCH_SIZE),
+    };
+  });
+}
+
+/** One endpoint by what makes it callable: its method and its URL. */
+function endpointKey(endpoint: { method?: unknown; url?: unknown }): string {
+  const method = typeof endpoint.method === "string" ? endpoint.method.toUpperCase() : "GET";
+  const url = typeof endpoint.url === "string" ? endpoint.url : "";
+  try {
+    return `${method} ${new URL(url).href}`;
+  } catch {
+    return `${method} ${url}`;
+  }
+}
+
+/** Every endpoint this key already lists, mapped to the slug that lists it. */
+function listedEndpointSlugs(mine: MyListings): Map<string, string> {
+  const listed = new Map<string, string>();
+  for (const listing of Array.isArray(mine.listings) ? mine.listings : []) {
+    if (typeof listing !== "object" || listing === null) continue;
+    const { slug, endpoints } = listing as { slug?: unknown; endpoints?: unknown };
+    if (typeof slug !== "string" || !Array.isArray(endpoints)) continue;
+    for (const endpoint of endpoints) {
+      if (typeof endpoint === "object" && endpoint !== null) {
+        listed.set(endpointKey(endpoint as Record<string, unknown>), slug);
+      }
+    }
+  }
+  return listed;
+}
+
+/**
+ * A refusal of this batch alone — a 4xx about its content — rather than one
+ * every later batch would meet too: a rejected key, a rate limit, an outage.
+ */
+function refusedOnItsMerits(error: Error): boolean {
+  return (
+    error instanceof RegistryApiError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 401 &&
+    error.status !== 429
+  );
+}
+
+type PublishedEndpoint = {
+  name: string;
+  method: string;
+  url: string;
+  result: "listed" | "skipped" | "failed" | "not_attempted";
+  slug?: string;
+  error?: string;
+};
+
+function endpointResult(
+  endpoint: ListingEndpointInput,
+  result: PublishedEndpoint["result"],
+  detail: { slug?: string; error?: string } = {},
+): PublishedEndpoint {
+  return { name: endpoint.name, method: endpoint.method, url: endpoint.url, result, ...detail };
+}
+
+function formatPublishedEndpoint(endpoint: PublishedEndpoint): string {
+  const detail =
+    endpoint.result === "listed"
+      ? (endpoint.slug ?? "")
+      : endpoint.result === "skipped"
+        ? `already listed as ${endpoint.slug ?? "?"}`
+        : endpoint.result === "failed"
+          ? (endpoint.error?.split("\n")[0] ?? "")
+          : "not attempted";
+  const label = endpoint.result === "not_attempted" ? "pending" : endpoint.result;
+  return `  ${label.padEnd(7)} ${endpoint.name}\t${endpoint.method} ${endpoint.url}\t${detail}`;
+}
+
+/** Moves one listing through the registry's states: live, or up for review. */
+async function publishStatusCommand(
+  argv: string[],
+  action: ListingStatusAction,
+  usage: string,
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const parsed = parseArguments(argv, { valueOptions: new Set(), maximumPositionals: 1 });
+  const slug = requiredPositional(parsed.positionals[0], `Usage: ${usage}`);
+  const { client } = await listingsClient(io, dependencies);
+  const result = await client.status(slug, action);
+  await recordAudit(dependencies, "listing.status", { detail: `${slug} ${action}` });
+  output(io, json, result, formatListingStatus(slug, action, result));
+}
+
+/** Every listing this key owns, whatever state it is in. */
+async function publishListCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  requireNoArguments(argv, "publish list");
+  const { client } = await listingsClient(io, dependencies);
+  const result = await client.mine();
+  output(io, json, result, formatMyListings(result));
+}
+
+/**
+ * The registry write API, ready to call: the base URL this install already
+ * talks to, plus the key. Both failures — no key, and an unreadable config —
+ * happen here, before anything is probed or signed.
+ */
+async function listingsClient(
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<{ client: ListingsClient; baseUrl: string }> {
+  const paths = getVapiPaths();
+  const config = await readConfig(paths.config, io);
+  const baseUrl = registryBaseUrl(config);
+  // The variable belongs to the process, like VAPI_KEYSTORE_PASSWORD; the
+  // injected environment models wallet selection and agent markers.
+  const resolved = await resolveApiKey({
+    env: process.env,
+    store: getSecretStore(dependencies),
+    configPath: paths.config,
+  });
+  if (resolved === undefined) throw new Error(noApiKeyMessage(baseUrl));
+  return {
+    baseUrl,
+    client: createListingsClient({
+      baseUrl,
+      apiKey: resolved.key,
+      allowPrivateNetwork: config.allowPrivateNetwork ?? false,
+      ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+    }),
+  };
+}
+
+function noApiKeyMessage(baseUrl: string): string {
+  return [
+    "No vAPI API key on this machine.",
+    `Create one in the console at ${listingsUrl(baseUrl, API_KEY_CONSOLE_PATH).href}, then store it with vapi auth set-key.`,
+    `In CI, set ${API_KEY_ENV} instead.`,
+  ].join("\n");
+}
+
+const DISCOVERY_PATH = "/api/call/discovery";
+
+/**
+ * The registry behind the configured discovery URLs. `VAPI_REGISTRY_URL` has
+ * already moved those by the time the config is loaded, so deriving the base
+ * from them follows the env override, a self-hosted registry and a mount
+ * prefix alike. A hand-edited discovery URL falls back to the shipped default.
+ */
+function registryBaseUrl(config: VapiConfig): string {
+  try {
+    const url = new URL(config.marketplaceDiscoveryUrl);
+    const path = url.pathname.replace(/\/+$/, "");
+    if (!path.endsWith(DISCOVERY_PATH)) return resolveRegistryUrl();
+    url.search = "";
+    url.hash = "";
+    url.pathname = path.slice(0, path.length - DISCOVERY_PATH.length) || "/";
+    return url.href;
+  } catch {
+    return resolveRegistryUrl();
+  }
+}
+
+/** Which endpoints of the probed API this listing offers. */
+async function selectOperations(
+  operations: readonly ProbeOperation[],
+  args: {
+    select: string | undefined;
+    all: boolean;
+    interactive: boolean;
+    io: CliIo;
+    dependencies: CliDependencies;
+  },
+): Promise<ProbeOperation[]> {
+  if (args.select !== undefined) return pickOperations(operations, args.select);
+  if (args.all) return [...operations];
+  if (!args.interactive) throw new UsageError(PUBLISH_NEEDS_TERMINAL);
+  args.io.stdout("");
+  args.io.stdout("Endpoints found:");
+  for (const [index, operation] of operations.entries()) {
+    args.io.stdout(formatOperation(index + 1, operation));
+  }
+  const answer = await getLinePrompt(args.dependencies)(
+    "Endpoints to list (numbers or names, comma separated; blank for all): ",
+  );
+  return answer.trim().length === 0 ? [...operations] : pickOperations(operations, answer);
+}
+
+function pickOperations(
+  operations: readonly ProbeOperation[],
+  selection: string,
+): ProbeOperation[] {
+  const wanted = selection
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  if (wanted.length === 0) throw new UsageError("--select needs at least one endpoint name.");
+  const picked: ProbeOperation[] = [];
+  for (const value of wanted) {
+    const byIndex = /^\d+$/.test(value) ? operations[Number(value) - 1] : undefined;
+    const match =
+      byIndex ??
+      operations.find((operation) => operation.name.toLowerCase() === value.toLowerCase());
+    if (match === undefined) {
+      throw new UsageError(
+        `No endpoint named ${JSON.stringify(value)}. The probe found ${operations
+          .map((operation) => operation.name)
+          .join(", ")}.`,
+      );
+    }
+    if (!picked.includes(match)) picked.push(match);
+  }
+  return picked;
+}
+
+/** A field the listing needs: the option, what the probe knew, or a question. */
+async function publishField(
+  supplied: string | undefined,
+  args: { asking: boolean; prompt: string; missing: string; dependencies: CliDependencies },
+): Promise<string> {
+  const value = supplied?.trim();
+  if (value) return value;
+  if (!args.asking) throw new UsageError(args.missing);
+  const typed = (await getLinePrompt(args.dependencies)(args.prompt)).trim();
+  if (typed.length === 0) throw new UsageError(args.missing);
+  return typed;
+}
+
+function parseCategory(value: string): ListingCategory {
+  const normalized = value.trim().toLowerCase();
+  if ((LISTING_CATEGORIES as readonly string[]).includes(normalized)) {
+    return normalized as ListingCategory;
+  }
+  throw new UsageError(`--category must be one of ${LISTING_CATEGORIES.join(", ")}.`);
+}
+
+function parseProbeMode(value: string | undefined): ProbeMode | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if ((PROBE_MODES as readonly string[]).includes(normalized)) return normalized as ProbeMode;
+  throw new UsageError(`--mode must be one of ${PROBE_MODES.join(", ")}.`);
+}
+
+/** Payouts are an EVM transfer, so a wallet without an EVM key cannot receive them. */
+function requireEvmAddress(
+  address: string | undefined,
+  wallet: string,
+  retry = "vapi publish <url> --wallet <name>",
+): Address {
+  if (address === undefined || !/^0x[0-9a-fA-F]{40}$/.test(address)) {
+    throw new Error(
+      `Wallet ${wallet} has no EVM account, so it cannot receive vAPI Call payouts. Use a wallet that has one: ${retry}.`,
+    );
+  }
+  return address as Address;
+}
+
+/**
+ * The line the wallet signs. The registry may send its own message, which is
+ * then signed verbatim; otherwise the client builds the canonical EIP-4361
+ * message so both sides agree byte for byte.
+ */
+function payoutSiweMessage(
+  nonce: { nonce?: unknown; message?: unknown },
+  baseUrl: string,
+  address: Address,
+  dependencies: CliDependencies,
+): string {
+  const supplied = typeof nonce.message === "string" ? nonce.message.trim() : "";
+  if (supplied.length > 0) return supplied;
+  const value = typeof nonce.nonce === "string" ? nonce.nonce.trim() : "";
+  if (value.length === 0) {
+    throw new Error("The registry returned no payout nonce, so there is nothing to sign.");
+  }
+  return buildPayoutSiweMessage({
+    baseUrl,
+    address,
+    nonce: value,
+    issuedAt: (dependencies.now?.() ?? new Date()).toISOString(),
+  });
+}
+
+function toListingEndpoint(
+  operation: ProbeOperation,
+  fallbackDescription: string,
+): ListingEndpointInput {
+  const url = typeof operation.url === "string" ? operation.url.trim() : "";
+  if (!isHttpUrl(url)) {
+    throw new Error(
+      `The probe returned no callable URL for endpoint ${operation.name}, so it cannot be listed.`,
+    );
+  }
+  const method = typeof operation.method === "string" ? operation.method.trim() : "";
+  const description = typeof operation.description === "string" ? operation.description.trim() : "";
+  return {
+    name: operation.name,
+    method: (method || "GET").toUpperCase(),
+    url,
+    description: description || fallbackDescription,
+    ...optionalStringField(operation, "operationId"),
+    ...optionalStringField(operation, "requestContentType"),
+    ...(operation.requestSchema === undefined ? {} : { requestSchema: operation.requestSchema }),
+    ...optionalStringField(operation, "responseContentType"),
+    ...optionalStringField(operation, "pathTemplate"),
+    ...(operation.pathParameters === undefined ? {} : { pathParameters: operation.pathParameters }),
+  };
+}
+
+function optionalStringField<Key extends keyof ListingEndpointInput>(
+  operation: ProbeOperation,
+  key: Key,
+): Partial<Record<Key, string>> {
+  const value = operation[key as string];
+  return typeof value === "string" && value.trim().length > 0
+    ? ({ [key]: value.trim() } as Partial<Record<Key, string>>)
+    : {};
+}
+
+function probeString(probe: ProbeResult, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = probe[key];
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return undefined;
+}
+
+/** A category the probe guessed, used only when it is one the registry accepts. */
+function probeCategory(probe: ProbeResult): string | undefined {
+  const value = probeString(probe, ["category"])?.toLowerCase();
+  return value !== undefined && (LISTING_CATEGORIES as readonly string[]).includes(value)
+    ? value
+    : undefined;
+}
+
+function listingSlug(created: CreatedListing): string | undefined {
+  const slug = created.listing?.slug;
+  return typeof slug === "string" && slug.trim().length > 0 ? slug.trim() : undefined;
+}
+
+function formatProbeRejection(rejection: ProbeRejection): string {
+  const code = typeof rejection.code === "string" ? rejection.code : "rejected";
+  return [
+    `Probe rejected: ${code}`,
+    ...(typeof rejection.message === "string" ? [rejection.message] : []),
+    ...(typeof rejection.hint === "string" ? [`Hint: ${rejection.hint}`] : []),
+  ].join("\n");
+}
+
+function formatOperation(index: number, operation: ProbeOperation): string {
+  const method = typeof operation.method === "string" ? operation.method.toUpperCase() : "GET";
+  const url = typeof operation.url === "string" ? operation.url : "";
+  const description = typeof operation.description === "string" ? operation.description.trim() : "";
+  return [
+    `  ${index}  ${operation.name}\t${method}\t${url}`,
+    ...(description.length > 0 ? [`     ${description}`] : []),
+  ].join("\n");
+}
+
+function formatCreatedListing(
+  created: CreatedListing,
+  name: string,
+  payoutWallet: string,
+  endpoints: number,
+): string {
+  const slug = listingSlug(created) ?? "(no slug returned)";
+  const status = typeof created.listing?.status === "string" ? created.listing.status : "unknown";
+  const verification =
+    typeof created.listing?.verification === "string" ? created.listing.verification : "none";
+  return [
+    `Listed ${name} as ${slug} with ${endpoints} endpoint${endpoints === 1 ? "" : "s"}.`,
+    `Status: ${status} · verification: ${verification}`,
+    `Payout wallet: ${payoutWallet}`,
+  ].join("\n");
+}
+
+/**
+ * Where the payouts land. Deploying the splitter is a wallet transaction
+ * against the factory, so it stays in the console; this says which address the
+ * money will sit behind and what to run once it exists.
+ */
+function formatSplitters(
+  splitters: SplitterStates | undefined,
+  splittersError: string | undefined,
+  slug: string | undefined,
+  baseUrl: string,
+): string[] {
+  const nextStep = `Deploy the FeeSplitter from your wallet in the console at ${listingsUrl(baseUrl, "/providers").href}, then run \`vapi publish activate ${slug ?? "<slug>"}\`.`;
+  if (splittersError !== undefined) {
+    return [`Could not read your splitters: ${splittersError}`, nextStep];
+  }
+  const states = Array.isArray(splitters?.networkStates) ? splitters.networkStates : [];
+  const fee = typeof splitters?.feeBp === "number" ? ` (vAPI fee ${splitters.feeBp / 100}%)` : "";
+  return [
+    `Splitters${fee}:`,
+    ...states.map((state) => {
+      const label = [state.name, state.network].filter(Boolean).join(" ");
+      const address = typeof state.splitterAddress === "string" ? state.splitterAddress : "unknown";
+      return `  ${label || "network"}\t${address}\t${state.deployed === true ? "deployed" : "not deployed"}`;
+    }),
+    nextStep,
+  ];
+}
+
+function formatListingStatus(
+  slug: string,
+  action: ListingStatusAction,
+  result: { status?: unknown; verification?: unknown },
+): string {
+  const status = typeof result.status === "string" ? result.status : "unknown";
+  const verification = typeof result.verification === "string" ? result.verification : undefined;
+  const lines = [
+    `Listing ${slug}: ${status}${verification === undefined ? "" : ` · verification: ${verification}`}`,
+  ];
+  if (action === "activate") {
+    lines.push(
+      `It answers searches that pass --include-unverified. Ask for review with vapi publish verify-request ${slug}.`,
+    );
+  }
+  if (action === "request_verification") {
+    lines.push(
+      "vAPI reviews it; until then it stays out of the default search and is tagged [requested].",
+    );
+  }
+  return lines.join("\n");
+}
+
+function formatMyListings(result: { listings?: readonly unknown[] }): string {
+  const listings = Array.isArray(result.listings) ? result.listings : [];
+  if (listings.length === 0) return "No listings yet. Create one with vapi publish <url>.";
+  return [
+    "SLUG\tSTATUS\tVERIFICATION\tNAME",
+    ...listings.map((listing) => {
+      const record = (typeof listing === "object" && listing !== null ? listing : {}) as Record<
+        string,
+        unknown
+      >;
+      return [
+        typeof record.slug === "string" ? record.slug : "—",
+        typeof record.status === "string" ? record.status : "—",
+        typeof record.verification === "string" ? record.verification : "none",
+        typeof record.name === "string" ? record.name : "",
+      ].join("\t");
+    }),
+  ].join("\n");
+}
+
+const CLAIM_USAGE = "Usage: vapi claim <origin> [--wallet <name>]";
+
+/**
+ * `vapi claim <origin>`: the owner of an API vAPI indexed from a public
+ * catalog takes the listings over. The registry sends an EIP-4361 message; the
+ * wallet the listings already pay signs it on the same path \`vapi publish\`
+ * signs its payout line, and the registry recovers the signer to match it
+ * against their payTo. Nothing is paid and the payout path does not change. A
+ * human act, like publishing: there is no MCP tool for it.
+ */
+async function claimCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set([WALLET_OPTION]),
+    maximumPositionals: 1,
+  });
+  const origin = claimOrigin(requiredPositional(parsed.positionals[0], CLAIM_USAGE));
+  const { client, baseUrl } = await listingsClient(io, dependencies);
+  const wallet = await targetWallet(parsed, dependencies);
+  const { account } = await unlockTarget(wallet, dependencies);
+  const address = requireEvmAddress(
+    account.address,
+    wallet.name,
+    `vapi claim ${origin} --wallet <name>`,
+  );
+  const nonce = await client.claimNonce(origin, address);
+  const message = typeof nonce.message === "string" ? nonce.message : "";
+  assertClaimMessage(message, { baseUrl, origin, address });
+  const signature = await account.signMessage({ message });
+  const result = await client.claim({ origin, message, signature });
+  const claimed = (Array.isArray(result.claimed) ? result.claimed : []).filter(
+    (slug): slug is string => typeof slug === "string",
+  );
+  await recordAudit(dependencies, "listing.claim", {
+    wallet: wallet.name,
+    detail: `${origin} ${claimed.join(",")}`.trim(),
+  });
+  outputForWallet(io, json, wallet, { origin, claimed }, formatClaimed(origin, claimed));
+}
+
+/** An https origin, and nothing more: a claim covers every listing served from it. */
+function claimOrigin(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new UsageError(`${CLAIM_USAGE}. ${JSON.stringify(value)} is not a URL.`);
+  }
+  if (url.protocol !== "https:" || url.pathname !== "/" || url.search !== "" || url.hash !== "") {
+    throw new UsageError(
+      `vapi claim takes an https origin such as https://api.example, not ${JSON.stringify(value)}.`,
+    );
+  }
+  return url.origin;
+}
+
+function formatClaimed(origin: string, claimed: readonly string[]): string {
+  if (claimed.length === 0) return `Nothing was claimed from ${origin}.`;
+  return [
+    `Claimed ${claimed.length} listing${claimed.length === 1 ? "" : "s"} served from ${origin}:`,
+    ...claimed.map((slug) => `  ${slug}`),
+    "They are still paid directly to this wallet, with no vAPI fee. vapi publish list shows them; vapi publish verify-request <slug> asks for review.",
+  ].join("\n");
 }
 
 const EXPORT_KEY_WARNING =
@@ -1903,21 +3034,104 @@ function outputStub(io: CliIo, json: boolean): void {
 }
 
 /**
+ * The short word for how far a listing got through vAPI review. A mirrored
+ * external row is called `external` rather than `unverified`: vAPI reviewed
+ * nothing it merely mirrored, and saying "unverified" would read as a verdict
+ * on a catalog vAPI never claimed to judge.
+ */
+export function verificationTag(listing: {
+  verification?: ListingVerification;
+  external?: boolean;
+}): "verified" | "requested" | "unverified" | "external" {
+  if (listing.external) return "external";
+  if (listing.verification === "verified") return "verified";
+  return listing.verification === "requested" ? "requested" : "unverified";
+}
+
+/**
  * One block per listing. The group tag is the shortest honest answer to "whose
- * API is this", and the fee label is the registry's own disclosure of what is
- * already inside the price, so neither is recomputed here.
+ * API is this", the verification tag is how far vAPI reviewed it, and the fee
+ * label is the registry's own disclosure of what is already inside the price,
+ * so none of the three is recomputed here. A group that already says `external`
+ * is not repeated by the verification tag.
  */
 function formatSearch(page: Awaited<ReturnType<typeof searchMarketplace>>): string {
   if (page.items.length === 0) return "No listings found.";
   return page.items
-    .map((item) =>
-      [
-        `${item.ref}\t${item.kind}\t${item.group ? `[${item.group}] ` : ""}${item.card.title}`,
+    .map((item) => {
+      const tags = [
+        ...(item.group ? [item.group] : []),
+        verificationTag({ verification: item.verification, external: isMirroredHit(item) }),
+      ];
+      const prefix = [...new Set(tags)].map((tag) => `[${tag}] `).join("");
+      return [
+        `${item.ref}\t${item.kind}\t${prefix}${item.card.title}`,
         `  ${item.card.summary}`,
         ...(item.fee ? [`  Fee: ${item.fee.label}`] : []),
-      ].join("\n"),
-    )
+      ].join("\n");
+    })
     .join("\n");
+}
+
+/**
+ * `inspect` answers with the whole record, so the disclosures a human decides
+ * on — how far vAPI reviewed this listing, what network fee is already inside
+ * the price, and how the listing has behaved lately — are said in words above
+ * it. Liveness and conformance are said only when the registry sent them.
+ */
+function formatInspect(result: Awaited<ReturnType<typeof inspectService>>): string {
+  return [
+    `Verification: ${verificationTag({
+      verification: result.verification,
+      external: result.group === "external",
+    })}`,
+    ...(result.fee ? [`Fee: ${result.fee.label}`] : []),
+    ...(result.liveness ? [formatLiveness(result.liveness)] : []),
+    ...(result.conformance ? [formatConformance(result.conformance)] : []),
+    JSON.stringify(result, null, 2),
+  ].join("\n");
+}
+
+function formatLiveness(liveness: ListingLiveness): string {
+  const checks = `${liveness.checks7d} check${liveness.checks7d === 1 ? "" : "s"}`;
+  return [
+    `Liveness: ${(liveness.uptime7d * 100).toFixed(1)}% up over 7 days (${checks})`,
+    ...(liveness.latencyP50Ms === null ? [] : [`p50 ${Math.round(liveness.latencyP50Ms)} ms`]),
+    ...(liveness.latencyP95Ms === null ? [] : [`p95 ${Math.round(liveness.latencyP95Ms)} ms`]),
+  ].join(" · ");
+}
+
+const OFFER_TRANSPORT_WORDS = {
+  body: "offer in the JSON body",
+  header: "offer in the PAYMENT-REQUIRED header only",
+  both: "offer in header and body",
+} as const;
+
+function formatConformance(conformance: ListingConformance): string {
+  return [
+    `Conformance: ${
+      conformance.declaredVersion === null
+        ? "no x402 version declared"
+        : `x402 v${conformance.declaredVersion}`
+    }, ${conformance.versionConformant ? "conformant" : "not conformant"}, ${
+      OFFER_TRANSPORT_WORDS[conformance.offerTransport]
+    }`,
+    ...(conformance.issues.length === 0 ? [] : [`issues: ${conformance.issues.join(", ")}`]),
+  ].join(" · ");
+}
+
+/**
+ * One line, above the result, when the listing that was just paid is not
+ * vAPI-verified. It never blocks and never prompts: the payment has already
+ * happened, and the point is that the next one is an informed choice.
+ */
+export function verificationNotice(verification: ListingVerification | undefined): string[] {
+  if (verification === undefined || verification === "verified") return [];
+  const state =
+    verification === "requested"
+      ? "requested — vAPI review is pending"
+      : "unverified — vAPI has not reviewed this listing";
+  return [`Verification: ${state}. Check its request contract and its price with vapi inspect.`];
 }
 
 function formatWallet(wallet: Awaited<ReturnType<typeof getWallet>>): string {

@@ -176,7 +176,11 @@ describe("vAPI registry helpers", () => {
         config,
         fetchImpl,
       ),
-    ).resolves.toEqual(marketplacePage);
+      // The fixture predates the verification tier, so every hit reads as `none`.
+    ).resolves.toEqual({
+      ...marketplacePage,
+      items: marketplacePage.items.map((item) => ({ ...item, verification: "none" })),
+    });
 
     const url = new URL(fetchImpl.mock.calls[0]![0] as URL);
     expect(url.searchParams.get("q")).toBe("weather");
@@ -184,6 +188,93 @@ describe("vAPI registry helpers", () => {
     expect(url.searchParams.get("network")).toBe("eip155:8453");
     expect(url.searchParams.get("limit")).toBe("7");
     expect(url.searchParams.get("cursor")).toBe("opaque");
+  });
+
+  it("reads the verification tier the registry sends", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        ...marketplacePage,
+        items: [
+          { ...marketplacePage.items[0], verification: "verified" },
+          { ...marketplacePage.items[1], verification: "requested" },
+        ],
+      }),
+    );
+
+    const page = await searchMarketplace({ query: "weather" }, config, fetchImpl);
+
+    expect(page.items.map((item) => item.verification)).toEqual(["verified", "requested"]);
+  });
+
+  it("sends includeUnverified only when it is asked for", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => Response.json(marketplacePage));
+
+    await searchMarketplace({ query: "weather" }, config, fetchImpl);
+    await searchMarketplace({ query: "weather", includeUnverified: false }, config, fetchImpl);
+    await searchMarketplace({ query: "weather", includeUnverified: true }, config, fetchImpl);
+
+    const switches = fetchImpl.mock.calls.map((call) =>
+      new URL(call[0] as URL).searchParams.get("includeUnverified"),
+    );
+    expect(switches).toEqual([null, null, "true"]);
+  });
+
+  it("rejects a non-boolean includeUnverified before it reaches the registry", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+
+    await expect(
+      searchMarketplace(
+        { query: "weather", includeUnverified: "yes" as unknown as boolean },
+        config,
+        fetchImpl,
+      ),
+    ).rejects.toThrow();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("threads the source search option through to the registry query string", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ ...marketplacePage, items: [] }))
+      .mockResolvedValueOnce(Response.json({ ...marketplacePage, items: [] }));
+    const source = vapiRegistrySource("https://console.vapinetwork.ai", { fetch: fetchImpl });
+
+    await source.search("weather");
+    await source.search("weather", { includeUnverified: true });
+
+    const switches = fetchImpl.mock.calls.map((call) =>
+      new URL(call[0] as URL).searchParams.get("includeUnverified"),
+    );
+    expect(switches).toEqual([null, "true"]);
+  });
+
+  it("carries the verification tier onto a mirrored listing", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        ...marketplacePage,
+        items: [{ ...marketplacePage.items[1], verification: "none" }],
+      }),
+    );
+    const source = vapiRegistrySource("https://console.vapinetwork.ai", { fetch: fetchImpl });
+
+    const listings = await source.search("prices");
+
+    expect(listings).toHaveLength(1);
+    expect(listings[0]!.verification).toBe("none");
+  });
+
+  it("resolves one exact ref even when it was never verified", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(callsPage));
+    const source = vapiRegistrySource("https://console.vapinetwork.ai", { fetch: fetchImpl });
+
+    const listing = await source.inspect("weather-call");
+
+    expect(listing?.verification).toBe("none");
+    expect(new URL(fetchImpl.mock.calls[0]![0] as URL).searchParams.get("includeUnverified")).toBe(
+      "true",
+    );
   });
 
   it("resolves executable endpoints through the compatibility API", async () => {

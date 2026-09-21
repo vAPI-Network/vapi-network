@@ -8,6 +8,7 @@
     "paths": {
       "@vapi-network/core": ["./packages/core/src/index.ts"],
       "@vapi-network/core/secrets": ["./packages/core/src/secrets.ts"],
+      "@vapi-network/core/api-key": ["./packages/core/src/api-key.ts"],
       "@vapi-network/sources": ["./packages/sources/src/index.ts"],
       "@vapi-network/mcp": ["./packages/mcp/src/index.ts"],
       "@vapi-network/cli": ["./packages/cli/src/index.ts"],
