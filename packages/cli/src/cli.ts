@@ -17,6 +17,7 @@ import {
   assertWalletName,
   checkReceiptSettlement,
   changeKeystorePassphrase,
+  createPublicFetch,
   createSupportReport,
   enableDefaultNetwork,
   enableSolanaKey,
@@ -33,6 +34,7 @@ import {
   isSolanaNetwork,
   KeystoreError,
   loadConfig,
+  MARKETPLACE_EXECUTION_METHODS,
   listAccounts,
   migrateLegacyRegistryConfig,
   migrateLegacyVapiHome,
@@ -91,6 +93,7 @@ import {
   startStdioServer,
 } from "@vapi-network/mcp";
 import { detectColorLevel, renderBanner } from "./brand.js";
+import { checkX402, formatCheckReport } from "./check.js";
 import {
   API_KEY_CONSOLE_PATH,
   assertClaimMessage,
@@ -136,6 +139,7 @@ Usage:
   vapi inspect <id> [--endpoint <name>] [--json]
   vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--wallet <name>] [--json]
   vapi pay --resume <receipt-id> [--json]
+  vapi check <url> [--method <method>] [--json]
   vapi balance [--wallet <name>] [--json]
   vapi receipts [--limit <n>] [--wallet <name>] [--all-wallets] [--json]
   vapi receipts export --format <json|csv> [--range <24h|7d|30d>] [--wallet <name>] [--all-wallets]
@@ -164,6 +168,8 @@ Usage:
 Every command that touches a wallet takes \`--wallet <name>\`, falls back to \`VAPI_WALLET\`, then to the default set by \`vapi wallet use\`, and names the wallet it used on its first line.
 
 \`vapi search\` answers with vAPI-verified listings plus the mirrored external catalogs. \`--include-unverified\` also returns self-listed APIs that passed vAPI's automated x402 probe but were never reviewed; every result is tagged \`[verified]\`, \`[requested]\`, \`[unverified]\` or \`[external]\`.
+
+\`vapi check <url>\` grades an x402 API's 402 without paying: status, transport, declared version and its required fields, the exact scheme, canonical USDC, payTo, maxTimeoutSeconds, and the origin's /.well-known/x402 and openapi.json. No wallet, no payment, no registry call. It exits 1 when a rule fails.
 
 \`vapi pay --resume <receipt-id>\` answers the one question a lost response leaves: did that payment settle? It reads the signed authorization's state on-chain — settled, expired, or still pending — and never pays.
 
@@ -539,6 +545,8 @@ export async function runCli(
       case "claim":
         await claimCommand(args.slice(1), json, io, dependencies);
         return 0;
+      case "check":
+        return await checkCommand(args.slice(1), json, io, dependencies);
       case "mcp":
         await mcpCommand(args.slice(1), dependencies);
         return 0;
@@ -1285,6 +1293,45 @@ async function payCommand(
     result as unknown as Record<string, unknown>,
     [...verificationNotice(result.verification), JSON.stringify(result, null, 2)].join("\n"),
   );
+}
+
+const CHECK_USAGE = "Usage: vapi check <url> [--method <method>]";
+
+/**
+ * A local x402 conformance doctor for a provider's own API. Returns the exit
+ * code itself: a failed rule is a `1` with the whole report, not a thrown error.
+ */
+async function checkCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<number> {
+  const parsed = parseArguments(argv, {
+    valueOptions: new Set(["--method"]),
+    maximumPositionals: 1,
+  });
+  const url = requiredPositional(parsed.positionals[0], CHECK_USAGE);
+  if (!isHttpUrl(url)) throw new UsageError(`vapi check takes an http(s) URL. ${CHECK_USAGE}`);
+  const method = (parsed.one("--method") ?? "GET").trim().toUpperCase();
+  if (!(MARKETPLACE_EXECUTION_METHODS as readonly string[]).includes(method)) {
+    throw new UsageError(`--method must be one of ${MARKETPLACE_EXECUTION_METHODS.join(", ")}.`);
+  }
+  const config = await readConfig(getVapiPaths().config, io);
+  const fetchImpl =
+    dependencies.fetchImpl ??
+    createPublicFetch({ allowPrivateNetwork: config.allowPrivateNetwork ?? false });
+  let report: Awaited<ReturnType<typeof checkX402>>;
+  try {
+    report = await checkX402(new URL(url), { method, fetchImpl });
+  } catch (error) {
+    throw new Error(
+      `Could not reach ${url}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+  output(io, json, report, formatCheckReport(report));
+  return report.summary.fail > 0 ? 1 : 0;
 }
 
 const RESUME_OPTION = "--resume";

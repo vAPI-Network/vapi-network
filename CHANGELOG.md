@@ -43,6 +43,17 @@ payment. Nothing is blocked; nothing is decided for you.
   already have an owner (409) each get a sentence. Needs `vapi auth set-key`;
   like publishing, there is no MCP tool for it. Each claim writes a
   `listing.claim` audit line.
+- `vapi check <url>`: a free, local x402 conformance doctor. It fetches the URL
+  without paying, decodes the 402 from the v2 `PAYMENT-REQUIRED` header and the
+  JSON body, and grades status, offer transport, declared version and its
+  required fields, the `exact` scheme, canonical USDC on a known network,
+  `payTo`, `maxTimeoutSeconds`, the origin's `/.well-known/x402` and
+  `/openapi.json` `x-payment-info` — each pass, warn or fail with the
+  registry's snake_case issue codes. `--json` returns one report; exit `0`
+  when nothing failed, `1` when a rule failed, `2` for usage. No wallet, no
+  payment, no registry call. The repository root is now also a composite
+  GitHub Action, "x402 conformance check", with `url` and `fail-on`
+  (`fail` | `warn`) inputs, running the published CLI's `check --json`.
 - `vapi auth set-key`, `vapi auth status` and `vapi auth clear` for the registry
   API key. The key is typed on a prompt and never passed as an argument, is kept
   in the same OS secret store as the wallet passphrase — or in

@@ -227,6 +227,7 @@ to stdout. Exit codes are `0` for success, `1` for an operational failure, and
 | `vapi inspect <id>`                  | `--endpoint <name>`                                                                                                                                                                                     | Verification, fee, liveness, conformance, contract and live quote, for free |
 | `vapi pay <id-or-url>`               | `--method`, `--endpoint`, `--body <json>`, `--content-type`, `--network <caip2>`, `--expected-pay-to`, `--max <usd>`, `--wallet <name>`                                                                 | Calls the API and pays it from the local wallet, naming an unverified tier  |
 | `vapi pay --resume <receipt-id>`     | —                                                                                                                                                                                                       | After a lost response: did that payment settle? Reads the chain, never pays |
+| `vapi check <url>`                   | `--method <method>`                                                                                                                                                                                     | Grades an API's 402 against x402, rule by rule. No wallet, no payment       |
 | `vapi balance`                       | `--wallet <name>`                                                                                                                                                                                       | The wallet's address and USDC balances                                      |
 | `vapi receipts`                      | `--limit <n>`, `--wallet <name>`, `--all-wallets`                                                                                                                                                       | The local append-only call ledger, newest last                              |
 | `vapi receipts export`               | `--format <json\|csv>`, `--range <24h\|7d\|30d>`, `--wallet <name>`, `--all-wallets`                                                                                                                    | Raw receipts for a spreadsheet or dashboard                                 |
@@ -263,6 +264,52 @@ safe. **Pending** means it is unused but still valid — wait until the time it
 prints. It unlocks no wallet and signs nothing. EVM only for now; a Solana
 receipt says so, and a receipt written before 0.4.0 does not record the nonce. `mcp --json` is accepted as a no-op, because the
 stdio transport is already JSON-RPC.
+
+## Check your API
+
+`vapi check` is a free x402 conformance doctor for the API you are building. It
+asks the URL for its price without paying, grades the 402 the way a client reads
+it, and looks for the origin's discovery documents:
+
+```bash
+vapi check https://weather.example/forecast
+vapi check https://weather.example/alerts --method POST --json
+```
+
+| Rule        | Passes when                                                                                     |
+| ----------- | ----------------------------------------------------------------------------------------------- |
+| `status`    | the URL answers HTTP 402                                                                        |
+| `transport` | the offer is readable: a base64 `PAYMENT-REQUIRED` header, a JSON body, or both                 |
+| `version`   | it declares `x402Version` 2 (1 is a warning: v2-only clients cannot pay it)                     |
+| `fields`    | every field that version requires is present and well-typed                                     |
+| `scheme`    | at least one accepted option is `exact`                                                         |
+| `asset`     | an exact option pays canonical USDC, with USDC's EIP-712 domain, on Base, Arc testnet or Solana |
+| `pay_to`    | every exact option's `payTo` is a valid, non-zero address for its network                       |
+| `timeout`   | `maxTimeoutSeconds` is a whole number between 10 and 3600                                       |
+| `discovery` | `/.well-known/x402` serves a JSON document (a warning otherwise)                                |
+| `openapi`   | `/openapi.json` describes the operation with `x-payment-info` (a warning otherwise)             |
+
+Each finding carries a stable snake_case code — `v2_missing_resource`,
+`offer_header_only`, `v2_header_malformed`, `scheme_unsupported` and the rest —
+the same codes the registry records for a listing and `vapi inspect` prints.
+`--json` returns the whole report, including a `conformance` object in the
+registry's shape. The exit code is `0` when nothing failed, warnings included,
+`1` when a rule failed, and `2` for invalid usage. No wallet is opened, nothing
+is signed, and no registry is called: the only requests go to the origin being
+checked, through the same network guard as every other request.
+
+In CI, the repository is also a GitHub Action that runs the published CLI:
+
+```yaml
+- uses: vAPI-Network/vapi-network@main
+  with:
+    url: https://weather.example/forecast
+    fail-on: warn # or fail, the default
+```
+
+It prints every rule, annotates failures and warnings, exposes the JSON report
+as the `report` output, and fails the step on a failed rule — or on a warning
+too, with `fail-on: warn`.
 
 ## Publish an API
 
