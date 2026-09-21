@@ -688,7 +688,7 @@ describe("vapi pay --resume", () => {
     expect(text).toMatch(/^Wallet: agent$/mu);
     expect(text).toContain("Receipt: lost-1 — POST https://vendor.example/paid");
     expect(text).toContain(
-      "Settled: the authorization was used on-chain, so the payment went through. Do not pay again.",
+      "Settled: the authorization was used on-chain, so the payment went through (or the payer cancelled it, which this client never does). Do not pay again.",
     );
   });
 

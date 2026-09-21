@@ -25,8 +25,9 @@ export const EIP3009_AUTHORIZATION_STATE_ABI = [
 /**
  * What the chain says about a signed payment whose response was lost:
  *
- * - `settled`: the nonce was used. The payment went through; paying again
- *   pays twice.
+ * - `settled`: the nonce was used. EIP-3009 also marks a cancelled
+ *   authorization as used, but this client never cancels, so in practice the
+ *   payment went through; paying again pays twice.
  * - `expired`: never used, and the chain is past `validBefore`, so it never can
  *   be. Paying again is safe.
  * - `pending`: never used yet, but still valid. It may still settle; wait for

@@ -1338,7 +1338,7 @@ const RESUME_OPTION = "--resume";
 
 const SETTLEMENT_STATE_WORDS = {
   settled:
-    "Settled: the authorization was used on-chain, so the payment went through. Do not pay again.",
+    "Settled: the authorization was used on-chain, so the payment went through (or the payer cancelled it, which this client never does). Do not pay again.",
   expired:
     "Expired: the authorization was never used and can no longer settle. Paying again is safe.",
   pending: "Pending: the authorization is unused but can still settle.",
