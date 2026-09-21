@@ -54,6 +54,8 @@ import {
   WalletStore,
   writeDefaultConfig,
   type AuditEvent,
+  type ListingConformance,
+  type ListingLiveness,
   type ListingVerification,
   type ResolvedPassphrase,
   type SecretStore,
@@ -2696,9 +2698,10 @@ function formatSearch(page: Awaited<ReturnType<typeof searchMarketplace>>): stri
 }
 
 /**
- * `inspect` answers with the whole record, so the two disclosures a human
- * decides on — how far vAPI reviewed this listing, and what network fee is
- * already inside the price — are said in words above it.
+ * `inspect` answers with the whole record, so the disclosures a human decides
+ * on — how far vAPI reviewed this listing, what network fee is already inside
+ * the price, and how the listing has behaved lately — are said in words above
+ * it. Liveness and conformance are said only when the registry sent them.
  */
 function formatInspect(result: Awaited<ReturnType<typeof inspectService>>): string {
   return [
@@ -2707,8 +2710,38 @@ function formatInspect(result: Awaited<ReturnType<typeof inspectService>>): stri
       external: result.group === "external",
     })}`,
     ...(result.fee ? [`Fee: ${result.fee.label}`] : []),
+    ...(result.liveness ? [formatLiveness(result.liveness)] : []),
+    ...(result.conformance ? [formatConformance(result.conformance)] : []),
     JSON.stringify(result, null, 2),
   ].join("\n");
+}
+
+function formatLiveness(liveness: ListingLiveness): string {
+  const checks = `${liveness.checks7d} check${liveness.checks7d === 1 ? "" : "s"}`;
+  return [
+    `Liveness: ${(liveness.uptime7d * 100).toFixed(1)}% up over 7 days (${checks})`,
+    ...(liveness.latencyP50Ms === null ? [] : [`p50 ${Math.round(liveness.latencyP50Ms)} ms`]),
+    ...(liveness.latencyP95Ms === null ? [] : [`p95 ${Math.round(liveness.latencyP95Ms)} ms`]),
+  ].join(" · ");
+}
+
+const OFFER_TRANSPORT_WORDS = {
+  body: "offer in the JSON body",
+  header: "offer in the PAYMENT-REQUIRED header only",
+  both: "offer in header and body",
+} as const;
+
+function formatConformance(conformance: ListingConformance): string {
+  return [
+    `Conformance: ${
+      conformance.declaredVersion === null
+        ? "no x402 version declared"
+        : `x402 v${conformance.declaredVersion}`
+    }, ${conformance.versionConformant ? "conformant" : "not conformant"}, ${
+      OFFER_TRANSPORT_WORDS[conformance.offerTransport]
+    }`,
+    ...(conformance.issues.length === 0 ? [] : [`issues: ${conformance.issues.join(", ")}`]),
+  ].join(" · ");
 }
 
 /**

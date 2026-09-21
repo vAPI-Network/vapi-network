@@ -51,6 +51,13 @@ payment. Nothing is blocked; nothing is decided for you.
   when the listing it just paid was not verified. Neither prompts nor blocks.
 - `verification` in `--json` on `search`, `inspect` and `pay`, and on the
   `call.search`, `call.inspect` and `call.pay` MCP results.
+- `vapi inspect` prints a `Liveness:` line — uptime over seven days of hourly
+  re-probes, p50 and p95 latency — and a `Conformance:` line — declared x402
+  version, whether the 402 follows it, where the offer travels, issue codes —
+  when the registry sends `liveness` and `conformance`. Both are optional on
+  every discovery hit and service record, reach `--json` and `call.inspect`
+  unchanged, and a malformed value reads as absent rather than failing the
+  listing.
 - `includeUnverified` on `discover()` and on the `Source.search` seam, and
   `verification` on core's `Listing`. Sources that have no notion of vAPI
   verification ignore the option and claim no tier.

@@ -572,6 +572,53 @@ describe("inspect output", () => {
     ).toBe(0);
     expect(JSON.parse(asJson.stdout[0]!)).toMatchObject({ verification: "none" });
   });
+
+  it("says how the listing has behaved lately when the registry knows", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-health-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () =>
+      Response.json(
+        servicesResponse({
+          liveness: { uptime7d: 0.9941, latencyP50Ms: 212.4, latencyP95Ms: null, checks7d: 168 },
+          conformance: {
+            declaredVersion: 2,
+            versionConformant: false,
+            offerTransport: "header",
+            issues: ["v2_missing_resource", "offer_header_only"],
+          },
+        }),
+      ),
+    );
+    const captured = captureIo();
+
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization"], captured.io, { fetchImpl }),
+    ).toBe(0);
+
+    const text = captured.stdout.join("\n");
+    expect(text).toContain("Liveness: 99.4% up over 7 days (168 checks) · p50 212 ms");
+    expect(text).not.toContain("p95");
+    expect(text).toContain(
+      "Conformance: x402 v2, not conformant, offer in the PAYMENT-REQUIRED header only · issues: v2_missing_resource, offer_header_only",
+    );
+  });
+
+  it("stays silent about liveness and conformance a registry does not send", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-no-health-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => Response.json(servicesResponse()));
+    const captured = captureIo();
+
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization"], captured.io, { fetchImpl }),
+    ).toBe(0);
+
+    const text = captured.stdout.join("\n");
+    expect(text).not.toContain("Liveness:");
+    expect(text).not.toContain("Conformance:");
+  });
 });
 
 describe("the verification notice vapi pay prints", () => {

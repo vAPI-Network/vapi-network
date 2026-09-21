@@ -168,6 +168,61 @@ describe("Agent Cash listing inspection", () => {
     ).resolves.toMatchObject({ verification: "none" });
   });
 
+  it("carries the registry's liveness and conformance, and drops a malformed record", async () => {
+    const liveness = { uptime7d: 0.994, latencyP50Ms: 212, latencyP95Ms: 480, checks7d: 168 };
+    const conformance = {
+      declaredVersion: 2,
+      versionConformant: false,
+      offerTransport: "header",
+      issues: ["v2_missing_resource", "offer_header_only"],
+    };
+    const respondWith = (health: Record<string, unknown>) =>
+      vi.fn<typeof fetch>().mockResolvedValue(
+        Response.json({
+          services: [
+            {
+              id: "decodepaymentauthorization",
+              name: "Decode Payment Authorization",
+              description: "Decode an x402 payment authorization.",
+              category: "crypto",
+              tier: "verified",
+              verified: true,
+              wrapped: false,
+              price: "$0.005",
+              networks: ["eip155:8453"],
+              ...health,
+              endpoints: [
+                {
+                  name: "decode",
+                  method: "POST",
+                  url: "https://decode.example/decode",
+                  price: "$0.005",
+                  description: "Decode an authorization payload.",
+                },
+              ],
+            },
+          ],
+        }),
+      );
+
+    await expect(
+      inspectService(
+        { id: "decodepaymentauthorization" },
+        config,
+        respondWith({ liveness, conformance }),
+      ),
+    ).resolves.toMatchObject({ liveness, conformance });
+
+    // An uptime above 1 is not a fraction; the listing still resolves, silently.
+    const malformed = await inspectService(
+      { id: "decodepaymentauthorization" },
+      config,
+      respondWith({ liveness: { ...liveness, uptime7d: 99.4 }, conformance }),
+    );
+    expect(malformed).not.toHaveProperty("liveness");
+    expect(malformed.conformance).toEqual(conformance);
+  });
+
   it("reports an unknown listing id without calling a provider endpoint", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (request) =>
       new URL(request instanceof Request ? request.url : request).pathname.endsWith(

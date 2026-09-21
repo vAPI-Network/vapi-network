@@ -13,8 +13,10 @@ import {
   isMirroredHit,
   isSolanaAddress,
   isSupportedPaymentNetwork,
+  listingConformanceSchema,
   listingFeeSchema,
   listingGroupSchema,
+  listingLivenessSchema,
   listingVerificationSchema,
   loadConfig,
   listAccounts,
@@ -127,6 +129,8 @@ const inspectToolResultSchema = z.object({
   group: listingGroupSchema.optional(),
   fee: listingFeeSchema.optional(),
   verification: listingVerificationSchema,
+  liveness: listingLivenessSchema.optional(),
+  conformance: listingConformanceSchema.optional(),
   payment: z
     .object({
       scheme: z.literal("exact"),
