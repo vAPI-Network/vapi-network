@@ -85,6 +85,7 @@ describe("x402 SVM payloads", () => {
       x402Version: 2,
       accepted: { network: SOLANA_MAINNET_CAIP2 },
       payload: { transaction: expect.any(String) },
+      extensions: { "builder-code": { info: { s: ["vapi"] } } },
     });
     expect(
       JSON.parse(Buffer.from(payment.headers["PAYMENT-SIGNATURE"], "base64").toString("utf8")),

@@ -6,13 +6,17 @@ import {
   assertMaxPrice,
   BASE_MAINNET_CAIP2,
   BROWSER_ENABLED_X402_NETWORK_CONFIG,
+  buildCompatibleX402Payment,
   buildEip3009TypedData,
   buildX402Payment,
   classifySettlement,
+  createPaymentId,
+  isValidPaymentId,
   isSvmPaymentRequirements,
   parse402Challenge,
   parse402Response,
   parseSettlementResponse,
+  X402Error,
 } from "./x402.js";
 import {
   SOLANA_MAINNET_CAIP2,
@@ -90,6 +94,140 @@ describe("browser-neutral x402 client", () => {
     });
     expect(payment.headers["PAYMENT-SIGNATURE"]).toBeTruthy();
     expect(Object.keys(payment.headers)).toEqual(["PAYMENT-SIGNATURE"]);
+    expect(decodePaymentSignature(payment.headers["PAYMENT-SIGNATURE"]).extensions).toEqual({
+      "builder-code": { info: { s: ["vapi"] } },
+    });
+    expect(payment.paymentId).toBeUndefined();
+  });
+
+  it("normalizes builder-code while preserving other server extensions", async () => {
+    const valid = await buildPaymentWithExtensions({
+      bazaar: { info: { input: "weather" } },
+      "builder-code": {
+        info: {
+          a: "weather_app",
+          s: [
+            "server_one",
+            "vapi",
+            "INVALID-CODE",
+            "server_one",
+            "server_two",
+            "server_three",
+            "server_four",
+            "server_five",
+            "server_six",
+          ],
+          w: "must-not-echo",
+        },
+        schema: { type: "object" },
+      },
+    });
+    const validExtensions = decodePaymentSignature(valid.headers["PAYMENT-SIGNATURE"]).extensions;
+    expect(validExtensions).toEqual({
+      bazaar: { info: { input: "weather" } },
+      "builder-code": {
+        info: {
+          a: "weather_app",
+          s: ["vapi", "server_one", "server_two", "server_three", "server_four", "server_five"],
+        },
+        schema: { type: "object" },
+      },
+    });
+    expect(
+      (validExtensions?.["builder-code"] as { info: Record<string, unknown> }).info,
+    ).not.toHaveProperty("w");
+
+    const invalid = await buildPaymentWithExtensions({
+      "builder-code": { info: { a: "Invalid app", s: "server_code" } },
+    });
+    expect(decodePaymentSignature(invalid.headers["PAYMENT-SIGNATURE"]).extensions).toEqual({
+      "builder-code": { info: { s: ["vapi", "server_code"] } },
+    });
+  });
+
+  it("adds an advertised payment-identifier and reuses a supplied id", async () => {
+    const paymentId = createPaymentId((bytes) => bytes.fill(0xab));
+    expect(paymentId).toBe(`pay_${"ab".repeat(16)}`);
+    expect(isValidPaymentId(paymentId)).toBe(true);
+    const extensions = {
+      bazaar: { info: { input: "weather" } },
+      "payment-identifier": {
+        info: { required: true, purpose: "dedupe" },
+        schema: { type: "object", required: ["id"] },
+      },
+    };
+
+    const first = await buildPaymentWithExtensions(extensions, paymentId);
+    const second = await buildPaymentWithExtensions(extensions, paymentId);
+    for (const payment of [first, second]) {
+      const sent = decodePaymentSignature(payment.headers["PAYMENT-SIGNATURE"]);
+      expect(payment.paymentId).toBe(paymentId);
+      expect(sent.extensions).toEqual({
+        bazaar: { info: { input: "weather" } },
+        "builder-code": { info: { s: ["vapi"] } },
+        "payment-identifier": {
+          schema: { type: "object", required: ["id"] },
+          info: { required: true, purpose: "dedupe", id: paymentId },
+        },
+      });
+    }
+  });
+
+  it("includes payment extensions in the compatibility header", async () => {
+    const paymentId = `pay_${"cd".repeat(16)}`;
+    const quote = parse402Challenge(
+      {
+        ...exactChallenge({}),
+        extensions: {
+          "builder-code": { info: { a: "weather_app" }, schema: { type: "object" } },
+          "payment-identifier": {
+            info: { required: true },
+            schema: { type: "object", required: ["id"] },
+          },
+        },
+      },
+      networks,
+    );
+
+    const payment = await buildCompatibleX402Payment({
+      account: { address: BUYER, signTypedData: async () => SIGNATURE },
+      quote,
+      nonce: NONCE,
+      nowSeconds: 1_700_000_000,
+      paymentId,
+    });
+    const canonical = decodePaymentSignature(payment.headers["PAYMENT-SIGNATURE"]);
+    const compatible = JSON.parse(payment.headers["X-PAYMENT"]) as {
+      extensions?: Record<string, unknown>;
+    };
+
+    expect(compatible.extensions).toEqual(canonical.extensions);
+    expect(compatible.extensions).toMatchObject({
+      "builder-code": { info: { a: "weather_app", s: ["vapi"] } },
+      "payment-identifier": { info: { required: true, id: paymentId } },
+    });
+  });
+
+  it("rejects a malformed supplied payment id only when payment-identifier is advertised", async () => {
+    await expect(
+      buildPaymentWithExtensions(
+        {
+          "payment-identifier": {
+            info: { required: true },
+            schema: { type: "object" },
+          },
+        },
+        "bad id",
+      ),
+    ).rejects.toBeInstanceOf(X402Error);
+    expect(isValidPaymentId("a".repeat(16))).toBe(true);
+    expect(isValidPaymentId("a".repeat(128))).toBe(true);
+    expect(isValidPaymentId("a".repeat(15))).toBe(false);
+    expect(isValidPaymentId("a".repeat(129))).toBe(false);
+    expect(isValidPaymentId("pay_not.valid".padEnd(16, "x"))).toBe(false);
+
+    const withoutAdvertisement = await buildPaymentWithExtensions(undefined, "bad id");
+    expect(withoutAdvertisement.paymentId).toBeUndefined();
   });
 
   it("does not extend authorization beyond a short provider timeout", () => {
@@ -228,6 +366,42 @@ describe("browser-neutral x402 client", () => {
     const quote = parse402Challenge(challenge, networks);
     expect(quote.extensions).toBeUndefined();
     expect(quote.accepted.amount).toBeDefined();
+  });
+
+  it("keeps payment extensions when unrelated discovery metadata exceeds its limits", async () => {
+    const challenge = exactChallenge({});
+    const builderCode = {
+      info: { a: "weather_app" },
+      schema: { type: "object" },
+    };
+    const paymentIdentifier = {
+      info: { required: true },
+      schema: { type: "object", required: ["id"] },
+    };
+    challenge.extensions = {
+      bazaar: { info: { examples: Array.from({ length: 65 }, (_, index) => index) } },
+      "builder-code": builderCode,
+      "payment-identifier": paymentIdentifier,
+    };
+
+    const quote = parse402Challenge(challenge, networks);
+    expect(quote.extensions).toEqual({
+      "builder-code": builderCode,
+      "payment-identifier": paymentIdentifier,
+    });
+
+    const paymentId = `pay_${"ef".repeat(16)}`;
+    const payment = await buildX402Payment({
+      signer: { address: BUYER, signTypedData: async () => SIGNATURE },
+      quote,
+      nonce: NONCE,
+      nowSeconds: 1_700_000_000,
+      paymentId,
+    });
+    expect(decodePaymentSignature(payment.headers["PAYMENT-SIGNATURE"]).extensions).toMatchObject({
+      "builder-code": { info: { a: "weather_app", s: ["vapi"] } },
+      "payment-identifier": { info: { required: true, id: paymentId } },
+    });
   });
 
   it("rejects oversized payment metadata and challenge extensions", () => {
@@ -378,6 +552,34 @@ describe("browser-neutral x402 client", () => {
 
 function encodeBase64(value: unknown) {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64");
+}
+
+function decodePaymentSignature(value: string): {
+  extensions?: Record<string, unknown>;
+} {
+  return JSON.parse(Buffer.from(value, "base64").toString("utf8")) as {
+    extensions?: Record<string, unknown>;
+  };
+}
+
+async function buildPaymentWithExtensions(
+  extensions: Record<string, unknown> | undefined,
+  paymentId?: string,
+) {
+  const quote = parse402Challenge(
+    {
+      ...exactChallenge({}),
+      ...(extensions ? { extensions } : {}),
+    },
+    networks,
+  );
+  return await buildX402Payment({
+    signer: { address: BUYER, signTypedData: async () => SIGNATURE },
+    quote,
+    nonce: NONCE,
+    nowSeconds: 1_700_000_000,
+    ...(paymentId ? { paymentId } : {}),
+  });
 }
 
 function exactChallenge(overrides: Record<string, unknown>) {

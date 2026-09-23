@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -93,5 +93,31 @@ describe("receipts ledger", () => {
     expect(() =>
       parseReceipt({ ...receipt, authorization: { ...authorization, nonce: "0x1234" } }),
     ).toThrow();
+  });
+
+  it("round-trips payment ids while old literal JSONL rows remain readable", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-payment-id-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "receipts.jsonl");
+    const oldLine =
+      '{"id":"old","timestamp":"2026-09-10T08:00:00.000Z","resourceUrl":"https://api.example/old"}';
+    await writeFile(path, `${oldLine}\n`, "utf8");
+    const current: Receipt = {
+      id: "current",
+      timestamp: "2026-09-10T08:01:00.000Z",
+      resourceUrl: "https://api.example/paid",
+      paymentId: `pay_${"ab".repeat(16)}`,
+    };
+    await appendReceipt(current, path);
+
+    expect(await readReceipts(path)).toEqual([
+      {
+        id: "old",
+        timestamp: "2026-09-10T08:00:00.000Z",
+        resourceUrl: "https://api.example/old",
+      },
+      current,
+    ]);
+    expect(() => parseReceipt({ ...current, paymentId: "bad id" })).toThrow();
   });
 });

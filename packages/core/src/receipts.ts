@@ -27,6 +27,11 @@ export interface Receipt {
   }>;
   readonly payer?: string;
   /**
+   * The x402 payment-identifier id sent with this payment. Absent on receipts
+   * written before it and when the server did not advertise payment-identifier.
+   */
+  readonly paymentId?: string;
+  /**
    * The EIP-3009 authorization this call signed, kept so a payment whose
    * response was lost can be settled against the chain later with
    * `vapi pay --resume`. The token and the network are the quote's `asset` and
@@ -103,6 +108,10 @@ const receiptSchema: z.ZodType<Receipt> = z.strictObject({
     })
     .optional(),
   payer: z.string().optional(),
+  paymentId: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{16,128}$/)
+    .optional(),
   authorization: z
     .strictObject({
       from: z.string().regex(/^0x[0-9a-fA-F]{40}$/),

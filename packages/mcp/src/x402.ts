@@ -97,13 +97,19 @@ export async function buildX402Payment(args: {
   nowSeconds?: number;
   nonce?: Hex;
   fetchImpl?: typeof fetch;
-}): Promise<{ payload: X402PaymentPayload; headers: X402PaymentHeaders }> {
+  paymentId?: string;
+}): Promise<{
+  payload: X402PaymentPayload;
+  headers: X402PaymentHeaders;
+  paymentId?: string;
+}> {
   const payment = await buildSharedX402Payment({
     signer: args.account,
     quote: args.quote,
     ...(args.nowSeconds === undefined ? {} : { nowSeconds: args.nowSeconds }),
     ...(args.nonce === undefined ? {} : { nonce: args.nonce }),
     ...(args.fetchImpl === undefined ? {} : { fetchImpl: args.fetchImpl }),
+    ...(args.paymentId === undefined ? {} : { paymentId: args.paymentId }),
   });
   return {
     payload: payment.payload,
@@ -114,7 +120,9 @@ export async function buildX402Payment(args: {
         scheme: args.quote.accepted.scheme,
         network: args.quote.accepted.network,
         payload: payment.payload.payload,
+        extensions: payment.payload.extensions,
       }),
     },
+    ...(payment.paymentId ? { paymentId: payment.paymentId } : {}),
   };
 }

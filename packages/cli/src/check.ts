@@ -1,12 +1,15 @@
 /**
  * `vapi check <url>`: a free, local x402 conformance doctor. It asks the URL
  * for its price the way a client would, without paying, and grades the 402
- * rule by rule; then it looks for the origin's discovery document and its
- * OpenAPI description. No wallet is opened, nothing is signed, and no registry
- * is called: every request goes to the origin being checked.
+ * rule by rule, including its advertised extensions; then it looks for the
+ * origin's discovery document and an OpenAPI description beside the checked
+ * path, at the origin root, or through the origin's API catalog. No wallet is
+ * opened, nothing is signed, and no registry is called: every request goes to
+ * the origin being checked.
  *
- * The issue codes are the snake_case codes of the registry's
- * `probe.conformance`, so `vapi check` and `vapi inspect` speak one vocabulary.
+ * Offer issue codes use the registry's snake_case `probe.conformance`
+ * vocabulary, so `vapi check` and `vapi inspect` speak one language. The local
+ * extensions finding does not change that registry-shaped record.
  */
 
 import { isAddress } from "viem";
@@ -37,6 +40,8 @@ export type CheckReport = {
   status: number;
   /** The same record the registry keeps per listing; null when there is no offer to grade. */
   conformance: ListingConformance | null;
+  /** Known x402 extensions advertised by the declared offer, in a stable order. */
+  extensions: string[];
   rules: CheckRule[];
   summary: Record<CheckResult, number>;
 };
@@ -47,6 +52,16 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const MIN_TIMEOUT_SECONDS = 10;
 /** Longer than this, a signed payment stays spendable for over an hour. */
 const MAX_TIMEOUT_SECONDS = 3_600;
+const MAX_API_CATALOG_HREFS = 10;
+
+const KNOWN_EXTENSIONS = [
+  "bazaar",
+  "builder-code",
+  "payment-identifier",
+  "sign-in-with-x",
+  "offer-and-receipt",
+  "auth-hints",
+] as const;
 
 type FieldType = "string" | "text" | "amount" | "seconds";
 
@@ -94,10 +109,12 @@ export async function checkX402(
   const response = await send(options.fetchImpl, target, options.method);
   const rules = [statusRule(response)];
   let conformance: ListingConformance | null = null;
+  let extensions: string[] = [];
   if (response.status === 402) {
     const graded = gradeOffer(await readOffer(response));
     rules.push(...graded.rules);
     conformance = graded.conformance;
+    extensions = graded.extensions;
   } else {
     void response.body?.cancel().catch(() => undefined);
   }
@@ -108,6 +125,7 @@ export async function checkX402(
     method: options.method,
     status: response.status,
     conformance,
+    extensions,
     rules,
     summary: {
       pass: rules.filter((rule) => rule.result === "pass").length,
@@ -136,10 +154,15 @@ function rule(name: string, result: CheckResult, detail: string, issues: string[
   return { rule: name, result, detail, issues };
 }
 
-async function send(fetchImpl: typeof fetch, url: URL, method: string): Promise<Response> {
+async function send(
+  fetchImpl: typeof fetch,
+  url: URL,
+  method: string,
+  accept = "application/json",
+): Promise<Response> {
   return await fetchImpl(url, {
     method,
-    headers: { accept: "application/json" },
+    headers: { accept },
     redirect: "manual",
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
@@ -181,18 +204,22 @@ async function readOffer(response: Response): Promise<Offer> {
   return { ...(header ? { header } : {}), headerMalformed, ...(body ? { body } : {}) };
 }
 
-function gradeOffer(offer: Offer): { rules: CheckRule[]; conformance: ListingConformance | null } {
+function gradeOffer(offer: Offer): {
+  rules: CheckRule[];
+  conformance: ListingConformance | null;
+  extensions: string[];
+} {
   const transport = transportRule(offer);
   const declared = offer.header ?? offer.body;
   if (declared === undefined || transport.offerTransport === undefined) {
-    return { rules: [transport.rule], conformance: null };
+    return { rules: [transport.rule], conformance: null, extensions: [] };
   }
   const version =
     declared.x402Version === 1 || declared.x402Version === 2 ? declared.x402Version : null;
   const accepts = (Array.isArray(declared.accepts) ? declared.accepts : []).filter(isRecord);
   const exact = accepts.filter((accept) => accept.scheme === "exact");
   const fields = version === null ? undefined : fieldsRule(declared, version);
-  const rules = [
+  const offerRules = [
     transport.rule,
     versionRule(declared, version),
     ...(fields ? [fields] : []),
@@ -201,15 +228,38 @@ function gradeOffer(offer: Offer): { rules: CheckRule[]; conformance: ListingCon
       ? []
       : [assetRule(exact, version), payToRule(exact, version), timeoutRule(exact)]),
   ];
+  const extensions = advertisedExtensions(declared);
   return {
-    rules,
+    rules: [...offerRules, extensionsRule(extensions)],
     conformance: {
       declaredVersion: version,
       versionConformant: fields?.result === "pass",
       offerTransport: transport.offerTransport,
-      issues: [...new Set(rules.flatMap((graded) => graded.issues))],
+      issues: [...new Set(offerRules.flatMap((graded) => graded.issues))],
     },
+    extensions,
   };
+}
+
+function advertisedExtensions(declared: Record<string, unknown>): string[] {
+  const extensions = declared.extensions;
+  if (!isRecord(extensions)) return [];
+  return KNOWN_EXTENSIONS.filter((name) => Object.prototype.hasOwnProperty.call(extensions, name));
+}
+
+function extensionsRule(advertised: readonly string[]): CheckRule {
+  const detail =
+    advertised.length === 0
+      ? "Advertises none of the known extensions."
+      : `Advertises ${advertised.join(", ")}.`;
+  return advertised.includes("bazaar")
+    ? rule("extensions", "pass", detail)
+    : rule(
+        "extensions",
+        "warn",
+        `${detail} Adding Bazaar metadata makes the API discoverable in Coinbase's Bazaar and by Coinbase for Agents.`,
+        ["bazaar_metadata_missing"],
+      );
 }
 
 function transportRule(offer: Offer): {
@@ -471,29 +521,143 @@ async function openApiRule(
   method: string,
   fetchImpl: typeof fetch,
 ): Promise<CheckRule> {
-  const url = new URL("/openapi.json", target.origin);
-  const document = await fetchJson(fetchImpl, url);
-  if (typeof document === "string" || !isRecord(document) || !isRecord(document.paths)) {
+  const pathCandidates = pathAdjacentOpenApiUrls(target);
+  const adjacent = await findOpenApiOperation(fetchImpl, pathCandidates, target.pathname, method);
+  let firstDocument = adjacent.firstDocument;
+  let found = adjacent.found;
+  const catalogUrl = new URL("/.well-known/api-catalog", target.origin);
+  if (found === undefined) {
+    const catalog = await fetchJson(
+      fetchImpl,
+      catalogUrl,
+      "application/linkset+json, application/json",
+    );
+    const seen = new Set(pathCandidates.map((candidate) => candidate.href));
+    const catalogCandidates = apiCatalogOpenApiUrls(catalog, catalogUrl, target.origin, seen);
+    const catalogResult = await findOpenApiOperation(
+      fetchImpl,
+      catalogCandidates,
+      target.pathname,
+      method,
+      true,
+    );
+    firstDocument ??= catalogResult.firstDocument;
+    found = catalogResult.found;
+  }
+  if (found === undefined && firstDocument === undefined) {
+    const nearest = pathCandidates[0]!;
+    const root = pathCandidates[pathCandidates.length - 1]!;
+    const pathDetail =
+      pathCandidates.length === 1
+        ? `at ${nearest.href}`
+        : `from ${nearest.href} through ${root.href}`;
     return rule(
       "openapi",
       "warn",
-      `No OpenAPI document with paths at ${url.href}${typeof document === "string" ? `: ${document}` : "."}`,
+      `No OpenAPI document with paths ${pathDetail}, or in same-origin service-desc links from ${catalogUrl.href}.`,
       ["openapi_missing"],
     );
   }
-  const found = findOperation(document.paths, target.pathname, method);
   const label = `${method} ${target.pathname}`;
   if (found === undefined) {
-    return rule("openapi", "warn", `${url.href} describes no ${label}.`, [
+    const source = openApiSource(firstDocument!, catalogUrl);
+    return rule("openapi", "warn", `${source} describes no ${label}.`, [
       "openapi_operation_missing",
     ]);
   }
-  return found.operation["x-payment-info"] !== undefined ||
-    found.item["x-payment-info"] !== undefined
-    ? rule("openapi", "pass", `${url.href} declares x-payment-info for ${label}.`)
-    : rule("openapi", "warn", `${url.href} describes ${label} without x-payment-info.`, [
+  const source = openApiSource(found.document, catalogUrl);
+  return found.operation.operation["x-payment-info"] !== undefined ||
+    found.operation.item["x-payment-info"] !== undefined
+    ? rule("openapi", "pass", `${source} declares x-payment-info for ${label}.`)
+    : rule("openapi", "warn", `${source} describes ${label} without x-payment-info.`, [
         "openapi_payment_info_missing",
       ]);
+}
+
+function pathAdjacentOpenApiUrls(target: URL): URL[] {
+  const candidates: URL[] = [];
+  const seen = new Set<string>();
+  let candidate = new URL("openapi.json", target);
+  while (true) {
+    if (!seen.has(candidate.href)) {
+      candidates.push(candidate);
+      seen.add(candidate.href);
+    }
+    if (candidate.pathname === "/openapi.json") return candidates;
+    candidate = new URL("../openapi.json", candidate);
+  }
+}
+
+/** Same-origin RFC 9727 service descriptions, in linkset order and without duplicates. */
+function apiCatalogOpenApiUrls(
+  document: unknown,
+  catalogUrl: URL,
+  origin: string,
+  seen: Set<string>,
+): URL[] {
+  if (!isRecord(document) || !Array.isArray(document.linkset)) return [];
+  const candidates: URL[] = [];
+  for (const link of document.linkset) {
+    if (!isRecord(link) || !Array.isArray(link["service-desc"])) continue;
+    for (const description of link["service-desc"]) {
+      if (!isRecord(description) || typeof description.href !== "string") continue;
+      let candidate: URL;
+      try {
+        candidate = new URL(description.href, catalogUrl);
+      } catch {
+        continue;
+      }
+      if (candidate.origin !== origin || seen.has(candidate.href)) continue;
+      seen.add(candidate.href);
+      candidates.push(candidate);
+      if (candidates.length === MAX_API_CATALOG_HREFS) return candidates;
+    }
+  }
+  return candidates;
+}
+
+type OpenApiDocument = {
+  url: URL;
+  paths: Record<string, unknown>;
+  viaCatalog?: true;
+};
+
+async function findOpenApiOperation(
+  fetchImpl: typeof fetch,
+  candidates: readonly URL[],
+  pathname: string,
+  method: string,
+  viaCatalog = false,
+): Promise<{
+  firstDocument?: OpenApiDocument;
+  found?: {
+    document: OpenApiDocument;
+    operation: { item: Record<string, unknown>; operation: Record<string, unknown> };
+  };
+}> {
+  let firstDocument: OpenApiDocument | undefined;
+  for (const url of candidates) {
+    const document = await fetchJson(fetchImpl, url);
+    if (isRecord(document) && isRecord(document.paths)) {
+      const located: OpenApiDocument = {
+        url,
+        paths: document.paths,
+        ...(viaCatalog ? { viaCatalog: true } : {}),
+      };
+      firstDocument ??= located;
+      const operation = findOperation(document.paths, pathname, method);
+      if (operation !== undefined) {
+        return { firstDocument, found: { document: located, operation } };
+      }
+    }
+  }
+  return firstDocument === undefined ? {} : { firstDocument };
+}
+
+function openApiSource(document: OpenApiDocument, catalogUrl: URL): string {
+  return document.viaCatalog
+    ? `${document.url.href} (via the API catalog at ${catalogUrl.href})`
+    : document.url.href;
 }
 
 /** The operation a path template and method describe; a servers prefix may precede the template. */
@@ -517,10 +681,14 @@ function findOperation(
 }
 
 /** The parsed JSON of a 200, or the reason there is none. */
-async function fetchJson(fetchImpl: typeof fetch, url: URL): Promise<unknown> {
+async function fetchJson(
+  fetchImpl: typeof fetch,
+  url: URL,
+  accept = "application/json",
+): Promise<unknown> {
   let response: Response;
   try {
-    response = await send(fetchImpl, url, "GET");
+    response = await send(fetchImpl, url, "GET", accept);
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }

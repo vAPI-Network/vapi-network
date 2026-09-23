@@ -5,6 +5,8 @@ TypeScript toolkit for discovering and paying x402 services from a terminal, an
 MCP client, or your own code. Your key is generated on your machine, encrypted
 under your passphrase, and never leaves it. vAPI applies spend policy before
 signing, sends the payment straight to the service, and writes a local receipt.
+Every payment identifies this client as `vapi` through x402 `builder-code`; when
+an API advertises `payment-identifier`, the generated id is kept on that receipt.
 
 Call works today. Tasks and Compute are next.
 
@@ -226,8 +228,8 @@ to stdout. Exit codes are `0` for success, `1` for an operational failure, and
 | `vapi search [query]`                | `--kind <kind>` (repeatable), `--network <caip2>`, `--limit <n>`, `--cursor <cursor>`, `--include-unverified`                                                                                           | Merged discovery across every configured source, tagged by group and tier   |
 | `vapi inspect <id>`                  | `--endpoint <name>`                                                                                                                                                                                     | Verification, fee, liveness, conformance, contract and live quote, for free |
 | `vapi pay <id-or-url>`               | `--method`, `--endpoint`, `--body <json>`, `--content-type`, `--network <caip2>`, `--expected-pay-to`, `--max <usd>`, `--wallet <name>`                                                                 | Calls the API and pays it from the local wallet, naming an unverified tier  |
-| `vapi pay --resume <receipt-id>`     | —                                                                                                                                                                                                       | After a lost response: did that payment settle? Reads the chain, never pays |
-| `vapi check <url>`                   | `--method <method>`                                                                                                                                                                                     | Grades an API's 402 against x402, rule by rule. No wallet, no payment       |
+| `vapi pay --resume <receipt-id>`     | —                                                                                                                                                                                                       | Checks settlement, shows its payment id, and never pays                     |
+| `vapi check <url>`                   | `--method <method>`                                                                                                                                                                                     | Grades its 402, extensions and same-origin discovery. Never pays            |
 | `vapi balance`                       | `--wallet <name>`                                                                                                                                                                                       | The wallet's address and USDC balances                                      |
 | `vapi receipts`                      | `--limit <n>`, `--wallet <name>`, `--all-wallets`                                                                                                                                                       | The local append-only call ledger, newest last                              |
 | `vapi receipts export`               | `--format <json\|csv>`, `--range <24h\|7d\|30d>`, `--wallet <name>`, `--all-wallets`                                                                                                                    | Raw receipts for a spreadsheet or dashboard                                 |
@@ -262,8 +264,12 @@ payment went through — do not pay again. **Expired** means it was never used
 and the chain is past its `validBefore`, so it never can be — paying again is
 safe. **Pending** means it is unused but still valid — wait until the time it
 prints. It unlocks no wallet and signs nothing. EVM only for now; a Solana
-receipt says so, and a receipt written before 0.4.0 does not record the nonce. `mcp --json` is accepted as a no-op, because the
-stdio transport is already JSON-RPC.
+receipt says so, and a receipt written before 0.4.0 does not record the nonce.
+Every payment payload carries the client code `vapi` in the x402 `builder-code`
+extension. When the API advertises `payment-identifier`, vAPI generates one id,
+sends it with the payment, records it as `paymentId` on the receipt, and shows
+it again in `vapi pay --resume`. `mcp --json` is accepted as a no-op, because
+the stdio transport is already JSON-RPC.
 
 ## Check your API
 
@@ -276,27 +282,40 @@ vapi check https://weather.example/forecast
 vapi check https://weather.example/alerts --method POST --json
 ```
 
-| Rule        | Passes when                                                                                     |
-| ----------- | ----------------------------------------------------------------------------------------------- |
-| `status`    | the URL answers HTTP 402                                                                        |
-| `transport` | the offer is readable: a base64 `PAYMENT-REQUIRED` header, a JSON body, or both                 |
-| `version`   | it declares `x402Version` 2 (1 is a warning: v2-only clients cannot pay it)                     |
-| `fields`    | every field that version requires is present and well-typed                                     |
-| `scheme`    | at least one accepted option is `exact`                                                         |
-| `asset`     | an exact option pays canonical USDC, with USDC's EIP-712 domain, on Base, Arc testnet or Solana |
-| `pay_to`    | every exact option's `payTo` is a valid, non-zero address for its network                       |
-| `timeout`   | `maxTimeoutSeconds` is a whole number between 10 and 3600                                       |
-| `discovery` | `/.well-known/x402` serves a JSON document (a warning otherwise)                                |
-| `openapi`   | `/openapi.json` describes the operation with `x-payment-info` (a warning otherwise)             |
+| Rule         | Passes when                                                                                     |
+| ------------ | ----------------------------------------------------------------------------------------------- |
+| `status`     | the URL answers HTTP 402                                                                        |
+| `transport`  | the offer is readable: a base64 `PAYMENT-REQUIRED` header, a JSON body, or both                 |
+| `version`    | it declares `x402Version` 2 (1 is a warning: v2-only clients cannot pay it)                     |
+| `fields`     | every field that version requires is present and well-typed                                     |
+| `scheme`     | at least one accepted option is `exact`                                                         |
+| `asset`      | an exact option pays canonical USDC, with USDC's EIP-712 domain, on Base, Arc testnet or Solana |
+| `pay_to`     | every exact option's `payTo` is a valid, non-zero address for its network                       |
+| `timeout`    | `maxTimeoutSeconds` is a whole number between 10 and 3600                                       |
+| `extensions` | the offer advertises Bazaar metadata; every known advertised extension is listed                |
+| `discovery`  | `/.well-known/x402` serves a JSON document (a warning otherwise)                                |
+| `openapi`    | a discovered OpenAPI document describes the operation with `x-payment-info`                     |
 
-Each finding carries a stable snake_case code — `v2_missing_resource`,
+The `extensions` rule reports `bazaar`, `builder-code`, `payment-identifier`,
+`sign-in-with-x`, `offer-and-receipt` and `auth-hints` in that order. Missing
+Bazaar metadata is a `bazaar_metadata_missing` warning because adding it makes
+the API discoverable in Coinbase's Bazaar and by Coinbase for Agents. This
+local warning does not appear in the registry-shaped `conformance.issues`.
+
+For OpenAPI, the check tries `openapi.json` beside the checked path and then in
+each ancestor directory, nearest first, ending at the origin's `/openapi.json`.
+If none has a `paths` object, it reads `/.well-known/api-catalog` and follows up
+to 10 RFC 9264 `service-desc` links in order. It only follows same-origin links.
+
+Offer findings carry stable snake_case codes — `v2_missing_resource`,
 `offer_header_only`, `v2_header_malformed`, `scheme_unsupported` and the rest —
 the same codes the registry records for a listing and `vapi inspect` prints.
-`--json` returns the whole report, including a `conformance` object in the
-registry's shape. The exit code is `0` when nothing failed, warnings included,
-`1` when a rule failed, and `2` for invalid usage. No wallet is opened, nothing
-is signed, and no registry is called: the only requests go to the origin being
-checked, through the same network guard as every other request.
+`--json` returns the whole report, including the advertised `extensions` list
+and a `conformance` object in the registry's shape. The exit code is `0` when
+nothing failed, warnings included, `1` when a rule failed, and `2` for invalid
+usage. No wallet is opened, nothing is signed, and no registry is called: the
+only requests go to the origin being checked, through the same network guard as
+every other request.
 
 In CI, the repository is also a GitHub Action that runs the published CLI:
 

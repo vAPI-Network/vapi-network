@@ -3,6 +3,25 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## Unreleased
+
+### Added
+
+- Every EVM and Solana x402 payment now carries the `builder-code` extension
+  with the client code `vapi`. APIs that advertise `payment-identifier` receive
+  one generated payment id, echoed with their extension metadata; receipts
+  record it as `paymentId`, and `vapi pay --resume` shows it without paying or
+  resubmitting.
+- `vapi check` now lists known extensions advertised by a 402 offer. Missing
+  Bazaar metadata is a warning because Bazaar and Coinbase for Agents use it to
+  discover the API.
+
+### Changed
+
+- `vapi check` now looks for OpenAPI beside the checked path and in each parent
+  directory before `/openapi.json`. It then follows up to 10 same-origin
+  `service-desc` links from `/.well-known/api-catalog`.
+
 ## 0.4.0
 
 Listing on vAPI became permissionless, so "is this listed?" stopped being a
