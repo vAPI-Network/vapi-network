@@ -79,7 +79,7 @@ export async function startDeviceLink(args: {
   const api = new URL(args.apiBase);
   const nonceResponse = await safeFetch(
     fetchImpl,
-    apiEndpoint(args.apiBase, "/api/auth/siwe-nonce"),
+    apiEndpoint(args.apiBase, "/api/auth/siwe-nonce?purpose=link"),
   );
   if (!nonceResponse.ok) throw httpError("The vAPI sign-in nonce request failed.");
   const noncePayload = await responseRecord(nonceResponse);
