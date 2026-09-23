@@ -52,6 +52,7 @@ import {
 import { inspectService } from "./tools/inspect.js";
 import {
   createRouterTools,
+  routerBuyTool,
   routerChatTool,
   routerModelsTool,
   routerUsageTool,
@@ -573,16 +574,24 @@ export function createVapiServer(options: VapiServerOptions) {
     wallets: options.store,
     fetchImpl: guardedFetch,
     apiBase,
+    account: options.account,
+    config: options.config,
+    ...(options.ledgerPath === undefined ? {} : { ledgerPath: options.ledgerPath }),
+    ...(options.receiptsPath === undefined ? {} : { receiptsPath: options.receiptsPath }),
     ...(options.router?.listRouterModels
       ? { listRouterModels: options.router.listRouterModels }
       : {}),
     ...(options.router?.routerUsage ? { routerUsage: options.router.routerUsage } : {}),
     ...(options.router?.routerChat ? { routerChat: options.router.routerChat } : {}),
     ...(options.router?.ownerStake ? { ownerStake: options.router.ownerStake } : {}),
+    ...(options.router?.buyRouterBalance
+      ? { buyRouterBalance: options.router.buyRouterBalance }
+      : {}),
   });
   server.registerTool("router.models", routerModelsTool, router.models);
   server.registerTool("router.usage", routerUsageTool, router.usage);
   server.registerTool("router.chat", routerChatTool, router.chat);
+  server.registerTool("router.buy", routerBuyTool, router.buy);
 
   const search = async (input: {
     query?: string;

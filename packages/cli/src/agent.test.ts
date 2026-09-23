@@ -198,6 +198,29 @@ describe("vapi agent create", () => {
 });
 
 describe("vapi agent run", () => {
+  it("resolves auto-refill caps again when the purchase is attempted", async () => {
+    const home = await homeWithAgent();
+    const store = await WalletStore.open(home);
+    await store.setRouterRefill("researcher", { belowUsd: 0.5, tierUsd: 1 });
+    const routerChat = vi.fn(async (deps: RouterClientDeps) => {
+      const writer = await WalletStore.open(home);
+      await writer.setSpendCaps("researcher", { perCallAtomic: "0", perDayAtomic: "0" });
+      const caps =
+        typeof deps.refill?.caps === "function" ? await deps.refill.caps() : deps.refill?.caps;
+      expect(caps).toEqual({ perCallAtomic: "0", perDayAtomic: "0" });
+      return textReply("Caps reloaded.");
+    });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["agent", "run", "researcher", "Check caps"], captured.io, {
+        ...createDependencies(),
+        router: { routerChat },
+      }),
+    ).toBe(0);
+    expect(captured.stdout.at(-1)).toBe("Caps reloaded.");
+  });
+
   it("never asks on a non-TTY and declines a scripted above-threshold payment", async () => {
     const home = await homeWithAgent();
     const line = vi.fn(async () => "yes");

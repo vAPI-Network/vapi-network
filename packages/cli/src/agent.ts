@@ -211,7 +211,22 @@ async function runCommand(
   const listingNames = new Map<string, string>();
   const chatRequest = dependencies.router?.routerChat ?? routerChat;
   const chat = async (request: Parameters<typeof routerChat>[1]) => {
-    const result = await chatRequest(routerDependencies(target, dependencies), request);
+    const result = await chatRequest(
+      {
+        ...routerDependencies(target, dependencies),
+        refill: {
+          account,
+          config,
+          caps: async () => {
+            await target.store.reload();
+            return await spendCapsForWallet(target.store, target.name);
+          },
+          paths: { ledgerPath: paths.ledger, receiptsPath: paths.receipts },
+          ...(dependencies.now === undefined ? {} : { now: dependencies.now() }),
+        },
+      },
+      request,
+    );
     for (const call of result.toolCalls) {
       if (call.name !== "call_search") continue;
       const query = searchQuery(call.arguments);

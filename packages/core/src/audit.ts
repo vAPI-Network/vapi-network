@@ -43,6 +43,10 @@ export const AUDIT_EVENTS = [
   "agent.run.pay",
   "agent.run.declined",
   "agent.run.end",
+  // Router balance purchases and automatic refills. These lines record only
+  // the tier/network or a safe refusal class, never an access token or key.
+  "router.buy",
+  "router.refill.declined",
   // A listing this machine created or moved through the registry's states.
   // The slug is not a secret, so it is worth having in the trail.
   "listing.publish",

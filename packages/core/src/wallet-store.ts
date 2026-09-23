@@ -69,11 +69,21 @@ const agentLinkSchema: z.ZodType<AgentLink> = z.object({
   routerBaseUrl: z.string().optional(),
 });
 
+export const ROUTER_TOPUP_TIERS = [1, 5, 20, 50] as const;
+export type RouterTopupTier = (typeof ROUTER_TOPUP_TIERS)[number];
+export type RouterRefill = { belowUsd: number; tierUsd: RouterTopupTier };
+
+const routerRefillSchema: z.ZodType<RouterRefill> = z.object({
+  belowUsd: z.number().finite().min(0),
+  tierUsd: z.union([z.literal(1), z.literal(5), z.literal(20), z.literal(50)]),
+});
+
 /** What `wallets.json` records about one wallet. The keys live in its keystore. */
 export const walletEntrySchema = z.object({
   createdAt: z.iso.datetime(),
   label: z.string().trim().min(1).max(80).optional(),
   spendCaps: spendCapsSchema,
+  routerRefill: routerRefillSchema.optional(),
   link: agentLinkSchema.optional(),
 });
 
@@ -337,6 +347,19 @@ export class WalletStore {
       if (entry) entry.spendCaps = parsed;
     });
     return { ...wallet.entry, spendCaps: parsed };
+  }
+
+  async setRouterRefill(name: string, refill: RouterRefill | null): Promise<WalletEntry> {
+    const parsed = refill === null ? undefined : routerRefillSchema.parse(refill);
+    const wallet = this.resolve({ name });
+    const registry = await this.update((registry) => {
+      const entry = registry.wallets[wallet.name];
+      if (!entry)
+        throw new KeystoreError(unknownWalletMessage(wallet.name, Object.keys(registry.wallets)));
+      if (parsed === undefined) delete entry.routerRefill;
+      else entry.routerRefill = parsed;
+    });
+    return structuredClone(registry.wallets[wallet.name]!);
   }
 
   /** Sets or, with `undefined`, clears the human label of a wallet. */

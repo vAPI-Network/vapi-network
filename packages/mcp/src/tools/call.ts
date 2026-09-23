@@ -7,6 +7,7 @@ import {
   appendReceipt,
   areSamePaymentNetwork,
   assertPublicUrl,
+  completeX402Payment,
   createPublicFetch,
   DiscoveryCatalogError,
   formatUsdc,
@@ -15,11 +16,9 @@ import {
   isNetworkConfigured,
   isSolanaAddress,
   isSolanaNetwork,
-  isSvmPaymentRequirements,
   isSupportedPaymentNetwork,
   marketplaceExecutionMethodSchema,
   marketplaceHitSchema,
-  reserveSpend,
   type ListingVerification,
   type LookupFn,
   type MarketplaceExecutionMethod,
@@ -29,16 +28,10 @@ import {
   type VapiPaymentAccount,
   type VapiConfig,
   type WalletName,
-  type X402PaymentPayload,
+  X402PaymentError,
 } from "@vapi-network/core";
 
-import {
-  assertMaxPrice,
-  buildX402Payment,
-  classifySettlement,
-  parse402Response,
-  parseSettlementResponse,
-} from "../x402.js";
+import { classifySettlement } from "../x402.js";
 import { buildSIWxProof, parseSIWxResponse } from "../siwx.js";
 import { findMarketplaceApiByRef, resolveServiceListing } from "./search.js";
 
@@ -519,203 +512,59 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
     }
   }
 
-  let quote: Awaited<ReturnType<typeof parse402Response>>;
+  let paidAttempt: Awaited<ReturnType<typeof fetchWithGuardedRedirects>> | undefined;
+  let completed: Awaited<ReturnType<typeof completeX402Payment<unknown>>>;
   try {
-    quote = await challengeAttempt.waitFor(
-      parse402Response(challengeAttempt.response, config.networks, requiredNetwork, expectedPayTo),
-      challengeAttempt.response,
-    );
-  } finally {
-    trace.phases.quoteMs = elapsed(trace, initialStarted);
-    challengeAttempt.finish();
-  }
-  trace.quote = {
-    network: quote.accepted.network,
-    asset: quote.accepted.asset,
-    amountAtomic: quote.amountAtomic.toString(),
-    payTo: quote.accepted.payTo,
-  };
-  if (new URL(challengeAttempt.request.url).protocol !== "https:") {
-    throw new Error("vAPI will only send a signed x402 payment to an HTTPS endpoint.");
-  }
-  trace.capsApplied = true;
-  assertMaxPrice(quote.amountAtomic, input.maxPriceUsd);
-  await reserveSpend(quote.amountAtomic, args.spendCaps ?? config.spendCaps, {
-    ledgerPath: args.ledgerPath ?? getVapiPaths().ledger,
-    now: args.now,
-    ...(args.wallet === undefined ? {} : { wallet: args.wallet }),
-  });
-
-  // The reservation above is intentionally complete before this signing call.
-  const signStarted = trace.nowMs();
-  let payment: Awaited<ReturnType<typeof buildX402Payment>>;
-  try {
-    payment = await buildX402Payment({
+    completed = await completeX402Payment({
+      challenge: challengeAttempt,
       account,
-      quote,
-      fetchImpl,
-      nowSeconds: args.now ? Math.floor(args.now.getTime() / 1_000) : undefined,
-    });
-    trace.paymentId = payment.paymentId;
-    trace.payer = isSvmPaymentRequirements(quote.accepted)
-      ? account.solana?.address
-      : account.address;
-    if ("authorization" in payment.payload.payload) {
-      const { from, nonce, validBefore } = payment.payload.payload.authorization;
-      trace.authorization = { from, nonce, validBefore };
-    }
-  } finally {
-    trace.phases.signMs = elapsed(trace, signStarted);
-  }
-  // Every "do not retry" below names the receipt `vapi pay --resume` settles it with.
-  const resumeId = args.receiptsPath === undefined ? undefined : trace.receiptId;
-  const paidHeaders = new Headers(challengeAttempt.request.headers);
-  for (const [name, value] of Object.entries(payment.headers)) {
-    paidHeaders.set(name, value);
-  }
-  const paidBody =
-    challengeAttempt.request.method === "GET" || challengeAttempt.request.method === "HEAD"
-      ? undefined
-      : await challengeAttempt.request.clone().arrayBuffer();
-  const paidRequest = new Request(challengeAttempt.request.url, {
-    method: challengeAttempt.request.method,
-    headers: paidHeaders,
-    body: paidBody,
-  });
-  let paidAttempt: Awaited<ReturnType<typeof fetchWithGuardedRedirects>>;
-  const paidRequestStarted = trace.nowMs();
-  try {
-    paidAttempt = await fetchWithGuardedRedirects(paidRequest, false);
-  } catch (error) {
-    trace.phases.requestMs = elapsed(trace, paidRequestStarted);
-    throw settlementUnknown(
-      "The paid request lost its response. Do not retry automatically; inspect the authorization and settlement state first.",
-      quote,
-      payment.payload,
-      trace.payer ?? account.address,
-      payment.paymentId,
-      null,
-      resumeId,
-      error,
-    );
-  }
-  trace.phases.requestMs = elapsed(trace, paidRequestStarted);
-  const paidResponse = paidAttempt.response;
-  trace.status = paidResponse.status;
-  const settleStarted = trace.nowMs();
-  const settlement = parseSettlementResponse(paidResponse.headers);
-  const settlementOutcome = classifySettlement(settlement);
-  const transaction = settlementTransaction(settlement);
-  const explorerUrl = transaction
-    ? explorerTransactionUrl(quote.accepted.network, transaction)
-    : undefined;
-  trace.settlement = {
-    outcome: settlementOutcome,
-    ...(transaction ? { transaction } : {}),
-    ...(explorerUrl ? { explorerUrl } : {}),
-    ...(settlement === null ? {} : { evidence: settlement }),
-  };
-  trace.phases.settleMs = elapsed(trace, settleStarted);
-  try {
-    if (settlementOutcome === "rejected") {
-      discardBody(paidResponse);
-      throw paymentRejected(paidResponse.status, settlement);
-    }
-    if (isRedirectStatus(paidResponse.status) && settlementOutcome !== "succeeded") {
-      discardBody(paidResponse);
-      throw settlementUnknown(
-        "The paid endpoint returned a redirect. The payment header was not forwarded; do not retry automatically until settlement is checked.",
-        quote,
-        payment.payload,
-        trace.payer ?? account.address,
-        payment.paymentId,
-        settlement,
-        resumeId,
-      );
-    }
-    if (paidResponse.status === 402 && settlementOutcome !== "succeeded") {
-      let message =
-        "The endpoint returned HTTP 402 after receiving the authorization. Settlement is uncertain; do not retry automatically.";
-      try {
-        const changed = await paidAttempt.waitFor(
-          parse402Response(paidResponse, config.networks, requiredNetwork, expectedPayTo),
-          paidResponse,
-        );
-        if (changed.amountAtomic !== quote.amountAtomic) {
-          message = `The endpoint returned a changed quote (${quote.amountAtomic} → ${changed.amountAtomic} atomic USDC) after receiving the authorization. Settlement is uncertain; do not retry automatically.`;
-        }
-      } catch {
-        // The repeated response does not need a parseable next quote to remain ambiguous.
-      }
-      throw settlementUnknown(
-        message,
-        quote,
-        payment.payload,
-        trace.payer ?? account.address,
-        payment.paymentId,
-        settlement,
-        resumeId,
-      );
-    }
-    if (!paidResponse.ok && settlementOutcome !== "succeeded") {
-      discardBody(paidResponse);
-      throw settlementUnknown(
-        `The paid endpoint returned HTTP ${paidResponse.status} without decisive settlement evidence. Do not retry automatically.`,
-        quote,
-        payment.payload,
-        trace.payer ?? account.address,
-        payment.paymentId,
-        settlement,
-        resumeId,
-      );
-    }
-    let body: unknown;
-    const bodyStarted = trace.nowMs();
-    try {
-      body = await paidAttempt.waitFor(readResponseBody(paidResponse), paidResponse);
-    } catch (error) {
-      if (settlementOutcome === "succeeded") {
-        throw responseUnreadableAfterSettlement(paidResponse.status, settlement, error);
-      }
-      throw settlementUnknown(
-        "The paid response could not be read. Do not retry automatically; inspect the authorization and settlement state first.",
-        quote,
-        payment.payload,
-        trace.payer ?? account.address,
-        payment.paymentId,
-        settlement,
-        resumeId,
-        error,
-      );
-    } finally {
-      trace.phases.requestMs = (trace.phases.requestMs ?? 0) + elapsed(trace, bodyStarted);
-    }
-
-    const execution = {
-      resourceUrl: paidAttempt.request.url,
-      method: paidAttempt.request.method,
-      result: {
-        status: paidResponse.status,
-        body,
-        payment: {
-          network: quote.accepted.network,
-          amountAtomic: quote.amountAtomic.toString(),
-          amountUsd: formatUsdc(quote.amountAtomic),
-          asset: quote.accepted.asset,
-          payTo: quote.accepted.payTo,
-          settlement: settlementWithExplorer(settlement, quote.accepted.network),
-          proof: paidResponse.headers.get("x-vapi-payment-proof"),
-        },
-        ...verificationFor(endpoint),
-        ...expectedRequestFor(endpoint, paidResponse.status),
+      caps: args.spendCaps ?? config.spendCaps,
+      config,
+      send: async (paidRequest) => {
+        paidAttempt = await fetchWithGuardedRedirects(paidRequest, false);
+        return paidAttempt;
       },
-    };
-    trace.resourceUrl = execution.resourceUrl;
-    trace.method = execution.method;
-    return execution;
-  } finally {
-    paidAttempt.finish();
+      consumeResponse: async (response) => {
+        if (!paidAttempt) throw new Error("The paid request did not produce a response attempt.");
+        return await paidAttempt.waitFor(readResponseBody(response), response);
+      },
+      fetchImpl,
+      ledgerPath: args.ledgerPath ?? getVapiPaths().ledger,
+      wallet: args.wallet,
+      maxPriceUsd: input.maxPriceUsd,
+      requiredNetwork,
+      expectedPayTo,
+      now: args.now,
+      nowMs: trace.nowMs,
+      quoteStartedMs: initialStarted,
+      trace,
+    });
+  } catch (error) {
+    throw mapX402PaymentError(error, args.receiptsPath === undefined ? undefined : trace.receiptId);
   }
+
+  const execution = {
+    resourceUrl: completed.request.url,
+    method: completed.request.method,
+    result: {
+      status: completed.response.status,
+      body: completed.body,
+      payment: {
+        network: completed.quote.accepted.network,
+        amountAtomic: completed.quote.amountAtomic.toString(),
+        amountUsd: formatUsdc(completed.quote.amountAtomic),
+        asset: completed.quote.accepted.asset,
+        payTo: completed.quote.accepted.payTo,
+        settlement: settlementWithExplorer(completed.settlement, completed.quote.accepted.network),
+        proof: completed.response.headers.get("x-vapi-payment-proof"),
+      },
+      ...verificationFor(endpoint),
+      ...expectedRequestFor(endpoint, completed.response.status),
+    },
+  };
+  trace.resourceUrl = execution.resourceUrl;
+  trace.method = execution.method;
+  return execution;
 }
 
 async function recordCallReceipt(
@@ -725,11 +574,13 @@ async function recordCallReceipt(
 ): Promise<void> {
   if (!args.receiptsPath) return;
   const payment = execution.result.payment;
-  const evidence = payment?.settlement ?? undefined;
-  const transaction = settlementTransaction(evidence);
+  const evidence = trace.settlement?.evidence;
+  const transaction = trace.settlement?.transaction;
   const explorerUrl =
     transaction && payment ? explorerTransactionUrl(payment.network, transaction) : undefined;
-  const settlementOutcome = payment ? classifySettlement(evidence) : undefined;
+  const settlementOutcome = payment
+    ? (trace.settlement?.outcome ?? classifySettlement(payment.settlement))
+    : undefined;
   const identityAsset = trace.identityNetwork
     ? args.config.networks[trace.identityNetwork]?.usdc
     : undefined;
@@ -948,13 +799,6 @@ function settlementTransaction(value: unknown): string | undefined {
   return typeof transaction === "string" && transaction ? transaction : undefined;
 }
 
-function settlementExplorerUrl(network: string | undefined, value: unknown): string | undefined {
-  const transaction = settlementTransaction(value);
-  return network === undefined || transaction === undefined
-    ? undefined
-    : explorerTransactionUrl(network, transaction);
-}
-
 function settlementWithExplorer(value: unknown, network: string): unknown {
   const explorerUrl = settlementExplorerUrl(network, value);
   if (
@@ -966,6 +810,13 @@ function settlementWithExplorer(value: unknown, network: string): unknown {
     return value;
   }
   return { ...value, explorerUrl };
+}
+
+function settlementExplorerUrl(network: string | undefined, value: unknown): string | undefined {
+  const transaction = settlementTransaction(value);
+  return network === undefined || transaction === undefined
+    ? undefined
+    : explorerTransactionUrl(network, transaction);
 }
 
 function expectedRequestFor(
@@ -1307,74 +1158,30 @@ async function fetchAttempt(
   }
 }
 
-/**
- * A payment that may or may not have settled. An EVM authorization can be
- * settled against the chain later, so when this call wrote a receipt the
- * message names the one command that does it; a Solana payment cannot be yet.
- */
-function settlementUnknown(
-  message: string,
-  quote: Awaited<ReturnType<typeof parse402Response>>,
-  payment: X402PaymentPayload,
-  payer: string,
-  paymentId: string | undefined,
-  receipt: unknown | null,
-  resumeId: string | undefined,
-  cause?: unknown,
-): VapiCallError {
+/** Maps core payment facts back to the stable MCP error interface. */
+function mapX402PaymentError(error: unknown, resumeId: string | undefined): unknown {
+  if (!(error instanceof X402PaymentError)) return error;
+  if (error.code === "payment_rejected") {
+    return new VapiCallError("payment_rejected", error.message, undefined, {
+      cause: error.cause,
+      ...(error.paymentRejection ? { paymentRejection: error.paymentRejection } : {}),
+    });
+  }
+  if (error.code === "response_unreadable") {
+    return new VapiCallError("response_unreadable", error.message, undefined, {
+      cause: error.cause,
+      ...(error.confirmedSettlement ? { confirmedSettlement: error.confirmedSettlement } : {}),
+    });
+  }
   const resume =
-    resumeId !== undefined && "authorization" in payment.payload
+    resumeId !== undefined && error.possibleSettlement?.authorizationNonce
       ? ` Check whether it settled with \`vapi pay --resume ${resumeId}\` before paying again.`
       : "";
   return new VapiCallError(
     "settlement_unknown",
-    `${message}${resume}`,
-    {
-      network: quote.accepted.network,
-      asset: quote.accepted.asset,
-      amountAtomic: quote.amountAtomic.toString(),
-      payTo: quote.accepted.payTo,
-      payer,
-      ...(paymentId ? { paymentId } : {}),
-      ...(isSvmPaymentRequirements(quote.accepted)
-        ? {
-            authorizationTransaction:
-              "transaction" in payment.payload ? payment.payload.transaction : "",
-          }
-        : "authorization" in payment.payload
-          ? {
-              authorizationNonce: payment.payload.authorization.nonce,
-              authorizationExpiresAt: payment.payload.authorization.validBefore,
-            }
-          : {}),
-      receipt,
-    },
-    cause === undefined ? undefined : { cause },
-  );
-}
-
-function paymentRejected(httpStatus: number, receipt: unknown): VapiCallError {
-  return new VapiCallError(
-    "payment_rejected",
-    `The paid endpoint reported that x402 settlement was rejected (HTTP ${httpStatus}).`,
-    undefined,
-    { paymentRejection: { httpStatus, receipt } },
-  );
-}
-
-function responseUnreadableAfterSettlement(
-  httpStatus: number,
-  receipt: unknown,
-  cause: unknown,
-): VapiCallError {
-  return new VapiCallError(
-    "response_unreadable",
-    "The paid response could not be read after settlement was confirmed. Do not retry the authorization automatically.",
-    undefined,
-    {
-      cause,
-      confirmedSettlement: { httpStatus, receipt },
-    },
+    `${error.message}${resume}`,
+    error.possibleSettlement,
+    { cause: error.cause },
   );
 }
 

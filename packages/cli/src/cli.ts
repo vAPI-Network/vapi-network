@@ -93,6 +93,7 @@ import {
   type startDeviceLink,
 } from "@vapi-network/core/agent-link";
 import type {
+  buyRouterBalance,
   listRouterModels,
   ownerStake,
   rotateRouterKey,
@@ -176,6 +177,9 @@ Usage:
   vapi router models [--wallet <name>] [--json]
   vapi router usage [--wallet <name>] [--json]
   vapi router chat --model <id> [--system <text>] [--max-tokens <n>] "<prompt>" [--wallet <name>] [--json]
+  vapi router buy <1|5|20|50> [--wallet <name>] [--json]
+  vapi router buy --auto <1|5|20|50> --below <usd> [--wallet <name>] [--json]
+  vapi router buy --auto off [--wallet <name>] [--json]
   vapi router key [--rotate] [--wallet <name>] [--json]
   vapi stake status [--wallet <name>] [--json]
   vapi stake open [--wallet <name>] [--no-browser] [--json]
@@ -259,6 +263,7 @@ export type CliDependencies = {
     listRouterModels?: typeof listRouterModels;
     routerUsage?: typeof routerUsage;
     routerChat?: typeof routerChat;
+    buyRouterBalance?: typeof buyRouterBalance;
     rotateRouterKey?: typeof rotateRouterKey;
     ownerStake?: typeof ownerStake;
     routerCredentials?: typeof routerCredentials;

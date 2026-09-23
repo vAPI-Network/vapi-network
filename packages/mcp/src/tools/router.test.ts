@@ -30,19 +30,30 @@ afterEach(async () => {
 });
 
 describe("vAPI Router MCP tools", () => {
-  it("registers only the three public Router tools with secret-safe schemas and descriptions", async () => {
+  it("registers only the four public Router tools with secret-safe schemas and descriptions", async () => {
     const { server } = await routerServer();
     const { tools } = await server.listTools();
     const names = tools.map((tool) => tool.name);
 
-    expect(names).toEqual(expect.arrayContaining(["router.models", "router.usage", "router.chat"]));
+    expect(names).toEqual(
+      expect.arrayContaining(["router.models", "router.usage", "router.chat", "router.buy"]),
+    );
     expect(names).not.toContain("router.key");
-    for (const name of ["router.models", "router.usage", "router.chat"]) {
+    for (const name of ["router.models", "router.usage", "router.chat", "router.buy"]) {
       const tool = tools.find((candidate) => candidate.name === name);
       expect(tool?.description).toContain("OS secret store");
       expect(tool?.description).toContain("never returned");
       expectPublicValue(tool);
     }
+
+    const buy = tools.find((tool) => tool.name === "router.buy");
+    expect(buy?.inputSchema).toMatchObject({
+      additionalProperties: false,
+      required: ["usd"],
+      properties: {
+        usd: { anyOf: [{ const: 1 }, { const: 5 }, { const: 20 }, { const: 50 }] },
+      },
+    });
 
     await server.close();
   });
@@ -139,6 +150,35 @@ describe("vAPI Router MCP tools", () => {
     await server.close();
   });
 
+  it("offers chat auto-refill context only for the account unlocked at session start", async () => {
+    const routerChat = vi.fn<NonNullable<RouterOverrides["routerChat"]>>(async () => chatResult());
+    const { server } = await routerServer({ routerChat });
+
+    await server.callTool({
+      name: "router.chat",
+      arguments: { model: "open-model", messages: [{ role: "user", content: "active" }] },
+    });
+    await server.callTool({
+      name: "router.chat",
+      arguments: {
+        model: "open-model",
+        messages: [{ role: "user", content: "other" }],
+        wallet: "work",
+      },
+    });
+
+    const activeDeps = routerChat.mock.calls[0]?.[0];
+    expect(activeDeps).toMatchObject({ wallet: "main", refill: expect.any(Object) });
+    expect(
+      typeof activeDeps?.refill?.caps === "function"
+        ? await activeDeps.refill.caps()
+        : activeDeps?.refill?.caps,
+    ).toEqual({ perCallAtomic: "100000", perDayAtomic: "1000000" });
+    expect(routerChat.mock.calls[1]?.[0]).toMatchObject({ wallet: "work" });
+    expect(routerChat.mock.calls[1]?.[0]).not.toHaveProperty("refill");
+    await server.close();
+  });
+
   it.each([
     [
       "an extra tools field",
@@ -200,6 +240,120 @@ describe("vAPI Router MCP tools", () => {
     expectPublicValue(result);
     await server.close();
   });
+
+  it.each([
+    ["zero", "0", 1],
+    ["insufficient", "4999999", 5],
+  ] as const)(
+    "refuses a Router balance purchase when the daily cap is %s without paying or fetching",
+    async (_case, perDayAtomic, usd) => {
+      const buyRouterBalance = vi.fn<NonNullable<RouterOverrides["buyRouterBalance"]>>();
+      const { server, store, fetchImpl } = await routerServer({ buyRouterBalance });
+      await store.setSpendCaps("main", { perCallAtomic: "50000000", perDayAtomic });
+
+      const result = await server.callTool({ name: "router.buy", arguments: { usd } });
+
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain("vapi wallet caps main");
+      expect(buyRouterBalance).not.toHaveBeenCalled();
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expectPublicValue(result);
+      await server.close();
+    },
+  );
+
+  it("reloads the wallet's daily cap before an MCP purchase", async () => {
+    const buyRouterBalance = vi.fn<NonNullable<RouterOverrides["buyRouterBalance"]>>();
+    const { server, store, fetchImpl } = await routerServer({ buyRouterBalance });
+    await store.setSpendCaps("main", {
+      perCallAtomic: "50000000",
+      perDayAtomic: "50000000",
+    });
+    const writer = await WalletStore.open(store.home);
+    await writer.setSpendCaps("main", { perCallAtomic: "0", perDayAtomic: "0" });
+
+    const result = await server.callTool({ name: "router.buy", arguments: { usd: 1 } });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("vapi wallet caps main");
+    expect(buyRouterBalance).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await server.close();
+  });
+
+  it("buys through the injected core seam and returns only a public receipt summary", async () => {
+    const buyRouterBalance = vi.fn<NonNullable<RouterOverrides["buyRouterBalance"]>>(async () => ({
+      receipt: {
+        id: "receipt-router-5",
+        timestamp: "2026-09-23T12:00:00.000Z",
+        resourceUrl: `${API_BASE}api/router/top-up/5`,
+        source: "router.topup",
+        quote: {
+          network: "eip155:8453",
+          amountAtomic: "5000000",
+          key: `${SECRET_PREFIX}hidden-receipt-field`,
+        },
+        settlement: {
+          outcome: "succeeded",
+          transaction: "0xrouter-topup-transaction",
+          token: `${SECRET_PREFIX}hidden-settlement-field`,
+        },
+        key: `${SECRET_PREFIX}hidden-receipt-field`,
+      },
+      balance: { purchasedUsd: 5, spentUsd: 0, remainingUsd: 5 },
+      token: `${SECRET_PREFIX}hidden-result-field`,
+    }));
+    const { server, store, fetchImpl } = await routerServer({ buyRouterBalance });
+    await store.setSpendCaps("work", {
+      perCallAtomic: "50000000",
+      perDayAtomic: "50000000",
+    });
+
+    const result = await server.callTool({
+      name: "router.buy",
+      arguments: { usd: 5, wallet: "work" },
+    });
+
+    expect(result.isError, JSON.stringify(result)).not.toBe(true);
+    expect(result.structuredContent).toEqual({
+      receipt: {
+        id: "receipt-router-5",
+        amountUsd: 5,
+        network: "eip155:8453",
+        transaction: "0xrouter-topup-transaction",
+      },
+      balance: { purchasedUsd: 5, spentUsd: 0, remainingUsd: 5 },
+    });
+    expect(buyRouterBalance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        wallet: "work",
+        fetchImpl,
+        caps: { perCallAtomic: "50000000", perDayAtomic: "50000000" },
+      }),
+      5,
+    );
+    expectPublicValue(result);
+    await server.close();
+  });
+
+  it.each([{ usd: 2 }, { usd: 1, extra: true }])(
+    "rejects a non-tier or extra router.buy field before payment",
+    async (input) => {
+      const buyRouterBalance = vi.fn<NonNullable<RouterOverrides["buyRouterBalance"]>>();
+      const { server, store, fetchImpl } = await routerServer({ buyRouterBalance });
+      await store.setSpendCaps("main", {
+        perCallAtomic: "50000000",
+        perDayAtomic: "50000000",
+      });
+
+      const result = await server.callTool({ name: "router.buy", arguments: input });
+
+      expect(result.isError).toBe(true);
+      expect(buyRouterBalance).not.toHaveBeenCalled();
+      expect(fetchImpl).not.toHaveBeenCalled();
+      await server.close();
+    },
+  );
 });
 
 type RouterOverrides = NonNullable<VapiServerOptions["router"]>;
@@ -234,9 +388,12 @@ async function routerServer(overrides: RouterOverrides = {}) {
           computeTodayUsd: 0,
           stakeUrl: "https://console.example.test/stake",
         })),
+      ...(overrides.buyRouterBalance === undefined
+        ? {}
+        : { buyRouterBalance: overrides.buyRouterBalance }),
     },
   });
-  return { server, fetchImpl };
+  return { server, store, fetchImpl };
 }
 
 function usage(): AgentRouterUsage {
