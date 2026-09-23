@@ -37,6 +37,9 @@ describe("Agent Cash MCP marketplace tools", () => {
     expect(tools.tools.map((tool) => tool.name)).toEqual([
       "auth.link",
       "auth.status",
+      "router.models",
+      "router.usage",
+      "router.chat",
       "call.search",
       "search",
       "call.inspect",

@@ -92,6 +92,14 @@ import {
   type pollDeviceLink,
   type startDeviceLink,
 } from "@vapi-network/core/agent-link";
+import type {
+  listRouterModels,
+  ownerStake,
+  rotateRouterKey,
+  routerChat,
+  routerCredentials,
+  routerUsage,
+} from "@vapi-network/core/router-client";
 import {
   callService,
   getWallet,
@@ -102,6 +110,8 @@ import {
 import { detectColorLevel, renderBanner } from "./brand.js";
 import { checkX402, formatCheckReport } from "./check.js";
 import { loginCommand, logoutCommand, whoamiCommand } from "./login.js";
+import { routerCommand } from "./router.js";
+import { stakeCommand } from "./stake.js";
 import {
   API_KEY_CONSOLE_PATH,
   assertClaimMessage,
@@ -156,6 +166,12 @@ Usage:
   vapi login [--wallet <name>] [--label <name>] [--publish] [--no-browser] [--json]
   vapi logout [--wallet <name>] [--json]
   vapi whoami [--wallet <name>] [--json]
+  vapi router models [--wallet <name>] [--json]
+  vapi router usage [--wallet <name>] [--json]
+  vapi router chat --model <id> [--system <text>] [--max-tokens <n>] "<prompt>" [--wallet <name>] [--json]
+  vapi router key [--rotate] [--wallet <name>] [--json]
+  vapi stake status [--wallet <name>] [--json]
+  vapi stake open [--wallet <name>] [--no-browser] [--json]
   vapi export-key [--network <caip2>] [--wallet <name>] [--json]
   vapi backup [--wallet <name>] [--json]
   vapi import (--phrase | --key) [--wallet <name>] [--networks <base,arc,solana>] [--replace] [--force] [--json]
@@ -230,6 +246,17 @@ export type CliDependencies = {
     startDeviceLink?: typeof startDeviceLink;
     pollDeviceLink?: typeof pollDeviceLink;
   };
+  /** Router operations, injected so CLI tests never make service requests. */
+  router?: {
+    listRouterModels?: typeof listRouterModels;
+    routerUsage?: typeof routerUsage;
+    routerChat?: typeof routerChat;
+    rotateRouterKey?: typeof rotateRouterKey;
+    ownerStake?: typeof ownerStake;
+    routerCredentials?: typeof routerCredentials;
+  };
+  /** Reads stdin to EOF for `vapi router chat ... -`. */
+  readStdin?: () => Promise<string>;
   /** Opens one public URL in the platform browser. */
   openUrl?: (url: string) => boolean;
   /** Moves a wallet balance, injected for deterministic sweep command tests. */
@@ -422,7 +449,7 @@ function secretsDecision(dependencies: CliDependencies): SecretsDecision {
 }
 
 /** One audit line. The home is the wallet store's, so `VAPI_HOME` is honoured. */
-async function recordAudit(
+export async function recordAudit(
   dependencies: CliDependencies,
   event: AuditEvent,
   options: { wallet?: string; detail?: string } = {},
@@ -442,19 +469,20 @@ async function recordAudit(
  * attempt, and say which stream or which variable decided it. Nothing is
  * printed to stdout, so a caller capturing it gets nothing either way.
  */
-async function requireSecretsAllowed(
+export async function requireSecretsAllowed(
   dependencies: CliDependencies,
   event: AuditEvent,
   wallet: string | undefined,
-  refusal: string = AGENT_SECRET_REFUSAL,
+  options: { refusal?: string; forcedReason?: string } = {},
 ): Promise<void> {
   const decision = secretsDecision(dependencies);
-  if (decision.allowed) return;
+  if (decision.allowed && options.forcedReason === undefined) return;
+  const reason = decision.allowed ? options.forcedReason : decision.reason;
   await recordAudit(dependencies, event, {
     ...(wallet === undefined ? {} : { wallet }),
-    detail: `refused: ${decision.reason ?? ""}`,
+    detail: `refused: ${reason ?? ""}`,
   });
-  throw new KeystoreError(`${refusal} ${decision.reason ?? ""}`.trim());
+  throw new KeystoreError(`${options.refusal ?? AGENT_SECRET_REFUSAL} ${reason ?? ""}`.trim());
 }
 
 /**
@@ -544,6 +572,12 @@ export async function runCli(
         return 0;
       case "whoami":
         await whoamiCommand(args.slice(1), json, io, dependencies);
+        return 0;
+      case "router":
+        await routerCommand(args.slice(1), json, io, dependencies);
+        return 0;
+      case "stake":
+        await stakeCommand(args.slice(1), json, io, dependencies);
         return 0;
       case "export-key":
         await exportKeyCommand(args.slice(1), json, io, dependencies);
@@ -1738,7 +1772,9 @@ async function authSetKeyCommand(
   dependencies: CliDependencies,
 ): Promise<void> {
   if (argv.length > 0) throw new UsageError(API_KEY_IN_ARGV);
-  await requireSecretsAllowed(dependencies, "auth.key.set", undefined, API_KEY_NEEDS_TERMINAL);
+  await requireSecretsAllowed(dependencies, "auth.key.set", undefined, {
+    refusal: API_KEY_NEEDS_TERMINAL,
+  });
   const key = await getPrompts(dependencies).secret("vAPI API key: ");
   const stored = await storeApiKey(key, {
     store: getSecretStore(dependencies),
@@ -3036,7 +3072,9 @@ async function unlockCommand(
     maximumPositionals: 0,
   });
   const target = await targetWallet(parsed, dependencies);
-  await requireSecretsAllowed(dependencies, "wallet.unlock", target.name, UNLOCK_NEEDS_TERMINAL);
+  await requireSecretsAllowed(dependencies, "wallet.unlock", target.name, {
+    refusal: UNLOCK_NEEDS_TERMINAL,
+  });
   const store = getSecretStore(dependencies);
   if (!store.available) {
     throw new KeystoreError(NO_SECRET_STORE);
