@@ -9,13 +9,20 @@ import {
   DEFAULT_DISCOVERY_URL,
   DEFAULT_MARKETPLACE_DISCOVERY_URL,
   DEFAULT_REGISTRY_FALLBACKS,
+  enableDefaultNetwork,
   getDefaultConfig,
   loadConfig,
   migrateLegacyRegistryConfig,
   rewriteLegacyRegistryUrl,
   rewriteLegacyRegistryUrls,
 } from "./config.js";
-import { BASE_MAINNET_CAIP2, NETWORKS, SOLANA_MAINNET_CAIP2 } from "./networks.js";
+import {
+  ARC_MAINNET_CAIP2,
+  ARC_TESTNET_CAIP2,
+  BASE_MAINNET_CAIP2,
+  NETWORKS,
+  SOLANA_MAINNET_CAIP2,
+} from "./networks.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -53,6 +60,35 @@ describe("vAPI config", () => {
         usdc: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
       },
     });
+  });
+
+  it("selects Arc mainnet by alias with a public default and supports its override", () => {
+    expect(getDefaultConfig({}, { networks: ["base", "arc"] }).networks).toMatchObject({
+      [ARC_MAINNET_CAIP2]: {
+        rpcUrl: "https://rpc.mainnet.arc.io",
+        usdc: NETWORKS[ARC_MAINNET_CAIP2].usdc,
+      },
+    });
+    expect(
+      getDefaultConfig({ ARC_RPC_URL: " https://env.arc.example " }, { networks: ["arc"] })
+        .networks[ARC_MAINNET_CAIP2]?.rpcUrl,
+    ).toBe("https://env.arc.example");
+  });
+
+  it("rejects a non-canonical Arc USDC contract", () => {
+    const config = getDefaultConfig({}, { networks: ["arc"] });
+    config.networks[ARC_MAINNET_CAIP2]!.usdc = "0x1111111111111111111111111111111111111111";
+
+    expect(() => configSchema.parse(config)).toThrow(/canonical Arc USDC predeploy/);
+  });
+
+  it("keeps Arc testnet distinct and requires its RPC", () => {
+    expect(() => getDefaultConfig({}, { networks: ["arc-testnet"] })).toThrow(
+      "Arc testnet RPC is required.",
+    );
+    expect(() => getDefaultConfig({}, { networks: [ARC_TESTNET_CAIP2] })).toThrow(
+      "Arc testnet RPC is required.",
+    );
   });
 
   it("rejects a non-canonical mint for the Solana mainnet config", () => {
@@ -109,6 +145,51 @@ describe("vAPI config", () => {
     expect(registryOverride).toMatchObject({
       discoveryUrl: "https://registry.example/api/call/services",
       marketplaceDiscoveryUrl: "https://registry.example/api/call/discovery",
+    });
+  });
+
+  it("adds the Arc mainnet entry when ARC_RPC_URL is set", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-arc-mainnet-config-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "config.json");
+    await writeFile(
+      path,
+      JSON.stringify({
+        discoveryUrl: DEFAULT_DISCOVERY_URL,
+        networks: {
+          [ARC_MAINNET_CAIP2]: {
+            rpcUrl: "https://old.arc.example",
+            usdc: NETWORKS[ARC_MAINNET_CAIP2].usdc,
+            depositUrl: "https://fund.example/arc",
+            depositInstructions: "Send USDC on Arc mainnet.",
+          },
+        },
+        spendCaps: { perCallAtomic: "100000", perDayAtomic: "1000000" },
+      }),
+    );
+
+    await expect(
+      loadConfig(path, { ARC_RPC_URL: " https://env.arc.example " }),
+    ).resolves.toMatchObject({
+      networks: {
+        [ARC_MAINNET_CAIP2]: {
+          rpcUrl: "https://env.arc.example",
+          usdc: NETWORKS[ARC_MAINNET_CAIP2].usdc,
+          depositUrl: "https://fund.example/arc",
+          depositInstructions: "Send USDC on Arc mainnet.",
+        },
+      },
+    });
+
+    await expect(enableDefaultNetwork("arc", path, {})).resolves.toMatchObject({
+      networks: {
+        [ARC_MAINNET_CAIP2]: {
+          rpcUrl: "https://rpc.mainnet.arc.io",
+          usdc: NETWORKS[ARC_MAINNET_CAIP2].usdc,
+          depositUrl: "https://fund.example/arc",
+          depositInstructions: "Send USDC on Arc mainnet.",
+        },
+      },
     });
   });
 });

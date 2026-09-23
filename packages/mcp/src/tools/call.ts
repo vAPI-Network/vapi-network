@@ -10,6 +10,7 @@ import {
   createPublicFetch,
   DiscoveryCatalogError,
   formatUsdc,
+  explorerTransactionUrl,
   getVapiPaths,
   isNetworkConfigured,
   isSolanaAddress,
@@ -604,11 +605,14 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
   const settleStarted = trace.nowMs();
   const settlement = parseSettlementResponse(paidResponse.headers);
   const settlementOutcome = classifySettlement(settlement);
+  const transaction = settlementTransaction(settlement);
+  const explorerUrl = transaction
+    ? explorerTransactionUrl(quote.accepted.network, transaction)
+    : undefined;
   trace.settlement = {
     outcome: settlementOutcome,
-    ...(settlementTransaction(settlement)
-      ? { transaction: settlementTransaction(settlement) }
-      : {}),
+    ...(transaction ? { transaction } : {}),
+    ...(explorerUrl ? { explorerUrl } : {}),
     ...(settlement === null ? {} : { evidence: settlement }),
   };
   trace.phases.settleMs = elapsed(trace, settleStarted);
@@ -699,7 +703,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
           amountUsd: formatUsdc(quote.amountAtomic),
           asset: quote.accepted.asset,
           payTo: quote.accepted.payTo,
-          settlement,
+          settlement: settlementWithExplorer(settlement, quote.accepted.network),
           proof: paidResponse.headers.get("x-vapi-payment-proof"),
         },
         ...verificationFor(endpoint),
@@ -723,6 +727,8 @@ async function recordCallReceipt(
   const payment = execution.result.payment;
   const evidence = payment?.settlement ?? undefined;
   const transaction = settlementTransaction(evidence);
+  const explorerUrl =
+    transaction && payment ? explorerTransactionUrl(payment.network, transaction) : undefined;
   const settlementOutcome = payment ? classifySettlement(evidence) : undefined;
   const identityAsset = trace.identityNetwork
     ? args.config.networks[trace.identityNetwork]?.usdc
@@ -747,6 +753,7 @@ async function recordCallReceipt(
           settlement: {
             outcome: classifySettlement(evidence),
             ...(transaction ? { transaction } : {}),
+            ...(explorerUrl ? { explorerUrl } : {}),
             ...(evidence === undefined ? {} : { evidence }),
           },
         }
@@ -894,21 +901,25 @@ function errorSettlement(
     }
     if (error.confirmedSettlement) {
       const evidence = error.confirmedSettlement.receipt;
+      const explorerUrl = settlementExplorerUrl(trace.quote?.network, evidence);
       return {
         outcome: "succeeded",
         ...(settlementTransaction(evidence)
           ? { transaction: settlementTransaction(evidence) }
           : {}),
+        ...(explorerUrl ? { explorerUrl } : {}),
         evidence,
       };
     }
     if (error.possibleSettlement) {
       const evidence = error.possibleSettlement.receipt;
+      const explorerUrl = settlementExplorerUrl(trace.quote?.network, evidence);
       return {
         outcome: "unknown",
         ...(settlementTransaction(evidence)
           ? { transaction: settlementTransaction(evidence) }
           : {}),
+        ...(explorerUrl ? { explorerUrl } : {}),
         ...(evidence === null ? {} : { evidence }),
       };
     }
@@ -935,6 +946,26 @@ function settlementTransaction(value: unknown): string | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const transaction = Reflect.get(value, "transaction");
   return typeof transaction === "string" && transaction ? transaction : undefined;
+}
+
+function settlementExplorerUrl(network: string | undefined, value: unknown): string | undefined {
+  const transaction = settlementTransaction(value);
+  return network === undefined || transaction === undefined
+    ? undefined
+    : explorerTransactionUrl(network, transaction);
+}
+
+function settlementWithExplorer(value: unknown, network: string): unknown {
+  const explorerUrl = settlementExplorerUrl(network, value);
+  if (
+    explorerUrl === undefined ||
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value)
+  ) {
+    return value;
+  }
+  return { ...value, explorerUrl };
 }
 
 function expectedRequestFor(

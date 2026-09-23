@@ -1,15 +1,8 @@
 import { getAddress, type Address } from "viem";
 
 export const BASE_MAINNET_CAIP2 = "eip155:8453" as const;
+export const ARC_MAINNET_CAIP2 = "eip155:5042" as const;
 export const ARC_TESTNET_CAIP2 = "eip155:5042002" as const;
-/**
- * Arc mainnet is not yet published by Arc or the x402 packages. Keep this
- * non-routable placeholder so callers do not mistake viem's reserved chain ID
- * for a usable x402 network.
- *
- * TODO: replace only after Arc publishes a mainnet RPC and canonical USDC.
- */
-export const ARC_MAINNET_CAIP2_PLACEHOLDER: null = null;
 
 /** Full Solana mainnet genesis hash requested by the persisted vAPI config. */
 export const SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d" as const;
@@ -17,7 +10,8 @@ export const SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc1
 export const X402_SOLANA_MAINNET_CAIP2 = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" as const;
 export const SOLANA_MAINNET_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" as const;
 
-export type CanonicalX402UsdcNetwork = typeof BASE_MAINNET_CAIP2 | typeof ARC_TESTNET_CAIP2;
+export type CanonicalX402UsdcNetwork =
+  typeof BASE_MAINNET_CAIP2 | typeof ARC_MAINNET_CAIP2 | typeof ARC_TESTNET_CAIP2;
 
 export type X402TokenDomain = Readonly<{
   name: string;
@@ -59,10 +53,15 @@ const arcTestnetUsdc = canonicalIdentity("0x360000000000000000000000000000000000
   name: "USDC",
   version: "2",
 });
+const arcMainnetUsdc = canonicalIdentity("0x3600000000000000000000000000000000000000", {
+  name: "USDC",
+  version: "2",
+});
 
 /** Canonical token and signing-domain identity. This is not an enablement policy. */
 export const CANONICAL_X402_USDC_NETWORKS = Object.freeze({
   [BASE_MAINNET_CAIP2]: baseMainnetUsdc,
+  [ARC_MAINNET_CAIP2]: arcMainnetUsdc,
   [ARC_TESTNET_CAIP2]: arcTestnetUsdc,
 }) satisfies Readonly<Record<CanonicalX402UsdcNetwork, CanonicalX402UsdcIdentity>>;
 
@@ -84,5 +83,6 @@ function browserNetwork(identity: CanonicalX402UsdcIdentity) {
 /** Networks the browser-wallet adapter is currently allowed to execute on. */
 export const BROWSER_ENABLED_X402_NETWORK_CONFIG: X402NetworkConfig = Object.freeze({
   [BASE_MAINNET_CAIP2]: browserNetwork(baseMainnetUsdc),
+  [ARC_MAINNET_CAIP2]: browserNetwork(arcMainnetUsdc),
   [ARC_TESTNET_CAIP2]: browserNetwork(arcTestnetUsdc),
 });

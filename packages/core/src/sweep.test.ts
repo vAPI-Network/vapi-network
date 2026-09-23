@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { calculateSweepAmount, getArcGasHeadroomAtomic } from "./sweep.js";
+import { ARC_MAINNET_CAIP2, usesUsdcGas } from "./networks.js";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -16,6 +17,10 @@ describe("sweep amount math", () => {
     expect(getArcGasHeadroomAtomic()).toBe(50_000n);
     expect(calculateSweepAmount(2_500_000n, 50_000n)).toBe(2_450_000n);
     expect(calculateSweepAmount(40_000n, 50_000n)).toBe(0n);
+    expect(usesUsdcGas(ARC_MAINNET_CAIP2)).toBe(true);
+    expect(calculateSweepAmount(2_500_000n, usesUsdcGas(ARC_MAINNET_CAIP2) ? 50_000n : 0n)).toBe(
+      2_450_000n,
+    );
   });
 
   it("parses configured Arc gas headroom as atomic USDC", () => {

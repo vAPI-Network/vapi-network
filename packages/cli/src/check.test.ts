@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runCli, type CliIo } from "./cli.js";
 
 const BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+const ARC_USDC = "0x3600000000000000000000000000000000000000";
 const PAY_TO = "0x1111111111111111111111111111111111111111";
 const URL_UNDER_TEST = "https://weather.example/v1/weather/paris";
 
@@ -452,6 +453,28 @@ describe("vapi check <url>", () => {
     const { report } = await checkJson(api.fetchImpl);
 
     expect(ruleResult(report, "asset")).toMatchObject({ result: "fail", issues: [issue] });
+    expect(ruleResult(report, "asset")?.detail).toBe(
+      "No exact option pays canonical USDC on a network vAPI knows: Base, Arc mainnet, Arc testnet or Solana.",
+    );
+  });
+
+  it("passes canonical USDC on Arc mainnet", async () => {
+    const offer = v2Offer(
+      {},
+      {
+        network: "eip155:5042",
+        asset: ARC_USDC,
+        extra: { name: "USDC", version: "2" },
+      },
+    );
+    const api = conformantOrigin({
+      "/v1/weather/paris": { status: 402, body: offer, headers: paymentRequired(offer) },
+    });
+
+    const { code, report } = await checkJson(api.fetchImpl);
+
+    expect(code).toBe(0);
+    expect(ruleResult(report, "asset")).toMatchObject({ result: "pass", issues: [] });
   });
 
   it("checks payTo and maxTimeoutSeconds", async () => {

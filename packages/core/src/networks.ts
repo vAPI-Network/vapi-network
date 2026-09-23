@@ -1,5 +1,5 @@
 import {
-  ARC_MAINNET_CAIP2_PLACEHOLDER,
+  ARC_MAINNET_CAIP2,
   ARC_TESTNET_CAIP2,
   BASE_MAINNET_CAIP2,
   CANONICAL_X402_USDC_NETWORKS,
@@ -21,7 +21,7 @@ import {
 import { createPublicFetch, type LookupFn } from "./net-guard.js";
 
 export {
-  ARC_MAINNET_CAIP2_PLACEHOLDER,
+  ARC_MAINNET_CAIP2,
   ARC_TESTNET_CAIP2,
   BASE_MAINNET_CAIP2,
   SOLANA_MAINNET_CAIP2,
@@ -39,6 +39,7 @@ export type NetworkDefinition = {
   gasToken: "ETH" | "USDC" | "SOL";
   rpcEnv: string;
   publicRpcUrl?: string;
+  explorerUrl?: string;
 };
 
 export type ConfiguredNetwork = {
@@ -61,6 +62,16 @@ export const NETWORKS = {
     gasToken: "ETH",
     rpcEnv: "BASE_RPC_URL",
     publicRpcUrl: "https://mainnet.base.org",
+  },
+  [ARC_MAINNET_CAIP2]: {
+    family: "evm",
+    chainId: 5_042,
+    name: "Arc mainnet",
+    usdc: CANONICAL_X402_USDC_NETWORKS[ARC_MAINNET_CAIP2].usdc,
+    gasToken: "USDC",
+    rpcEnv: "ARC_RPC_URL",
+    publicRpcUrl: "https://rpc.mainnet.arc.io",
+    explorerUrl: "https://explorer.arc.io",
   },
   [ARC_TESTNET_CAIP2]: {
     family: "evm",
@@ -102,6 +113,32 @@ export function parseEip155ChainId(network: string): number {
 
 export function isSolanaNetwork(network: string): boolean {
   return network === SOLANA_MAINNET_CAIP2 || network === X402_SOLANA_MAINNET_CAIP2;
+}
+
+export function usesUsdcGas(network: string): boolean {
+  try {
+    return getNetworkDefinition(network).gasToken === "USDC";
+  } catch {
+    return false;
+  }
+}
+
+export function explorerTransactionUrl(network: string, hash: string): string | undefined {
+  try {
+    const explorerUrl = getNetworkDefinition(network).explorerUrl;
+    return explorerUrl ? `${explorerUrl}/tx/${hash}` : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function explorerAddressUrl(network: string, address: string): string | undefined {
+  try {
+    const explorerUrl = getNetworkDefinition(network).explorerUrl;
+    return explorerUrl ? `${explorerUrl}/address/${address}` : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function areSamePaymentNetwork(left: string, right: string): boolean {
@@ -175,6 +212,13 @@ export function createChain(network: string, rpcUrl: string): Chain {
     rpcUrls: {
       default: { http: [rpcUrl] },
     },
+    ...(definition.explorerUrl
+      ? {
+          blockExplorers: {
+            default: { name: `${definition.name} explorer`, url: definition.explorerUrl },
+          },
+        }
+      : {}),
   });
 }
 

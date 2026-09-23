@@ -15,12 +15,23 @@ scoped packages. The packages share one version and are released together.
 - `vapi check` now lists known extensions advertised by a 402 offer. Missing
   Bazaar metadata is a warning because Bazaar and Coinbase for Agents use it to
   discover the API.
+- Arc mainnet is now a payable x402 network (`eip155:5042`) with the public RPC
+  `https://rpc.mainnet.arc.io`; `ARC_RPC_URL` overrides it. Enable it with
+  `vapi init --networks base,arc`, `vapi accounts --enable arc`, or the
+  equivalent wallet create/import `--networks` flag. Setting `ARC_RPC_URL` also
+  enables it. Arc sweeps retain 0.05 USDC for gas by default, configurable with
+  `VAPI_ARC_GAS_HEADROOM_USDC`, and print transaction links at
+  `https://explorer.arc.io`; missing-authorization receipt messages link the
+  payer there as well.
 
 ### Changed
 
 - `vapi check` now looks for OpenAPI beside the checked path and in each parent
   directory before `/openapi.json`. It then follows up to 10 same-origin
   `service-desc` links from `/.well-known/api-catalog`.
+- `ARC_MAINNET_CAIP2_PLACEHOLDER` was replaced by `ARC_MAINNET_CAIP2`. The
+  programmatic `getDefaultConfig` alias `arc` now means Arc mainnet; use
+  `arc-testnet` for Arc testnet.
 
 ## 0.4.0
 

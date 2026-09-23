@@ -25,11 +25,13 @@ const AGENT: CliDependencies = { interactive: false, env: {} };
 const originalHome = process.env.VAPI_HOME;
 const originalPassword = process.env.VAPI_KEYSTORE_PASSWORD;
 const originalWallet = process.env.VAPI_WALLET;
+const originalArcRpc = process.env.ARC_RPC_URL;
 
 afterEach(() => {
   restoreEnvironment("VAPI_HOME", originalHome);
   restoreEnvironment("VAPI_KEYSTORE_PASSWORD", originalPassword);
   restoreEnvironment("VAPI_WALLET", originalWallet);
+  restoreEnvironment("ARC_RPC_URL", originalArcRpc);
 });
 
 describe("vapi wallet list", () => {
@@ -115,6 +117,27 @@ describe("vapi wallet create", () => {
     expect(text).toContain("Spend caps: 0.1 USD per call, 1 USD per day");
     expect(text).toContain("vapi wallet use agent");
     expect((await stat(join(home, "wallets", "agent.json"))).mode & 0o777).toBe(0o600);
+  });
+
+  it("enables Arc mainnet in an existing config when requested", async () => {
+    const home = await initializedHome("vapi-wallet-create-arc-");
+    delete process.env.ARC_RPC_URL;
+    const captured = captureIo();
+
+    expect(
+      await runCli(["wallet", "create", "agent", "--networks", "base,arc", "--json"], captured.io, {
+        ...AGENT,
+        prompts: refusingPrompts(),
+      }),
+    ).toBe(0);
+
+    const config = JSON.parse(await readFile(join(home, "config.json"), "utf8")) as {
+      networks: Record<string, { rpcUrl: string; usdc: string }>;
+    };
+    expect(config.networks["eip155:5042"]).toEqual({
+      rpcUrl: "https://rpc.mainnet.arc.io",
+      usdc: "0x3600000000000000000000000000000000000000",
+    });
   });
 
   it("returns the new wallet as JSON without the phrase", async () => {

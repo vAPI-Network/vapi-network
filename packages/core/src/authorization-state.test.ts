@@ -3,7 +3,13 @@ import { decodeFunctionData, encodeFunctionResult, getAddress } from "viem";
 
 import { EIP3009_AUTHORIZATION_STATE_ABI, checkReceiptSettlement } from "./authorization-state.js";
 import { getDefaultConfig } from "./config.js";
-import { BASE_MAINNET_CAIP2, SOLANA_MAINNET_CAIP2, SOLANA_MAINNET_USDC } from "./networks.js";
+import {
+  ARC_MAINNET_CAIP2,
+  BASE_MAINNET_CAIP2,
+  NETWORKS,
+  SOLANA_MAINNET_CAIP2,
+  SOLANA_MAINNET_USDC,
+} from "./networks.js";
 import type { Receipt } from "./receipts.js";
 
 const USDC = getAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
@@ -80,6 +86,26 @@ describe("checkReceiptSettlement", () => {
     ).toEqual({ functionName: "authorizationState", args: [PAYER, NONCE] });
   });
 
+  it("reads settlement for an Arc mainnet receipt", async () => {
+    const node = rpc({ used: true, chainTime: VALID_BEFORE - 60 });
+    const receipt = lostResponse({
+      quote: {
+        network: ARC_MAINNET_CAIP2,
+        asset: NETWORKS[ARC_MAINNET_CAIP2].usdc,
+        amountAtomic: "2500",
+      },
+    });
+    const config = getDefaultConfig({}, { networks: [ARC_MAINNET_CAIP2] });
+
+    await expect(
+      checkReceiptSettlement(receipt, config, { fetchImpl: node.fetchImpl }),
+    ).resolves.toMatchObject({
+      network: ARC_MAINNET_CAIP2,
+      token: NETWORKS[ARC_MAINNET_CAIP2].usdc,
+      state: "settled",
+    });
+  });
+
   it("calls an unused authorization expired once the chain is past validBefore", async () => {
     const atExpiry = rpc({ used: false, chainTime: VALID_BEFORE });
     await expect(
@@ -121,6 +147,22 @@ describe("checkReceiptSettlement", () => {
     ).rejects.toThrow(
       `Receipt receipt-lost does not record its payment authorization — it was written before vAPI kept the EIP-3009 nonce on receipts — so its settlement cannot be looked up. Check ${PAYER}'s USDC transfers to ${PAY_TO} on a block explorer before paying again.`,
     );
+  });
+
+  it("links Arc mainnet missing authorizations to its explorer", async () => {
+    await expect(
+      checkReceiptSettlement(
+        lostResponse({
+          quote: {
+            network: ARC_MAINNET_CAIP2,
+            asset: NETWORKS[ARC_MAINNET_CAIP2].usdc,
+            amountAtomic: "2500",
+          },
+          authorization: undefined,
+        }),
+        getDefaultConfig(),
+      ),
+    ).rejects.toThrow(`https://explorer.arc.io/address/${PAYER}`);
   });
 
   it("says so when a call signed nothing at all", async () => {

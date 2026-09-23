@@ -215,16 +215,16 @@ to stdout. Exit codes are `0` for success, `1` for an operational failure, and
 
 | Command                              | Options                                                                                                                                                                                                 | What it does                                                                |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| `vapi init`                          | `--networks <base,solana>`                                                                                                                                                                              | Creates `~/.vapi`, the wallet `main` and the config. Says so if one exists. |
+| `vapi init`                          | `--networks <base,arc,solana>`                                                                                                                                                                          | Creates `~/.vapi`, the wallet `main` and the config. Says so if one exists. |
 | `vapi wallet list`                   | —                                                                                                                                                                                                       | Name, address, default marker, caps in USD, unlocked, label                 |
-| `vapi wallet create <name>`          | `--networks <base,solana>`, `--label <text>`                                                                                                                                                            | A new wallet, with its own phrase, caps and passphrase                      |
+| `vapi wallet create <name>`          | `--networks <base,arc,solana>`, `--label <text>`                                                                                                                                                        | A new wallet, with its own phrase, caps and passphrase                      |
 | `vapi wallet use <name>`             | —                                                                                                                                                                                                       | Makes it the default for every later command                                |
 | `vapi wallet rename <old> <new>`     | —                                                                                                                                                                                                       | Renames the keystore, the registry entry and that wallet's receipts         |
 | `vapi wallet remove <name>`          | `--force`                                                                                                                                                                                               | Moves the keystore to `wallets/.trash/`; asks you to type the name          |
 | `vapi wallet restore <name>`         | —                                                                                                                                                                                                       | Brings a removed wallet back, same passphrase                               |
 | `vapi wallet caps <name>`            | `--per-call <usd>`, `--per-day <usd>`                                                                                                                                                                   | Sets that wallet's spend caps, in US dollars                                |
 | `vapi fund`                          | `--amount <usd>`, `--wallet <name>`                                                                                                                                                                     | Prints and opens the hosted funding page. Makes no network call.            |
-| `vapi accounts`                      | `--enable solana`, `--wallet <name>`                                                                                                                                                                    | One deposit account per configured network, with balances and guidance      |
+| `vapi accounts`                      | `--enable <solana\|arc>`, `--wallet <name>`                                                                                                                                                             | One deposit account per configured network, with balances and guidance      |
 | `vapi search [query]`                | `--kind <kind>` (repeatable), `--network <caip2>`, `--limit <n>`, `--cursor <cursor>`, `--include-unverified`                                                                                           | Merged discovery across every configured source, tagged by group and tier   |
 | `vapi inspect <id>`                  | `--endpoint <name>`                                                                                                                                                                                     | Verification, fee, liveness, conformance, contract and live quote, for free |
 | `vapi pay <id-or-url>`               | `--method`, `--endpoint`, `--body <json>`, `--content-type`, `--network <caip2>`, `--expected-pay-to`, `--max <usd>`, `--wallet <name>`                                                                 | Calls the API and pays it from the local wallet, naming an unverified tier  |
@@ -237,7 +237,7 @@ to stdout. Exit codes are `0` for success, `1` for an operational failure, and
 | `vapi sweep <address>`               | `--network <caip2>`, `--wallet <name>`                                                                                                                                                                  | Moves the USDC balance out to an address you own                            |
 | `vapi export-key`                    | `--network <caip2>`, `--wallet <name>`                                                                                                                                                                  | Prints the private key. Terminal only, never for an agent.                  |
 | `vapi backup`                        | `--wallet <name>`                                                                                                                                                                                       | Prints the 12 words. Terminal only, never for an agent.                     |
-| `vapi import`                        | `--phrase` or `--key`, `--wallet <name>`, `--networks <base,solana>`, `--replace`, `--force`                                                                                                            | Restores a wallet from a prompt, never from argv                            |
+| `vapi import`                        | `--phrase` or `--key`, `--wallet <name>`, `--networks <base,arc,solana>`, `--replace`, `--force`                                                                                                        | Restores a wallet from a prompt, never from argv                            |
 | `vapi passphrase`                    | `--wallet <name>`                                                                                                                                                                                       | Re-encrypts the keystore under a new passphrase                             |
 | `vapi unlock`                        | `--wallet <name>`                                                                                                                                                                                       | Puts that wallet's passphrase in the OS secret store                        |
 | `vapi lock`                          | `--wallet <name>`, `--all`                                                                                                                                                                              | Takes a stored passphrase back out                                          |
@@ -282,19 +282,19 @@ vapi check https://weather.example/forecast
 vapi check https://weather.example/alerts --method POST --json
 ```
 
-| Rule         | Passes when                                                                                     |
-| ------------ | ----------------------------------------------------------------------------------------------- |
-| `status`     | the URL answers HTTP 402                                                                        |
-| `transport`  | the offer is readable: a base64 `PAYMENT-REQUIRED` header, a JSON body, or both                 |
-| `version`    | it declares `x402Version` 2 (1 is a warning: v2-only clients cannot pay it)                     |
-| `fields`     | every field that version requires is present and well-typed                                     |
-| `scheme`     | at least one accepted option is `exact`                                                         |
-| `asset`      | an exact option pays canonical USDC, with USDC's EIP-712 domain, on Base, Arc testnet or Solana |
-| `pay_to`     | every exact option's `payTo` is a valid, non-zero address for its network                       |
-| `timeout`    | `maxTimeoutSeconds` is a whole number between 10 and 3600                                       |
-| `extensions` | the offer advertises Bazaar metadata; every known advertised extension is listed                |
-| `discovery`  | `/.well-known/x402` serves a JSON document (a warning otherwise)                                |
-| `openapi`    | a discovered OpenAPI document describes the operation with `x-payment-info`                     |
+| Rule         | Passes when                                                                                                  |
+| ------------ | ------------------------------------------------------------------------------------------------------------ |
+| `status`     | the URL answers HTTP 402                                                                                     |
+| `transport`  | the offer is readable: a base64 `PAYMENT-REQUIRED` header, a JSON body, or both                              |
+| `version`    | it declares `x402Version` 2 (1 is a warning: v2-only clients cannot pay it)                                  |
+| `fields`     | every field that version requires is present and well-typed                                                  |
+| `scheme`     | at least one accepted option is `exact`                                                                      |
+| `asset`      | an exact option pays canonical USDC, with USDC's EIP-712 domain, on Base, Arc mainnet, Arc testnet or Solana |
+| `pay_to`     | every exact option's `payTo` is a valid, non-zero address for its network                                    |
+| `timeout`    | `maxTimeoutSeconds` is a whole number between 10 and 3600                                                    |
+| `extensions` | the offer advertises Bazaar metadata; every known advertised extension is listed                             |
+| `discovery`  | `/.well-known/x402` serves a JSON document (a warning otherwise)                                             |
+| `openapi`    | a discovered OpenAPI document describes the operation with `x-payment-info`                                  |
 
 The `extensions` rule reports `bazaar`, `builder-code`, `payment-identifier`,
 `sign-in-with-x`, `offer-and-receipt` and `auth-hints` in that order. Missing
@@ -611,10 +611,11 @@ reports/              what vapi report writes
 | `VAPI_API_KEY`           | The registry key `vapi publish` authenticates with, for CI                  |
 | `VAPI_NO_SECRETS`        | Set to `1` to stop `vapi backup` and `vapi export-key` printing anything    |
 
-`ARC_TESTNET_RPC_URL` and `SOLANA_RPC_URL` point those two networks at an
-endpoint you trust. On first use of the default home, the client copies an
-existing `~/.vapi/agent-cash/` configuration into `~/.vapi/` when it can do so
-without overwriting files, prints a notice, and leaves the old directory alone.
+`ARC_RPC_URL` overrides the Arc mainnet RPC. `ARC_TESTNET_RPC_URL` and
+`SOLANA_RPC_URL` point those two networks at an endpoint you trust. On first
+use of the default home, the client copies an existing `~/.vapi/agent-cash/`
+configuration into `~/.vapi/` when it can do so without overwriting files,
+prints a notice, and leaves the old directory alone.
 
 ## Funding
 
@@ -646,18 +647,19 @@ to its human.
 
 ## Networks and accounts
 
-| Network        | x402 identifier                                       | USDC                                           | Gas / RPC notes                                        |
-| -------------- | ----------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------------ |
-| Base mainnet   | `eip155:8453`                                         | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`   | ETH; defaults to `https://mainnet.base.org`            |
-| Arc testnet    | `eip155:5042002`                                      | `0x3600000000000000000000000000000000000000`   | USDC is also the gas token; set `ARC_TESTNET_RPC_URL`  |
-| Solana mainnet | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d` | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | SOL; defaults to `https://api.mainnet-beta.solana.com` |
+| Network        | x402 identifier                                       | USDC                                           | Gas / RPC notes                                                      |
+| -------------- | ----------------------------------------------------- | ---------------------------------------------- | -------------------------------------------------------------------- |
+| Base mainnet   | `eip155:8453`                                         | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`   | ETH; defaults to `https://mainnet.base.org`                          |
+| Arc mainnet    | `eip155:5042`                                         | `0x3600000000000000000000000000000000000000`   | USDC is also the gas token; defaults to `https://rpc.mainnet.arc.io` |
+| Arc testnet    | `eip155:5042002`                                      | `0x3600000000000000000000000000000000000000`   | USDC is also the gas token; set `ARC_TESTNET_RPC_URL`                |
+| Solana mainnet | `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d` | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | SOL; defaults to `https://api.mainnet-beta.solana.com`               |
 
 The x402 reference packages shorten the Solana CAIP-2 reference to
 `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`; vAPI accepts that identifier as an
-alias while persisting the full genesis hash above. Arc mainnet is **not yet — a
-placeholder only**: Arc and the x402 packages publish no mainnet RPC plus
-canonical USDC, so the client carries a non-routable placeholder rather than
-guessing a production configuration.
+alias while persisting the full genesis hash above. Enable Arc mainnet with
+`vapi init --networks base,arc` (or the same `--networks` value on `vapi wallet
+create` or `vapi import`), `vapi accounts --enable arc`, or `ARC_RPC_URL`. Its
+explorer is `https://explorer.arc.io`.
 
 `vapi accounts` lists one deposit account per configured network: its CAIP-2 ID,
 network name, address, atomic and formatted USDC balance, gas-token balance, and
@@ -671,6 +673,9 @@ to that network's `config.json` entry:
   "depositInstructions": "Use the configured Arc testnet faucet, then send USDC to this address."
 }
 ```
+
+Arc mainnet uses the default public RPC or `ARC_RPC_URL` and needs no faucet
+configuration.
 
 Create both local accounts at initialization with `vapi init --networks
 base,solana`, or add an Ed25519 account to an existing keystore with `vapi

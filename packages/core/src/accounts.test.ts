@@ -4,6 +4,7 @@ import type { Address } from "viem";
 import { listAccounts, type AccountNetworkAdapter } from "./accounts.js";
 import { getDefaultConfig, type VapiConfig } from "./config.js";
 import {
+  ARC_MAINNET_CAIP2,
   ARC_TESTNET_CAIP2,
   BASE_MAINNET_CAIP2,
   NETWORKS,
@@ -71,6 +72,33 @@ describe("account listing", () => {
       },
     ]);
     expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("lists Arc mainnet with its default deposit instruction", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (_input, init) => {
+      const request = JSON.parse(String(init?.body)) as { id: number };
+      return Response.json({ jsonrpc: "2.0", id: request.id, result: uint256Hex(1_000_000n) });
+    });
+    const config = {
+      ...getDefaultConfig({}),
+      networks: {
+        [ARC_MAINNET_CAIP2]: {
+          rpcUrl: "https://arc-rpc.example",
+          usdc: NETWORKS[ARC_MAINNET_CAIP2].usdc,
+        },
+      },
+    } as VapiConfig;
+
+    await expect(listAccounts({ address: ADDRESS, config, fetchImpl })).resolves.toEqual([
+      {
+        caip2: ARC_MAINNET_CAIP2,
+        name: "Arc mainnet",
+        address: ADDRESS,
+        usdcBalance: { atomic: "1000000", formatted: "1" },
+        gasTokenBalance: { symbol: "USDC", atomic: "1000000", formatted: "1" },
+        depositInstructions: `Send USDC on Arc mainnet to ${ADDRESS}; USDC also pays Arc gas.`,
+      },
+    ]);
   });
 
   it("returns a nonfatal entry when a network RPC fails", async () => {

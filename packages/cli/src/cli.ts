@@ -5,7 +5,6 @@ import { createInterface } from "node:readline/promises";
 import type { Address } from "viem";
 
 import {
-  ARC_TESTNET_CAIP2,
   BASE_MAINNET_CAIP2,
   DEFAULT_WALLET_NAME,
   ONRAMP_FALLBACK_INSTRUCTIONS,
@@ -28,6 +27,7 @@ import {
   getArcGasHeadroomAtomic,
   getNetworkDefinition,
   getVapiPaths,
+  explorerTransactionUrl,
   isMissingFile,
   isMirroredHit,
   isNetworkConfigured,
@@ -53,6 +53,7 @@ import {
   sweepBack,
   unlockKeystore,
   usdToAtomic,
+  usesUsdcGas,
   validatePrivateKey,
   validateRecoveryPhrase,
   WalletStore,
@@ -125,16 +126,16 @@ const HELP_HEADING = "vAPI Network";
 export const HELP = `${HELP_HEADING}
 
 Usage:
-  vapi init [--networks <base,solana>] [--json]
+  vapi init [--networks <base,arc,solana>] [--json]
   vapi wallet list [--json]
-  vapi wallet create <name> [--networks <base,solana>] [--label <text>] [--json]
+  vapi wallet create <name> [--networks <base,arc,solana>] [--label <text>] [--json]
   vapi wallet use <name> [--json]
   vapi wallet rename <old> <new> [--json]
   vapi wallet remove <name> [--force] [--json]
   vapi wallet restore <name> [--json]
   vapi wallet caps <name> [--per-call <usd>] [--per-day <usd>] [--json]
   vapi fund [--amount <usd>] [--wallet <name>] [--json]
-  vapi accounts [--enable solana] [--wallet <name>] [--json]
+  vapi accounts [--enable <solana|arc>] [--wallet <name>] [--json]
   vapi search [query] [--kind <kind>] [--network <caip2>] [--limit <n>] [--cursor <cursor>] [--include-unverified] [--json]
   vapi inspect <id> [--endpoint <name>] [--json]
   vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--wallet <name>] [--json]
@@ -147,7 +148,7 @@ Usage:
   vapi sweep <address> [--network <caip2>] [--wallet <name>] [--json]
   vapi export-key [--network <caip2>] [--wallet <name>] [--json]
   vapi backup [--wallet <name>] [--json]
-  vapi import (--phrase | --key) [--wallet <name>] [--networks <base,solana>] [--replace] [--force] [--json]
+  vapi import (--phrase | --key) [--wallet <name>] [--networks <base,arc,solana>] [--replace] [--force] [--json]
   vapi passphrase [--wallet <name>] [--json]
   vapi unlock [--wallet <name>] [--json]
   vapi lock [--wallet <name> | --all] [--json]
@@ -586,6 +587,7 @@ async function initCommand(
   });
   const networks = parseInitNetworks(parsed.one("--networks") ?? "base");
   const enableSolana = networks.includes("solana");
+  const enableArc = networks.includes("arc");
   if (!json) showBanner(io);
   const paths = getVapiPaths();
   if (!process.env.VAPI_HOME?.trim()) {
@@ -615,8 +617,9 @@ async function initCommand(
   if (!json) await showRecoveryPhrase(created.recoveryPhrase, io, dependencies);
   if (!(await fileExists(paths.config))) {
     await writeDefaultConfig(paths.config, process.env, { networks });
-  } else if (enableSolana) {
-    await enableDefaultNetwork("solana", paths.config);
+  } else {
+    if (enableSolana) await enableDefaultNetwork("solana", paths.config);
+    if (enableArc) await enableDefaultNetwork("arc", paths.config);
   }
   const configRewrites = await migrateLegacyRegistryConfig(paths.config);
 
@@ -790,7 +793,9 @@ async function walletCreateCommand(
   );
   const networks = parseInitNetworks(parsed.one("--networks") ?? "base");
   const enableSolana = networks.includes("solana");
+  const enableArc = networks.includes("arc");
   const label = parsed.one("--label");
+  const paths = getVapiPaths();
   const store = await openWalletStore();
   if (store.has(name)) {
     throw new KeystoreError(`Wallet ${name} already exists. Choose another name.`);
@@ -808,6 +813,13 @@ async function walletCreateCommand(
     account = await enableSolanaKey(passphrase, created.path);
   }
   if (!json) await showRecoveryPhrase(created.recoveryPhrase, io, dependencies);
+
+  if (!(await fileExists(paths.config))) {
+    await writeDefaultConfig(paths.config, process.env, { networks });
+  } else {
+    if (enableSolana) await enableDefaultNetwork("solana", paths.config);
+    if (enableArc) await enableDefaultNetwork("arc", paths.config);
+  }
 
   const isDefault = store.defaultName === created.name;
   const result = {
@@ -1426,16 +1438,18 @@ async function accountsCommand(
     maximumPositionals: 0,
   });
   const enable = parsed.one("--enable");
-  if (enable !== undefined && enable !== "solana") {
-    throw new UsageError("--enable currently supports only solana.");
+  if (enable !== undefined && enable !== "solana" && enable !== "arc") {
+    throw new UsageError("--enable supports solana and arc.");
   }
   const paths = getVapiPaths();
   const target = await targetWallet(parsed, dependencies);
   const resolved = await walletPassphrase(target, dependencies);
   const account = await withResolvedPassphrase(resolved, target, dependencies, (passphrase) =>
-    enable ? enableSolanaKey(passphrase, target.path) : unlockKeystore(passphrase, target.path),
+    enable === "solana"
+      ? enableSolanaKey(passphrase, target.path)
+      : unlockKeystore(passphrase, target.path),
   );
-  if (enable) await enableDefaultNetwork("solana", paths.config);
+  if (enable) await enableDefaultNetwork(enable, paths.config);
   const config = await readConfig(paths.config, io);
   const accounts = await listAccounts({
     address: account.address,
@@ -1590,7 +1604,13 @@ async function sweepCommand(
   > = [];
   for (const network of requestedNetwork ? [requestedNetwork] : Object.keys(config.networks)) {
     try {
-      const result = await sweepBack({ account, config, network, destination });
+      const result = await sweepBack({
+        account,
+        config,
+        network,
+        destination,
+        ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+      });
       results.push({ ...result, status: "swept" });
     } catch (error) {
       if (requestedNetwork) throw error;
@@ -2716,6 +2736,7 @@ async function importCommand(
   }
   const networks = parseInitNetworks(parsed.one("--networks") ?? "base");
   const enableSolana = networks.includes("solana");
+  const enableArc = networks.includes("arc");
   if (!fromPhrase && enableSolana) {
     throw new UsageError(
       "vapi import --key imports one EVM key, so --networks cannot include solana. Import the recovery phrase instead.",
@@ -2766,8 +2787,9 @@ async function importCommand(
 
   if (!(await fileExists(paths.config))) {
     await writeDefaultConfig(paths.config, process.env, { networks });
-  } else if (enableSolana) {
-    await enableDefaultNetwork("solana", paths.config);
+  } else {
+    if (enableSolana) await enableDefaultNetwork("solana", paths.config);
+    if (enableArc) await enableDefaultNetwork("arc", paths.config);
   }
   const result = {
     address: account.address,
@@ -3287,7 +3309,12 @@ function formatSupportReport(result: Awaited<ReturnType<typeof createSupportRepo
 function formatReceipt(receipt: Awaited<ReturnType<typeof readReceipts>>[number]): string {
   const status =
     receipt.settlement?.outcome ?? (receipt.error ? "error" : (receipt.status ?? "recorded"));
-  return `${receipt.timestamp}\t${status}\t${receipt.method ?? "GET"} ${receipt.resourceUrl}`;
+  const explorerUrl =
+    receipt.settlement?.explorerUrl ??
+    (receipt.quote?.network && receipt.settlement?.transaction
+      ? explorerTransactionUrl(receipt.quote.network, receipt.settlement.transaction)
+      : undefined);
+  return `${receipt.timestamp}\t${status}\t${receipt.method ?? "GET"} ${receipt.resourceUrl}${explorerUrl ? ` (${explorerUrl})` : ""}`;
 }
 
 function formatStats(stats: ReturnType<typeof aggregateStats>): string {
@@ -3349,11 +3376,14 @@ function formatSweepResults(
     .map((result) => {
       const name = getNetworkDefinition(result.network).name;
       if (result.status === "error") return `${name}: ${result.error}`;
-      const retained =
-        result.network === ARC_TESTNET_CAIP2
-          ? ` (retained ${formatUsdc(getArcGasHeadroomAtomic())} USDC for gas)`
-          : "";
-      return `${name}: swept ${formatUsdc(BigInt(result.amountAtomic))} USDC in ${result.transaction}${retained}`;
+      const retained = usesUsdcGas(result.network)
+        ? ` (retained ${formatUsdc(getArcGasHeadroomAtomic())} USDC for gas)`
+        : "";
+      const explorerUrl = explorerTransactionUrl(result.network, result.transaction);
+      const transaction = explorerUrl
+        ? `${result.transaction} (${explorerUrl})`
+        : result.transaction;
+      return `${name}: swept ${formatUsdc(BigInt(result.amountAtomic))} USDC in ${transaction}${retained}`;
     })
     .join("\n");
 }
@@ -3503,8 +3533,8 @@ function parseInitNetworks(value: string): string[] {
     throw new UsageError("--networks must be a comma-separated list without duplicates.");
   }
   for (const network of networks) {
-    if (network !== "base" && network !== "solana") {
-      throw new UsageError("--networks supports base and solana.");
+    if (network !== "base" && network !== "arc" && network !== "solana") {
+      throw new UsageError("--networks supports base, arc and solana.");
     }
   }
   return networks;

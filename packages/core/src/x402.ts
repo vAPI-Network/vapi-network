@@ -14,8 +14,8 @@ import { getCanonicalX402Usdc, type X402NetworkConfig } from "./x402-networks.js
 export type { Address, Hex } from "viem";
 
 export {
+  ARC_MAINNET_CAIP2,
   ARC_TESTNET_CAIP2,
-  ARC_MAINNET_CAIP2_PLACEHOLDER,
   BASE_MAINNET_CAIP2,
   BROWSER_ENABLED_X402_NETWORK_CONFIG,
   CANONICAL_X402_USDC_NETWORKS,
@@ -310,9 +310,14 @@ export function parse402Challenge(
     ) {
       return false;
     }
+    // An EIP-3009 authorization is signed for the token contract itself. An
+    // offer naming another verifying contract (Circle Gateway's batched
+    // wallet, for one) wants a different payment flow, so it is not payable here.
+    const verifyingContract = readString(extra, "verifyingContract");
     try {
       return (
         getAddress(asset) === getAddress(configured.usdc) &&
+        (verifyingContract === null || getAddress(verifyingContract) === getAddress(asset)) &&
         (!expectedPayTo || getAddress(payTo) === getAddress(expectedPayTo))
       );
     } catch {
