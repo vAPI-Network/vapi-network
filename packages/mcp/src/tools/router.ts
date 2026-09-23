@@ -1,6 +1,7 @@
-import type { SecretStore, WalletStore } from "@vapi-network/core";
-import { walletNameSchema } from "@vapi-network/core";
+import type { SecretStore, VapiConfig, VapiPaymentAccount, WalletStore } from "@vapi-network/core";
+import { spendCapsForWallet, walletNameSchema } from "@vapi-network/core";
 import {
+  buyRouterBalance,
   listRouterModels,
   ownerStake,
   routerChat,
@@ -58,6 +59,13 @@ const routerChatInputShape = {
 
 const routerChatInputSchema = z.strictObject(routerChatInputShape);
 
+const routerBuyInputShape = {
+  usd: z.union([z.literal(1), z.literal(5), z.literal(20), z.literal(50)]),
+  ...walletArgument,
+};
+
+const routerBuyInputSchema = z.strictObject(routerBuyInputShape);
+
 const KEY_SAFETY_DESCRIPTION = "The Router key stays in the OS secret store and is never returned.";
 
 export const routerModelsTool = {
@@ -90,11 +98,27 @@ export const routerChatTool = {
   }),
 };
 
+export const routerBuyTool = {
+  description: `Buy prepaid vAPI Router balance with the selected local wallet, subject to that wallet's daily spend cap. ${KEY_SAFETY_DESCRIPTION}`,
+  inputSchema: routerBuyInputShape,
+  strictInput: true,
+  outputSchema: z.object({
+    receipt: z.object({
+      id: z.string(),
+      amountUsd: z.number(),
+      network: z.string(),
+      transaction: z.string().optional(),
+    }),
+    balance: routerUsageSchema.balance,
+  }),
+};
+
 export type RouterCoreOverrides = {
   listRouterModels?: typeof listRouterModels | undefined;
   routerUsage?: typeof routerUsage | undefined;
   routerChat?: typeof routerChat | undefined;
   ownerStake?: typeof ownerStake | undefined;
+  buyRouterBalance?: typeof buyRouterBalance | undefined;
 };
 
 export type RouterToolsOptions = RouterCoreOverrides & {
@@ -103,6 +127,10 @@ export type RouterToolsOptions = RouterCoreOverrides & {
   wallets?: WalletStore | undefined;
   fetchImpl: typeof fetch;
   apiBase: string;
+  account: VapiPaymentAccount;
+  config: VapiConfig;
+  ledgerPath?: string | undefined;
+  receiptsPath?: string | undefined;
 };
 
 type ToolResult = {
@@ -114,11 +142,17 @@ export function createRouterTools(options: RouterToolsOptions): {
   models(input: Record<string, never>): Promise<ToolResult>;
   usage(input: { wallet?: string }): Promise<ToolResult>;
   chat(input: z.infer<typeof routerChatInputSchema>): Promise<ToolResult>;
+  buy(input: z.infer<typeof routerBuyInputSchema>): Promise<ToolResult>;
 } {
   const listModels = options.listRouterModels ?? listRouterModels;
   const readUsage = options.routerUsage ?? routerUsage;
   const chat = options.routerChat ?? routerChat;
   const readStake = options.ownerStake ?? ownerStake;
+  const buyBalance = options.buyRouterBalance ?? buyRouterBalance;
+  // `options.account` was unlocked before stdio started. Keep its original
+  // wallet identity: `wallet.use` may move the active session later, and chat
+  // must never unlock a different wallet merely to attempt an automatic refill.
+  const unlockedWallet = options.session.resolve().name;
 
   return {
     async models() {
@@ -141,7 +175,7 @@ export function createRouterTools(options: RouterToolsOptions): {
 
     async chat(input) {
       const parsed = routerChatInputSchema.parse(input);
-      const result = await chat(routerDeps(options, parsed.wallet), {
+      const result = await chat(routerDeps(options, parsed.wallet, unlockedWallet), {
         model: parsed.model,
         messages: parsed.messages,
         ...(parsed.max_tokens === undefined ? {} : { max_tokens: parsed.max_tokens }),
@@ -150,6 +184,67 @@ export function createRouterTools(options: RouterToolsOptions): {
         content: result.content,
         model: result.model,
         ...(result.usage === undefined ? {} : { usage: result.usage }),
+      });
+    },
+
+    async buy(input) {
+      const parsed = routerBuyInputSchema.parse(input);
+      if (options.wallets === undefined) {
+        throw new Error("No wallet store is available, so no linked wallet can be selected.");
+      }
+      await options.wallets.reload();
+      const wallet = options.session.resolve(parsed.wallet);
+      const caps = options.wallets.entry(wallet.name)?.spendCaps;
+      const requiredAtomic = BigInt(parsed.usd) * 1_000_000n;
+      if (
+        caps === undefined ||
+        BigInt(caps.perDayAtomic) === 0n ||
+        BigInt(caps.perDayAtomic) < requiredAtomic
+      ) {
+        throw new Error(
+          `Wallet ${wallet.name} needs a daily spend cap of at least $${parsed.usd} before it can buy Router balance. Set it with vapi wallet caps ${wallet.name} --per-day ${parsed.usd}.`,
+        );
+      }
+
+      const selected = await options.session.payment(wallet.name);
+      if (selected.spendCaps === undefined) {
+        throw new Error(
+          `Wallet ${wallet.name} has no resolved spend caps. Set them with vapi wallet caps ${wallet.name}.`,
+        );
+      }
+      const result = await buyBalance(
+        {
+          ...routerDeps(options, wallet.name),
+          account: selected.account,
+          config: options.config,
+          caps: selected.spendCaps,
+          ...(options.ledgerPath === undefined && options.receiptsPath === undefined
+            ? {}
+            : {
+                paths: {
+                  ...(options.ledgerPath === undefined ? {} : { ledgerPath: options.ledgerPath }),
+                  ...(options.receiptsPath === undefined
+                    ? {}
+                    : { receiptsPath: options.receiptsPath }),
+                },
+              }),
+        },
+        parsed.usd,
+      );
+      const network = result.receipt.quote?.network;
+      if (network === undefined) {
+        throw new Error("The Router balance purchase receipt did not identify its network.");
+      }
+      return toolResult({
+        receipt: {
+          id: result.receipt.id,
+          amountUsd: parsed.usd,
+          network,
+          ...(result.receipt.settlement?.transaction === undefined
+            ? {}
+            : { transaction: result.receipt.settlement.transaction }),
+        },
+        balance: publicBalance(result.balance),
       });
     },
   };
@@ -176,15 +271,53 @@ function publicUsage(usage: AgentRouterUsage): AgentRouterUsage {
   };
 }
 
-function routerDeps(options: RouterToolsOptions, wallet?: string): RouterClientDeps {
+function publicBalance(usage: AgentRouterUsage["balance"]): AgentRouterUsage["balance"] {
+  return usage === null
+    ? null
+    : {
+        purchasedUsd: usage.purchasedUsd,
+        spentUsd: usage.spentUsd,
+        remainingUsd: usage.remainingUsd,
+      };
+}
+
+function routerDeps(
+  options: RouterToolsOptions,
+  wallet?: string,
+  unlockedWallet?: string,
+): RouterClientDeps {
   if (options.wallets === undefined) {
     throw new Error("No wallet store is available, so no linked wallet can be selected.");
   }
+  const selected = options.session.resolve(wallet);
+  const caps = options.wallets.entry(selected.name)?.spendCaps;
   return {
     secrets: options.secrets,
     wallets: options.wallets,
-    wallet: options.session.resolve(wallet).name,
+    wallet: selected.name,
     fetchImpl: options.fetchImpl,
+    ...(unlockedWallet === selected.name && caps !== undefined
+      ? {
+          refill: {
+            account: options.account,
+            config: options.config,
+            caps: async () => {
+              await options.wallets!.reload();
+              return await spendCapsForWallet(options.wallets!, selected.name);
+            },
+            ...(options.ledgerPath === undefined && options.receiptsPath === undefined
+              ? {}
+              : {
+                  paths: {
+                    ...(options.ledgerPath === undefined ? {} : { ledgerPath: options.ledgerPath }),
+                    ...(options.receiptsPath === undefined
+                      ? {}
+                      : { receiptsPath: options.receiptsPath }),
+                  },
+                }),
+          },
+        }
+      : {}),
   };
 }
 

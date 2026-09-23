@@ -40,6 +40,7 @@ describe("Agent Cash MCP marketplace tools", () => {
       "router.models",
       "router.usage",
       "router.chat",
+      "router.buy",
       "call.search",
       "search",
       "call.inspect",

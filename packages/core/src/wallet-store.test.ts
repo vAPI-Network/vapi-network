@@ -33,6 +33,7 @@ import {
 import { readSpendLedger, readSpendLedgerRows, reserveSpend } from "./spend-policy.js";
 import {
   assertWalletName,
+  ROUTER_TOPUP_TIERS,
   spendCapsForWallet,
   walletEntrySchema,
   WalletStore,
@@ -268,6 +269,41 @@ describe("wallet selection", () => {
 });
 
 describe("wallet store", () => {
+  it("persists and clears Router refill settings while legacy entries still parse", async () => {
+    const home = await makeHome();
+    const legacyEntry = walletEntrySchema.parse({
+      createdAt: "2026-09-19T12:00:00.000Z",
+      spendCaps: { ...DEFAULT_SPEND_CAPS },
+    });
+    expect(legacyEntry).not.toHaveProperty("routerRefill");
+    expect(ROUTER_TOPUP_TIERS).toEqual([1, 5, 20, 50]);
+
+    await writeFile(
+      join(home, "wallets.json"),
+      `${JSON.stringify(
+        { version: 1, default: "main", wallets: { main: legacyEntry } },
+        null,
+        2,
+      )}\n`,
+      { mode: 0o600 },
+    );
+    const store = await WalletStore.open(home);
+
+    await expect(
+      store.setRouterRefill("main", { belowUsd: 2.5, tierUsd: 5 }),
+    ).resolves.toMatchObject({ routerRefill: { belowUsd: 2.5, tierUsd: 5 } });
+    expect((await WalletStore.open(home)).entry("main")?.routerRefill).toEqual({
+      belowUsd: 2.5,
+      tierUsd: 5,
+    });
+    await expect(
+      store.setRouterRefill("main", { belowUsd: 1, tierUsd: 3 as never }),
+    ).rejects.toThrow();
+
+    await expect(store.setRouterRefill("main", null)).resolves.not.toHaveProperty("routerRefill");
+    expect((await WalletStore.open(home)).entry("main")).not.toHaveProperty("routerRefill");
+  });
+
   it("parses entries without a link and persists link changes", async () => {
     const home = await makeHome();
     const entry = walletEntrySchema.parse({

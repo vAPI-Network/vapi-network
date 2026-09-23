@@ -2,13 +2,28 @@ import { z } from "zod";
 
 import {
   AgentLinkError,
+  agentAccessToken,
   agentFetch,
   agentSecretAccounts,
   withAgentCredentialLock,
 } from "./agent-link.js";
+import { appendAudit } from "./audit.js";
+import type { SpendCaps, VapiConfig } from "./config.js";
+import type { VapiPaymentAccount } from "./keystore.js";
 import { createPublicFetch } from "./net-guard.js";
+import type { Receipt } from "./receipts.js";
 import type { SecretStore } from "./secret-store.js";
-import type { AgentLink, WalletName, WalletStore } from "./wallet-store.js";
+import { SpendCapError } from "./spend-policy.js";
+import {
+  ROUTER_TOPUP_TIERS,
+  type AgentLink,
+  type RouterTopupTier,
+  type WalletName,
+  type WalletStore,
+} from "./wallet-store.js";
+import { payRequest } from "./x402-pay.js";
+
+export { ROUTER_TOPUP_TIERS, type RouterRefill, type RouterTopupTier } from "./wallet-store.js";
 
 export type RouterModel = { id: string; [k: string]: unknown };
 
@@ -69,6 +84,13 @@ export type RouterClientDeps = {
   wallets: WalletStore;
   wallet: WalletName;
   fetchImpl?: typeof fetch;
+  refill?: {
+    account: VapiPaymentAccount | (() => Promise<VapiPaymentAccount>);
+    config: VapiConfig;
+    caps: SpendCaps | (() => Promise<SpendCaps>);
+    paths?: { ledgerPath?: string; receiptsPath?: string };
+    now?: Date;
+  };
 };
 
 export const DEFAULT_ROUTER_BASE_URL = "https://router.vapinetwork.ai";
@@ -186,11 +208,167 @@ export async function routerUsage(deps: RouterClientDeps): Promise<AgentRouterUs
   return parsed.data;
 }
 
+export async function buyRouterBalance(
+  deps: RouterClientDeps & {
+    account: VapiPaymentAccount;
+    config: VapiConfig;
+    caps: SpendCaps;
+    paths?: { ledgerPath?: string; receiptsPath?: string };
+    now?: Date;
+  },
+  tierUsd: RouterTopupTier,
+): Promise<{ receipt: Receipt; balance: AgentRouterUsage["balance"] }> {
+  if (!isRouterTopupTier(tierUsd)) {
+    throw new RouterClientError("http", "Router balance must use a $1, $5, $20, or $50 tier.");
+  }
+  const { link, accessToken } = await purchaseCredentialSnapshot(deps);
+  const { response, receipt } = await payRequest({
+    url: `${trimTrailingSlashes(link.apiBase)}/api/router/top-up/${tierUsd}`,
+    init: {
+      method: "POST",
+      headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
+    },
+    account: deps.account,
+    wallet: deps.wallet,
+    caps: deps.caps,
+    config: deps.config,
+    fetchImpl: deps.fetchImpl ?? publicFetch,
+    ...(deps.paths === undefined ? {} : { paths: deps.paths }),
+    maxAtomic: BigInt(tierUsd) * 1_000_000n,
+    preferNetworks: ["eip155:8453"],
+    ...(deps.now === undefined ? {} : { now: deps.now }),
+    source: "router.topup",
+  });
+  if (!response.ok) {
+    throw new RouterClientError(
+      "http",
+      `The Router balance purchase returned HTTP ${response.status}.`,
+      response.status,
+    );
+  }
+
+  await appendAudit(
+    deps.wallets.home,
+    {
+      event: "router.buy",
+      wallet: deps.wallet,
+      owner: link.owner,
+      tty: Boolean(process.stderr.isTTY),
+      detail: `$${tierUsd} on ${receipt.quote?.network ?? "eip155:8453"}`,
+    },
+    deps.now === undefined ? {} : { now: () => deps.now! },
+  );
+
+  try {
+    await ensureBalanceRouterKey(deps, link);
+  } catch {
+    throw new RouterClientError(
+      "http",
+      "The Router balance payment went through, but its key could not be fetched or stored. It can be fetched on the next chat/buy.",
+    );
+  }
+
+  return { receipt, balance: (await routerUsage(deps)).balance };
+}
+
 export async function routerChat(
   deps: RouterClientDeps,
   request: ChatRequest,
 ): Promise<ChatResult> {
   const { routerBaseUrl, routerKey } = await routerCredentialSnapshot(deps);
+  try {
+    return await sendRouterChat(deps, routerBaseUrl, routerKey, request, "stake");
+  } catch (error) {
+    if (!(error instanceof RouterClientError) || error.code !== "budget_exhausted") throw error;
+
+    let usage: AgentRouterUsage | undefined;
+    try {
+      usage = await routerUsage(deps);
+    } catch {
+      // Unknown balance is allowed to try a stored key; the Router remains authoritative.
+    }
+    const resetsAt = usage?.compute.resetsAt ?? "00:00 UTC";
+    let balance = usage?.balance;
+    const refill = deps.wallets.entry(deps.wallet)?.routerRefill;
+
+    if (
+      usage !== undefined &&
+      refill !== undefined &&
+      deps.refill !== undefined &&
+      (balance?.remainingUsd ?? 0) < refill.belowUsd
+    ) {
+      try {
+        const [account, caps] = await Promise.all([
+          resolveRefillValue(deps.refill.account),
+          resolveRefillValue(deps.refill.caps),
+        ]);
+        balance = (
+          await buyRouterBalance(
+            {
+              ...deps,
+              account,
+              config: deps.refill.config,
+              caps,
+              ...(deps.refill.paths === undefined ? {} : { paths: deps.refill.paths }),
+              ...(deps.refill.now === undefined ? {} : { now: deps.refill.now }),
+            },
+            refill.tierUsd,
+          )
+        ).balance;
+      } catch (refillError) {
+        await appendAudit(deps.wallets.home, {
+          event: "router.refill.declined",
+          wallet: deps.wallet,
+          ...(deps.wallets.entry(deps.wallet)?.link?.owner === undefined
+            ? {}
+            : { owner: deps.wallets.entry(deps.wallet)!.link!.owner }),
+          tty: Boolean(process.stderr.isTTY),
+          detail: refillDeclinedDetail(refillError),
+        });
+      }
+    }
+
+    const mayHaveBalance = usage === undefined || (balance?.remainingUsd ?? 0) > 0;
+    if (mayHaveBalance) {
+      const balanceCredentials = await routerBalanceCredentialSnapshot(deps);
+      if (balanceCredentials !== undefined) {
+        try {
+          return await sendRouterChat(
+            deps,
+            balanceCredentials.routerBaseUrl,
+            balanceCredentials.routerKey,
+            request,
+            "balance",
+          );
+        } catch (balanceError) {
+          if (
+            balanceError instanceof RouterClientError &&
+            balanceError.code === "budget_exhausted"
+          ) {
+            throw budgetExhaustedError(resetsAt, error.status);
+          }
+          if (
+            balanceError instanceof RouterClientError &&
+            balanceError.code === "no_router_key" &&
+            balanceError.status === 401
+          ) {
+            await removeRejectedBalanceKey(deps, balanceCredentials).catch(() => undefined);
+          }
+          throw balanceError;
+        }
+      }
+    }
+    throw budgetExhaustedError(resetsAt, error.status);
+  }
+}
+
+async function sendRouterChat(
+  deps: RouterClientDeps,
+  routerBaseUrl: string,
+  routerKey: string,
+  request: ChatRequest,
+  keyUsed: ChatResult["keyUsed"],
+): Promise<ChatResult> {
   const fetchImpl = deps.fetchImpl ?? publicFetch;
   let response: Response;
   try {
@@ -221,22 +399,18 @@ export async function routerChat(
       body.includes("Budget has been exceeded") ||
       body.includes("ExceededBudget")
     ) {
-      let resetsAt = "00:00 UTC";
-      try {
-        resetsAt = (await routerUsage(deps)).compute.resetsAt;
-      } catch {
-        // The safe fallback does not expose a failed console response.
-      }
       throw new RouterClientError(
         "budget_exhausted",
-        `Today's Router allowance is used up. It resets at ${resetsAt}.`,
+        "The Router key has no remaining budget.",
         response.status,
       );
     }
     if (response.status === 401) {
       throw new RouterClientError(
         "no_router_key",
-        "The Router key was revoked. Run vapi router key --rotate.",
+        keyUsed === "stake"
+          ? "The Router key was revoked. Run vapi router key --rotate."
+          : "The Router balance key was rejected. Buy Router balance again to refresh it.",
         401,
       );
     }
@@ -267,8 +441,186 @@ export async function routerChat(
     })),
     ...(parsed.data.usage === undefined ? {} : { usage: parsed.data.usage }),
     model: parsed.data.model ?? request.model,
-    keyUsed: "stake",
+    keyUsed,
   };
+}
+
+async function ensureBalanceRouterKey(deps: RouterClientDeps, paidLink: AgentLink): Promise<void> {
+  if (!deps.secrets.available) {
+    throw new RouterClientError(
+      "http",
+      "No OS secret store is available, so the Router balance key cannot be stored safely.",
+    );
+  }
+  // Token refresh uses the link's credential lock. Serialize balance-key minting
+  // on a separate lock so a 401 can refresh without trying to reacquire this lock.
+  await withAgentCredentialLock(
+    deps.wallets,
+    `${paidLink.clientId}:router-balance-key`,
+    async () => {
+      const link = await linkedWallet(deps);
+      if (!sameAgentLink(link, paidLink)) {
+        throw new RouterClientError(
+          "http",
+          "The agent link changed while fetching the Router balance key.",
+        );
+      }
+      const account = agentSecretAccounts(deps.wallet).routerBalance;
+      let existing: string | undefined;
+      try {
+        existing = await deps.secrets.get(account);
+      } catch {
+        throw new RouterClientError("http", "The Router balance key could not be read safely.");
+      }
+      if (existing !== undefined && existing.length > 0) return;
+
+      const response = await consoleRequest(
+        deps,
+        "/api/agents/self/router-balance-key",
+        { method: "POST" },
+        "The Router balance key request failed after payment.",
+        link,
+      );
+      if (!response.ok) {
+        throw new RouterClientError(
+          "http",
+          `The Router balance key request returned HTTP ${response.status} after payment.`,
+          response.status,
+        );
+      }
+      const parsed = routerKeyResponseSchema.safeParse(await responseJson(response));
+      if (!parsed.success) {
+        throw new RouterClientError("http", "The Router balance key response was invalid.");
+      }
+      const currentLink = await linkedWallet(deps);
+      if (!sameAgentLink(currentLink, paidLink)) {
+        throw new RouterClientError(
+          "http",
+          "The agent link changed while fetching the Router balance key.",
+        );
+      }
+      const returnedBase = validRouterBaseUrl(parsed.data.router_base_url);
+      const expectedBase = validRouterBaseUrl(link.routerBaseUrl ?? DEFAULT_ROUTER_BASE_URL);
+      if (returnedBase !== expectedBase) {
+        throw new RouterClientError(
+          "http",
+          "The Router balance key response named an unexpected Router base URL.",
+        );
+      }
+      try {
+        await deps.secrets.set(account, parsed.data.router_key);
+      } catch {
+        throw new RouterClientError("http", "The Router balance key could not be stored safely.");
+      }
+    },
+  );
+}
+
+type RouterBalanceCredentials = {
+  clientId: string;
+  routerBaseUrl: string;
+  routerKey: string;
+};
+
+async function routerBalanceCredentialSnapshot(
+  deps: RouterClientDeps,
+): Promise<RouterBalanceCredentials | undefined> {
+  const observedLink = await linkedWallet(deps);
+  try {
+    return await withAgentCredentialLock(deps.wallets, observedLink.clientId, async () => {
+      const link = await linkedWallet(deps);
+      if (link.clientId !== observedLink.clientId) {
+        throw new RouterClientError(
+          "http",
+          "The agent link changed while reading Router balance credentials.",
+        );
+      }
+      if (!deps.secrets.available) return undefined;
+      let routerKey: string | undefined;
+      try {
+        routerKey = await deps.secrets.get(agentSecretAccounts(deps.wallet).routerBalance);
+      } catch {
+        throw new RouterClientError("http", "The Router balance key could not be read safely.");
+      }
+      if (routerKey === undefined || routerKey.length === 0) return undefined;
+      return {
+        clientId: link.clientId,
+        routerBaseUrl: validRouterBaseUrl(link.routerBaseUrl ?? DEFAULT_ROUTER_BASE_URL),
+        routerKey,
+      };
+    });
+  } catch (error) {
+    if (error instanceof RouterClientError) throw error;
+    throw new RouterClientError("http", "The Router balance credentials could not be read safely.");
+  }
+}
+
+async function removeRejectedBalanceKey(
+  deps: RouterClientDeps,
+  rejected: RouterBalanceCredentials,
+): Promise<void> {
+  if (!deps.secrets.available) return;
+  await withAgentCredentialLock(deps.wallets, rejected.clientId, async () => {
+    const link = await linkedWallet(deps);
+    if (link.clientId !== rejected.clientId) return;
+    const account = agentSecretAccounts(deps.wallet).routerBalance;
+    if ((await deps.secrets.get(account)) === rejected.routerKey) {
+      await deps.secrets.remove(account);
+    }
+  });
+}
+
+async function routerAccessToken(deps: RouterClientDeps): Promise<string> {
+  try {
+    return await agentAccessToken({
+      secrets: deps.secrets,
+      wallets: deps.wallets,
+      wallet: deps.wallet,
+      ...(deps.fetchImpl === undefined ? {} : { fetchImpl: deps.fetchImpl }),
+    });
+  } catch (error) {
+    if (error instanceof AgentLinkError && error.code === "not_linked") throw notLinkedError();
+    throw new RouterClientError("http", "The agent access token could not be read safely.");
+  }
+}
+
+async function purchaseCredentialSnapshot(
+  deps: RouterClientDeps,
+): Promise<{ link: AgentLink; accessToken: string }> {
+  const before = await linkedWallet(deps);
+  const accessToken = await routerAccessToken(deps);
+  const after = await linkedWallet(deps);
+  if (!sameAgentLink(before, after)) {
+    throw new RouterClientError(
+      "http",
+      "The agent link changed while preparing the Router balance purchase.",
+    );
+  }
+  return { link: after, accessToken };
+}
+
+async function resolveRefillValue<T>(value: T | (() => Promise<T>)): Promise<T> {
+  return typeof value === "function" ? await (value as () => Promise<T>)() : value;
+}
+
+function budgetExhaustedError(resetsAt: string, status?: number): RouterClientError {
+  return new RouterClientError(
+    "budget_exhausted",
+    `Today's Router allowance is used up. It resets at ${resetsAt}. Buy Router balance with vapi router buy 5.`,
+    status,
+  );
+}
+
+function refillDeclinedDetail(error: unknown): string {
+  if (error instanceof SpendCapError) return `${error.name}: ${error.code}`;
+  if (error instanceof RouterClientError) {
+    return `${error.name}: ${error.code}${error.status === undefined ? "" : ` (${error.status})`}`;
+  }
+  return "Error: Router balance refill failed.";
+}
+
+function isRouterTopupTier(value: unknown): value is RouterTopupTier {
+  return ROUTER_TOPUP_TIERS.some((tier) => tier === value);
 }
 
 export async function rotateRouterKey(deps: RouterClientDeps): Promise<void> {

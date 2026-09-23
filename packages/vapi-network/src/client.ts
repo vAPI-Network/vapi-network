@@ -17,6 +17,7 @@ import {
   type AgentRouterUsage,
   type ChatRequest,
   type ChatResult,
+  type Receipt,
   type RouterModel,
   type ResolvedWallet,
   type SecretStore,
@@ -24,11 +25,13 @@ import {
   type VapiPaymentAccount,
 } from "@vapi-network/core";
 import {
+  buyRouterBalance,
   listRouterModels,
   routerChat,
   routerCredentials,
   routerUsage,
   type RouterClientDeps,
+  type RouterTopupTier,
 } from "@vapi-network/core/router-client";
 import {
   callService,
@@ -79,6 +82,7 @@ export type VapiClient = {
   router: {
     models(): Promise<RouterModel[]>;
     usage(): Promise<AgentRouterUsage>;
+    buy(usd: RouterTopupTier): Promise<{ receipt: Receipt; balance: AgentRouterUsage["balance"] }>;
     chat(req: ChatRequest): Promise<ChatResult>;
     /**
      * Base URL and key for any OpenAI-compatible framework. The key stays in
@@ -120,12 +124,6 @@ export async function createVapiClient(options: VapiClientOptions = {}): Promise
   }
   const address = storedAddress as `0x${string}`;
 
-  const deps: RouterClientDeps = {
-    secrets,
-    wallets,
-    wallet: selected.name,
-    ...(options.fetch === undefined ? {} : { fetchImpl: options.fetch }),
-  };
   let accountPromise: Promise<VapiPaymentAccount> | undefined;
 
   const account = (): Promise<VapiPaymentAccount> => {
@@ -161,6 +159,19 @@ export async function createVapiClient(options: VapiClientOptions = {}): Promise
   const currentSpendCaps = async () => {
     await wallets.reload();
     return await spendCapsForWallet(wallets, selected.name);
+  };
+
+  const deps: RouterClientDeps = {
+    secrets,
+    wallets,
+    wallet: selected.name,
+    ...(options.fetch === undefined ? {} : { fetchImpl: options.fetch }),
+    refill: {
+      account,
+      config,
+      caps: currentSpendCaps,
+      paths: { ledgerPath: paths.ledger, receiptsPath: paths.receipts },
+    },
   };
 
   return {
@@ -212,6 +223,19 @@ export async function createVapiClient(options: VapiClientOptions = {}): Promise
       async usage() {
         await requireAccountLink();
         return await routerUsage(deps);
+      },
+      async buy(usd) {
+        await requireAccountLink();
+        return await buyRouterBalance(
+          {
+            ...deps,
+            account: await account(),
+            config,
+            caps: await currentSpendCaps(),
+            paths: { ledgerPath: paths.ledger, receiptsPath: paths.receipts },
+          },
+          usd,
+        );
       },
       async chat(request) {
         await requireAccountLink();

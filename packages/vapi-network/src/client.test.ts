@@ -22,7 +22,9 @@ const PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef012345678
 const PASSPHRASE = "test-only-passphrase";
 const PAY_TO = "0x1111111111111111111111111111111111111111";
 const OWNER = "0x2222222222222222222222222222222222222222";
+const ACCESS_TOKEN = "test-agent-access-token";
 const ROUTER_KEY = "sk-test-router-key";
+const BALANCE_KEY = "sk-test-router-balance-key";
 const NOT_LINKED = "Not linked. Run vapi login on this machine, or set VAPI_HOME to a linked home.";
 const temporaryDirectories: string[] = [];
 
@@ -119,6 +121,163 @@ describe("createVapiClient", () => {
     expect(unlock).toHaveBeenCalledOnce();
   });
 
+  it("buys Router balance with the lazily unlocked wallet and records the payment", async () => {
+    const home = await temporaryHome();
+    const store = await WalletStore.open(home);
+    await store.importKey("main", PASSPHRASE, PRIVATE_KEY, {
+      spendCaps: { perCallAtomic: "10000000", perDayAtomic: "10000000" },
+    });
+    await store.setLink("main", agentLink());
+    const config = getDefaultConfig();
+    config.allowPrivateNetwork = true;
+    await writeFile(getVapiPaths(home).config, `${JSON.stringify(config)}\n`, { mode: 0o600 });
+    const secrets = memorySecretStore({
+      [agentSecretAccounts("main").tokens]: JSON.stringify({
+        accessToken: ACCESS_TOKEN,
+        refreshToken: "test-agent-refresh-token",
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        scopes: ["mcp:call", "router.use"],
+      }),
+    });
+    const balance = { purchasedUsd: 5, spentUsd: 0, remainingUsd: 5 };
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname === "/api/router/top-up/5") {
+        return request.headers.has("payment-signature")
+          ? routerTopupAccepted()
+          : routerTopupRequired();
+      }
+      if (url.pathname === "/api/agents/self/router-balance-key") {
+        return Response.json({
+          router_key: BALANCE_KEY,
+          router_base_url: "https://router.example/gateway",
+        });
+      }
+      if (url.pathname === "/api/agents/self/router") {
+        return Response.json({
+          compute: {
+            allowanceUsd: 10,
+            spentTodayUsd: 1,
+            remainingTodayUsd: 9,
+            resetsAt: "2026-09-24T00:00:00.000Z",
+            ownerLimitUsd: 20,
+            ownerSpentUsd: 1,
+          },
+          balance,
+        });
+      }
+      throw new Error(`Unexpected request to ${url.href}`);
+    });
+    const unlock = vi.spyOn(WalletStore.prototype, "unlock");
+    const client = await createVapiClient({
+      home,
+      passphrase: PASSPHRASE,
+      secretStore: secrets,
+      fetch: fetchImpl,
+      env: {},
+    });
+
+    expect(unlock).not.toHaveBeenCalled();
+    await expect(client.router.buy(5)).resolves.toMatchObject({
+      receipt: { outcome: "paid", source: "router.topup" },
+      balance,
+    });
+    expect(unlock).toHaveBeenCalledOnce();
+    await expect(stat(getVapiPaths(home).ledger)).resolves.toBeDefined();
+    await expect(stat(getVapiPaths(home).receipts)).resolves.toBeDefined();
+  });
+
+  it("auto-refills configured Router balance for SDK chats and agent runs", async () => {
+    const home = await registryHome({
+      link: agentLink(),
+      spendCaps: { perCallAtomic: "10000000", perDayAtomic: "20000000" },
+      routerRefill: { belowUsd: 2, tierUsd: 5 },
+    });
+    await writeAgentProfile(home, {
+      version: 1,
+      name: "researcher",
+      wallet: "main",
+      model: "router/test",
+      instructions: "Research carefully.",
+      verifiedOnly: true,
+      approveAboveUsd: 0.5,
+      maxSteps: 2,
+      tools: ["call.search", "call.inspect", "call.pay"],
+      paused: false,
+      createdAt: "2026-09-23T00:00:00.000Z",
+    });
+    const config = getDefaultConfig();
+    config.allowPrivateNetwork = true;
+    await writeFile(getVapiPaths(home).config, `${JSON.stringify(config)}\n`, { mode: 0o600 });
+    const account = await externalAccount(home);
+    const secrets = memorySecretStore({
+      [agentSecretAccounts("main").tokens]: JSON.stringify({
+        accessToken: ACCESS_TOKEN,
+        refreshToken: "test-agent-refresh-token",
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        scopes: ["mcp:call", "router.use"],
+      }),
+      [agentSecretAccounts("main").routerStake]: ROUTER_KEY,
+      [agentSecretAccounts("main").routerBalance]: BALANCE_KEY,
+    });
+    let topupCalls = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (url.hostname === "router.example") {
+        const authorization = request.headers.get("authorization");
+        if (authorization === `Bearer ${ROUTER_KEY}`) {
+          return new Response("budget exceeded", { status: 429 });
+        }
+        expect(authorization).toBe(`Bearer ${BALANCE_KEY}`);
+        return Response.json({
+          model: "router/test",
+          choices: [{ message: { content: "Answered from balance." } }],
+        });
+      }
+      if (url.pathname === "/api/agents/self/router") {
+        return Response.json({
+          compute: {
+            allowanceUsd: 1,
+            spentTodayUsd: 1,
+            remainingTodayUsd: 0,
+            resetsAt: "2026-09-24T00:00:00.000Z",
+            ownerLimitUsd: 5,
+            ownerSpentUsd: 5,
+          },
+          balance: { purchasedUsd: 5, spentUsd: 4, remainingUsd: 1 },
+        });
+      }
+      if (url.pathname === "/api/router/top-up/5") {
+        topupCalls += 1;
+        return request.headers.has("payment-signature")
+          ? routerTopupAccepted()
+          : routerTopupRequired();
+      }
+      throw new Error(`Unexpected request to ${url.href}`);
+    });
+    const client = await createVapiClient({
+      account,
+      home,
+      secretStore: secrets,
+      fetch: fetchImpl,
+      env: {},
+    });
+
+    await expect(
+      client.router.chat({
+        model: "router/test",
+        messages: [{ role: "user", content: "Chat" }],
+      }),
+    ).resolves.toMatchObject({ content: "Answered from balance.", keyUsed: "balance" });
+    await expect(client.agent.run("researcher", "Run")).resolves.toMatchObject({
+      answer: "Answered from balance.",
+      stoppedBecause: { type: "stopped", reason: "finished" },
+    });
+    expect(topupCalls).toBe(4);
+  });
+
   it("declines an above-threshold agent payment by default", async () => {
     const home = await registryHome({
       link: agentLink(),
@@ -210,6 +369,7 @@ describe("createVapiClient", () => {
 
     await expect(client.router.models()).rejects.toThrow(NOT_LINKED);
     await expect(client.router.usage()).rejects.toThrow(NOT_LINKED);
+    await expect(client.router.buy(1)).rejects.toThrow(NOT_LINKED);
     await expect(
       client.router.chat({ model: "router/test", messages: [{ role: "user", content: "hi" }] }),
     ).rejects.toThrow(NOT_LINKED);
@@ -253,7 +413,11 @@ function agentLink(): AgentLink {
 }
 
 async function registryHome(
-  options: { spendCaps?: SpendCaps; link?: AgentLink } = {},
+  options: {
+    spendCaps?: SpendCaps;
+    link?: AgentLink;
+    routerRefill?: { belowUsd: number; tierUsd: 1 | 5 | 20 | 50 };
+  } = {},
 ): Promise<string> {
   const home = await temporaryHome();
   await writeFile(
@@ -269,6 +433,7 @@ async function registryHome(
               perCallAtomic: "100000",
               perDayAtomic: "1000000",
             },
+            ...(options.routerRefill === undefined ? {} : { routerRefill: options.routerRefill }),
             ...(options.link === undefined ? {} : { link: options.link }),
           },
         },
@@ -312,6 +477,42 @@ function paymentRequired(): Response {
       ],
     },
     { status: 402 },
+  );
+}
+
+function routerTopupRequired(): Response {
+  const config = getDefaultConfig();
+  return Response.json(
+    {
+      x402Version: 2,
+      resource: { url: "https://api.vapinetwork.ai/api/router/top-up/5" },
+      accepts: [
+        {
+          scheme: "exact",
+          network: BASE_MAINNET_CAIP2,
+          amount: "5000000",
+          asset: config.networks[BASE_MAINNET_CAIP2]!.usdc,
+          payTo: PAY_TO,
+          maxTimeoutSeconds: 60,
+          extra: { name: "USD Coin", version: "2" },
+        },
+      ],
+    },
+    { status: 402 },
+  );
+}
+
+function routerTopupAccepted(): Response {
+  return Response.json(
+    { status: "accepted", usd: 5, owner: OWNER },
+    {
+      headers: {
+        "payment-response": Buffer.from(
+          JSON.stringify({ success: true, transaction: `0x${"33".repeat(32)}` }),
+          "utf8",
+        ).toString("base64"),
+      },
+    },
   );
 }
 

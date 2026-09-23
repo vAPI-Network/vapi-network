@@ -4,9 +4,10 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { type SecretStore, WalletStore } from "@vapi-network/core";
+import { SpendCapError, type SecretStore, WalletStore } from "@vapi-network/core";
 import {
   RouterClientError,
+  type buyRouterBalance,
   type AgentRouterUsage,
   type ChatRequest,
   type ChatResult,
@@ -58,7 +59,7 @@ describe("vapi router usage", () => {
     expect(human.stdout).toEqual([
       "Compute today: $0.42 of $2.00 (resets 03:07 UTC)",
       "Owner's Compute: $0.90 of $5.00",
-      "Router balance: none",
+      "Router balance: none bought yet",
     ]);
 
     const json = captureIo();
@@ -83,7 +84,147 @@ describe("vapi router usage", () => {
     expect(await runCli(["router", "usage", "--wallet", WALLET], captured.io, dependencies)).toBe(
       0,
     );
-    expect(captured.stdout).toContain("Router balance: $7.75 left of $10.00");
+    expect(captured.stdout).toContain("Router balance: $7.75 (bought $10.00, used $2.25)");
+  });
+});
+
+describe("vapi router buy", () => {
+  it("unlocks the wallet, applies its spend caps, and prints the paid balance", async () => {
+    await initializedHome();
+    const buy = vi.fn<typeof buyRouterBalance>(async () => purchaseResult());
+    const secret = vi.fn(async () => PASSPHRASE);
+    const captured = captureIo();
+
+    expect(
+      await runCli(["router", "buy", "5", "--wallet", WALLET], captured.io, {
+        ...commandDependencies(),
+        interactive: true,
+        prompts: { secret },
+        router: { buyRouterBalance: buy },
+      }),
+    ).toBe(0);
+    expect(captured.stdout).toEqual(["Paid $5.00 USDC on Base. Router balance: $7.40."]);
+    expect(secret).toHaveBeenCalledOnce();
+    expect(buy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        wallet: WALLET,
+        caps: { perCallAtomic: "100000", perDayAtomic: "1000000" },
+        paths: expect.objectContaining({
+          ledgerPath: expect.stringContaining("spend-ledger.json"),
+          receiptsPath: expect.stringContaining("receipts.jsonl"),
+        }),
+      }),
+      5,
+    );
+  });
+
+  it("prints a secret-free JSON summary and handles a not-yet-visible balance", async () => {
+    await initializedHome();
+    const buy = vi.fn<typeof buyRouterBalance>(async () => purchaseResult(null));
+    const dependencies = {
+      ...commandDependencies(),
+      interactive: true,
+      prompts: { secret: async () => PASSPHRASE },
+      router: { buyRouterBalance: buy },
+    };
+    const json = captureIo();
+
+    expect(
+      await runCli(["router", "buy", "5", "--wallet", WALLET, "--json"], json.io, dependencies),
+    ).toBe(0);
+    expect(JSON.parse(json.stdout[0]!)).toEqual({
+      tierUsd: 5,
+      amountUsd: 5,
+      network: "eip155:8453",
+      transaction: "0xtransaction",
+      receiptId: "router-receipt",
+      balance: null,
+    });
+    expect(allOutput(json)).not.toContain(TEST_ROUTER_KEY);
+
+    const human = captureIo();
+    expect(await runCli(["router", "buy", "5", "--wallet", WALLET], human.io, dependencies)).toBe(
+      0,
+    );
+    expect(human.stdout).toEqual(["Paid $5.00 USDC on Base. Router balance is not visible yet."]);
+  });
+
+  it("stores and clears automatic refill without unlocking the wallet", async () => {
+    const home = await initializedHome();
+    const secret = vi.fn(async () => PASSPHRASE);
+    const human = captureIo();
+    const dependencies = {
+      ...commandDependencies(),
+      interactive: true,
+      prompts: { secret },
+    };
+
+    expect(
+      await runCli(
+        ["router", "buy", "--auto", "5", "--below", "2.50", "--wallet", WALLET],
+        human.io,
+        dependencies,
+      ),
+    ).toBe(0);
+    expect(human.stdout).toEqual([
+      "Automatic Router refill: buy $5.00 when the balance is below $2.50.",
+    ]);
+    expect((await WalletStore.open(home)).entry(WALLET)?.routerRefill).toEqual({
+      tierUsd: 5,
+      belowUsd: 2.5,
+    });
+    expect(secret).not.toHaveBeenCalled();
+
+    const json = captureIo();
+    expect(
+      await runCli(
+        ["router", "buy", "--auto", "off", "--wallet", WALLET, "--json"],
+        json.io,
+        dependencies,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(json.stdout[0]!)).toEqual({ wallet: WALLET, routerRefill: null });
+    expect((await WalletStore.open(home)).entry(WALLET)?.routerRefill).toBeUndefined();
+    expect(secret).not.toHaveBeenCalled();
+  });
+
+  it("rejects unsupported tiers as usage errors", async () => {
+    await initializedHome();
+    const captured = captureIo();
+
+    expect(
+      await runCli(["router", "buy", "3", "--wallet", WALLET, "--json"], captured.io, {
+        ...commandDependencies(),
+        interactive: true,
+        prompts: { secret: async () => PASSPHRASE },
+      }),
+    ).toBe(2);
+    expect(JSON.parse(captured.stdout[0]!)).toEqual({
+      error: "Router balance tier must be 1, 5, 20, or 50.",
+      exitCode: 2,
+    });
+  });
+
+  it("reports spend-policy refusal as an operational error with the caps remedy", async () => {
+    await initializedHome();
+    const buy = vi.fn<typeof buyRouterBalance>(async () => {
+      throw new SpendCapError("per_call_cap_exceeded", "Refusing to sign.");
+    });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["router", "buy", "5", "--wallet", WALLET, "--json"], captured.io, {
+        ...commandDependencies(),
+        interactive: true,
+        prompts: { secret: async () => PASSPHRASE },
+        router: { buyRouterBalance: buy },
+      }),
+    ).toBe(1);
+    expect(JSON.parse(captured.stdout[0]!)).toEqual({
+      error:
+        "Router balance purchase refused by the wallet spend policy: Refusing to sign. Review or change it with vapi wallet caps researcher.",
+      exitCode: 1,
+    });
   });
 });
 
@@ -164,6 +305,55 @@ describe("vapi router chat", () => {
     expect(routerChat.mock.calls[0]![1].messages).toEqual([
       { role: "user", content: "Prompt from stdin\n" },
     ]);
+  });
+
+  it("offers auto-refill only when the configured wallet unlocks without prompting", async () => {
+    const home = await initializedHome();
+    const store = await WalletStore.open(home);
+    await store.setRouterRefill(WALLET, { tierUsd: 5, belowUsd: 2 });
+    const prompt = vi.fn(async () => PASSPHRASE);
+    const unlockedChat = vi.fn(async (_deps: RouterClientDeps, _request: ChatRequest) =>
+      chatResult(),
+    );
+    const unlockedSecrets = secretStoreStub();
+    unlockedSecrets.get = async (account) => (account === WALLET ? PASSPHRASE : undefined);
+
+    expect(
+      await runCli(
+        ["router", "chat", "--wallet", WALLET, "--model", "model-a", "Hello"],
+        captureIo().io,
+        commandDependencies({
+          interactive: true,
+          prompts: { secret: prompt },
+          secretStore: unlockedSecrets,
+          router: { routerChat: unlockedChat },
+        }),
+      ),
+    ).toBe(0);
+    const refill = unlockedChat.mock.calls[0]![0].refill;
+    expect(refill).toBeDefined();
+    expect(typeof refill!.caps === "function" ? await refill!.caps() : refill!.caps).toEqual({
+      perCallAtomic: "100000",
+      perDayAtomic: "1000000",
+    });
+    expect(prompt).not.toHaveBeenCalled();
+
+    const lockedChat = vi.fn(async (_deps: RouterClientDeps, _request: ChatRequest) =>
+      chatResult(),
+    );
+    expect(
+      await runCli(
+        ["router", "chat", "--wallet", WALLET, "--model", "model-a", "Hello"],
+        captureIo().io,
+        commandDependencies({
+          interactive: true,
+          prompts: { secret: prompt },
+          router: { routerChat: lockedChat },
+        }),
+      ),
+    ).toBe(0);
+    expect(lockedChat.mock.calls[0]![0].refill).toBeUndefined();
+    expect(prompt).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -281,6 +471,16 @@ describe("vapi router key", () => {
 });
 
 describe("Router client errors", () => {
+  it("lists the buy command in the router usage error", async () => {
+    const captured = captureIo();
+
+    expect(await runCli(["router", "--json"], captured.io, commandDependencies())).toBe(2);
+    expect(JSON.parse(captured.stdout[0]!)).toEqual({
+      error: "Usage: vapi router <models|usage|chat|key|buy>.",
+      exitCode: 2,
+    });
+  });
+
   it("normalizes an unlinked wallet in human and JSON output", async () => {
     await initializedHome();
     const routerUsage = vi.fn(async () => {
@@ -314,6 +514,25 @@ function usageResult(): AgentRouterUsage {
       ownerSpentUsd: 0.9,
     },
     balance: null,
+  };
+}
+
+function purchaseResult(
+  balance: AgentRouterUsage["balance"] = {
+    purchasedUsd: 10,
+    spentUsd: 2.6,
+    remainingUsd: 7.4,
+  },
+): Awaited<ReturnType<typeof buyRouterBalance>> {
+  return {
+    receipt: {
+      id: "router-receipt",
+      timestamp: "2026-09-23T12:00:00.000Z",
+      resourceUrl: "https://api.vapinetwork.ai/api/router/top-up/5",
+      quote: { network: "eip155:8453", amountAtomic: "5000000" },
+      settlement: { outcome: "succeeded", transaction: "0xtransaction" },
+    },
+    balance,
   };
 }
 

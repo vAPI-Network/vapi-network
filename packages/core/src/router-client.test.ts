@@ -1,14 +1,19 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getAddress, type Hex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 
 import { agentSecretAccounts, saveAgentLink, type AgentTokens } from "./agent-link.js";
-import { DEFAULT_SPEND_CAPS } from "./config.js";
+import { readAuditLog } from "./audit.js";
+import { DEFAULT_SPEND_CAPS, getDefaultConfig } from "./config.js";
+import { NETWORKS } from "./networks.js";
 import {
   DEFAULT_ROUTER_BASE_URL,
   RouterClientError,
+  buyRouterBalance,
   listRouterModels,
   ownerStake,
   rotateRouterKey,
@@ -18,18 +23,24 @@ import {
   type RouterClientDeps,
 } from "./router-client.js";
 import type { SecretStore } from "./secret-store.js";
+import { BASE_MAINNET_CAIP2 } from "./x402-networks.js";
 import { WalletStore, type AgentLink } from "./wallet-store.js";
 
 const API_BASE = "https://console.example";
 const ROUTER_BASE = "https://router.example/gateway/";
 const ACCESS_TOKEN = "test-agent-access-token";
 const ROUTER_KEY = "sk-test-router-key";
+const BALANCE_KEY = "sk-test-router-balance-key";
 const OWNER = "0x1111111111111111111111111111111111111111" as const;
 const RESET_AT = "2026-09-24T00:00:00.000Z";
+const NOW = new Date("2026-09-23T10:00:00.000Z");
+const PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" as Hex;
+const PAY_TO = getAddress("0x2222222222222222222222222222222222222222");
 
 const directories: string[] = [];
 
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   await Promise.all(
     directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
@@ -89,7 +100,10 @@ function tokens(): AgentTokens {
   };
 }
 
-async function walletStore(link: AgentLink | undefined): Promise<WalletStore> {
+async function walletStore(
+  link: AgentLink | undefined,
+  routerRefill?: { belowUsd: number; tierUsd: 1 | 5 | 20 | 50 },
+): Promise<WalletStore> {
   const home = await mkdtemp(join(tmpdir(), "vapi-router-client-"));
   directories.push(home);
   await writeFile(
@@ -103,6 +117,7 @@ async function walletStore(link: AgentLink | undefined): Promise<WalletStore> {
             createdAt: "2026-09-23T09:00:00.000Z",
             spendCaps: DEFAULT_SPEND_CAPS,
             ...(link === undefined ? {} : { link }),
+            ...(routerRefill === undefined ? {} : { routerRefill }),
           },
         },
       },
@@ -116,9 +131,15 @@ async function walletStore(link: AgentLink | undefined): Promise<WalletStore> {
 
 async function linkedDeps(
   fetchImpl: typeof fetch,
-  options: { link?: AgentLink; key?: string; available?: boolean } = {},
+  options: {
+    link?: AgentLink;
+    key?: string;
+    balanceKey?: string;
+    available?: boolean;
+    routerRefill?: { belowUsd: number; tierUsd: 1 | 5 | 20 | 50 };
+  } = {},
 ): Promise<RouterClientDeps & { secrets: MemorySecretStore }> {
-  const wallets = await walletStore(options.link ?? agentLink());
+  const wallets = await walletStore(options.link ?? agentLink(), options.routerRefill);
   const accounts = agentSecretAccounts("main");
   const secrets = memorySecretStore(
     {
@@ -128,10 +149,68 @@ async function linkedDeps(
         : options.key === undefined
           ? {}
           : { [accounts.routerStake]: options.key }),
+      ...(options.balanceKey === undefined ? {} : { [accounts.routerBalance]: options.balanceKey }),
     },
     options.available,
   );
   return { secrets, wallets, wallet: "main", fetchImpl };
+}
+
+function topupRequired(tierUsd: 1 | 5 | 20 | 50 = 5): Response {
+  return new Response(
+    JSON.stringify({
+      x402Version: 2,
+      resource: {
+        url: `${API_BASE}/api/router/top-up/${tierUsd}`,
+        description: `Prepaid vAPI Router balance, $${tierUsd}.`,
+        mimeType: "application/json",
+      },
+      accepts: [
+        {
+          scheme: "exact",
+          network: BASE_MAINNET_CAIP2,
+          amount: String(tierUsd * 1_000_000),
+          asset: NETWORKS[BASE_MAINNET_CAIP2].usdc,
+          payTo: PAY_TO,
+          maxTimeoutSeconds: 60,
+          extra: { name: "USD Coin", version: "2" },
+        },
+      ],
+    }),
+    { status: 402, headers: { "content-type": "application/json" } },
+  );
+}
+
+function topupAccepted(tierUsd: 1 | 5 | 20 | 50 = 5): Response {
+  return Response.json(
+    { status: "accepted", usd: tierUsd, owner: OWNER },
+    {
+      headers: {
+        "payment-response": Buffer.from(
+          JSON.stringify({ success: true, transaction: `0x${"33".repeat(32)}` }),
+          "utf8",
+        ).toString("base64"),
+      },
+    },
+  );
+}
+
+function refillOptions(
+  wallets: WalletStore,
+  caps = { perCallAtomic: "20000000", perDayAtomic: "20000000" },
+) {
+  const config = getDefaultConfig();
+  config.allowPrivateNetwork = true;
+  return {
+    account: privateKeyToAccount(PRIVATE_KEY),
+    config,
+    caps,
+    paths: {
+      ledgerPath: join(wallets.home, "spend-ledger.json"),
+      receiptsPath: join(wallets.home, "receipts.jsonl"),
+    },
+    now: NOW,
+  };
 }
 
 function usageResponse() {
@@ -299,7 +378,7 @@ describe("routerChat", () => {
       name: "RouterClientError",
       code: "budget_exhausted",
       status: 429,
-      message: `Today's Router allowance is used up. It resets at ${RESET_AT}.`,
+      message: `Today's Router allowance is used up. It resets at ${RESET_AT}. Buy Router balance with vapi router buy 5.`,
     });
     expect(calls.some(({ url }) => url.host === "console.example")).toBe(true);
     expect(
@@ -308,6 +387,179 @@ describe("routerChat", () => {
           url.host === "console.example" && authorization === `Bearer ${ROUTER_KEY}`,
       ),
     ).toBe(false);
+  });
+
+  it("falls back to the stored balance key after the stake allowance is exhausted", async () => {
+    const routerAuthorizations: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      if (url.host === "router.example") {
+        routerAuthorizations.push(headers.get("authorization") ?? "");
+        if (routerAuthorizations.length === 1) return new Response("limited", { status: 429 });
+        return Response.json({ choices: [{ message: { content: "balance answer" } }] });
+      }
+      if (url.pathname === "/api/agents/self/router") {
+        expect(headers.get("authorization")).toBe(`Bearer ${ACCESS_TOKEN}`);
+        expect(headers.get("authorization")).not.toContain(BALANCE_KEY);
+        return Response.json(usageResponse());
+      }
+      throw new Error(`Unexpected test URL ${url.origin}${url.pathname}`);
+    });
+
+    await expect(
+      routerChat(await linkedDeps(fetchImpl, { balanceKey: BALANCE_KEY }), {
+        model: "provider/model",
+        messages: [],
+      }),
+    ).resolves.toMatchObject({ content: "balance answer", keyUsed: "balance" });
+    expect(routerAuthorizations).toEqual([`Bearer ${ROUTER_KEY}`, `Bearer ${BALANCE_KEY}`]);
+  });
+
+  it.each([
+    { remainingUsd: 1, expectedTopups: 2 },
+    { remainingUsd: 6, expectedTopups: 0 },
+  ])(
+    "auto-refills only below the configured floor (remaining $remainingUsd)",
+    async ({ remainingUsd, expectedTopups }) => {
+      let routerCalls = 0;
+      let usageCalls = 0;
+      const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+        if (url.host === "router.example") {
+          routerCalls += 1;
+          if (routerCalls === 1) return new Response("limited", { status: 429 });
+          expect(headers.get("authorization")).toBe(`Bearer ${BALANCE_KEY}`);
+          return Response.json({ choices: [{ message: { content: "from balance" } }] });
+        }
+        if (url.pathname === "/api/agents/self/router") {
+          usageCalls += 1;
+          return Response.json({
+            ...usageResponse(),
+            balance: {
+              purchasedUsd: 10 + (usageCalls > 1 ? 1 : 0),
+              spentUsd: 10 - remainingUsd,
+              remainingUsd: remainingUsd + (usageCalls > 1 ? 1 : 0),
+            },
+          });
+        }
+        if (url.pathname === "/api/router/top-up/1") {
+          return headers.has("payment-signature") ? topupAccepted(1) : topupRequired(1);
+        }
+        throw new Error(`Unexpected test URL ${url.origin}${url.pathname}`);
+      });
+      const deps = await linkedDeps(fetchImpl, {
+        balanceKey: BALANCE_KEY,
+        routerRefill: { belowUsd: 5, tierUsd: 1 },
+      });
+
+      await expect(
+        routerChat(
+          { ...deps, refill: refillOptions(deps.wallets) },
+          { model: "provider/model", messages: [] },
+        ),
+      ).resolves.toMatchObject({ content: "from balance", keyUsed: "balance" });
+
+      const topupCalls = fetchImpl.mock.calls.filter(([input]) =>
+        String(input instanceof Request ? input.url : input).includes("/api/router/top-up/1"),
+      );
+      expect(topupCalls).toHaveLength(expectedTopups);
+    },
+  );
+
+  it("audits a spend-cap-declined refill and still uses the remaining balance", async () => {
+    let routerCalls = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      if (url.host === "router.example") {
+        routerCalls += 1;
+        if (routerCalls === 1) return new Response("limited", { status: 429 });
+        expect(headers.get("authorization")).toBe(`Bearer ${BALANCE_KEY}`);
+        return Response.json({ choices: [{ message: { content: "still available" } }] });
+      }
+      if (url.pathname === "/api/agents/self/router") {
+        return Response.json({
+          ...usageResponse(),
+          balance: { purchasedUsd: 10, spentUsd: 9, remainingUsd: 1 },
+        });
+      }
+      if (url.pathname === "/api/router/top-up/1") return topupRequired(1);
+      throw new Error(`Unexpected test URL ${url.origin}${url.pathname}`);
+    });
+    const deps = await linkedDeps(fetchImpl, {
+      balanceKey: BALANCE_KEY,
+      routerRefill: { belowUsd: 5, tierUsd: 1 },
+    });
+
+    await expect(
+      routerChat(
+        {
+          ...deps,
+          refill: refillOptions(deps.wallets, {
+            perCallAtomic: "500000",
+            perDayAtomic: "500000",
+          }),
+        },
+        { model: "provider/model", messages: [] },
+      ),
+    ).resolves.toMatchObject({ content: "still available", keyUsed: "balance" });
+
+    await expect(readAuditLog(deps.wallets.home)).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ event: "router.refill.declined", wallet: "main" }),
+      ]),
+    );
+    expect(
+      fetchImpl.mock.calls.filter(([input]) =>
+        String(input instanceof Request ? input.url : input).includes("/api/router/top-up/1"),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("keeps stake, balance, and access credentials out of errors, audits, and receipts", async () => {
+    let routerCalls = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.host === "router.example") {
+        routerCalls += 1;
+        return new Response(routerCalls === 1 ? ROUTER_KEY : BALANCE_KEY, {
+          status: routerCalls === 1 ? 429 : 401,
+        });
+      }
+      if (url.pathname === "/api/agents/self/router") {
+        return Response.json({
+          ...usageResponse(),
+          balance: { purchasedUsd: 10, spentUsd: 9, remainingUsd: 1 },
+        });
+      }
+      if (url.pathname === "/api/router/top-up/1") {
+        return new Response(JSON.stringify({ x402Version: ACCESS_TOKEN }), {
+          status: 402,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`Unexpected test URL ${url.origin}${url.pathname}`);
+    });
+    const deps = await linkedDeps(fetchImpl, {
+      balanceKey: BALANCE_KEY,
+      routerRefill: { belowUsd: 5, tierUsd: 1 },
+    });
+
+    const thrown = await routerChat(
+      { ...deps, refill: refillOptions(deps.wallets) },
+      { model: "provider/model", messages: [] },
+    ).then(
+      () => new Error("Expected the rejected balance key to fail."),
+      (error: unknown) => error as Error,
+    );
+    const audit = await readFile(join(deps.wallets.home, "audit.log"), "utf8");
+    const receipts = await readFile(join(deps.wallets.home, "receipts.jsonl"), "utf8");
+    const exposed = `${thrown.message}\n${audit}\n${receipts}`;
+    expect(exposed).not.toContain(ROUTER_KEY);
+    expect(exposed).not.toContain(BALANCE_KEY);
+    expect(exposed).not.toContain(ACCESS_TOKEN);
   });
 
   it("maps an ExceededBudget response with another status to budget_exhausted", async () => {
@@ -399,6 +651,165 @@ describe("routerChat", () => {
     expect(thrown).toMatchObject({ code: "http", status: 503 });
     expect((thrown as Error).message).toBe("vAPI Router returned HTTP 503.");
     expect((thrown as Error).message).not.toContain(ROUTER_KEY);
+  });
+});
+
+describe("buyRouterBalance", () => {
+  it("never combines an access token with a different link generation's API base", async () => {
+    const mixedRequests: Array<{ url: string; authorization: string | null }> = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      mixedRequests.push({
+        url: request.url,
+        authorization: request.headers.get("authorization"),
+      });
+      throw new Error("A mixed-generation request must not be sent.");
+    });
+    const deps = await linkedDeps(fetchImpl);
+    const oldEntry = deps.wallets.entry("main")!;
+    const newAccessToken = "test-new-owner-access-token";
+    const newLink = agentLink({
+      apiBase: "https://new-console.example",
+      owner: "0x2222222222222222222222222222222222222222",
+      linkedAt: "2026-09-23T11:00:00.000Z",
+    });
+    let activeLink = oldEntry.link!;
+    let linkReads = 0;
+    vi.spyOn(deps.wallets, "entry").mockImplementation((name) => {
+      if (name !== "main") return undefined;
+      const entry = { ...oldEntry, link: activeLink };
+      if (linkReads++ === 0) {
+        activeLink = newLink;
+        deps.secrets.entries[agentSecretAccounts("main").tokens] = JSON.stringify({
+          ...tokens(),
+          accessToken: newAccessToken,
+        });
+      }
+      return entry;
+    });
+
+    await expect(
+      buyRouterBalance({ ...deps, ...refillOptions(deps.wallets) }, 1),
+    ).rejects.toMatchObject({
+      code: "http",
+      message: expect.stringMatching(/link changed/iu),
+    });
+    expect(mixedRequests).toEqual([]);
+  });
+
+  it("pays with the agent bearer, mints one balance key, stores it, and returns usage", async () => {
+    const calls: Array<{ url: URL; authorization: string | null; hasPayment: boolean }> = [];
+    let mintCalls = 0;
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
+      calls.push({
+        url,
+        authorization: headers.get("authorization"),
+        hasPayment: headers.has("payment-signature"),
+      });
+      if (url.pathname === "/api/router/top-up/5") {
+        return headers.has("payment-signature") ? topupAccepted() : topupRequired();
+      }
+      if (url.pathname === "/api/agents/self/router-balance-key") {
+        mintCalls += 1;
+        return Response.json({ router_key: BALANCE_KEY, router_base_url: ROUTER_BASE });
+      }
+      if (url.pathname === "/api/agents/self/router") return Response.json(usageResponse());
+      throw new Error(`Unexpected test URL ${url.origin}${url.pathname}`);
+    });
+    const deps = await linkedDeps(fetchImpl);
+    const buyDeps = { ...deps, ...refillOptions(deps.wallets) };
+
+    const first = await buyRouterBalance(buyDeps, 5);
+    const second = await buyRouterBalance(buyDeps, 5);
+
+    expect(first.receipt).toMatchObject({
+      outcome: "paid",
+      source: "router.topup",
+      quote: { network: BASE_MAINNET_CAIP2, amountAtomic: "5000000" },
+    });
+    expect(first.balance).toEqual(usageResponse().balance);
+    expect(second.balance).toEqual(usageResponse().balance);
+    expect(mintCalls).toBe(1);
+    expect(deps.secrets.entries[agentSecretAccounts("main").routerBalance]).toBe(BALANCE_KEY);
+    expect(calls.filter(({ url }) => url.pathname === "/api/router/top-up/5")).toHaveLength(4);
+    expect(
+      calls
+        .filter(({ url }) => url.host === "console.example")
+        .every(({ authorization }) => authorization === `Bearer ${ACCESS_TOKEN}`),
+    ).toBe(true);
+    expect(
+      calls.some(
+        ({ url, authorization }) =>
+          url.host === "console.example" && authorization === `Bearer ${BALANCE_KEY}`,
+      ),
+    ).toBe(false);
+    expect(calls.filter(({ hasPayment }) => hasPayment)).toHaveLength(2);
+  });
+
+  it("keeps a mismatched Router base key out of the secret store after payment", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const request = input instanceof Request ? input : new Request(input);
+      const url = new URL(request.url);
+      if (url.pathname === "/api/router/top-up/1") {
+        return request.headers.has("payment-signature") ? topupAccepted(1) : topupRequired(1);
+      }
+      if (url.pathname === "/api/agents/self/router-balance-key") {
+        return Response.json({
+          router_key: BALANCE_KEY,
+          router_base_url: "https://other-router.example",
+        });
+      }
+      throw new Error(`Unexpected test URL ${url.origin}${url.pathname}`);
+    });
+    const deps = await linkedDeps(fetchImpl);
+
+    await expect(
+      buyRouterBalance({ ...deps, ...refillOptions(deps.wallets) }, 1),
+    ).rejects.toMatchObject({
+      code: "http",
+      message: expect.stringMatching(/payment went through.*next chat\/buy/iu),
+    });
+    expect(deps.secrets.entries[agentSecretAccounts("main").routerBalance]).toBeUndefined();
+    expect(await readFile(join(deps.wallets.home, "receipts.jsonl"), "utf8")).toContain(
+      '"outcome":"paid"',
+    );
+  });
+
+  it("refreshes a rejected token while fetching the balance key after payment", async () => {
+    let balanceKeyCalls = 0;
+    const refreshedAccessToken = "test-refreshed-access-token";
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname === "/api/router/top-up/1") {
+        return request.headers.has("payment-signature") ? topupAccepted(1) : topupRequired(1);
+      }
+      if (url.pathname === "/api/agents/self/router-balance-key") {
+        balanceKeyCalls += 1;
+        if (balanceKeyCalls === 1) return new Response("expired", { status: 401 });
+        expect(request.headers.get("authorization")).toBe(`Bearer ${refreshedAccessToken}`);
+        return Response.json({ router_key: BALANCE_KEY, router_base_url: ROUTER_BASE });
+      }
+      if (url.pathname === "/oauth/token") {
+        return Response.json({
+          access_token: refreshedAccessToken,
+          refresh_token: "test-refreshed-refresh-token",
+          expires_in: 3600,
+          scope: "mcp:call router.use",
+        });
+      }
+      if (url.pathname === "/api/agents/self/router") return Response.json(usageResponse());
+      throw new Error(`Unexpected test URL ${url.origin}${url.pathname}`);
+    });
+    const deps = await linkedDeps(fetchImpl);
+
+    await expect(
+      buyRouterBalance({ ...deps, ...refillOptions(deps.wallets) }, 1),
+    ).resolves.toMatchObject({ balance: usageResponse().balance });
+    expect(balanceKeyCalls).toBe(2);
+    expect(deps.secrets.entries[agentSecretAccounts("main").routerBalance]).toBe(BALANCE_KEY);
   });
 });
 

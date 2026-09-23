@@ -11,6 +11,7 @@ export type {
   ChatResult,
   RouterModel,
 } from "./router-client.js";
+export { buyRouterBalance } from "./router-client.js";
 export * from "./audit.js";
 export * from "./authorization-state.js";
 export * from "./config.js";
@@ -67,6 +68,7 @@ export * from "./svm.js";
 export * from "./wallet.js";
 export * from "./wallet-store.js";
 export * from "./x402.js";
+export * from "./x402-pay.js";
 export {
   ARC_MAINNET_CAIP2,
   BROWSER_ENABLED_X402_NETWORK_CONFIG,
