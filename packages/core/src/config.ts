@@ -45,6 +45,7 @@ export const DEFAULT_SPEND_CAPS = {
 
 export type VapiPaths = {
   directory: string;
+  agentsDir: string;
   config: string;
   keystore: string;
   receipts: string;
@@ -140,6 +141,7 @@ export function getVapiPaths(
 ): VapiPaths {
   return {
     directory,
+    agentsDir: join(directory, "agents"),
     config: join(directory, "config.json"),
     keystore: join(directory, "keystore.json"),
     receipts: join(directory, "receipts.jsonl"),

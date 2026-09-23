@@ -109,6 +109,7 @@ import {
 } from "@vapi-network/mcp";
 import { detectColorLevel, renderBanner } from "./brand.js";
 import { checkX402, formatCheckReport } from "./check.js";
+import { agentCommand, type AgentCommandDependencies } from "./agent.js";
 import { loginCommand, logoutCommand, whoamiCommand } from "./login.js";
 import { routerCommand } from "./router.js";
 import { stakeCommand } from "./stake.js";
@@ -163,6 +164,12 @@ Usage:
   vapi receipts export --format <json|csv> [--range <24h|7d|30d>] [--wallet <name>] [--all-wallets]
   vapi stats [--range <24h|7d|30d>] [--wallet <name>] [--all-wallets] [--json]
   vapi sweep [<address>] [--network <caip2>] [--wallet <name>] [--json]
+  vapi agent create <name> --model <id> --instructions <file> [--call-budget <usd>] [--max-per-call <usd>] [--router-budget <usd>] [--approve-above <usd>] [--include-unverified] [--max-steps <n>] [--json]
+  vapi agent run <name> "<task>" [--json]
+  vapi agent list [--json]
+  vapi agent pause <name> [--json]
+  vapi agent resume <name> [--json]
+  vapi agent revoke <name> [--json]
   vapi login [--wallet <name>] [--label <name>] [--publish] [--no-browser] [--json]
   vapi logout [--wallet <name>] [--json]
   vapi whoami [--wallet <name>] [--json]
@@ -245,6 +252,7 @@ export type CliDependencies = {
   agentLink?: {
     startDeviceLink?: typeof startDeviceLink;
     pollDeviceLink?: typeof pollDeviceLink;
+    forgetAgentLink?: typeof import("@vapi-network/core/agent-link").forgetAgentLink;
   };
   /** Router operations, injected so CLI tests never make service requests. */
   router?: {
@@ -255,6 +263,8 @@ export type CliDependencies = {
     ownerStake?: typeof ownerStake;
     routerCredentials?: typeof routerCredentials;
   };
+  /** Agent profile and run operations, injected so tests stay local and deterministic. */
+  agent?: AgentCommandDependencies;
   /** Reads stdin to EOF for `vapi router chat ... -`. */
   readStdin?: () => Promise<string>;
   /** Opens one public URL in the platform browser. */
@@ -564,6 +574,8 @@ export async function runCli(
       case "sweep":
         await sweepCommand(args.slice(1), json, io, dependencies);
         return 0;
+      case "agent":
+        return await agentCommand(args.slice(1), json, io, dependencies);
       case "login":
         await loginCommand(args.slice(1), json, io, dependencies);
         return 0;
@@ -840,7 +852,7 @@ async function unlockedWallets(
  * same passphrase confirmation and the same one-time phrase as `vapi init`.
  * No network call: a fresh wallet has nothing to look up.
  */
-async function walletCreateCommand(
+export async function walletCreateCommand(
   argv: string[],
   json: boolean,
   io: CliIo,
@@ -1067,7 +1079,7 @@ async function walletRestoreCommand(
 }
 
 /** Per-wallet spend caps, in US dollars, converted to atomic USDC on the way in. */
-async function walletCapsCommand(
+export async function walletCapsCommand(
   argv: string[],
   json: boolean,
   io: CliIo,

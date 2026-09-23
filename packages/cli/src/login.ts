@@ -28,6 +28,17 @@ export async function loginCommand(
   io: CliIo,
   dependencies: CliDependencies,
 ): Promise<void> {
+  await runLoginFlow(argv, json, io, dependencies);
+}
+
+/** Shared device-link flow used by `vapi login` and `vapi agent create`. */
+export async function runLoginFlow(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+  options: { routerAllowanceUsd?: number } = {},
+): Promise<void> {
   const parsed = parseArguments(argv, {
     valueOptions: new Set([WALLET_OPTION, "--label"]),
     booleanOptions: new Set(["--publish", "--no-browser"]),
@@ -42,7 +53,16 @@ export async function loginCommand(
   const fetchImpl = dependencies.fetchImpl ?? createPublicFetch({ allowPrivateNetwork: false });
   const begin = dependencies.agentLink?.startDeviceLink ?? startDeviceLink;
   const poll = dependencies.agentLink?.pollDeviceLink ?? pollDeviceLink;
-  const started = await begin({ apiBase, account, label, scopes, fetchImpl });
+  const started = await begin({
+    apiBase,
+    account,
+    label,
+    scopes,
+    fetchImpl,
+    ...(options.routerAllowanceUsd === undefined
+      ? {}
+      : { routerAllowanceUsd: options.routerAllowanceUsd }),
+  });
   const instructions = loginInstructions(
     target.name,
     account.address,

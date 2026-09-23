@@ -37,6 +37,12 @@ export const AUDIT_EVENTS = [
   "auth.key.clear",
   "agent.linked",
   "agent.unlinked",
+  // Agent run lifecycle only. These lines must never contain secrets.
+  "agent.run.start",
+  "agent.run.step",
+  "agent.run.pay",
+  "agent.run.declined",
+  "agent.run.end",
   // A listing this machine created or moved through the registry's states.
   // The slug is not a secret, so it is worth having in the trail.
   "listing.publish",

@@ -11,6 +11,7 @@ import {
   DEFAULT_REGISTRY_FALLBACKS,
   enableDefaultNetwork,
   getDefaultConfig,
+  getVapiPaths,
   loadConfig,
   migrateLegacyRegistryConfig,
   rewriteLegacyRegistryUrl,
@@ -35,6 +36,10 @@ afterEach(async () => {
 });
 
 describe("vAPI config", () => {
+  it("derives the agents directory from the vAPI home", () => {
+    expect(getVapiPaths("/tmp/vapi-home").agentsDir).toBe("/tmp/vapi-home/agents");
+  });
+
   it("uses the api host by default and derives both paths from VAPI_REGISTRY_URL", () => {
     expect(getDefaultConfig({})).toMatchObject({
       discoveryUrl: DEFAULT_DISCOVERY_URL,
