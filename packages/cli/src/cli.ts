@@ -87,6 +87,12 @@ import {
   storeApiKey,
 } from "@vapi-network/core/api-key";
 import {
+  agentFetch,
+  renameAgentLinkWallet,
+  type pollDeviceLink,
+  type startDeviceLink,
+} from "@vapi-network/core/agent-link";
+import {
   callService,
   getWallet,
   inspectService,
@@ -95,6 +101,7 @@ import {
 } from "@vapi-network/mcp";
 import { detectColorLevel, renderBanner } from "./brand.js";
 import { checkX402, formatCheckReport } from "./check.js";
+import { loginCommand, logoutCommand, whoamiCommand } from "./login.js";
 import {
   API_KEY_CONSOLE_PATH,
   assertClaimMessage,
@@ -145,7 +152,10 @@ Usage:
   vapi receipts [--limit <n>] [--wallet <name>] [--all-wallets] [--json]
   vapi receipts export --format <json|csv> [--range <24h|7d|30d>] [--wallet <name>] [--all-wallets]
   vapi stats [--range <24h|7d|30d>] [--wallet <name>] [--all-wallets] [--json]
-  vapi sweep <address> [--network <caip2>] [--wallet <name>] [--json]
+  vapi sweep [<address>] [--network <caip2>] [--wallet <name>] [--json]
+  vapi login [--wallet <name>] [--label <name>] [--publish] [--no-browser] [--json]
+  vapi logout [--wallet <name>] [--json]
+  vapi whoami [--wallet <name>] [--json]
   vapi export-key [--network <caip2>] [--wallet <name>] [--json]
   vapi backup [--wallet <name>] [--json]
   vapi import (--phrase | --key) [--wallet <name>] [--networks <base,arc,solana>] [--replace] [--force] [--json]
@@ -215,6 +225,15 @@ export type CliDependencies = {
   secretStore?: SecretStore;
   /** Injected clock, so a signed message is reproducible in a test. */
   now?: () => Date;
+  /** Device-link operations, injected so tests never touch the account service. */
+  agentLink?: {
+    startDeviceLink?: typeof startDeviceLink;
+    pollDeviceLink?: typeof pollDeviceLink;
+  };
+  /** Opens one public URL in the platform browser. */
+  openUrl?: (url: string) => boolean;
+  /** Moves a wallet balance, injected for deterministic sweep command tests. */
+  sweepBack?: typeof sweepBack;
 };
 
 const processIo: CliIo = {
@@ -224,13 +243,13 @@ const processIo: CliIo = {
 
 const defaultPrompts: CliPrompts = { secret: (prompt) => promptForSecret(prompt) };
 
-class UsageError extends Error {}
+export class UsageError extends Error {}
 
 function getPrompts(dependencies: CliDependencies): CliPrompts {
   return dependencies.prompts ?? defaultPrompts;
 }
 
-function getEnvironment(dependencies: CliDependencies): NodeJS.ProcessEnv {
+export function getEnvironment(dependencies: CliDependencies): NodeJS.ProcessEnv {
   return dependencies.env ?? process.env;
 }
 
@@ -262,7 +281,7 @@ const WALLET_OPTION = "--wallet";
 const INCLUDE_UNVERIFIED_OPTION = "--include-unverified";
 
 /** The wallet one invocation acts on, resolved before any passphrase is read. */
-type WalletTarget = {
+export type WalletTarget = {
   store: WalletStore;
   name: WalletName;
   path: string;
@@ -294,7 +313,7 @@ async function selectWallet(
 }
 
 /** Opens the store and picks the wallet in one step, for the usual command. */
-async function targetWallet(
+export async function targetWallet(
   parsed: { one(name: string): string | undefined },
   dependencies: CliDependencies,
 ): Promise<WalletTarget> {
@@ -302,7 +321,7 @@ async function targetWallet(
 }
 
 /** The OS secret store this run uses: the machine's, or the one a test injects. */
-function getSecretStore(dependencies: CliDependencies): SecretStore {
+export function getSecretStore(dependencies: CliDependencies): SecretStore {
   return dependencies.secretStore ?? secretStore();
 }
 
@@ -353,7 +372,7 @@ async function withResolvedPassphrase<T>(
 }
 
 /** Opens the selected wallet, and keeps the passphrase for callers that need it. */
-async function unlockTarget(
+export async function unlockTarget(
   target: WalletTarget,
   dependencies: CliDependencies,
 ): Promise<{ account: VapiPaymentAccount; passphrase: string }> {
@@ -516,6 +535,15 @@ export async function runCli(
         return 0;
       case "sweep":
         await sweepCommand(args.slice(1), json, io, dependencies);
+        return 0;
+      case "login":
+        await loginCommand(args.slice(1), json, io, dependencies);
+        return 0;
+      case "logout":
+        await logoutCommand(args.slice(1), json, io, dependencies);
+        return 0;
+      case "whoami":
+        await whoamiCommand(args.slice(1), json, io, dependencies);
         return 0;
       case "export-key":
         await exportKeyCommand(args.slice(1), json, io, dependencies);
@@ -890,7 +918,12 @@ async function walletRenameCommand(
   const from = requiredPositional(parsed.positionals[0], "Usage: vapi wallet rename <old> <new>");
   const to = requiredPositional(parsed.positionals[1], "Usage: vapi wallet rename <old> <new>");
   const store = await openWalletStore();
-  const renamed = await store.rename(from, to);
+  const renamed = await renameAgentLinkWallet({
+    secrets: getSecretStore(dependencies),
+    wallets: store,
+    from,
+    to,
+  });
   await recordAudit(dependencies, "wallet.rename", {
     wallet: renamed.name,
     detail: `from ${from}`,
@@ -1585,14 +1618,18 @@ async function sweepCommand(
     valueOptions: new Set(["--network", WALLET_OPTION]),
     maximumPositionals: 1,
   });
-  const destination = requiredPositional(
-    parsed.positionals[0],
-    "Usage: vapi sweep <address> [--network <caip2>]",
-  );
   const requestedNetwork = parsed.one("--network");
+  const target = await targetWallet(parsed, dependencies);
+  const explicitDestination = parsed.positionals[0];
+  const ownerDestination = explicitDestination === undefined ? target.entry.link?.owner : undefined;
+  const destination = explicitDestination ?? ownerDestination;
+  if (destination === undefined) {
+    throw new UsageError(
+      `Usage: vapi sweep [<address>] [--network <caip2>]\nNo address was provided and wallet ${target.name} is not linked. Run vapi login first.`,
+    );
+  }
   const paths = getVapiPaths();
   const config = await readConfig(paths.config, io);
-  const target = await targetWallet(parsed, dependencies);
   const { account } = await unlockTarget(target, dependencies);
   if (requestedNetwork && !isNetworkConfigured(config.networks, requestedNetwork)) {
     throw new Error(`Network ${requestedNetwork} is not configured.`);
@@ -1604,7 +1641,7 @@ async function sweepCommand(
   > = [];
   for (const network of requestedNetwork ? [requestedNetwork] : Object.keys(config.networks)) {
     try {
-      const result = await sweepBack({
+      const result = await (dependencies.sweepBack ?? sweepBack)({
         account,
         config,
         network,
@@ -1624,7 +1661,7 @@ async function sweepCommand(
   if (!results.some((result) => result.status === "swept")) {
     throw new Error("No configured network had a sweepable USDC balance.");
   }
-  outputForWallet(io, json, target, { results }, formatSweepResults(results));
+  outputForWallet(io, json, target, { results }, formatSweepResults(results, ownerDestination));
 }
 
 async function reportCommand(
@@ -1732,9 +1769,23 @@ async function authStatusCommand(
     store: getSecretStore(dependencies),
     configPath: paths.config,
   });
+  const agentLink = await selectedAgentLink(dependencies);
+  const linkLine =
+    agentLink === undefined
+      ? undefined
+      : `Agent link: ${agentLink.label} linked to ${agentLink.owner} (${agentLink.scopes.join(" ")})`;
   if (!status.present) {
     const message = noApiKeyMessage(registryBaseUrl(await readConfig(paths.config, io)));
-    output(io, json, { present: false, message }, message);
+    output(
+      io,
+      json,
+      {
+        present: false,
+        message,
+        ...(agentLink === undefined ? {} : { agentLink }),
+      },
+      [message, ...(linkLine === undefined ? [] : [linkLine])].join("\n"),
+    );
     return;
   }
   const message = `The vAPI API key ${status.masked} is read from ${status.location}.`;
@@ -1747,9 +1798,38 @@ async function authStatusCommand(
       location: status.location,
       key: status.masked,
       message,
+      ...(agentLink === undefined ? {} : { agentLink }),
     },
-    message,
+    [message, ...(linkLine === undefined ? [] : [linkLine])].join("\n"),
   );
+}
+
+async function selectedAgentLink(dependencies: CliDependencies): Promise<
+  | {
+      wallet: WalletName;
+      label: string;
+      owner: `0x${string}`;
+      scopes: string[];
+    }
+  | undefined
+> {
+  const store = await openWalletStore();
+  let resolved: ReturnType<typeof store.resolve>;
+  try {
+    resolved = store.resolve({ env: getEnvironment(dependencies) });
+  } catch (error) {
+    if (error instanceof KeystoreError) return undefined;
+    throw error;
+  }
+  const link = resolved.entry.link;
+  return link === undefined
+    ? undefined
+    : {
+        wallet: resolved.name,
+        label: link.label,
+        owner: link.owner,
+        scopes: link.scopes,
+      };
 }
 
 /** Removes the key from everywhere this client put it. */
@@ -1862,7 +1942,7 @@ async function publishListingCommand(
   }
   const method = parsed.one("--method");
   const mode = parseProbeMode(parsed.one("--mode"));
-  const { client, baseUrl } = await listingsClient(io, dependencies);
+  const { client, baseUrl } = await listingsClient(io, dependencies, parsed);
 
   const probe = await client.probe({
     url,
@@ -2189,12 +2269,13 @@ async function publishListCommand(
 
 /**
  * The registry write API, ready to call: the base URL this install already
- * talks to, plus the key. Both failures — no key, and an unreadable config —
- * happen here, before anything is probed or signed.
+ * talks to, plus an API key or linked agent bearer. Credential failures and an
+ * unreadable config happen here, before anything is probed or signed.
  */
 async function listingsClient(
   io: CliIo,
   dependencies: CliDependencies,
+  selection: { one(name: string): string | undefined } = { one: () => undefined },
 ): Promise<{ client: ListingsClient; baseUrl: string }> {
   const paths = getVapiPaths();
   const config = await readConfig(paths.config, io);
@@ -2206,16 +2287,68 @@ async function listingsClient(
     store: getSecretStore(dependencies),
     configPath: paths.config,
   });
-  if (resolved === undefined) throw new Error(noApiKeyMessage(baseUrl));
+  if (resolved !== undefined) {
+    return {
+      baseUrl,
+      client: createListingsClient({
+        baseUrl,
+        apiKey: resolved.key,
+        allowPrivateNetwork: config.allowPrivateNetwork ?? false,
+        ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
+      }),
+    };
+  }
+
+  let target: WalletTarget;
+  try {
+    target = await targetWallet(selection, dependencies);
+  } catch (error) {
+    if (error instanceof KeystoreError) throw new Error(noApiKeyMessage(baseUrl));
+    throw error;
+  }
+  const link = target.entry.link;
+  if (
+    link === undefined ||
+    !link.scopes.includes("call.publish") ||
+    !sameOrigin(link.apiBase, baseUrl)
+  ) {
+    throw new Error(noApiKeyMessage(baseUrl));
+  }
+  const guardedFetch =
+    dependencies.fetchImpl ??
+    createPublicFetch({ allowPrivateNetwork: config.allowPrivateNetwork ?? false });
+  const authenticatedFetch: typeof fetch = async (input, init) =>
+    await agentFetch(
+      {
+        secrets: getSecretStore(dependencies),
+        wallets: target.store,
+        wallet: target.name,
+        fetchImpl: guardedFetch,
+      },
+      requestUrl(input),
+      init,
+    );
   return {
     baseUrl,
     client: createListingsClient({
       baseUrl,
-      apiKey: resolved.key,
+      authenticatedFetch,
       allowPrivateNetwork: config.allowPrivateNetwork ?? false,
-      ...(dependencies.fetchImpl ? { fetchImpl: dependencies.fetchImpl } : {}),
     }),
   };
+}
+
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  return input instanceof URL ? input.href : input.url;
+}
+
+function sameOrigin(left: string, right: string): boolean {
+  try {
+    return new URL(left).origin === new URL(right).origin;
+  } catch {
+    return false;
+  }
 }
 
 function noApiKeyMessage(baseUrl: string): string {
@@ -2234,7 +2367,7 @@ const DISCOVERY_PATH = "/api/call/discovery";
  * from them follows the env override, a self-hosted registry and a mount
  * prefix alike. A hand-edited discovery URL falls back to the shipped default.
  */
-function registryBaseUrl(config: VapiConfig): string {
+export function registryBaseUrl(config: VapiConfig): string {
   try {
     const url = new URL(config.marketplaceDiscoveryUrl);
     const path = url.pathname.replace(/\/+$/, "");
@@ -2552,7 +2685,7 @@ async function claimCommand(
     maximumPositionals: 1,
   });
   const origin = claimOrigin(requiredPositional(parsed.positionals[0], CLAIM_USAGE));
-  const { client, baseUrl } = await listingsClient(io, dependencies);
+  const { client, baseUrl } = await listingsClient(io, dependencies, parsed);
   const wallet = await targetWallet(parsed, dependencies);
   const { account } = await unlockTarget(wallet, dependencies);
   const address = requireEvmAddress(
@@ -3190,7 +3323,7 @@ function formatFund(address: string, url: string, opened: boolean): string {
  * Open a funding URL without ever failing the command: a headless or locked-down
  * machine simply keeps the printed link.
  */
-function openInBrowser(url: string): boolean {
+export function openInBrowser(url: string): boolean {
   const opener =
     process.platform === "darwin"
       ? { command: "open", args: [url] }
@@ -3371,6 +3504,7 @@ function formatSweepResults(
     | { network: string; status: "swept"; amountAtomic: string; transaction: string }
     | { network: string; status: "error"; error: string }
   >,
+  ownerDestination?: string,
 ): string {
   return results
     .map((result) => {
@@ -3383,7 +3517,9 @@ function formatSweepResults(
       const transaction = explorerUrl
         ? `${result.transaction} (${explorerUrl})`
         : result.transaction;
-      return `${name}: swept ${formatUsdc(BigInt(result.amountAtomic))} USDC in ${transaction}${retained}`;
+      const destination =
+        ownerDestination === undefined ? "" : ` to your owner wallet ${ownerDestination}`;
+      return `${name}: swept ${formatUsdc(BigInt(result.amountAtomic))} USDC${destination} in ${transaction}${retained}`;
     })
     .join("\n");
 }
@@ -3395,7 +3531,7 @@ type ArgumentSpec = {
   maximumPositionals: number;
 };
 
-function parseArguments(argv: string[], spec: ArgumentSpec) {
+export function parseArguments(argv: string[], spec: ArgumentSpec) {
   const positionals: string[] = [];
   const options = new Map<string, string[]>();
   const flags = new Set<string>();

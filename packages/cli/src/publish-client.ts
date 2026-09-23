@@ -3,9 +3,9 @@
  *
  * Everything else in this client reads the registry without an account. Listing
  * an API is the one thing that writes, so it is the one thing that carries a
- * bearer key and a wallet signature. It lives in the CLI package rather than in
- * a source adapter because it is not discovery: there is no MCP tool and no
- * agent path to it, and the only caller is a human running `vapi publish`.
+ * bearer credential and a wallet signature. It lives in the CLI package rather
+ * than in a source adapter because it is not discovery: there is no MCP tool,
+ * and the only caller is the CLI.
  *
  * Every response is returned exactly as the registry sent it, so `--json` can
  * hand it on untouched and an unknown field is carried rather than dropped. The
@@ -162,7 +162,9 @@ export type ListingsClientOptions = {
   /** The registry base URL, with any mount prefix it carries. */
   baseUrl: string;
   /** The `vapi_sk_…` key, sent as a bearer token and never logged. */
-  apiKey: string;
+  apiKey?: string;
+  /** A caller that adds and refreshes its own bearer credential. */
+  authenticatedFetch?: typeof fetch;
   fetchImpl?: typeof fetch;
   allowPrivateNetwork?: boolean;
 };
@@ -190,7 +192,11 @@ export function listingsUrl(baseUrl: string, path: string): URL {
 }
 
 export function createListingsClient(options: ListingsClientOptions): ListingsClient {
+  if (options.apiKey === undefined && options.authenticatedFetch === undefined) {
+    throw new Error("The listings client needs an API key or authenticated fetch.");
+  }
   const request =
+    options.authenticatedFetch ??
     options.fetchImpl ??
     createPublicFetch({ allowPrivateNetwork: options.allowPrivateNetwork ?? false });
 
@@ -206,7 +212,7 @@ export function createListingsClient(options: ListingsClientOptions): ListingsCl
       method: init.method,
       headers: {
         accept: "application/json",
-        authorization: `Bearer ${options.apiKey}`,
+        ...(options.apiKey === undefined ? {} : { authorization: `Bearer ${options.apiKey}` }),
         ...(init.body === undefined ? {} : { "content-type": "application/json" }),
       },
       ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),

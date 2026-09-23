@@ -7,7 +7,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { verifyMessage } from "viem";
 
 import { API_KEY_SECRET_ACCOUNT } from "@vapi-network/core/api-key";
-import type { AuditEntry, SecretStore } from "@vapi-network/core";
+import { type AuditEntry, type SecretStore, WalletStore } from "@vapi-network/core";
+import { agentSecretAccounts } from "@vapi-network/core/agent-link";
 
 import { runCli, type CliDependencies, type CliIo, type CliPrompts } from "./cli.js";
 
@@ -930,6 +931,36 @@ describe("vapi publish activate, verify-request and list", () => {
     expect(message).toContain("vapi auth set-key");
     expect(message).toContain("VAPI_API_KEY");
   });
+
+  it("uses the linked agent bearer when call.publish is allowed and no API key exists", async () => {
+    const home = await initializedHome("vapi-publish-agent-bearer-");
+    delete process.env.VAPI_API_KEY;
+    const accessToken = "agent-access-token-that-must-stay-secret";
+    const entries: Record<string, string> = {
+      [agentSecretAccounts("main").tokens]: JSON.stringify({
+        accessToken,
+        refreshToken: "agent-refresh-token-that-must-stay-secret",
+        expiresAt: Date.now() + 60 * 60 * 1_000,
+        scopes: ["mcp:call", "router.use", "call.publish"],
+      }),
+    };
+    await setAgentLink(home, ["mcp:call", "router.use", "call.publish"]);
+    const registry = registryFetch({
+      "GET /api/call/listings/mine": { body: { listings: [] } },
+    });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["publish", "list"], captured.io, {
+        ...AGENT,
+        fetchImpl: registry.fetchImpl,
+        secretStore: secretStoreStub(entries),
+      }),
+    ).toBe(0);
+
+    expect(registry.calls[0]?.headers.get("authorization")).toBe(`Bearer ${accessToken}`);
+    expect([...captured.stdout, ...captured.stderr].join("\n")).not.toContain(accessToken);
+  });
 });
 
 describe("vapi claim <origin>", () => {
@@ -1027,6 +1058,37 @@ describe("vapi claim <origin>", () => {
       origin: ORIGIN,
       claimed: ["weather-forecast"],
     });
+  });
+
+  it("uses the linked agent bearer to claim when no API key exists", async () => {
+    const home = await initializedHome("vapi-claim-agent-bearer-");
+    delete process.env.VAPI_API_KEY;
+    const accessToken = "claim-agent-access-token-that-must-stay-secret";
+    const entries: Record<string, string> = {
+      [agentSecretAccounts("main").tokens]: JSON.stringify({
+        accessToken,
+        refreshToken: "claim-agent-refresh-token-that-must-stay-secret",
+        expiresAt: Date.now() + 60 * 60 * 1_000,
+        scopes: ["mcp:call", "router.use", "call.publish"],
+      }),
+    };
+    await setAgentLink(home, ["mcp:call", "router.use", "call.publish"]);
+    const registry = claimRegistry({ body: { claimed: ["weather-forecast"] } });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["claim", ORIGIN], captured.io, {
+        ...AGENT,
+        fetchImpl: registry.fetchImpl,
+        secretStore: secretStoreStub(entries),
+      }),
+    ).toBe(0);
+
+    expect(registry.calls).toHaveLength(2);
+    for (const call of registry.calls) {
+      expect(call.headers.get("authorization")).toBe(`Bearer ${accessToken}`);
+    }
+    expect([...captured.stdout, ...captured.stderr].join("\n")).not.toContain(accessToken);
   });
 
   it.each([
@@ -1219,6 +1281,37 @@ describe("vapi auth", () => {
     expect(captured.stdout.join("\n")).toContain("https://api.vapinetwork.ai/account");
   });
 
+  it("includes the selected wallet's agent link without reading a secret", async () => {
+    const home = await initializedHome("vapi-auth-status-agent-link-");
+    delete process.env.VAPI_API_KEY;
+    await setAgentLink(home, ["mcp:call", "router.use"]);
+    const store = secretStoreStub();
+    const get = vi.spyOn(store, "get");
+    const human = captureIo();
+
+    expect(await runCli(["auth", "status"], human.io, { ...AGENT, secretStore: store })).toBe(0);
+    expect(human.stdout.join("\n")).toContain(
+      "Agent link: publisher linked to 0x1111111111111111111111111111111111111111 (mcp:call router.use)",
+    );
+
+    const json = captureIo();
+    expect(
+      await runCli(["auth", "status", "--json"], json.io, { ...AGENT, secretStore: store }),
+    ).toBe(0);
+    expect(JSON.parse(json.stdout[0]!)).toMatchObject({
+      agentLink: {
+        wallet: "main",
+        label: "publisher",
+        owner: "0x1111111111111111111111111111111111111111",
+        scopes: ["mcp:call", "router.use"],
+      },
+    });
+    expect(get.mock.calls.map(([account]) => account)).toEqual([
+      API_KEY_SECRET_ACCOUNT,
+      API_KEY_SECRET_ACCOUNT,
+    ]);
+  });
+
   it("clears the key and warns that the environment still has one", async () => {
     const home = await initializedHome("vapi-auth-clear-");
     process.env.VAPI_API_KEY = KEY;
@@ -1335,6 +1428,18 @@ async function initializedHome(prefix: string): Promise<string> {
     await runCli(["init", "--json"], captureIo().io, { ...AGENT, fetchImpl: zeroBalanceRpc() }),
   ).toBe(0);
   return home;
+}
+
+async function setAgentLink(home: string, scopes: string[]): Promise<void> {
+  const store = await WalletStore.open(home);
+  await store.setLink("main", {
+    apiBase: "https://api.vapinetwork.ai",
+    clientId: "agent_main",
+    owner: "0x1111111111111111111111111111111111111111",
+    label: "publisher",
+    scopes,
+    linkedAt: "2026-09-23T10:00:00.000Z",
+  });
 }
 
 function zeroBalanceRpc() {
