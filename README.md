@@ -154,6 +154,11 @@ default on disk. It cannot see a recovery phrase, a private key or a passphrase,
 and the MCP server has no tool that creates, removes, renames, backs up or
 exports a wallet.
 
+vAPI agents combine a local profile, a dedicated wallet and vAPI Router into a
+small run loop on your machine. By default they use only verified listings, ask
+before a call above $0.50 and stop after at most 12 model steps. vAPI does not
+host agents; they run wherever you run `vapi agent run`.
+
 `vapi backup` and `vapi export-key` print a secret, so they run only when a
 person is demonstrably there: stdin and stdout are both a real terminal, no
 agent or CI marker is set, and you type the wallet's own name to confirm.
@@ -235,6 +240,12 @@ to stdout. Exit codes are `0` for success, `1` for an operational failure, and
 | `vapi receipts export`                     | `--format <json\|csv>`, `--range <24h\|7d\|30d>`, `--wallet <name>`, `--all-wallets`                                                                                                                    | Raw receipts for a spreadsheet or dashboard                                 |
 | `vapi stats`                               | `--range <24h\|7d\|30d>`, `--wallet <name>`, `--all-wallets`                                                                                                                                            | Spend, outcomes, latency percentiles and top services                       |
 | `vapi sweep [<address>]`                   | `--network <caip2>`, `--wallet <name>`                                                                                                                                                                  | Moves USDC to an address, or to the linked owner when omitted               |
+| `vapi agent create <name>`                 | `--model <id>`, `--instructions <file>`, `--call-budget <usd>`, `--max-per-call <usd>`, `--router-budget <usd>`, `--approve-above <usd>`, `--include-unverified`, `--max-steps <n>`                     | Creates a capped local agent wallet, profile and owner link                 |
+| `vapi agent run <name> "<task>"`           | None                                                                                                                                                                                                    | Runs the named agent on this machine                                        |
+| `vapi agent list`                          | None                                                                                                                                                                                                    | Lists profiles, links and today's Call and Router budgets                   |
+| `vapi agent pause <name>`                  | None                                                                                                                                                                                                    | Stops future runs until the agent is resumed                                |
+| `vapi agent resume <name>`                 | None                                                                                                                                                                                                    | Allows a paused agent to run again                                          |
+| `vapi agent revoke <name>`                 | None                                                                                                                                                                                                    | Revokes the link and removes the profile, but keeps its wallet              |
 | `vapi login`                               | `--wallet <name>`, `--label <name>`, `--publish`, `--no-browser`                                                                                                                                        | Links the local agent wallet to your vAPI account                           |
 | `vapi logout`                              | `--wallet <name>`                                                                                                                                                                                       | Removes the selected wallet's agent link and stored credentials             |
 | `vapi whoami`                              | `--wallet <name>`                                                                                                                                                                                       | Shows the selected wallet's owner link and permissions                      |
@@ -528,6 +539,37 @@ recovery phrase, a private key or a passphrase. Those stay in the CLI, in front
 of a person.
 
 ## SDK
+
+### `createVapiClient`
+
+Install the bundled client when you want Call, vAPI Router and local agents
+behind one wallet-bound API:
+
+```bash
+npm i vapi-network
+```
+
+```ts
+import { createVapiClient } from "vapi-network";
+
+const vapi = await createVapiClient({ wallet: "researcher" });
+const reply = await vapi.router.chat({
+  model: "openai/gpt-5-mini",
+  messages: [{ role: "user", content: "Summarise Base DEX activity." }],
+});
+console.log(reply.content);
+
+const listings = await vapi.call.search("Base DEX volume");
+console.log(listings);
+const result = await vapi.call.pay({ id: "base-dex-volume", maxPriceUsd: 0.05 });
+console.log(result.body);
+```
+
+`await vapi.router.openai()` returns the vAPI Router base URL and key for an
+OpenAI-compatible framework. Use this in your own code. Do not pass it into a
+model prompt.
+
+### Lower-level packages
 
 ```bash
 npm i @vapi-network/core @vapi-network/sources

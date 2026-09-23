@@ -20,6 +20,7 @@ describe("vAPI config home", () => {
     vi.stubEnv("VAPI_HOME", "/tmp/vapi-home");
     expect(getVapiPaths()).toEqual({
       directory: "/tmp/vapi-home",
+      agentsDir: "/tmp/vapi-home/agents",
       config: "/tmp/vapi-home/config.json",
       keystore: "/tmp/vapi-home/keystore.json",
       receipts: "/tmp/vapi-home/receipts.jsonl",
