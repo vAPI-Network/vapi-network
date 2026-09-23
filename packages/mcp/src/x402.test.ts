@@ -696,15 +696,25 @@ describe("x402 v2 challenge parsing", () => {
     temporaryDirectories.push(directory);
     const receiptsPath = join(directory, "receipts.jsonl");
     const account = privateKeyToAccount(PRIVATE_KEY);
-    const fetchImpl = vi
+    const paymentChallenge = {
+      ...challenge(),
+      extensions: {
+        "payment-identifier": {
+          info: { required: true },
+          schema: { type: "object", required: ["id"] },
+        },
+      },
+    };
+    const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify(challenge()), {
+        new Response(JSON.stringify(paymentChallenge), {
           status: 402,
           headers: { "content-type": "application/json" },
         }),
       )
-      .mockRejectedValueOnce(new Error("socket hang up")) as unknown as typeof fetch;
+      .mockRejectedValueOnce(new Error("socket hang up"));
+    const fetchImpl = fetchMock as unknown as typeof fetch;
 
     const failure = await callService({
       input: { url: "https://vendor.example/paid" },
@@ -722,9 +732,22 @@ describe("x402 v2 challenge parsing", () => {
       (error: unknown) => error as VapiCallError,
     );
 
+    const paidRequest = fetchMock.mock.calls[1]![0] as Request;
+    const sentPayload = JSON.parse(
+      Buffer.from(paidRequest.headers.get("payment-signature")!, "base64").toString("utf8"),
+    ) as {
+      extensions: {
+        "builder-code": unknown;
+        "payment-identifier": { info: { id: string } };
+      };
+    };
+    const sentPaymentId = sentPayload.extensions["payment-identifier"].info.id;
+    expect(sentPayload.extensions["builder-code"]).toEqual({ info: { s: ["vapi"] } });
+    expect(sentPaymentId).toMatch(/^pay_[0-9a-f]{32}$/);
     const [receipt] = await readReceipts(receiptsPath);
     expect(receipt).toMatchObject({
       outcome: "settlement_unknown",
+      paymentId: sentPaymentId,
       quote: { network: BASE_MAINNET_CAIP2, amountAtomic: "2500" },
       authorization: {
         from: account.address,
@@ -733,6 +756,7 @@ describe("x402 v2 challenge parsing", () => {
         validBefore: String(Date.parse("2026-09-21T10:00:00.000Z") / 1_000 + 60),
       },
     });
+    expect(failure.possibleSettlement?.paymentId).toBe(sentPaymentId);
     expect(failure.message).toBe(
       `The paid request lost its response. Do not retry automatically; inspect the authorization and settlement state first. Check whether it settled with \`vapi pay --resume ${receipt!.id}\` before paying again.`,
     );
@@ -816,8 +840,47 @@ describe("EIP-3009 exact payment construction", () => {
       nowSeconds: 1_700_000_000,
     });
 
-    expect(payment.payload).toEqual(officialFixture.payload);
-    expect(JSON.parse(payment.headers[legacyFixture.header])).toEqual(legacyFixture.payload);
+    expect(payment.payload).toEqual({
+      ...(officialFixture.payload as Record<string, unknown>),
+      extensions: { "builder-code": { info: { s: ["vapi"] } } },
+    });
+    expect(JSON.parse(payment.headers[legacyFixture.header])).toEqual({
+      ...(legacyFixture.payload as Record<string, unknown>),
+      extensions: { "builder-code": { info: { s: ["vapi"] } } },
+    });
+  });
+
+  it("forwards and returns a caller-supplied payment id", async () => {
+    const paymentId = `pay_${"cd".repeat(16)}`;
+    const quote = parse402Challenge(
+      {
+        ...challenge(),
+        extensions: {
+          "payment-identifier": {
+            info: { required: true },
+            schema: { type: "object" },
+          },
+        },
+      },
+      getDefaultConfig().networks,
+    );
+    const payment = await buildX402Payment({
+      account: privateKeyToAccount(PRIVATE_KEY),
+      quote,
+      nonce: NONCE,
+      nowSeconds: 1_700_000_000,
+      paymentId,
+    });
+
+    expect(payment.paymentId).toBe(paymentId);
+    const sent = JSON.parse(
+      Buffer.from(payment.headers["PAYMENT-SIGNATURE"], "base64").toString("utf8"),
+    ) as { extensions: { "payment-identifier": { info: { id: string } } } };
+    expect(sent.extensions["payment-identifier"].info.id).toBe(paymentId);
+    const compatible = JSON.parse(payment.headers["X-PAYMENT"]) as {
+      extensions: { "payment-identifier": { info: { id: string } } };
+    };
+    expect(compatible.extensions).toEqual(sent.extensions);
   });
 
   it("constructs and signs the expected typed data fixture", async () => {

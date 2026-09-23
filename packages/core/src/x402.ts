@@ -38,6 +38,10 @@ const MAX_METADATA_ENTRIES = 4096;
 const MAX_METADATA_KEYS_PER_OBJECT = 64;
 const MAX_METADATA_ARRAY_LENGTH = 64;
 const MAX_METADATA_STRING_LENGTH = 16_384;
+const BUILDER_CODE_PATTERN = /^[a-z0-9_]{1,32}$/;
+const PAYMENT_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
+
+export const VAPI_BUILDER_CODE = "vapi";
 
 export const EIP3009_AUTHORIZATION_TYPES = {
   TransferWithAuthorization: [
@@ -152,6 +156,89 @@ export class X402Error extends Error {
     super(message, options);
     this.name = "X402Error";
   }
+}
+
+/** Returns whether a value is a valid x402 payment-identifier id. */
+export function isValidPaymentId(value: unknown): value is string {
+  return typeof value === "string" && PAYMENT_ID_PATTERN.test(value);
+}
+
+/** Creates a fresh x402 payment-identifier id from 16 random bytes. */
+export function createPaymentId(
+  randomBytes: (bytes: Uint8Array<ArrayBuffer>) => void = fillRandomBytes,
+): string {
+  const bytes = new Uint8Array(16);
+  randomBytes(bytes);
+  return `pay_${bytesToHex(bytes).slice(2)}`;
+}
+
+/**
+ * Builds the extensions sent in a payment payload without mutating the
+ * server-declared extensions. A payment id is required only when the server
+ * advertised payment-identifier.
+ */
+export function buildPaymentExtensions(
+  serverExtensions: Readonly<Record<string, unknown>> | undefined,
+  options: Readonly<{ paymentId?: string }> = {},
+): Record<string, unknown> {
+  const declaredBuilderCode = serverExtensions?.["builder-code"];
+  const builderInfo = isRecord(declaredBuilderCode) ? declaredBuilderCode.info : undefined;
+  const serverBuilderInfo = isRecord(builderInfo) ? builderInfo : undefined;
+  const declaredServerCodes = serverBuilderInfo?.s;
+  const serverCodes =
+    typeof declaredServerCodes === "string"
+      ? [declaredServerCodes]
+      : Array.isArray(declaredServerCodes)
+        ? declaredServerCodes
+        : undefined;
+  const validServerCodes: string[] = [];
+  if (serverCodes) {
+    for (const code of serverCodes) {
+      if (
+        typeof code === "string" &&
+        BUILDER_CODE_PATTERN.test(code) &&
+        code !== VAPI_BUILDER_CODE &&
+        !validServerCodes.includes(code) &&
+        validServerCodes.length < 5
+      ) {
+        validServerCodes.push(code);
+      }
+    }
+  }
+  const appCode = serverBuilderInfo?.a;
+  // Facilitators read attribution from `extensions["builder-code"].info`
+  // (`BuilderCodeFacilitatorExtension` in @x402/extensions), so the codes go in
+  // `info`, and the server's declared `schema` is echoed alongside, the same
+  // shape the reference client produces after merging with the 402.
+  const builderCode = {
+    info: {
+      ...(typeof appCode === "string" && BUILDER_CODE_PATTERN.test(appCode) ? { a: appCode } : {}),
+      s: [VAPI_BUILDER_CODE, ...validServerCodes],
+    },
+    ...(isRecord(declaredBuilderCode) && declaredBuilderCode.schema !== undefined
+      ? { schema: declaredBuilderCode.schema }
+      : {}),
+  };
+
+  const paymentIdentifier = serverExtensions?.["payment-identifier"];
+  if (!isRecord(paymentIdentifier)) {
+    return { ...serverExtensions, "builder-code": builderCode };
+  }
+  if (!isValidPaymentId(options.paymentId)) {
+    throw new X402Error(
+      "invalid_challenge",
+      "paymentId must be 16-128 characters containing only letters, digits, underscores, or hyphens.",
+    );
+  }
+  const paymentInfo = isRecord(paymentIdentifier.info) ? paymentIdentifier.info : {};
+  return {
+    ...serverExtensions,
+    "builder-code": builderCode,
+    "payment-identifier": {
+      schema: paymentIdentifier.schema,
+      info: { ...paymentInfo, id: options.paymentId },
+    },
+  };
 }
 
 export function parse402Challenge(
@@ -273,13 +360,11 @@ export function parse402Challenge(
   if (!resource.url) {
     throw new X402Error("invalid_challenge", "x402 challenge is missing its resource URL.");
   }
-  // Extensions are discovery metadata, never payment input. A challenge whose
-  // extensions exceed the bounded-JSON limits is still payable: keep the quote
-  // and drop the metadata rather than refusing to pay.
-  const extensions =
-    challenge.extensions === undefined
-      ? undefined
-      : (readBoundedJsonRecord(challenge.extensions) ?? undefined);
+  // A challenge whose extensions exceed the bounded-JSON limits is still
+  // payable. Preserve bounded payment extensions even when unrelated metadata
+  // is too large, because builder-code and payment-identifier affect the
+  // payment payload itself.
+  const extensions = readChallengeExtensions(challenge.extensions);
 
   try {
     const configured = configuredX402Network(configuredNetworks, network);
@@ -476,7 +561,15 @@ export async function buildX402Payment(args: {
   nowSeconds?: number;
   nonce?: Hex;
   fetchImpl?: typeof fetch;
-}): Promise<{ payload: X402PaymentPayload; headers: X402PaymentHeaders }> {
+  paymentId?: string;
+}): Promise<{
+  payload: X402PaymentPayload;
+  headers: X402PaymentHeaders;
+  paymentId?: string;
+}> {
+  const advertisesPaymentIdentifier = isRecord(args.quote.extensions?.["payment-identifier"]);
+  const paymentId = advertisesPaymentIdentifier ? (args.paymentId ?? createPaymentId()) : undefined;
+  const extensions = buildPaymentExtensions(args.quote.extensions, { paymentId });
   if (isSvmPaymentRequirements(args.quote.accepted)) {
     if (!args.signer.solana) {
       throw new X402Error(
@@ -509,11 +602,12 @@ export async function buildX402Payment(args: {
       resource: args.quote.resource,
       accepted: args.quote.accepted,
       payload: created.payload as { transaction: string },
-      ...(args.quote.extensions ? { extensions: args.quote.extensions } : {}),
+      extensions,
     };
     return {
       payload,
       headers: { "PAYMENT-SIGNATURE": encodeBase64Json(payload) },
+      ...(paymentId ? { paymentId } : {}),
     };
   }
   const nonce = args.nonce ?? randomNonce();
@@ -529,13 +623,14 @@ export async function buildX402Payment(args: {
     resource: args.quote.resource,
     accepted: args.quote.accepted,
     payload: { signature, authorization },
-    ...(args.quote.extensions ? { extensions: args.quote.extensions } : {}),
+    extensions,
   };
   return {
     payload,
     headers: {
       "PAYMENT-SIGNATURE": encodeBase64Json(payload),
     },
+    ...(paymentId ? { paymentId } : {}),
   };
 }
 
@@ -546,13 +641,19 @@ export async function buildCompatibleX402Payment(args: {
   nowSeconds?: number;
   nonce?: Hex;
   fetchImpl?: typeof fetch;
-}): Promise<{ payload: X402PaymentPayload; headers: X402CompatiblePaymentHeaders }> {
+  paymentId?: string;
+}): Promise<{
+  payload: X402PaymentPayload;
+  headers: X402CompatiblePaymentHeaders;
+  paymentId?: string;
+}> {
   const payment = await buildX402Payment({
     signer: args.account,
     quote: args.quote,
     ...(args.nowSeconds === undefined ? {} : { nowSeconds: args.nowSeconds }),
     ...(args.nonce === undefined ? {} : { nonce: args.nonce }),
     ...(args.fetchImpl === undefined ? {} : { fetchImpl: args.fetchImpl }),
+    ...(args.paymentId === undefined ? {} : { paymentId: args.paymentId }),
   });
   return {
     payload: payment.payload,
@@ -563,8 +664,10 @@ export async function buildCompatibleX402Payment(args: {
         scheme: args.quote.accepted.scheme,
         network: args.quote.accepted.network,
         payload: payment.payload.payload,
+        extensions: payment.payload.extensions,
       }),
     },
+    ...(payment.paymentId ? { paymentId: payment.paymentId } : {}),
   };
 }
 
@@ -679,8 +782,12 @@ function parseEip155ChainId(network: string): number {
 
 function randomNonce(): Hex {
   const bytes = new Uint8Array(32);
-  globalThis.crypto.getRandomValues(bytes);
+  fillRandomBytes(bytes);
   return bytesToHex(bytes);
+}
+
+function fillRandomBytes(bytes: Uint8Array<ArrayBuffer>): void {
+  globalThis.crypto.getRandomValues(bytes);
 }
 
 function readAmount(value: Record<string, unknown>): bigint | null {
@@ -737,6 +844,20 @@ function readBoundedJsonRecord(value: unknown): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function readChallengeExtensions(value: unknown): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  const extensions = readBoundedJsonRecord(value);
+  if (extensions) return extensions;
+  if (!isRecord(value)) return undefined;
+
+  const paymentExtensions: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const name of ["builder-code", "payment-identifier"] as const) {
+    const extension = readBoundedJsonRecord(value[name]);
+    if (extension) paymentExtensions[name] = extension;
+  }
+  return Object.keys(paymentExtensions).length === 0 ? undefined : paymentExtensions;
 }
 
 function cloneBoundedJson(

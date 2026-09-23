@@ -12,13 +12,14 @@ const URL_UNDER_TEST = "https://weather.example/v1/weather/paris";
 
 type CheckJson = {
   status: number;
+  extensions: string[];
   conformance: {
     declaredVersion: 1 | 2 | null;
     versionConformant: boolean;
     offerTransport: string;
     issues: string[];
   } | null;
-  rules: { rule: string; result: string; issues: string[] }[];
+  rules: { rule: string; result: string; detail: string; issues: string[] }[];
   summary: { pass: number; warn: number; fail: number };
 };
 
@@ -38,6 +39,7 @@ function v2Offer(overrides: Record<string, unknown> = {}, accept: Record<string,
         ...accept,
       },
     ],
+    extensions: { bazaar: {} },
     ...overrides,
   };
 }
@@ -131,13 +133,14 @@ afterEach(() => {
 });
 
 describe("vapi check <url>", () => {
-  it("passes a conformant v2 API, asking nobody but its origin", async () => {
+  it("passes a conformant v2 API and falls back to root OpenAPI", async () => {
     const api = conformantOrigin();
 
     const { code, report } = await checkJson(api.fetchImpl);
 
     expect(code).toBe(0);
-    expect(report.summary).toEqual({ pass: 10, warn: 0, fail: 0 });
+    expect(report.summary).toEqual({ pass: 11, warn: 0, fail: 0 });
+    expect(report.extensions).toEqual(["bazaar"]);
     expect(report.rules.map((rule) => rule.rule)).toEqual([
       "status",
       "transport",
@@ -147,6 +150,7 @@ describe("vapi check <url>", () => {
       "asset",
       "pay_to",
       "timeout",
+      "extensions",
       "discovery",
       "openapi",
     ]);
@@ -159,8 +163,136 @@ describe("vapi check <url>", () => {
     expect(api.urls()).toEqual([
       URL_UNDER_TEST,
       "https://weather.example/.well-known/x402",
+      "https://weather.example/v1/weather/openapi.json",
+      "https://weather.example/v1/openapi.json",
       "https://weather.example/openapi.json",
     ]);
+    expect(ruleResult(report, "openapi")?.detail).toContain("https://weather.example/openapi.json");
+  });
+
+  it.each([
+    ["relative", "/{city}"],
+    ["full", "/v1/weather/{city}"],
+  ])(
+    "uses a path-adjacent OpenAPI document with a %s path before the root",
+    async (_kind, path) => {
+      const api = conformantOrigin({
+        "/v1/weather/openapi.json": {
+          body: {
+            openapi: "3.1.0",
+            paths: {
+              [path]: {
+                get: { "x-payment-info": { price: "0.0025", protocols: ["x402"] } },
+              },
+            },
+          },
+        },
+      });
+
+      const { report } = await checkJson(api.fetchImpl);
+
+      expect(ruleResult(report, "openapi")).toMatchObject({ result: "pass", issues: [] });
+      expect(ruleResult(report, "openapi")?.detail).toContain(
+        "https://weather.example/v1/weather/openapi.json",
+      );
+      expect(api.urls()).toEqual([
+        URL_UNDER_TEST,
+        "https://weather.example/.well-known/x402",
+        "https://weather.example/v1/weather/openapi.json",
+      ]);
+    },
+  );
+
+  it("continues past an unrelated path-adjacent OpenAPI document", async () => {
+    const api = conformantOrigin({
+      "/v1/weather/openapi.json": {
+        body: { openapi: "3.1.0", paths: { "/health": { get: {} } } },
+      },
+    });
+
+    const { report } = await checkJson(api.fetchImpl);
+
+    expect(ruleResult(report, "openapi")).toMatchObject({ result: "pass", issues: [] });
+    expect(ruleResult(report, "openapi")?.detail).toContain("https://weather.example/openapi.json");
+    expect(api.urls()).toEqual([
+      URL_UNDER_TEST,
+      "https://weather.example/.well-known/x402",
+      "https://weather.example/v1/weather/openapi.json",
+      "https://weather.example/v1/openapi.json",
+      "https://weather.example/openapi.json",
+    ]);
+  });
+
+  it("continues through same-origin API catalog service-desc links in order", async () => {
+    const api = conformantOrigin({
+      "/openapi.json": { status: 404 },
+      "/.well-known/api-catalog": {
+        body: {
+          linkset: [
+            {
+              anchor: "https://weather.example/",
+              "service-desc": [
+                { href: "https://elsewhere.example/openapi.json" },
+                { href: "/openapi.json" },
+                { href: "/specs/unrelated.json" },
+                { href: "/specs/weather.json", type: "application/vnd.oai.openapi+json" },
+              ],
+            },
+          ],
+        },
+      },
+      "/specs/unrelated.json": {
+        body: { openapi: "3.1.0", paths: { "/status": { get: {} } } },
+      },
+      "/specs/weather.json": { body: OPENAPI },
+    });
+
+    const { report } = await checkJson(api.fetchImpl);
+
+    expect(ruleResult(report, "openapi")).toMatchObject({ result: "pass", issues: [] });
+    expect(ruleResult(report, "openapi")?.detail).toContain(
+      "https://weather.example/specs/weather.json (via the API catalog at https://weather.example/.well-known/api-catalog)",
+    );
+    expect(api.urls()).toEqual([
+      URL_UNDER_TEST,
+      "https://weather.example/.well-known/x402",
+      "https://weather.example/v1/weather/openapi.json",
+      "https://weather.example/v1/openapi.json",
+      "https://weather.example/openapi.json",
+      "https://weather.example/.well-known/api-catalog",
+      "https://weather.example/specs/unrelated.json",
+      "https://weather.example/specs/weather.json",
+    ]);
+    expect(api.urls()).not.toContain("https://elsewhere.example/openapi.json");
+    const catalogRequest = api.fetchImpl.mock.calls.find(
+      ([input]) => String(input) === "https://weather.example/.well-known/api-catalog",
+    );
+    expect(catalogRequest?.[1]?.headers).toEqual({
+      accept: "application/linkset+json, application/json",
+    });
+  });
+
+  it.each([
+    ["missing linkset", {}],
+    ["non-array linkset", { linkset: {} }],
+    ["non-string href", { linkset: [{ "service-desc": [{ href: 42 }, null] }] }],
+  ])("tolerates a malformed API catalog with %s", async (_label, catalog) => {
+    const api = conformantOrigin({
+      "/openapi.json": { status: 404 },
+      "/.well-known/api-catalog": { body: catalog },
+    });
+
+    const { code, report } = await checkJson(api.fetchImpl);
+
+    expect(code).toBe(0);
+    expect(report.summary.fail).toBe(0);
+    expect(ruleResult(report, "openapi")).toMatchObject({
+      result: "warn",
+      issues: ["openapi_missing"],
+    });
+    expect(ruleResult(report, "openapi")?.detail).toContain(
+      "https://weather.example/.well-known/api-catalog",
+    );
   });
 
   it("fails a header-only v2 offer with no resource, in the registry's codes", async () => {
@@ -213,6 +345,65 @@ describe("vapi check <url>", () => {
       versionConformant: true,
       offerTransport: "body",
     });
+  });
+
+  it("reports known extensions from a header-carried offer in a stable order", async () => {
+    const offer = v2Offer({
+      extensions: {
+        "auth-hints": {},
+        unknown: {},
+        "offer-and-receipt": {},
+        bazaar: {},
+        "builder-code": {},
+      },
+    });
+    const api = conformantOrigin({
+      "/v1/weather/paris": { status: 402, headers: paymentRequired(offer) },
+    });
+
+    const { code, report } = await checkJson(api.fetchImpl);
+
+    expect(code).toBe(0);
+    expect(report.extensions).toEqual([
+      "bazaar",
+      "builder-code",
+      "offer-and-receipt",
+      "auth-hints",
+    ]);
+    expect(ruleResult(report, "extensions")).toEqual({
+      rule: "extensions",
+      result: "pass",
+      detail: "Advertises bazaar, builder-code, offer-and-receipt, auth-hints.",
+      issues: [],
+    });
+  });
+
+  it("warns about missing Bazaar metadata in a body-carried offer without failing", async () => {
+    const offer = {
+      ...V1_OFFER,
+      extensions: {
+        "auth-hints": {},
+        "sign-in-with-x": {},
+        "payment-identifier": {},
+      },
+    };
+    const api = conformantOrigin({
+      "/v1/weather/paris": { status: 402, body: offer },
+    });
+
+    const { code, report } = await checkJson(api.fetchImpl);
+
+    expect(code).toBe(0);
+    expect(report.summary.fail).toBe(0);
+    expect(report.extensions).toEqual(["payment-identifier", "sign-in-with-x", "auth-hints"]);
+    expect(ruleResult(report, "extensions")).toEqual({
+      rule: "extensions",
+      result: "warn",
+      detail:
+        "Advertises payment-identifier, sign-in-with-x, auth-hints. Adding Bazaar metadata makes the API discoverable in Coinbase's Bazaar and by Coinbase for Agents.",
+      issues: ["bazaar_metadata_missing"],
+    });
+    expect(report.conformance?.issues).not.toContain("bazaar_metadata_missing");
   });
 
   it("names v1 field names inside a v2 offer as missing and mistyped v2 fields", async () => {
@@ -302,7 +493,7 @@ describe("vapi check <url>", () => {
       result: "warn",
       issues: ["openapi_payment_info_missing"],
     });
-    expect(report.summary).toEqual({ pass: 8, warn: 2, fail: 0 });
+    expect(report.summary).toEqual({ pass: 9, warn: 2, fail: 0 });
   });
 
   it("fails a URL that answers without a 402, and grades nothing it did not get", async () => {
@@ -313,6 +504,7 @@ describe("vapi check <url>", () => {
     expect(code).toBe(1);
     expect(report.status).toBe(200);
     expect(report.conformance).toBeNull();
+    expect(report.extensions).toEqual([]);
     expect(report.rules.map((rule) => [rule.rule, rule.result])).toEqual([
       ["status", "fail"],
       ["discovery", "pass"],
@@ -331,10 +523,11 @@ describe("vapi check <url>", () => {
     expect(code).toBe(1);
     const text = stdout.join("\n");
     expect(text).toContain(`Check: GET ${URL_UNDER_TEST} — HTTP 402`);
-    expect(text).toContain("  pass  status     HTTP 402 Payment Required.");
+    expect(text).toContain("  pass  status      HTTP 402 Payment Required.");
     expect(text).toMatch(/^ {2}warn {2}transport {2}.* \[offer_header_only\]$/mu);
     expect(text).toMatch(/^ {2}fail {2}fields {5}.* \[v2_missing_resource\]$/mu);
-    expect(text).toContain("8 passed, 1 warning, 1 failed.");
+    expect(text).toContain("  pass  extensions  Advertises bazaar.");
+    expect(text).toContain("9 passed, 1 warning, 1 failed.");
   });
 
   it("sends --method and refuses anything that is not a URL or a method", async () => {

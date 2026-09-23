@@ -624,6 +624,7 @@ describe("inspect output", () => {
 describe("vapi pay --resume", () => {
   const PAYER = "0x9858EfFD232B4033E47d90003D41EC34EcaEda94";
   const VALID_BEFORE = 1_790_000_000;
+  const PAYMENT_ID = `pay_${"ab".repeat(16)}`;
 
   async function homeWithLostPayment(overrides: Record<string, unknown> = {}): Promise<void> {
     const home = await mkdtemp(join(tmpdir(), "vapi-cli-resume-"));
@@ -642,6 +643,7 @@ describe("vapi pay --resume", () => {
           payTo: "0x1111111111111111111111111111111111111111",
         },
         payer: PAYER,
+        paymentId: PAYMENT_ID,
         authorization: {
           from: PAYER,
           nonce: `0x${"ab".repeat(32)}`,
@@ -687,6 +689,7 @@ describe("vapi pay --resume", () => {
     const text = captured.stdout.join("\n");
     expect(text).toMatch(/^Wallet: agent$/mu);
     expect(text).toContain("Receipt: lost-1 — POST https://vendor.example/paid");
+    expect(text).toContain(`Payment id: ${PAYMENT_ID}`);
     expect(text).toContain(
       "Settled: the authorization was used on-chain, so the payment went through (or the payer cancelled it, which this client never does). Do not pay again.",
     );
@@ -703,6 +706,7 @@ describe("vapi pay --resume", () => {
     expect(JSON.parse(expired.stdout[0]!)).toMatchObject({
       wallet: "agent",
       receipt: "lost-1",
+      paymentId: PAYMENT_ID,
       state: "expired",
       authorizer: PAYER,
       validBefore: String(VALID_BEFORE),
@@ -720,6 +724,20 @@ describe("vapi pay --resume", () => {
     expect(pending.stdout.join("\n")).toContain(
       `Pending: the authorization is unused but can still settle. Wait until ${new Date(VALID_BEFORE * 1_000).toISOString()}, then run vapi pay --resume lost-1 again; paying now could pay twice.`,
     );
+  });
+
+  it("still resumes a receipt written without a payment id", async () => {
+    await homeWithLostPayment({ paymentId: undefined });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["pay", "--resume", "lost-1", "--json"], captured.io, {
+        fetchImpl: baseNode(true, VALID_BEFORE - 30),
+      }),
+    ).toBe(0);
+    const result = JSON.parse(captured.stdout[0]!) as Record<string, unknown>;
+    expect(result.state).toBe("settled");
+    expect(result).not.toHaveProperty("paymentId");
   });
 
   it("says a Solana receipt cannot be checked yet", async () => {

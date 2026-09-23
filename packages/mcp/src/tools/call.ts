@@ -59,6 +59,7 @@ export type PossibleSettlement = {
   amountAtomic: string;
   payTo: string;
   payer: string;
+  paymentId?: string;
   authorizationNonce?: string;
   authorizationExpiresAt?: string;
   authorizationTransaction?: string;
@@ -194,6 +195,7 @@ type CallTrace = {
   method?: string;
   quote?: NonNullable<Receipt["quote"]>;
   payer?: string;
+  paymentId?: string;
   authorization?: NonNullable<Receipt["authorization"]>;
   settlement?: NonNullable<Receipt["settlement"]>;
   status?: number;
@@ -553,6 +555,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
       fetchImpl,
       nowSeconds: args.now ? Math.floor(args.now.getTime() / 1_000) : undefined,
     });
+    trace.paymentId = payment.paymentId;
     trace.payer = isSvmPaymentRequirements(quote.accepted)
       ? account.solana?.address
       : account.address;
@@ -589,6 +592,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
       quote,
       payment.payload,
       trace.payer ?? account.address,
+      payment.paymentId,
       null,
       resumeId,
       error,
@@ -620,6 +624,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
         quote,
         payment.payload,
         trace.payer ?? account.address,
+        payment.paymentId,
         settlement,
         resumeId,
       );
@@ -643,6 +648,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
         quote,
         payment.payload,
         trace.payer ?? account.address,
+        payment.paymentId,
         settlement,
         resumeId,
       );
@@ -654,6 +660,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
         quote,
         payment.payload,
         trace.payer ?? account.address,
+        payment.paymentId,
         settlement,
         resumeId,
       );
@@ -671,6 +678,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
         quote,
         payment.payload,
         trace.payer ?? account.address,
+        payment.paymentId,
         settlement,
         resumeId,
         error,
@@ -734,6 +742,7 @@ async function recordCallReceipt(
             payTo: payment.payTo,
           },
           payer: trace.payer ?? args.account.address,
+          ...(trace.paymentId ? { paymentId: trace.paymentId } : {}),
           ...(trace.authorization ? { authorization: trace.authorization } : {}),
           settlement: {
             outcome: classifySettlement(evidence),
@@ -804,6 +813,7 @@ async function recordCallError(
       ...receiptContext(args, trace, resourceUrl),
       ...(trace.quote ? { quote: trace.quote } : {}),
       ...(trace.payer && outcome !== "declined_policy" ? { payer: trace.payer } : {}),
+      ...(trace.paymentId ? { paymentId: trace.paymentId } : {}),
       ...(trace.authorization ? { authorization: trace.authorization } : {}),
       ...(settlement ? { settlement } : {}),
       ...(trace.status === undefined ? {} : { status: trace.status }),
@@ -1276,6 +1286,7 @@ function settlementUnknown(
   quote: Awaited<ReturnType<typeof parse402Response>>,
   payment: X402PaymentPayload,
   payer: string,
+  paymentId: string | undefined,
   receipt: unknown | null,
   resumeId: string | undefined,
   cause?: unknown,
@@ -1293,6 +1304,7 @@ function settlementUnknown(
       amountAtomic: quote.amountAtomic.toString(),
       payTo: quote.accepted.payTo,
       payer,
+      ...(paymentId ? { paymentId } : {}),
       ...(isSvmPaymentRequirements(quote.accepted)
         ? {
             authorizationTransaction:
