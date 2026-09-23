@@ -2,6 +2,7 @@ export * from "./call-contracts.js";
 export * from "./call-contracts-wire.js";
 export * from "./accounts.js";
 export * from "./agent-guard.js";
+export type { AgentTokens, DeviceLinkStart, LinkResult } from "./agent-link.js";
 export * from "./audit.js";
 export * from "./authorization-state.js";
 export * from "./config.js";

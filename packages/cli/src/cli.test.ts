@@ -15,6 +15,7 @@ import {
   getVapiPaths,
   unlockKeystore,
   type SecretStore,
+  WalletStore,
 } from "@vapi-network/core";
 
 import {
@@ -947,6 +948,54 @@ describe("local metrics commands", () => {
   });
 });
 
+describe("vapi sweep destinations", () => {
+  const owner = "0x1111111111111111111111111111111111111111" as const;
+  const explicit = "0x2222222222222222222222222222222222222222";
+
+  it("uses the linked owner when no address is supplied", async () => {
+    const home = await initializedHome("vapi-cli-sweep-owner-");
+    const store = await WalletStore.open(home);
+    await store.setLink("main", {
+      apiBase: "https://api.vapinetwork.ai",
+      clientId: "agent_main",
+      owner,
+      label: "researcher",
+      scopes: ["mcp:call", "router.use"],
+      linkedAt: "2026-09-23T10:00:00.000Z",
+    });
+    const sweepBack = successfulSweep();
+    const captured = captureIo();
+
+    expect(await runCli(["sweep"], captured.io, { sweepBack })).toBe(0);
+
+    expect(sweepBack).toHaveBeenCalledOnce();
+    expect(sweepBack.mock.calls[0]![0]).toMatchObject({ destination: owner });
+    expect(captured.stdout.join("\n")).toContain(`to your owner wallet ${owner}`);
+  });
+
+  it("keeps the usage error when no address or link exists", async () => {
+    await initializedHome("vapi-cli-sweep-no-owner-");
+    const captured = captureIo();
+
+    expect(await runCli(["sweep"], captured.io, { sweepBack: successfulSweep() })).toBe(2);
+
+    const message = captured.stderr.join("\n");
+    expect(message).toContain("Usage: vapi sweep [<address>] [--network <caip2>]");
+    expect(message).toContain("vapi login");
+  });
+
+  it("keeps an explicit destination unchanged", async () => {
+    await initializedHome("vapi-cli-sweep-explicit-");
+    const sweepBack = successfulSweep();
+    const captured = captureIo();
+
+    expect(await runCli(["sweep", explicit], captured.io, { sweepBack })).toBe(0);
+
+    expect(sweepBack.mock.calls[0]![0]).toMatchObject({ destination: explicit });
+    expect(captured.stdout.join("\n")).not.toContain("your owner wallet");
+  });
+});
+
 /**
  * `vapi publish` is a real command since 0.4.0, so only the gateway daemon is
  * still a stub. Its tests live in `publish-cli.test.ts`.
@@ -1596,4 +1645,12 @@ function sweepRpc(transaction: string) {
     }
     return Response.json({ jsonrpc: "2.0", id: request.id, result });
   });
+}
+
+function successfulSweep() {
+  return vi.fn<NonNullable<CliDependencies["sweepBack"]>>(async ({ network }) => ({
+    network,
+    amountAtomic: "1000000",
+    transaction: "0x1234",
+  }));
 }

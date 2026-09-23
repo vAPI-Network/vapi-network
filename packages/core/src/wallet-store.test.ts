@@ -31,7 +31,13 @@ import {
   type Receipt,
 } from "./receipts.js";
 import { readSpendLedger, readSpendLedgerRows, reserveSpend } from "./spend-policy.js";
-import { assertWalletName, spendCapsForWallet, WalletStore } from "./wallet-store.js";
+import {
+  assertWalletName,
+  spendCapsForWallet,
+  walletEntrySchema,
+  WalletStore,
+  type AgentLink,
+} from "./wallet-store.js";
 
 const PASSPHRASE = "correct horse battery staple";
 const PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" as Hex;
@@ -262,6 +268,72 @@ describe("wallet selection", () => {
 });
 
 describe("wallet store", () => {
+  it("parses entries without a link and persists link changes", async () => {
+    const home = await makeHome();
+    const entry = walletEntrySchema.parse({
+      createdAt: "2026-09-19T12:00:00.000Z",
+      spendCaps: { ...DEFAULT_SPEND_CAPS },
+    });
+    expect(entry).not.toHaveProperty("link");
+    await writeFile(
+      join(home, "wallets.json"),
+      `${JSON.stringify({ version: 1, default: "main", wallets: { main: entry } }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    const store = await WalletStore.open(home);
+    const link: AgentLink = {
+      apiBase: "https://api.vapinetwork.ai",
+      clientId: "agent_0xabc",
+      owner: "0x1234",
+      label: "researcher",
+      scopes: ["mcp:call", "router.use"],
+      linkedAt: "2026-09-23T10:00:00.000Z",
+      routerBaseUrl: "https://router.vapinetwork.ai",
+    };
+
+    expect((await store.setLink("main", link)).link).toEqual(link);
+    expect((await WalletStore.open(home)).entry("main")?.link).toEqual(link);
+
+    expect((await store.clearLink("main")).link).toBeUndefined();
+    expect((await WalletStore.open(home)).entry("main")).not.toHaveProperty("link");
+  });
+
+  it("preserves concurrent link updates made by different store instances", async () => {
+    const home = await makeHome();
+    const entry = {
+      createdAt: "2026-09-19T12:00:00.000Z",
+      spendCaps: { ...DEFAULT_SPEND_CAPS },
+    };
+    await writeFile(
+      join(home, "wallets.json"),
+      `${JSON.stringify(
+        { version: 1, default: "alpha", wallets: { alpha: entry, beta: entry } },
+        null,
+        2,
+      )}\n`,
+      { mode: 0o600 },
+    );
+    const first = await WalletStore.open(home);
+    const second = await WalletStore.open(home);
+    const link = (owner: `0x${string}`): AgentLink => ({
+      apiBase: "https://api.vapinetwork.ai",
+      clientId: `agent_${owner}`,
+      owner,
+      label: owner,
+      scopes: ["mcp:call"],
+      linkedAt: "2026-09-23T10:00:00.000Z",
+    });
+
+    await Promise.all([
+      first.setLink("alpha", link("0x1111111111111111111111111111111111111111")),
+      second.setLink("beta", link("0x2222222222222222222222222222222222222222")),
+    ]);
+
+    const reopened = await WalletStore.open(home);
+    expect(reopened.entry("alpha")?.link?.owner).toBe("0x1111111111111111111111111111111111111111");
+    expect(reopened.entry("beta")?.link?.owner).toBe("0x2222222222222222222222222222222222222222");
+  });
+
   it(
     "creates, imports, lists, unlocks and re-labels wallets",
     async () => {

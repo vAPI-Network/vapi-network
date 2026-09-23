@@ -3,14 +3,17 @@ import {
   chmod,
   lstat,
   mkdir,
+  open,
   readdir,
   readFile,
   readlink,
   rename,
+  stat,
   symlink,
   unlink,
   writeFile,
 } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { dirname, join, resolve as resolvePath } from "node:path";
 
 import { z } from "zod";
@@ -30,6 +33,7 @@ import {
   type VapiPaymentAccount,
 } from "./keystore.js";
 import { renameReceiptWallet } from "./receipts.js";
+import type { SecretStore } from "./secret-store.js";
 import {
   DEFAULT_WALLET_NAME,
   isWalletName,
@@ -45,11 +49,32 @@ export {
   type WalletName,
 } from "./wallet-name.js";
 
+export type AgentLink = {
+  apiBase: string;
+  clientId: string;
+  owner: `0x${string}`;
+  label: string;
+  scopes: string[];
+  linkedAt: string;
+  routerBaseUrl?: string;
+};
+
+const agentLinkSchema: z.ZodType<AgentLink> = z.object({
+  apiBase: z.string(),
+  clientId: z.string(),
+  owner: z.custom<`0x${string}`>((value) => typeof value === "string" && value.startsWith("0x")),
+  label: z.string(),
+  scopes: z.array(z.string()),
+  linkedAt: z.iso.datetime(),
+  routerBaseUrl: z.string().optional(),
+});
+
 /** What `wallets.json` records about one wallet. The keys live in its keystore. */
 export const walletEntrySchema = z.object({
   createdAt: z.iso.datetime(),
   label: z.string().trim().min(1).max(80).optional(),
   spendCaps: spendCapsSchema,
+  link: agentLinkSchema.optional(),
 });
 
 export const walletRegistrySchema = z.object({
@@ -333,12 +358,39 @@ export class WalletStore {
     return entry;
   }
 
+  async setLink(name: WalletName, link: AgentLink): Promise<WalletEntry> {
+    const parsed = agentLinkSchema.parse(link);
+    const wallet = this.resolve({ name });
+    const registry = await this.update((registry) => {
+      const entry = registry.wallets[wallet.name];
+      if (!entry)
+        throw new KeystoreError(unknownWalletMessage(wallet.name, Object.keys(registry.wallets)));
+      entry.link = parsed;
+    });
+    return structuredClone(registry.wallets[wallet.name]!);
+  }
+
+  async clearLink(name: WalletName): Promise<WalletEntry> {
+    const wallet = this.resolve({ name });
+    const registry = await this.update((registry) => {
+      const entry = registry.wallets[wallet.name];
+      if (!entry)
+        throw new KeystoreError(unknownWalletMessage(wallet.name, Object.keys(registry.wallets)));
+      delete entry.link;
+    });
+    return structuredClone(registry.wallets[wallet.name]!);
+  }
+
   /**
    * Renames a wallet everywhere its name is recorded: the keystore file, the
    * registry, and the wallet field of its receipts. The keystore contents are
    * moved untouched.
    */
-  async rename(oldName: string, newName: string): Promise<ResolvedWallet> {
+  async rename(
+    oldName: string,
+    newName: string,
+    options: { secrets?: SecretStore } = {},
+  ): Promise<ResolvedWallet> {
     const wallet = this.resolve({ name: oldName });
     const target = assertWalletName(newName);
     if (target === wallet.name) return wallet;
@@ -351,15 +403,28 @@ export class WalletStore {
         `A keystore already exists at ${targetPath}. Refusing to overwrite it.`,
       );
     }
-    await rename(wallet.path, targetPath);
-    await this.retargetLegacyKeystoreLink(wallet.path, targetPath);
-    await this.update((registry) => {
-      const entry = registry.wallets[wallet.name];
-      delete registry.wallets[wallet.name];
-      if (entry) registry.wallets[target] = entry;
-      if (registry.default === wallet.name) registry.default = target;
-    });
-    await renameReceiptWallet(wallet.name, target, getVapiPaths(this.home).receipts);
+    const secretMigration =
+      wallet.entry.link === undefined
+        ? undefined
+        : await prepareAgentSecretRename(options.secrets, wallet.name, target);
+    let registryRenamed = false;
+    try {
+      await rename(wallet.path, targetPath);
+      await this.retargetLegacyKeystoreLink(wallet.path, targetPath);
+      await this.update((registry) => {
+        const entry = registry.wallets[wallet.name];
+        delete registry.wallets[wallet.name];
+        if (entry) registry.wallets[target] = entry;
+        if (registry.default === wallet.name) registry.default = target;
+      });
+      registryRenamed = true;
+      await renameReceiptWallet(wallet.name, target, getVapiPaths(this.home).receipts);
+    } catch (error) {
+      if (registryRenamed) await secretMigration?.commit().catch(() => undefined);
+      else await secretMigration?.rollback().catch(() => undefined);
+      throw error;
+    }
+    await secretMigration?.commit().catch(() => undefined);
     return { name: target, path: targetPath, entry: wallet.entry };
   }
 
@@ -491,13 +556,14 @@ export class WalletStore {
       // compatibility path is lost.
     }
 
-    const registry = await this.readRegistry();
-    registry.wallets[DEFAULT_WALLET_NAME] ??= {
-      createdAt: keystoreCreatedAt(info),
-      spendCaps: await readConfiguredSpendCaps(getVapiPaths(this.home).config),
-    };
-    registry.default ??= DEFAULT_WALLET_NAME;
-    await this.writeRegistry(registry);
+    const spendCaps = await readConfiguredSpendCaps(getVapiPaths(this.home).config);
+    await this.update((registry) => {
+      registry.wallets[DEFAULT_WALLET_NAME] ??= {
+        createdAt: keystoreCreatedAt(info),
+        spendCaps,
+      };
+      registry.default ??= DEFAULT_WALLET_NAME;
+    });
     return { moved: true, from: legacyPath, to: target };
   }
 
@@ -568,10 +634,12 @@ export class WalletStore {
   }
 
   private async update(mutate: (registry: WalletRegistry) => void): Promise<WalletRegistry> {
-    const registry = await this.readRegistry();
-    mutate(registry);
-    await this.writeRegistry(registry);
-    return this.snapshot();
+    return await withRegistryLock(this.registryPath, async () => {
+      const registry = await this.readRegistry();
+      mutate(registry);
+      await this.writeRegistry(registry);
+      return this.snapshot();
+    });
   }
 
   private async readRegistry(): Promise<WalletRegistry> {
@@ -702,6 +770,95 @@ function keystoreCreatedAt(info: { birthtimeMs: number; mtimeMs: number }): stri
   return new Date(stamp).toISOString();
 }
 
+type AgentSecretSet = { tokens: string; routerStake: string; routerBalance: string };
+type AgentSecretValues = { tokens?: string; routerStake?: string; routerBalance?: string };
+
+function agentSecretsForWallet(wallet: WalletName): AgentSecretSet {
+  return {
+    tokens: `vapi.agent.${wallet}.tokens`,
+    routerStake: `vapi.agent.${wallet}.router.stake`,
+    routerBalance: `vapi.agent.${wallet}.router.balance`,
+  };
+}
+
+async function prepareAgentSecretRename(
+  secrets: SecretStore | undefined,
+  from: WalletName,
+  to: WalletName,
+): Promise<{ commit(): Promise<void>; rollback(): Promise<void> }> {
+  if (secrets?.available !== true) {
+    throw new KeystoreError(
+      "This linked wallet cannot be renamed safely because no OS secret store is available.",
+    );
+  }
+  const source = agentSecretsForWallet(from);
+  const target = agentSecretsForWallet(to);
+  let targetValues: AgentSecretValues | undefined;
+  try {
+    targetValues = await readAgentSecretValues(secrets, target);
+    const sourceValues = await readAgentSecretValues(secrets, source);
+    await writeAgentSecretValues(secrets, target, sourceValues);
+  } catch (error) {
+    if (targetValues !== undefined) {
+      await writeAgentSecretValues(secrets, target, targetValues).catch(() => undefined);
+    }
+    throw new KeystoreError("The linked wallet credentials could not be prepared for rename.", {
+      cause: error,
+    });
+  }
+  const previousTarget = targetValues;
+
+  return {
+    async commit() {
+      await removeAgentSecrets(secrets, source);
+    },
+    async rollback() {
+      await writeAgentSecretValues(secrets, target, previousTarget);
+    },
+  };
+}
+
+async function readAgentSecretValues(
+  secrets: SecretStore,
+  accounts: AgentSecretSet,
+): Promise<AgentSecretValues> {
+  const [tokens, routerStake, routerBalance] = await Promise.all([
+    secrets.get(accounts.tokens),
+    secrets.get(accounts.routerStake),
+    secrets.get(accounts.routerBalance),
+  ]);
+  return {
+    ...(tokens === undefined ? {} : { tokens }),
+    ...(routerStake === undefined ? {} : { routerStake }),
+    ...(routerBalance === undefined ? {} : { routerBalance }),
+  };
+}
+
+async function writeAgentSecretValues(
+  secrets: SecretStore,
+  accounts: AgentSecretSet,
+  values: AgentSecretValues,
+): Promise<void> {
+  await writeAgentSecretValue(secrets, accounts.tokens, values.tokens);
+  await writeAgentSecretValue(secrets, accounts.routerStake, values.routerStake);
+  await writeAgentSecretValue(secrets, accounts.routerBalance, values.routerBalance);
+}
+
+async function writeAgentSecretValue(
+  secrets: SecretStore,
+  account: string,
+  value: string | undefined,
+): Promise<void> {
+  if (value === undefined) await secrets.remove(account);
+  else await secrets.set(account, value);
+}
+
+async function removeAgentSecrets(secrets: SecretStore, accounts: AgentSecretSet): Promise<void> {
+  await secrets.remove(accounts.tokens);
+  await secrets.remove(accounts.routerStake);
+  await secrets.remove(accounts.routerBalance);
+}
+
 async function pathExists(path: string): Promise<boolean> {
   try {
     await lstat(path);
@@ -709,6 +866,43 @@ async function pathExists(path: string): Promise<boolean> {
   } catch (error) {
     if (isMissingFile(error)) return false;
     throw error;
+  }
+}
+
+/** Serializes registry read-modify-write transactions across CLI and MCP processes. */
+async function withRegistryLock<T>(path: string, operation: () => Promise<T>): Promise<T> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const lockPath = `${path}.lock`;
+  const deadline = Date.now() + 2_000;
+  let handle: FileHandle | undefined;
+
+  while (!handle) {
+    try {
+      handle = await open(lockPath, "wx", 0o600);
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+      await removeStaleRegistryLock(lockPath);
+      if (Date.now() >= deadline) {
+        throw new KeystoreError("Timed out waiting for the wallet registry lock.");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+
+  try {
+    return await operation();
+  } finally {
+    await handle.close();
+    await unlink(lockPath).catch(() => undefined);
+  }
+}
+
+async function removeStaleRegistryLock(path: string): Promise<void> {
+  try {
+    const metadata = await stat(path);
+    if (Date.now() - metadata.mtimeMs > 30_000) await unlink(path);
+  } catch (error) {
+    if (!isMissingFile(error)) throw error;
   }
 }
 

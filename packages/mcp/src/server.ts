@@ -25,6 +25,7 @@ import {
   readReceipts,
   readSearchEvents,
   resolveRegistryUrl,
+  secretStore,
   walletNameSchema,
   type SecretStore,
   type SpendCaps,
@@ -42,6 +43,12 @@ import {
   type CallToolInput,
   type CallToolResult,
 } from "./tools/call.js";
+import {
+  authLinkTool,
+  authStatusTool,
+  createAuthTools,
+  type AuthAgentLinkOverrides,
+} from "./tools/auth.js";
 import { inspectService } from "./tools/inspect.js";
 import { searchMarketplace } from "./tools/search.js";
 import { getWallet, type WalletBalance } from "./tools/wallet.js";
@@ -67,6 +74,8 @@ export type VapiServerOptions = {
   passphrase?: (() => string | Promise<string>) | undefined;
   /** The OS secret store `vapi unlock` writes to; see `WalletSession`. */
   secretStore?: SecretStore | undefined;
+  /** Device-link functions and API base overridden by deterministic tests. */
+  agentLink?: AuthAgentLinkOverrides | undefined;
 };
 
 const MAX_CACHED_MARKETPLACE_REFS = 200;
@@ -514,17 +523,36 @@ export class VapiMcpServer {
 export function createVapiServer(options: VapiServerOptions) {
   const server = new VapiMcpServer();
   const searchedMarketplaceHits = new Map<string, MarketplaceHit[]>();
+  const secrets = options.secretStore ?? secretStore();
   const session = new WalletSession({
     account: options.account,
     store: options.store,
     wallet: options.wallet,
     env: options.env,
     passphrase: options.passphrase,
-    secretStore: options.secretStore,
+    secretStore: secrets,
   });
   const guardedFetch =
     options.fetchImpl ??
     createPublicFetch({ allowPrivateNetwork: options.config.allowPrivateNetwork ?? false });
+  const auth = createAuthTools({
+    session,
+    secrets,
+    wallets: options.store,
+    fetchImpl: guardedFetch,
+    apiBase: options.agentLink?.apiBase ?? agentApiBase(options.config, options.env),
+    ...(options.agentLink?.startDeviceLink
+      ? { startDeviceLink: options.agentLink.startDeviceLink }
+      : {}),
+    ...(options.agentLink?.pollDeviceLink
+      ? { pollDeviceLink: options.agentLink.pollDeviceLink }
+      : {}),
+    ...(options.agentLink?.saveAgentLink ? { saveAgentLink: options.agentLink.saveAgentLink } : {}),
+    ...(options.agentLink?.now ? { now: options.agentLink.now } : {}),
+  });
+
+  server.registerTool("auth.link", authLinkTool, auth.link);
+  server.registerTool("auth.status", authStatusTool, auth.status);
 
   const search = async (input: {
     query?: string;
@@ -785,6 +813,23 @@ export function createVapiServer(options: VapiServerOptions) {
   );
 
   return server;
+}
+
+const MARKETPLACE_DISCOVERY_PATH = "/api/call/discovery";
+
+/** Derive the API origin from the same configured discovery endpoint the CLI uses. */
+function agentApiBase(config: VapiConfig, env: NodeJS.ProcessEnv | undefined): string {
+  try {
+    const url = new URL(config.marketplaceDiscoveryUrl);
+    const path = url.pathname.replace(/\/+$/u, "");
+    if (!path.endsWith(MARKETPLACE_DISCOVERY_PATH)) return resolveRegistryUrl(env);
+    url.search = "";
+    url.hash = "";
+    url.pathname = path.slice(0, path.length - MARKETPLACE_DISCOVERY_PATH.length) || "/";
+    return url.href;
+  } catch {
+    return resolveRegistryUrl(env);
+  }
 }
 
 /**

@@ -10,8 +10,8 @@ import { isMissingFile } from "./config.js";
  * the agent's own account of it.
  *
  * A line never contains a secret. It records what happened, to which wallet,
- * whether a terminal was attached, and which agent marker was set — nothing
- * that could help someone spend the wallet.
+ * its linked owner, whether a terminal was attached, and which agent marker
+ * was set — nothing that could help someone spend the wallet.
  */
 export const AUDIT_EVENTS = [
   "secret.export.phrase",
@@ -35,6 +35,8 @@ export const AUDIT_EVENTS = [
   // machine. The key itself is never in the line; only that one is now here.
   "auth.key.set",
   "auth.key.clear",
+  "agent.linked",
+  "agent.unlinked",
   // A listing this machine created or moved through the registry's states.
   // The slug is not a secret, so it is worth having in the trail.
   "listing.publish",
@@ -49,6 +51,8 @@ export type AuditRecord = {
   event: AuditEvent;
   /** The wallet the event acted on, when one was selected. */
   wallet?: string;
+  /** The owner wallet of a linked agent. Never an access token or Router key. */
+  owner?: string;
   /** Whether a real terminal was attached when the event happened. */
   tty: boolean;
   /** The agent or CI variable that was set, if any. */
@@ -85,6 +89,7 @@ export async function appendAudit(
     time: (options.now?.() ?? new Date()).toISOString(),
     event: record.event,
     ...(record.wallet === undefined ? {} : { wallet: record.wallet }),
+    ...(record.owner === undefined ? {} : { owner: record.owner }),
     tty: record.tty,
     ...(record.agentMarker === undefined ? {} : { agentMarker: record.agentMarker }),
     ...(record.detail === undefined ? {} : { detail: record.detail }),
