@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import { getVapiPaths, isMissingFile } from "./config.js";
 import type { ListingProvenance } from "./discovery.js";
+import { explorerTransactionUrl } from "./networks.js";
 import { DEFAULT_WALLET_NAME, walletNameSchema, type WalletName } from "./wallet-name.js";
 import type { X402SettlementOutcome } from "./x402.js";
 
@@ -46,6 +47,7 @@ export interface Receipt {
   readonly settlement?: Readonly<{
     outcome: X402SettlementOutcome;
     transaction?: string;
+    explorerUrl?: string;
     evidence?: unknown;
   }>;
   readonly latencyMs?: number;
@@ -123,6 +125,7 @@ const receiptSchema: z.ZodType<Receipt> = z.strictObject({
     .strictObject({
       outcome: z.enum(["succeeded", "rejected", "unknown"]),
       transaction: z.string().optional(),
+      explorerUrl: z.url().optional(),
       evidence: z.unknown().optional(),
     })
     .optional(),
@@ -171,7 +174,27 @@ const receiptSchema: z.ZodType<Receipt> = z.strictObject({
 });
 
 export function parseReceipt(value: unknown): Receipt {
-  return receiptSchema.parse(value);
+  const receipt = receiptSchema.parse(value);
+  const transaction = receipt.settlement?.transaction;
+  const network = receipt.quote?.network;
+  const explorerUrl =
+    transaction === undefined || network === undefined
+      ? undefined
+      : explorerTransactionUrl(network, transaction);
+  if (explorerUrl === undefined || receipt.settlement?.explorerUrl === explorerUrl) {
+    return receipt;
+  }
+  return {
+    ...receipt,
+    settlement: {
+      outcome: receipt.settlement!.outcome,
+      ...(receipt.settlement!.transaction ? { transaction: receipt.settlement!.transaction } : {}),
+      explorerUrl,
+      ...(receipt.settlement!.evidence === undefined
+        ? {}
+        : { evidence: receipt.settlement!.evidence }),
+    },
+  };
 }
 
 /**

@@ -3,6 +3,7 @@ import { formatUnits, getAddress, type Address } from "viem";
 import type { VapiConfig } from "./config.js";
 import type { LookupFn } from "./net-guard.js";
 import {
+  ARC_MAINNET_CAIP2,
   BASE_MAINNET_CAIP2,
   createNetworkPublicClient,
   formatUsdc,
@@ -217,9 +218,11 @@ function depositDetails(
     configuredInstructions ??
     (caip2 === BASE_MAINNET_CAIP2
       ? `Send USDC on Base to ${address}.`
-      : isSolanaNetwork(caip2)
-        ? `Send USDC on Solana mainnet to ${address}.`
-        : undefined);
+      : caip2 === ARC_MAINNET_CAIP2
+        ? `Send USDC on Arc mainnet to ${address}; USDC also pays Arc gas.`
+        : isSolanaNetwork(caip2)
+          ? `Send USDC on Solana mainnet to ${address}.`
+          : undefined);
   return {
     ...(depositUrl ? { depositUrl } : {}),
     ...(depositInstructions ? { depositInstructions } : {}),

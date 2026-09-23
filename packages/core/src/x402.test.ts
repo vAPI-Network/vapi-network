@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   assertMaxPrice,
+  ARC_MAINNET_CAIP2,
   BASE_MAINNET_CAIP2,
   BROWSER_ENABLED_X402_NETWORK_CONFIG,
   buildCompatibleX402Payment,
@@ -441,6 +442,92 @@ describe("browser-neutral x402 client", () => {
         arcNetworks,
       ),
     ).toThrow(/No exact x402 payment option matches/);
+  });
+
+  it("accepts Arc mainnet's canonical USDC and rejects another asset", () => {
+    const arcNetworks = { [ARC_MAINNET_CAIP2]: { usdc: ARC_USDC } };
+    const quote = parse402Challenge(
+      exactChallenge({
+        network: ARC_MAINNET_CAIP2,
+        asset: ARC_USDC,
+        extra: { name: "USDC", version: "2" },
+      }),
+      arcNetworks,
+    );
+    expect(quote.accepted.extra).toMatchObject({ name: "USDC", version: "2" });
+    expect(
+      buildEip3009TypedData({
+        from: BUYER,
+        quote,
+        nonce: NONCE,
+        nowSeconds: 1_700_000_000,
+      }).typedData.domain,
+    ).toEqual({
+      name: "USDC",
+      version: "2",
+      chainId: 5042,
+      verifyingContract: ARC_USDC,
+    });
+    expect(() =>
+      parse402Challenge(
+        exactChallenge({
+          network: ARC_MAINNET_CAIP2,
+          asset: USDC,
+          extra: { name: "USDC", version: "2" },
+        }),
+        arcNetworks,
+      ),
+    ).toThrow(/No exact x402 payment option matches/);
+  });
+
+  it("skips Circle Gateway's batched Arc offer and pays the plain EIP-3009 one", () => {
+    // Shape of a live Arc 402 (api.exa.ai, 2026-09-23): the Gateway offer comes
+    // first and needs a Gateway deposit, the EIP-3009 offer second.
+    const arcNetworks = { [ARC_MAINNET_CAIP2]: { usdc: ARC_USDC } };
+    const challenge = exactChallenge({
+      network: ARC_MAINNET_CAIP2,
+      asset: ARC_USDC,
+      maxTimeoutSeconds: 3600,
+      extra: {
+        name: "GatewayWalletBatched",
+        version: "1",
+        verifyingContract: "0x77777777dcc4d5a8b6e418fd04d8997ef11000ee",
+      },
+    });
+    challenge.accepts.push({
+      ...challenge.accepts[0],
+      extra: { assetTransferMethod: "eip3009", name: "USDC", version: "2" },
+    });
+    const quote = parse402Challenge(challenge, arcNetworks);
+    expect(quote.accepted.extra).toMatchObject({ name: "USDC", version: "2" });
+  });
+
+  it("refuses an offer whose verifying contract is not the token", () => {
+    const arcNetworks = { [ARC_MAINNET_CAIP2]: { usdc: ARC_USDC } };
+    expect(() =>
+      parse402Challenge(
+        exactChallenge({
+          network: ARC_MAINNET_CAIP2,
+          asset: ARC_USDC,
+          extra: {
+            name: "USDC",
+            version: "2",
+            verifyingContract: "0x77777777dcc4d5a8b6e418fd04d8997ef11000ee",
+          },
+        }),
+        arcNetworks,
+      ),
+    ).toThrow(/No exact x402 payment option matches/);
+    expect(
+      parse402Challenge(
+        exactChallenge({
+          network: ARC_MAINNET_CAIP2,
+          asset: ARC_USDC,
+          extra: { name: "USDC", version: "2", verifyingContract: ARC_USDC.toLowerCase() },
+        }),
+        arcNetworks,
+      ).accepted.asset,
+    ).toBe(ARC_USDC);
   });
 
   it("dispatches exact challenges by EVM versus Solana network namespace", () => {

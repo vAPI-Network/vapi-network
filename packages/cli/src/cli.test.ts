@@ -8,6 +8,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import type { Hex } from "viem";
 
 import {
+  ARC_MAINNET_CAIP2,
   appendReceipt,
   appendSearchEvent,
   encryptPrivateKey,
@@ -66,11 +67,13 @@ function secretStoreStub(entries: Record<string, string> = {}): SecretStore {
 const originalHome = process.env.VAPI_HOME;
 const originalPassword = process.env.VAPI_KEYSTORE_PASSWORD;
 const originalSolanaRpc = process.env.SOLANA_RPC_URL;
+const originalArcRpc = process.env.ARC_RPC_URL;
 
 afterEach(() => {
   restoreEnvironment("VAPI_HOME", originalHome);
   restoreEnvironment("VAPI_KEYSTORE_PASSWORD", originalPassword);
   restoreEnvironment("SOLANA_RPC_URL", originalSolanaRpc);
+  restoreEnvironment("ARC_RPC_URL", originalArcRpc);
 });
 
 describe("CLI JSON output", () => {
@@ -195,6 +198,37 @@ describe("CLI JSON output", () => {
     });
   });
 
+  it("writes the public Arc mainnet config when requested", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-arc-init-"));
+    process.env.VAPI_HOME = home;
+    process.env.VAPI_KEYSTORE_PASSWORD = "test-only-passphrase";
+    delete process.env.ARC_RPC_URL;
+    const captured = captureIo();
+
+    expect(
+      await runCli(["init", "--networks", "base,arc", "--json"], captured.io, {
+        fetchImpl: zeroBalanceRpc(),
+      }),
+    ).toBe(0);
+
+    const config = JSON.parse(await readFile(join(home, "config.json"), "utf8")) as {
+      networks: Record<string, { rpcUrl: string; usdc: string }>;
+    };
+    expect(config.networks[ARC_MAINNET_CAIP2]).toEqual({
+      rpcUrl: "https://rpc.mainnet.arc.io",
+      usdc: "0x3600000000000000000000000000000000000000",
+    });
+  });
+
+  it("rejects an unknown init network with the complete supported list", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-invalid-network-"));
+    process.env.VAPI_HOME = home;
+    const captured = captureIo();
+
+    expect(await runCli(["init", "--networks", "base,foo"], captured.io)).toBe(2);
+    expect(captured.stderr[0]).toBe("--networks supports base, arc and solana.");
+  });
+
   it("lazily enables Solana without replacing the existing EVM key", async () => {
     const home = await mkdtemp(join(tmpdir(), "vapi-cli-solana-enable-"));
     process.env.VAPI_HOME = home;
@@ -218,6 +252,55 @@ describe("CLI JSON output", () => {
         },
       ],
     });
+  });
+
+  it("lazily enables Arc mainnet without deriving another key", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-arc-enable-"));
+    process.env.VAPI_HOME = home;
+    process.env.VAPI_KEYSTORE_PASSWORD = "test-only-passphrase";
+    delete process.env.ARC_RPC_URL;
+    const initialized = captureIo();
+    const fetchImpl = zeroBalanceRpc();
+    expect(await runCli(["init", "--json"], initialized.io, { fetchImpl })).toBe(0);
+    const enabled = captureIo();
+
+    expect(await runCli(["accounts", "--enable", "arc", "--json"], enabled.io, { fetchImpl })).toBe(
+      0,
+    );
+
+    const config = JSON.parse(await readFile(join(home, "config.json"), "utf8")) as {
+      networks: Record<string, { rpcUrl: string; usdc: string }>;
+    };
+    expect(config.networks[ARC_MAINNET_CAIP2]).toEqual({
+      rpcUrl: "https://rpc.mainnet.arc.io",
+      usdc: "0x3600000000000000000000000000000000000000",
+    });
+    expect(JSON.parse(enabled.stdout[0]!)).toMatchObject({
+      accounts: [{ caip2: "eip155:8453" }, { caip2: ARC_MAINNET_CAIP2 }],
+    });
+  });
+
+  it("prints Arc gas retention and its explorer URL for a human sweep", async () => {
+    await initializedHome("vapi-cli-arc-sweep-");
+    const enabled = captureIo();
+    const fetchImpl = zeroBalanceRpc();
+    expect(await runCli(["accounts", "--enable", "arc", "--json"], enabled.io, { fetchImpl })).toBe(
+      0,
+    );
+
+    const captured = captureIo();
+    const transaction = `0x${"ab".repeat(32)}`;
+    expect(
+      await runCli(
+        ["sweep", "0x2222222222222222222222222222222222222222", "--network", ARC_MAINNET_CAIP2],
+        captured.io,
+        { fetchImpl: sweepRpc(transaction) },
+      ),
+    ).toBe(0);
+
+    expect(captured.stdout.join("\n")).toContain(
+      `Arc mainnet: swept 0.95 USDC in ${transaction} (https://explorer.arc.io/tx/${transaction}) (retained 0.05 USDC for gas)`,
+    );
   });
 });
 
@@ -618,6 +701,27 @@ describe("inspect output", () => {
     const text = captured.stdout.join("\n");
     expect(text).not.toContain("Liveness:");
     expect(text).not.toContain("Conformance:");
+  });
+});
+
+describe("vapi receipts", () => {
+  it("prints an Arc mainnet settlement explorer URL", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-receipts-"));
+    process.env.VAPI_HOME = home;
+    await appendReceipt(
+      {
+        id: "arc-paid",
+        timestamp: "2026-09-21T10:00:00.000Z",
+        resourceUrl: "https://vendor.example/paid",
+        quote: { network: "eip155:5042", amountAtomic: "2500" },
+        settlement: { outcome: "succeeded", transaction: "0xabc" },
+      },
+      getVapiPaths().receipts,
+    );
+    const captured = captureIo();
+
+    expect(await runCli(["receipts"], captured.io)).toBe(0);
+    expect(captured.stdout.join("\n")).toContain("https://explorer.arc.io/tx/0xabc");
   });
 });
 
@@ -1435,5 +1539,61 @@ function zeroBalanceRpc() {
               ? { context: { slot: 1 }, value: 0 }
               : "0x0",
     });
+  });
+}
+
+function sweepRpc(transaction: string) {
+  const blockHash = `0x${"cd".repeat(32)}`;
+  const usdc = "0x3600000000000000000000000000000000000000";
+  return vi.fn<typeof fetch>(async (_input, init) => {
+    const request = JSON.parse(String(init?.body)) as { id: number; method: string };
+    let result: unknown = "0x0";
+    switch (request.method) {
+      case "eth_call":
+        result = `0x${(1_000_000).toString(16).padStart(64, "0")}`;
+        break;
+      case "eth_chainId":
+        result = "0x13b2";
+        break;
+      case "eth_getTransactionCount":
+        result = "0x0";
+        break;
+      case "eth_estimateGas":
+        result = "0x5208";
+        break;
+      case "eth_gasPrice":
+      case "eth_maxPriorityFeePerGas":
+        result = "0x1";
+        break;
+      case "eth_getBlockByNumber":
+        result = {
+          number: "0x1",
+          hash: blockHash,
+          parentHash: `0x${"ef".repeat(32)}`,
+          timestamp: "0x1",
+          baseFeePerGas: "0x1",
+        };
+        break;
+      case "eth_sendRawTransaction":
+        result = transaction;
+        break;
+      case "eth_getTransactionReceipt":
+        result = {
+          transactionHash: transaction,
+          blockHash,
+          blockNumber: "0x1",
+          cumulativeGasUsed: "0x5208",
+          effectiveGasPrice: "0x1",
+          gasUsed: "0x5208",
+          logs: [],
+          status: "0x1",
+          type: "0x2",
+          contractAddress: null,
+          from: "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+          to: usdc,
+        };
+        break;
+    }
+    return Response.json({ jsonrpc: "2.0", id: request.id, result });
   });
 }

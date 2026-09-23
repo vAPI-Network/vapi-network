@@ -420,7 +420,7 @@ function assetRule(exact: readonly Accept[], version: 1 | 2 | null): CheckRule {
   return rule(
     "asset",
     "fail",
-    "No exact option pays canonical USDC on a network vAPI knows: Base, Arc testnet or Solana.",
+    "No exact option pays canonical USDC on a network vAPI knows: Base, Arc mainnet, Arc testnet or Solana.",
     [...new Set(issues)],
   );
 }

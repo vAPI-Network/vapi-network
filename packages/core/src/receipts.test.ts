@@ -95,6 +95,22 @@ describe("receipts ledger", () => {
     ).toThrow();
   });
 
+  it("derives the Arc mainnet explorer URL from a settlement hash", () => {
+    expect(
+      parseReceipt({
+        id: "arc-paid",
+        timestamp: "2026-09-21T10:00:00.000Z",
+        resourceUrl: "https://api.example/paid",
+        quote: { network: "eip155:5042", amountAtomic: "2500" },
+        settlement: { outcome: "succeeded", transaction: "0xabc" },
+      }).settlement,
+    ).toEqual({
+      outcome: "succeeded",
+      transaction: "0xabc",
+      explorerUrl: "https://explorer.arc.io/tx/0xabc",
+    });
+  });
+
   it("round-trips payment ids while old literal JSONL rows remain readable", async () => {
     const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-payment-id-"));
     temporaryDirectories.push(directory);

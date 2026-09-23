@@ -3,7 +3,6 @@ import { createWalletClient, getAddress } from "viem";
 import type { AgentCashConfig } from "./config.js";
 import type { VapiPaymentAccount } from "./keystore.js";
 import {
-  ARC_TESTNET_CAIP2,
   configuredNetworkFor,
   createChain,
   createNetworkHttpTransport,
@@ -12,6 +11,7 @@ import {
   getNetworkDefinition,
   isSolanaNetwork,
   requireRpcUrl,
+  usesUsdcGas,
 } from "./networks.js";
 import type { LookupFn } from "./net-guard.js";
 import { readSolanaUsdcBalance, sweepSolanaUsdc } from "./svm.js";
@@ -88,7 +88,9 @@ export async function readUsdcBalance(args: {
     ...(args.lookup ? { lookup: args.lookup } : {}),
   });
   return await client.readContract({
-    address: getAddress(args.configured.usdc),
+    address: getAddress(
+      usesUsdcGas(args.network) ? getNetworkDefinition(args.network).usdc : args.configured.usdc,
+    ),
     abi: ERC20_ABI,
     functionName: "balanceOf",
     args: [getAddress(args.address)],
@@ -140,10 +142,9 @@ export async function sweepBack(args: {
     ...(args.fetchImpl ? { fetchImpl: args.fetchImpl } : {}),
     ...(args.lookup ? { lookup: args.lookup } : {}),
   });
-  const headroomAtomic =
-    args.network === ARC_TESTNET_CAIP2
-      ? (args.arcGasHeadroomAtomic ?? getArcGasHeadroomAtomic())
-      : 0n;
+  const headroomAtomic = usesUsdcGas(args.network)
+    ? (args.arcGasHeadroomAtomic ?? getArcGasHeadroomAtomic())
+    : 0n;
   const amountAtomic = calculateSweepAmount(balanceAtomic, headroomAtomic);
   if (amountAtomic === 0n) {
     const note =
@@ -165,7 +166,9 @@ export async function sweepBack(args: {
     }),
   });
   const transaction = await walletClient.writeContract({
-    address: getAddress(configured.usdc),
+    address: getAddress(
+      usesUsdcGas(args.network) ? getNetworkDefinition(args.network).usdc : configured.usdc,
+    ),
     abi: ERC20_ABI,
     functionName: "transfer",
     args: [getAddress(args.destination), amountAtomic],

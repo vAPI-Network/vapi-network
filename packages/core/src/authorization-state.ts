@@ -2,7 +2,12 @@ import { getAddress, type Hex } from "viem";
 
 import type { VapiConfig } from "./config.js";
 import type { LookupFn } from "./net-guard.js";
-import { configuredNetworkFor, createNetworkPublicClient, isSolanaNetwork } from "./networks.js";
+import {
+  configuredNetworkFor,
+  createNetworkPublicClient,
+  explorerAddressUrl,
+  isSolanaNetwork,
+} from "./networks.js";
 import type { Receipt } from "./receipts.js";
 
 /**
@@ -112,7 +117,8 @@ function missingAuthorization(receipt: Receipt): string {
     receipt.outcome !== "signed_in"
   ) {
     const payee = receipt.quote.payTo === undefined ? "" : ` to ${receipt.quote.payTo}`;
-    return `Receipt ${receipt.id} does not record its payment authorization — it was written before vAPI kept the EIP-3009 nonce on receipts — so its settlement cannot be looked up. Check ${receipt.payer}'s USDC transfers${payee} on a block explorer before paying again.`;
+    const explorerUrl = explorerAddressUrl(receipt.quote.network, receipt.payer);
+    return `Receipt ${receipt.id} does not record its payment authorization — it was written before vAPI kept the EIP-3009 nonce on receipts — so its settlement cannot be looked up. Check ${receipt.payer}'s USDC transfers${payee} ${explorerUrl ? `on ${explorerUrl}` : "on a block explorer"} before paying again.`;
   }
   return `Receipt ${receipt.id} records no signed payment authorization, so nothing from that call can settle.`;
 }

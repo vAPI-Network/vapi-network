@@ -8,6 +8,7 @@ import { getAddress, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import {
+  ARC_MAINNET_CAIP2,
   ARC_TESTNET_CAIP2,
   BASE_MAINNET_CAIP2,
   NETWORKS,
@@ -109,7 +110,9 @@ function challenge() {
   };
 }
 
-function arcChallenge() {
+function arcChallenge(
+  network: typeof ARC_TESTNET_CAIP2 | typeof ARC_MAINNET_CAIP2 = ARC_TESTNET_CAIP2,
+) {
   return {
     x402Version: 2,
     resource: {
@@ -120,9 +123,9 @@ function arcChallenge() {
     accepts: [
       {
         scheme: "exact",
-        network: ARC_TESTNET_CAIP2,
+        network,
         amount: "2000",
-        asset: NETWORKS[ARC_TESTNET_CAIP2].usdc,
+        asset: NETWORKS[network].usdc,
         payTo: PAY_TO,
         maxTimeoutSeconds: 60,
         extra: { name: "USDC", version: "2" },
@@ -191,6 +194,24 @@ describe("x402 v2 challenge parsing", () => {
     });
   });
 
+  it("configures Arc mainnet from its override and canonical token identity", () => {
+    vi.stubEnv("ARC_RPC_URL", "https://arc-rpc.example");
+
+    expect(getDefaultConfig().networks[ARC_MAINNET_CAIP2]).toMatchObject({
+      rpcUrl: "https://arc-rpc.example",
+      usdc: NETWORKS[ARC_MAINNET_CAIP2].usdc,
+    });
+  });
+
+  it("uses the public Arc mainnet RPC when explicitly requested without an override", () => {
+    const config = getDefaultConfig({}, { networks: ["arc"] });
+
+    expect(config.networks[ARC_MAINNET_CAIP2]).toMatchObject({
+      rpcUrl: "https://rpc.mainnet.arc.io",
+      usdc: NETWORKS[ARC_MAINNET_CAIP2].usdc,
+    });
+  });
+
   it("selects an Arc offer when Arc is explicitly configured", async () => {
     vi.stubEnv("ARC_TESTNET_RPC_URL", "https://arc-rpc.example");
     const response = new Response(JSON.stringify(arcChallenge()), {
@@ -201,6 +222,27 @@ describe("x402 v2 challenge parsing", () => {
     const quote = await parse402Response(response, getDefaultConfig().networks);
 
     expect(quote.accepted.network).toBe(ARC_TESTNET_CAIP2);
+  });
+
+  it("selects an Arc mainnet offer when Arc mainnet is configured", async () => {
+    vi.stubEnv("ARC_RPC_URL", "https://arc-rpc.example");
+    const response = new Response(
+      JSON.stringify({
+        ...arcChallenge(),
+        accepts: [
+          {
+            ...arcChallenge().accepts[0],
+            network: ARC_MAINNET_CAIP2,
+            asset: NETWORKS[ARC_MAINNET_CAIP2].usdc,
+          },
+        ],
+      }),
+      { status: 402, headers: { "content-type": "application/json" } },
+    );
+
+    const quote = await parse402Response(response, getDefaultConfig().networks);
+
+    expect(quote.accepted.network).toBe(ARC_MAINNET_CAIP2);
   });
 
   it("requires a locally pinned token domain for a custom configured network", () => {
@@ -449,6 +491,55 @@ describe("x402 v2 challenge parsing", () => {
           signMs: expect.any(Number),
           requestMs: expect.any(Number),
           settleMs: expect.any(Number),
+        },
+      },
+    ]);
+  });
+
+  it("adds an Arc mainnet explorer URL to payment data and its receipt", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-arc-call-"));
+    temporaryDirectories.push(directory);
+    const config = getDefaultConfig({}, { networks: ["arc"] });
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const transaction = `0x${"33".repeat(32)}`;
+    const settlement = { success: true, transaction };
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(arcChallenge(ARC_MAINNET_CAIP2)), {
+          status: 402,
+          headers: { "content-type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "payment-response": Buffer.from(JSON.stringify(settlement), "utf8").toString("base64"),
+          },
+        }),
+      ) as unknown as typeof fetch;
+
+    const result = await callService({
+      input: { url: "https://vendor.example/paid" },
+      account,
+      config,
+      fetchImpl,
+      lookup: async () => ["93.184.216.34"],
+      ledgerPath: join(directory, "ledger.json"),
+      receiptsPath: join(directory, "receipts.jsonl"),
+    });
+
+    expect(result.payment?.settlement).toMatchObject({
+      transaction,
+      explorerUrl: `https://explorer.arc.io/tx/${transaction}`,
+    });
+    await expect(readReceipts(join(directory, "receipts.jsonl"))).resolves.toMatchObject([
+      {
+        settlement: {
+          transaction,
+          explorerUrl: `https://explorer.arc.io/tx/${transaction}`,
         },
       },
     ]);

@@ -59,6 +59,7 @@ export * from "./wallet.js";
 export * from "./wallet-store.js";
 export * from "./x402.js";
 export {
+  ARC_MAINNET_CAIP2,
   BROWSER_ENABLED_X402_NETWORK_CONFIG,
   CANONICAL_X402_USDC_NETWORKS,
   getCanonicalX402Usdc,

@@ -7,6 +7,7 @@ import { getAddress } from "viem";
 import { z } from "zod";
 
 import {
+  ARC_MAINNET_CAIP2,
   ARC_TESTNET_CAIP2,
   BASE_MAINNET_CAIP2,
   configuredNetworkFor,
@@ -104,7 +105,17 @@ export const configSchema = z
         continue;
       }
       try {
-        getAddress(configured.usdc);
+        const usdc = getAddress(configured.usdc);
+        if (
+          (network === ARC_MAINNET_CAIP2 || network === ARC_TESTNET_CAIP2) &&
+          usdc !== getAddress(NETWORKS[network].usdc)
+        ) {
+          context.addIssue({
+            code: "custom",
+            path: ["networks", network, "usdc"],
+            message: "Expected the canonical Arc USDC predeploy.",
+          });
+        }
       } catch {
         context.addIssue({
           code: "custom",
@@ -311,15 +322,22 @@ export function getDefaultConfig(
       usdc: NETWORKS[BASE_MAINNET_CAIP2].usdc,
     };
   }
-  const arcRpcUrl = source.ARC_TESTNET_RPC_URL?.trim();
-  if (arcRpcUrl || requested.has("arc") || requested.has(ARC_TESTNET_CAIP2)) {
-    if (!arcRpcUrl) {
+  const arcMainnetRpcUrl = source.ARC_RPC_URL?.trim();
+  if (arcMainnetRpcUrl || requested.has("arc") || requested.has(ARC_MAINNET_CAIP2)) {
+    networks[ARC_MAINNET_CAIP2] = {
+      rpcUrl: arcMainnetRpcUrl || NETWORKS[ARC_MAINNET_CAIP2].publicRpcUrl,
+      usdc: NETWORKS[ARC_MAINNET_CAIP2].usdc,
+    };
+  }
+  const arcTestnetRpcUrl = source.ARC_TESTNET_RPC_URL?.trim();
+  if (arcTestnetRpcUrl || requested.has("arc-testnet") || requested.has(ARC_TESTNET_CAIP2)) {
+    if (!arcTestnetRpcUrl) {
       throw new Error(
         "Arc testnet RPC is required. Set ARC_TESTNET_RPC_URL before enabling Arc testnet.",
       );
     }
     networks[ARC_TESTNET_CAIP2] = {
-      rpcUrl: arcRpcUrl,
+      rpcUrl: arcTestnetRpcUrl,
       usdc: NETWORKS[ARC_TESTNET_CAIP2].usdc,
     };
   }
@@ -373,7 +391,8 @@ export async function loadConfig(
     );
   }
   const baseRpcUrl = source.BASE_RPC_URL?.trim();
-  const arcRpcUrl = source.ARC_TESTNET_RPC_URL?.trim();
+  const arcMainnetRpcUrl = source.ARC_RPC_URL?.trim();
+  const arcTestnetRpcUrl = source.ARC_TESTNET_RPC_URL?.trim();
   const solanaRpcUrl = source.SOLANA_RPC_URL?.trim();
   const discoveryUrl = source.VAPI_DISCOVERY_URL?.trim();
   const marketplaceDiscoveryUrl = source.VAPI_MARKETPLACE_DISCOVERY_URL?.trim();
@@ -381,10 +400,18 @@ export async function loadConfig(
   if (config.networks[BASE_MAINNET_CAIP2] && baseRpcUrl) {
     config.networks[BASE_MAINNET_CAIP2].rpcUrl = baseRpcUrl;
   }
-  if (arcRpcUrl) {
+  if (arcMainnetRpcUrl) {
+    const existing = config.networks[ARC_MAINNET_CAIP2];
+    config.networks[ARC_MAINNET_CAIP2] = {
+      ...(existing ?? { usdc: NETWORKS[ARC_MAINNET_CAIP2].usdc }),
+      rpcUrl: arcMainnetRpcUrl,
+    };
+  }
+  if (arcTestnetRpcUrl) {
+    const existing = config.networks[ARC_TESTNET_CAIP2];
     config.networks[ARC_TESTNET_CAIP2] = {
-      rpcUrl: arcRpcUrl,
-      usdc: config.networks[ARC_TESTNET_CAIP2]?.usdc ?? NETWORKS[ARC_TESTNET_CAIP2].usdc,
+      ...(existing ?? { usdc: NETWORKS[ARC_TESTNET_CAIP2].usdc }),
+      rpcUrl: arcTestnetRpcUrl,
     };
   }
   if (solanaRpcUrl) {
@@ -441,7 +468,7 @@ export async function writeDefaultConfig(
 }
 
 export async function enableDefaultNetwork(
-  network: "solana",
+  network: "solana" | "arc",
   path = getVapiPaths().config,
   source: NodeJS.ProcessEnv = process.env,
 ): Promise<VapiConfig> {
@@ -450,6 +477,12 @@ export async function enableDefaultNetwork(
     config.networks[SOLANA_MAINNET_CAIP2] = {
       rpcUrl: source.SOLANA_RPC_URL?.trim() || NETWORKS[SOLANA_MAINNET_CAIP2].publicRpcUrl,
       usdc: NETWORKS[SOLANA_MAINNET_CAIP2].usdc,
+    };
+  } else {
+    const existing = config.networks[ARC_MAINNET_CAIP2];
+    config.networks[ARC_MAINNET_CAIP2] = {
+      ...(existing ?? { usdc: NETWORKS[ARC_MAINNET_CAIP2].usdc }),
+      rpcUrl: source.ARC_RPC_URL?.trim() || NETWORKS[ARC_MAINNET_CAIP2].publicRpcUrl,
     };
   }
   await writeConfigFile(path, config);
