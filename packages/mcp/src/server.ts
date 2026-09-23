@@ -50,6 +50,13 @@ import {
   type AuthAgentLinkOverrides,
 } from "./tools/auth.js";
 import { inspectService } from "./tools/inspect.js";
+import {
+  createRouterTools,
+  routerChatTool,
+  routerModelsTool,
+  routerUsageTool,
+  type RouterCoreOverrides,
+} from "./tools/router.js";
 import { searchMarketplace } from "./tools/search.js";
 import { getWallet, type WalletBalance } from "./tools/wallet.js";
 import { WalletSession, type SessionWalletInfo } from "./wallet-session.js";
@@ -76,6 +83,8 @@ export type VapiServerOptions = {
   secretStore?: SecretStore | undefined;
   /** Device-link functions and API base overridden by deterministic tests. */
   agentLink?: AuthAgentLinkOverrides | undefined;
+  /** Core Router functions overridden by deterministic tests. */
+  router?: RouterCoreOverrides | undefined;
 };
 
 const MAX_CACHED_MARKETPLACE_REFS = 200;
@@ -377,6 +386,7 @@ type ToolDefinition<Shape extends z.ZodRawShape> = {
   description?: string;
   deprecatedReplacement?: string;
   inputSchema: Shape;
+  strictInput?: boolean;
   outputSchema?: z.ZodType;
 };
 
@@ -405,7 +415,9 @@ export class VapiMcpServer {
     definition: ToolDefinition<Shape>,
     handler: (input: z.infer<z.ZodObject<Shape>>) => Promise<ToolResult>,
   ): void {
-    const inputSchema = z.object(definition.inputSchema);
+    const inputSchema = definition.strictInput
+      ? z.strictObject(definition.inputSchema)
+      : z.object(definition.inputSchema);
     this.#tools.set(name, {
       ...(definition.description ? { description: definition.description } : {}),
       ...(definition.deprecatedReplacement
@@ -535,12 +547,13 @@ export function createVapiServer(options: VapiServerOptions) {
   const guardedFetch =
     options.fetchImpl ??
     createPublicFetch({ allowPrivateNetwork: options.config.allowPrivateNetwork ?? false });
+  const apiBase = options.agentLink?.apiBase ?? agentApiBase(options.config, options.env);
   const auth = createAuthTools({
     session,
     secrets,
     wallets: options.store,
     fetchImpl: guardedFetch,
-    apiBase: options.agentLink?.apiBase ?? agentApiBase(options.config, options.env),
+    apiBase,
     ...(options.agentLink?.startDeviceLink
       ? { startDeviceLink: options.agentLink.startDeviceLink }
       : {}),
@@ -553,6 +566,23 @@ export function createVapiServer(options: VapiServerOptions) {
 
   server.registerTool("auth.link", authLinkTool, auth.link);
   server.registerTool("auth.status", authStatusTool, auth.status);
+
+  const router = createRouterTools({
+    session,
+    secrets,
+    wallets: options.store,
+    fetchImpl: guardedFetch,
+    apiBase,
+    ...(options.router?.listRouterModels
+      ? { listRouterModels: options.router.listRouterModels }
+      : {}),
+    ...(options.router?.routerUsage ? { routerUsage: options.router.routerUsage } : {}),
+    ...(options.router?.routerChat ? { routerChat: options.router.routerChat } : {}),
+    ...(options.router?.ownerStake ? { ownerStake: options.router.ownerStake } : {}),
+  });
+  server.registerTool("router.models", routerModelsTool, router.models);
+  server.registerTool("router.usage", routerUsageTool, router.usage);
+  server.registerTool("router.chat", routerChatTool, router.chat);
 
   const search = async (input: {
     query?: string;

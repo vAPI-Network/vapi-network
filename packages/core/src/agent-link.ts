@@ -492,8 +492,8 @@ async function removeSecretAccounts(
   await safeRemoveSecret(secrets, accounts.routerBalance);
 }
 
-/** A rotating refresh token may be consumed only once, including across processes. */
-async function withAgentCredentialLock<T>(
+/** Serializes reads and writes of one agent link's credentials across processes. */
+export async function withAgentCredentialLock<T>(
   wallets: WalletStore,
   clientId: string,
   operation: () => Promise<T>,

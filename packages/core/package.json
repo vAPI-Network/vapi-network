@@ -34,10 +34,14 @@
     "./agent-link": {
       "types": "./dist/agent-link.d.ts",
       "import": "./dist/agent-link.js"
+    },
+    "./router-client": {
+      "types": "./dist/router-client.d.ts",
+      "import": "./dist/router-client.js"
     }
   },
   "scripts": {
-    "build": "node ../../scripts/build-package.mjs index=src/index.ts secrets=src/secrets.ts api-key=src/api-key.ts agent-link=src/agent-link.ts",
+    "build": "node ../../scripts/build-package.mjs index=src/index.ts secrets=src/secrets.ts api-key=src/api-key.ts agent-link=src/agent-link.ts router-client=src/router-client.ts",
     "lint": "eslint src --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

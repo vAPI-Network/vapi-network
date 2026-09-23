@@ -41,6 +41,11 @@ export default tseslint.config(
               message:
                 "The MCP server must never reach the registry API key. Publishing is a human act, in the CLI.",
             },
+            {
+              name: "@vapi-network/core/router-client",
+              importNames: ["routerCredentials", "rotateRouterKey"],
+              message: "The Router key never reaches MCP.",
+            },
           ],
           patterns: [
             {
