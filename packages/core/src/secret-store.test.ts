@@ -79,12 +79,57 @@ describe("the macOS keychain store", () => {
   });
 
   it("removes an entry and says when there was none", async () => {
-    const { run, runs } = recordingRunner([{ code: 0 }, { code: 44 }]);
+    const { run, runs } = recordingRunner([
+      { code: 0, stdout: "test-only-passphrase\n" },
+      { code: 0 },
+      { code: 44 },
+    ]);
     const store = secretStore({ platform: "darwin", run });
 
     expect(await store.remove("main")).toBe(true);
     expect(await store.remove("main")).toBe(false);
-    expect(runs[0]!.args).toEqual(["delete-generic-password", "-a", "main", "-s", "vapi-network"]);
+    expect(runs[1]!.args).toEqual(["delete-generic-password", "-a", "main", "-s", "vapi-network"]);
+  });
+
+  it("splits a value longer than the prompt limit over several items and joins it back", async () => {
+    // `security -w` reads at most 128 characters from its prompt and silently
+    // drops the rest, so a long value is stored in parts.
+    const value = `{"accessToken":"${"a".repeat(60)}","refreshToken":"${"r".repeat(60)}","expiresAt":1,"scopes":["mcp:call","router.use"]}`;
+    const items = new Map<string, string>();
+    const run: SecretStoreRunner = async (_file, args, input) => {
+      const account = args[args.indexOf("-a") + 1]!;
+      if (args[0] === "add-generic-password") {
+        const typed = input!.split("\n")[0]!;
+        items.set(account, typed.slice(0, 128));
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (args[0] === "find-generic-password") {
+        const stored = items.get(account);
+        return stored === undefined
+          ? { code: 44, stdout: "", stderr: "" }
+          : { code: 0, stdout: `${stored}\n`, stderr: "" };
+      }
+      if (args[0] === "delete-generic-password") {
+        return items.delete(account)
+          ? { code: 0, stdout: "", stderr: "" }
+          : { code: 44, stdout: "", stderr: "" };
+      }
+      return { code: 1, stdout: "", stderr: "unexpected" };
+    };
+    const store = secretStore({ platform: "darwin", run });
+
+    await store.set("vapi.agent.main.tokens", value);
+    expect([...items.values()].every((item) => item.length <= 128)).toBe(true);
+    expect(await store.get("vapi.agent.main.tokens")).toBe(value);
+
+    await store.set("vapi.agent.main.tokens", `${value}${"x".repeat(200)}`);
+    expect(await store.get("vapi.agent.main.tokens")).toBe(`${value}${"x".repeat(200)}`);
+    await store.set("vapi.agent.main.tokens", value);
+    expect(await store.get("vapi.agent.main.tokens")).toBe(value);
+    expect([...items.keys()].filter((key) => key.includes("#"))).toHaveLength(2);
+
+    expect(await store.remove("vapi.agent.main.tokens")).toBe(true);
+    expect(items.size).toBe(0);
   });
 
   it("turns any other failure into one sentence without the passphrase", async () => {
