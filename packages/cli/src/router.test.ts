@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SpendCapError, type SecretStore, WalletStore } from "@vapi-network/core";
+import { AGENT_LINK_REVOKED_MESSAGE, agentSecretAccounts } from "@vapi-network/core/agent-link";
 import {
+  ROUTER_KEY_REVOKED_MESSAGE,
   RouterClientError,
   type buyRouterBalance,
   type AgentRouterUsage,
@@ -19,6 +21,9 @@ import { runCli, type CliDependencies, type CliIo } from "./cli.js";
 const PASSPHRASE = "test-only-passphrase";
 const WALLET = "researcher";
 const TEST_ROUTER_KEY = "test-router-key-value";
+const REVOKED_ACCESS_TOKEN = "revoked-agent-access-token";
+const REVOKED_REFRESH_TOKEN = "revoked-agent-refresh-token";
+const REVOKED_ROUTER_KEY = "revoked-router-key";
 const homes: string[] = [];
 const originalHome = process.env.VAPI_HOME;
 
@@ -307,6 +312,83 @@ describe("vapi router chat", () => {
     ]);
   });
 
+  it("reports a revoked link in one line for chat, including JSON errors", async () => {
+    const fetchImpl = revokedLinkFetch();
+    const dependencies = await linkedRouterDependencies(fetchImpl);
+    const human = captureIo();
+
+    expect(
+      await runCli(
+        ["router", "chat", "--wallet", WALLET, "--model", "model-a", "Hello"],
+        human.io,
+        dependencies,
+      ),
+    ).toBe(1);
+    expect(human.stdout).toEqual([]);
+    expect(human.stderr).toEqual([AGENT_LINK_REVOKED_MESSAGE]);
+    expect(human.stderr.join("\n")).not.toContain("could not be read safely");
+    expect(human.stderr.join("\n")).not.toMatch(/\bat\s/);
+    expect(allOutput(human)).not.toContain(REVOKED_ACCESS_TOKEN);
+    expect(allOutput(human)).not.toContain(REVOKED_REFRESH_TOKEN);
+    expect(allOutput(human)).not.toContain(REVOKED_ROUTER_KEY);
+
+    const json = captureIo();
+    expect(
+      await runCli(
+        ["router", "chat", "--wallet", WALLET, "--model", "model-a", "Hello", "--json"],
+        json.io,
+        dependencies,
+      ),
+    ).toBe(1);
+    expect(JSON.parse(json.stdout[0]!)).toEqual({ error: AGENT_LINK_REVOKED_MESSAGE, exitCode: 1 });
+    expect(json.stderr).toEqual([]);
+    expect(allOutput(json)).not.toContain(REVOKED_ACCESS_TOKEN);
+    expect(allOutput(json)).not.toContain(REVOKED_REFRESH_TOKEN);
+    expect(allOutput(json)).not.toContain(REVOKED_ROUTER_KEY);
+  });
+
+  it("reports a revoked Router link for usage and key rotation", async () => {
+    const fetchImpl = revokedLinkFetch();
+    const dependencies = await linkedRouterDependencies(fetchImpl);
+
+    for (const argv of [
+      ["router", "usage", "--wallet", WALLET],
+      ["router", "key", "--rotate", "--wallet", WALLET],
+    ]) {
+      const captured = captureIo();
+      expect(await runCli(argv, captured.io, dependencies)).toBe(1);
+      expect(captured.stdout).toEqual([]);
+      expect(captured.stderr).toEqual([AGENT_LINK_REVOKED_MESSAGE]);
+      expect(allOutput(captured)).not.toContain(REVOKED_ACCESS_TOKEN);
+      expect(allOutput(captured)).not.toContain(REVOKED_REFRESH_TOKEN);
+      expect(allOutput(captured)).not.toContain(REVOKED_ROUTER_KEY);
+    }
+  });
+
+  it("reports a rejected Router key when the agent link is still active", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.host === "router.example") return new Response("rejected", { status: 401 });
+      if (url.pathname === "/api/agents/self/router") return Response.json(usageResult());
+      throw new Error(`Unexpected test URL ${url.origin}${url.pathname}`);
+    });
+    const dependencies = await linkedRouterDependencies(fetchImpl);
+    const captured = captureIo();
+
+    expect(
+      await runCli(
+        ["router", "chat", "--wallet", WALLET, "--model", "model-a", "Hello"],
+        captured.io,
+        dependencies,
+      ),
+    ).toBe(1);
+    expect(captured.stdout).toEqual([]);
+    expect(captured.stderr).toEqual([ROUTER_KEY_REVOKED_MESSAGE]);
+    expect(allOutput(captured)).not.toContain(REVOKED_ACCESS_TOKEN);
+    expect(allOutput(captured)).not.toContain(REVOKED_REFRESH_TOKEN);
+    expect(allOutput(captured)).not.toContain(REVOKED_ROUTER_KEY);
+  });
+
   it("offers auto-refill only when the configured wallet unlocks without prompting", async () => {
     const home = await initializedHome();
     const store = await WalletStore.open(home);
@@ -554,15 +636,61 @@ function commandDependencies(overrides: Partial<CliDependencies> = {}): CliDepen
   };
 }
 
-function secretStoreStub(): SecretStore {
+async function linkedRouterDependencies(fetchImpl: typeof fetch): Promise<CliDependencies> {
+  const home = await initializedHome();
+  const store = await WalletStore.open(home);
+  await store.setLink(WALLET, {
+    apiBase: "https://console.example",
+    clientId: "agent_researcher",
+    owner: "0x1111111111111111111111111111111111111111",
+    label: WALLET,
+    scopes: ["mcp:call", "router.use"],
+    linkedAt: "2026-09-23T10:00:00.000Z",
+    routerBaseUrl: "https://router.example",
+  });
+  const accounts = agentSecretAccounts(WALLET);
+  const entries: Record<string, string> = {
+    [accounts.tokens]: JSON.stringify({
+      accessToken: REVOKED_ACCESS_TOKEN,
+      refreshToken: REVOKED_REFRESH_TOKEN,
+      expiresAt: Number.MAX_SAFE_INTEGER,
+      scopes: ["mcp:call", "router.use"],
+    }),
+    [accounts.routerStake]: REVOKED_ROUTER_KEY,
+  };
+  const secretStore = secretStoreStub(entries);
+  return commandDependencies({ fetchImpl, secretStore });
+}
+
+function revokedLinkFetch(): typeof fetch {
+  return vi.fn<typeof fetch>(async (input) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.pathname === "/oauth/token") {
+      return Response.json({ error: "invalid_grant" }, { status: 400 });
+    }
+    if (url.host === "router.example") return new Response("revoked", { status: 401 });
+    if (url.pathname.startsWith("/api/agents/self/")) {
+      return new Response(null, { status: 401 });
+    }
+    throw new Error(`Unexpected test URL ${url.origin}${url.pathname}`);
+  });
+}
+
+function secretStoreStub(entries: Record<string, string> = {}): SecretStore {
   return {
     available: true,
     platform: "darwin",
     description: "the macOS Keychain",
-    get: async () => undefined,
-    has: async () => false,
-    set: async () => undefined,
-    remove: async () => false,
+    get: async (name) => entries[name],
+    has: async (name) => entries[name] !== undefined,
+    set: async (name, value) => {
+      entries[name] = value;
+    },
+    remove: async (name) => {
+      if (entries[name] === undefined) return false;
+      delete entries[name];
+      return true;
+    },
   };
 }
 

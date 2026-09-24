@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { AgentProfile, ChatRequest, ChatResult, VapiConfig } from "@vapi-network/core";
+import { AGENT_LINK_REVOKED_MESSAGE } from "@vapi-network/core/agent-link";
+import { RouterClientError } from "@vapi-network/core/router-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { UNTRUSTED_NOTICE } from "./guards.js";
@@ -411,6 +413,30 @@ describe("runAgent", () => {
       "agent.run.step",
       "agent.run.end",
     ]);
+  });
+
+  it("preserves the revoked-link sentence without exposing credentials", async () => {
+    const deps = await agentDeps([]);
+    deps.chat = vi
+      .fn()
+      .mockRejectedValue(new RouterClientError("not_linked", AGENT_LINK_REVOKED_MESSAGE));
+
+    const result = await runAgent("Do work", deps);
+
+    expect(result.stoppedBecause).toMatchObject({
+      reason: "error",
+      detail: AGENT_LINK_REVOKED_MESSAGE,
+    });
+    expect(result.stoppedBecause.detail).not.toContain("sk-");
+  });
+
+  it("keeps an unlinked wallet distinct from a revoked link", async () => {
+    const deps = await agentDeps([]);
+    deps.chat = vi.fn().mockRejectedValue(new RouterClientError("not_linked", "Not linked."));
+
+    const result = await runAgent("Do work", deps);
+
+    expect(result.stoppedBecause.detail).toBe("Not linked. Run vapi login.");
   });
 
   it("sends the untrusted-data notice and no dependency secrets to the model", async () => {

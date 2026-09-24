@@ -1,8 +1,9 @@
-import { createWalletClient, getAddress } from "viem";
+import { createWalletClient, getAddress, type Hash } from "viem";
 
 import type { AgentCashConfig } from "./config.js";
 import type { VapiPaymentAccount } from "./keystore.js";
 import {
+  BASE_MAINNET_CAIP2,
   configuredNetworkFor,
   createChain,
   createNetworkHttpTransport,
@@ -42,6 +43,19 @@ export type SweepResult = {
   amountAtomic: string;
   transaction: string;
 };
+
+export class SweepGasError extends Error {
+  readonly address: string;
+
+  constructor(address: string, cause: unknown) {
+    super(
+      `This wallet has no ETH on Base to pay the gas for the sweep. Send a little ETH on Base (a few cents) to ${address}, then run vapi sweep again.`,
+      { cause },
+    );
+    this.name = "SweepGasError";
+    this.address = address;
+  }
+}
 
 export function calculateSweepAmount(balanceAtomic: bigint, gasHeadroomAtomic: bigint): bigint {
   if (balanceAtomic < 0n || gasHeadroomAtomic < 0n) {
@@ -165,14 +179,26 @@ export async function sweepBack(args: {
       ...(args.lookup ? { lookup: args.lookup } : {}),
     }),
   });
-  const transaction = await walletClient.writeContract({
-    address: getAddress(
-      usesUsdcGas(args.network) ? getNetworkDefinition(args.network).usdc : configured.usdc,
-    ),
-    abi: ERC20_ABI,
-    functionName: "transfer",
-    args: [getAddress(args.destination), amountAtomic],
-  });
+  let transaction: Hash;
+  try {
+    transaction = await walletClient.writeContract({
+      address: getAddress(
+        usesUsdcGas(args.network) ? getNetworkDefinition(args.network).usdc : configured.usdc,
+      ),
+      abi: ERC20_ABI,
+      functionName: "transfer",
+      args: [getAddress(args.destination), amountAtomic],
+    });
+  } catch (error) {
+    if (
+      args.network === BASE_MAINNET_CAIP2 &&
+      !usesUsdcGas(args.network) &&
+      isInsufficientGasError(error)
+    ) {
+      throw new SweepGasError(args.account.address, error);
+    }
+    throw error;
+  }
   const publicClient = createNetworkPublicClient(args.network, configured, {
     allowPrivateNetwork: args.config.allowPrivateNetwork,
     ...(args.fetchImpl ? { fetch: args.fetchImpl } : {}),
@@ -188,4 +214,28 @@ export async function sweepBack(args: {
     amountAtomic: amountAtomic.toString(),
     transaction,
   };
+}
+
+function isInsufficientGasError(error: unknown): boolean {
+  const seen = new Set<object>();
+  let current: unknown = error;
+  while (typeof current === "object" && current !== null) {
+    if (seen.has(current)) return false;
+    seen.add(current);
+    const record = current as Record<string, unknown>;
+    if (record.name === "InsufficientFundsError") return true;
+    for (const field of ["message", "shortMessage", "details"]) {
+      const value = record[field];
+      if (typeof value !== "string") continue;
+      const normalized = value.toLowerCase();
+      if (
+        normalized.includes("gas required exceeds allowance") ||
+        normalized.includes("insufficient funds")
+      ) {
+        return true;
+      }
+    }
+    current = record.cause;
+  }
+  return false;
 }

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import {
+  AGENT_LINK_REVOKED_MESSAGE,
   AgentLinkError,
   agentAccessToken,
   agentFetch,
@@ -78,6 +79,9 @@ export class RouterClientError extends Error {
     this.name = "RouterClientError";
   }
 }
+
+export const ROUTER_KEY_REVOKED_MESSAGE =
+  "The Router key was revoked. Run vapi login to link again, or vapi router key --rotate if the link is still active.";
 
 export type RouterClientDeps = {
   secrets: SecretStore;
@@ -240,6 +244,7 @@ export async function buyRouterBalance(
     source: "router.topup",
   });
   if (!response.ok) {
+    if (response.status === 401) await verifyAgentLink(deps);
     throw new RouterClientError(
       "http",
       `The Router balance purchase returned HTTP ${response.status}.`,
@@ -279,6 +284,13 @@ export async function routerChat(
   try {
     return await sendRouterChat(deps, routerBaseUrl, routerKey, request, "stake");
   } catch (error) {
+    if (
+      error instanceof RouterClientError &&
+      error.code === "no_router_key" &&
+      error.status === 401
+    ) {
+      await verifyAgentLink(deps);
+    }
     if (!(error instanceof RouterClientError) || error.code !== "budget_exhausted") throw error;
 
     let usage: AgentRouterUsage | undefined;
@@ -409,7 +421,7 @@ async function sendRouterChat(
       throw new RouterClientError(
         "no_router_key",
         keyUsed === "stake"
-          ? "The Router key was revoked. Run vapi router key --rotate."
+          ? ROUTER_KEY_REVOKED_MESSAGE
           : "The Router balance key was rejected. Buy Router balance again to refresh it.",
         401,
       );
@@ -551,6 +563,9 @@ async function routerBalanceCredentialSnapshot(
     });
   } catch (error) {
     if (error instanceof RouterClientError) throw error;
+    if (error instanceof AgentLinkError && error.code === "not_linked") {
+      throw linkStatusError(error);
+    }
     throw new RouterClientError("http", "The Router balance credentials could not be read safely.");
   }
 }
@@ -579,7 +594,12 @@ async function routerAccessToken(deps: RouterClientDeps): Promise<string> {
       ...(deps.fetchImpl === undefined ? {} : { fetchImpl: deps.fetchImpl }),
     });
   } catch (error) {
-    if (error instanceof AgentLinkError && error.code === "not_linked") throw notLinkedError();
+    if (error instanceof AgentLinkError && error.code === "not_linked") {
+      throw linkStatusError(error);
+    }
+    if (error instanceof AgentLinkError) {
+      throw new RouterClientError("http", error.message);
+    }
     throw new RouterClientError("http", "The agent access token could not be read safely.");
   }
 }
@@ -744,6 +764,12 @@ async function routerCredentialSnapshot(
     });
   } catch (error) {
     if (error instanceof RouterClientError) throw error;
+    if (error instanceof AgentLinkError && error.code === "not_linked") {
+      throw linkStatusError(error);
+    }
+    if (error instanceof AgentLinkError) {
+      throw new RouterClientError("http", error.message);
+    }
     throw new RouterClientError("http", "The Router credentials could not be read safely.");
   }
 }
@@ -804,8 +830,30 @@ async function consoleRequest(
       init,
     );
   } catch (error) {
-    if (error instanceof AgentLinkError && error.code === "not_linked") throw notLinkedError();
+    if (error instanceof AgentLinkError && error.code === "not_linked") {
+      throw linkStatusError(error);
+    }
     throw new RouterClientError("http", failureMessage);
+  }
+}
+
+async function verifyAgentLink(deps: RouterClientDeps): Promise<void> {
+  const link = await linkedWallet(deps);
+  try {
+    await agentFetch(
+      {
+        secrets: deps.secrets,
+        wallets: deps.wallets,
+        wallet: deps.wallet,
+        ...(deps.fetchImpl === undefined ? {} : { fetchImpl: deps.fetchImpl }),
+      },
+      `${trimTrailingSlashes(link.apiBase)}/api/agents/self/router`,
+      { method: "GET" },
+    );
+  } catch (error) {
+    if (error instanceof AgentLinkError && error.code === "not_linked") {
+      throw linkStatusError(error);
+    }
   }
 }
 
@@ -833,6 +881,14 @@ function invalidRouterBaseUrlError(): RouterClientError {
 
 function notLinkedError(): RouterClientError {
   return new RouterClientError("not_linked", "Not linked. Run vapi login.");
+}
+
+function revokedLinkError(): RouterClientError {
+  return new RouterClientError("not_linked", AGENT_LINK_REVOKED_MESSAGE);
+}
+
+function linkStatusError(error: AgentLinkError): RouterClientError {
+  return error.message === AGENT_LINK_REVOKED_MESSAGE ? revokedLinkError() : notLinkedError();
 }
 
 function noRouterKeyError(): RouterClientError {

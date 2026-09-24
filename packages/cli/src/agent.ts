@@ -395,14 +395,17 @@ async function revokeCommand(
     // Revocation and local credential removal must not depend on a balance read.
   }
   const forget = dependencies.agentLink?.forgetAgentLink ?? forgetAgentLink;
-  await forget({
-    secrets: getSecretStore(dependencies),
-    wallets: target.store,
-    wallet: target.name,
-    ...(dependencies.fetchImpl === undefined ? {} : { fetchImpl: dependencies.fetchImpl }),
-    home: paths.directory,
-  });
-  await removeProfile(paths.directory, name);
+  try {
+    await forget({
+      secrets: getSecretStore(dependencies),
+      wallets: target.store,
+      wallet: target.name,
+      ...(dependencies.fetchImpl === undefined ? {} : { fetchImpl: dependencies.fetchImpl }),
+      home: paths.directory,
+    });
+  } finally {
+    await removeProfile(paths.directory, name);
+  }
   const sweep = `vapi sweep ${owner ?? "<address>"} --wallet ${profile.wallet}`;
   const message =
     balance === undefined

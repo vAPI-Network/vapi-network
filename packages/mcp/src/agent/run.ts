@@ -1,3 +1,5 @@
+import { AGENT_LINK_REVOKED_MESSAGE } from "@vapi-network/core/agent-link";
+import { ROUTER_KEY_REVOKED_MESSAGE } from "@vapi-network/core/router-client";
 import {
   appendAudit,
   type AgentProfile,
@@ -332,7 +334,7 @@ export async function runAgent(task: string, deps: RunAgentDeps): Promise<RunAge
       if (hasErrorCode(error, "budget_exhausted")) {
         return await stop("router_budget", routerBudgetDetail(error));
       }
-      return await stop("error", "The vAPI Router request failed.");
+      return await stop("error", routerErrorDetail(error));
     }
     if (reply.toolCalls.length === 0) {
       return await stop("finished", undefined, reply.content ?? null);
@@ -494,6 +496,22 @@ function routerBudgetDetail(error: unknown): string {
     return message;
   }
   return "Today's Router allowance is used up.";
+}
+
+function routerErrorDetail(error: unknown): string {
+  if (hasErrorCode(error, "not_linked")) {
+    return error instanceof Error && error.message === AGENT_LINK_REVOKED_MESSAGE
+      ? AGENT_LINK_REVOKED_MESSAGE
+      : "Not linked. Run vapi login.";
+  }
+  if (hasErrorCode(error, "no_router_key") && hasErrorStatus(error, 401)) {
+    return ROUTER_KEY_REVOKED_MESSAGE;
+  }
+  return "The vAPI Router request failed.";
+}
+
+function hasErrorStatus(error: unknown, status: number): boolean {
+  return typeof error === "object" && error !== null && Reflect.get(error, "status") === status;
 }
 
 function settlementUnknownDetail(error: unknown): string {

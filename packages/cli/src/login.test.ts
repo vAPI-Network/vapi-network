@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { type SecretStore, WalletStore } from "@vapi-network/core";
 import {
+  AGENT_LINK_REVOKED_MESSAGE,
   AgentLinkError,
   agentSecretAccounts,
   type DeviceLinkStart,
@@ -200,22 +201,59 @@ describe("vapi login", () => {
 });
 
 describe("vapi whoami and logout", () => {
+  it("reports a revoked link when logout is rejected by the console", async () => {
+    await initializedHome();
+    const entries: Record<string, string> = {};
+    const store = secretStoreStub(entries);
+    expect(
+      await runCli(["login", "--wallet", "researcher", "--no-browser"], captureIo().io, {
+        ...linkDependencies(),
+        secretStore: store,
+      }),
+    ).toBe(0);
+    const captured = captureIo();
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname === "/api/agents/self") return new Response(null, { status: 401 });
+      if (url.pathname === "/oauth/token") {
+        return Response.json({ error: "invalid_grant" }, { status: 400 });
+      }
+      throw new Error(`Unexpected test URL ${url.origin}${url.pathname}`);
+    });
+
+    expect(
+      await runCli(["logout", "--wallet", "researcher"], captured.io, {
+        interactive: false,
+        env: {},
+        secretStore: store,
+        fetchImpl,
+      }),
+    ).toBe(1);
+    expect(captured.stdout).toEqual([]);
+    expect(captured.stderr).toEqual([AGENT_LINK_REVOKED_MESSAGE]);
+    expectNoSecrets(allOutput(captured));
+  });
+
   it("reports an unlinked wallet without unlocking it", async () => {
     await initializedHome();
     delete process.env.VAPI_KEYSTORE_PASSWORD;
     const captured = captureIo();
+    const fetchImpl = vi.fn<typeof fetch>();
 
     expect(
       await runCli(["whoami", "--wallet", "researcher"], captured.io, {
         interactive: false,
         env: {},
         secretStore: secretStoreStub(),
+        fetchImpl,
       }),
     ).toBe(0);
     expect(captured.stdout.join("\n")).toContain("Not linked. Run vapi login.");
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expectNoSecrets(allOutput(captured));
   });
 
-  it("shows linked identity and Router key presence without reading either secret", async () => {
+  it("shows linked identity, Router key presence, and an active status", async () => {
     await initializedHome();
     const entries: Record<string, string> = {};
     const store = secretStoreStub(entries);
@@ -226,7 +264,7 @@ describe("vapi whoami and logout", () => {
       }),
     ).toBe(0);
     delete process.env.VAPI_KEYSTORE_PASSWORD;
-    const get = vi.spyOn(store, "get");
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 200 }));
     const captured = captureIo();
 
     expect(
@@ -234,6 +272,7 @@ describe("vapi whoami and logout", () => {
         interactive: false,
         env: {},
         secretStore: store,
+        fetchImpl,
       }),
     ).toBe(0);
 
@@ -242,7 +281,10 @@ describe("vapi whoami and logout", () => {
     expect(text).toContain("Label: researcher");
     expect(text).toContain("Permissions: mcp:call router.use");
     expect(text).toContain("Router key: stored");
-    expect(get).not.toHaveBeenCalled();
+    expect(text).toContain("Status: active");
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe("https://api.vapinetwork.ai/api/agents/self");
+    expect(fetchImpl.mock.calls[0]?.[1]?.method).toBe("GET");
     expectNoSecrets(allOutput(captured));
 
     const json = captureIo();
@@ -251,6 +293,7 @@ describe("vapi whoami and logout", () => {
         interactive: false,
         env: {},
         secretStore: store,
+        fetchImpl,
       }),
     ).toBe(0);
     expect(JSON.parse(json.stdout[0]!)).toMatchObject({
@@ -262,7 +305,140 @@ describe("vapi whoami and logout", () => {
       scopes: ["mcp:call", "router.use"],
       linkedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/u),
       routerKey: "stored",
+      status: "active",
     });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls[1]?.[0]).toBe("https://api.vapinetwork.ai/api/agents/self");
+    expect(fetchImpl.mock.calls[1]?.[1]?.method).toBe("GET");
+    expectNoSecrets(allOutput(json));
+  });
+
+  it("reports a revoked status after the console rejects the refresh grant", async () => {
+    await initializedHome();
+    const entries: Record<string, string> = {};
+    const store = secretStoreStub(entries);
+    expect(
+      await runCli(["login", "--wallet", "researcher", "--no-browser"], captureIo().io, {
+        ...linkDependencies(),
+        secretStore: store,
+      }),
+    ).toBe(0);
+    delete process.env.VAPI_KEYSTORE_PASSWORD;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname === "/api/agents/self") return new Response(null, { status: 401 });
+      if (url.pathname === "/oauth/token") {
+        return Response.json({ error: "invalid_grant" }, { status: 400 });
+      }
+      throw new Error("unexpected test request");
+    });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["whoami", "--wallet", "researcher"], captured.io, {
+        interactive: false,
+        env: {},
+        secretStore: store,
+        fetchImpl,
+      }),
+    ).toBe(0);
+
+    expect(captured.stdout.join("\n")).toContain(
+      "Status: revoked or expired on the server. Run vapi login to link again.",
+    );
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe("https://api.vapinetwork.ai/api/agents/self");
+    expect(fetchImpl.mock.calls[0]?.[1]?.method).toBe("GET");
+    expectNoSecrets(allOutput(captured));
+
+    const json = captureIo();
+    expect(
+      await runCli(["whoami", "--wallet", "researcher", "--json"], json.io, {
+        interactive: false,
+        env: {},
+        secretStore: store,
+        fetchImpl,
+      }),
+    ).toBe(0);
+    expect(JSON.parse(json.stdout[0]!)).toMatchObject({ status: "revoked" });
+    expect(fetchImpl.mock.calls[2]?.[0]).toBe("https://api.vapinetwork.ai/api/agents/self");
+    expect(fetchImpl.mock.calls[2]?.[1]?.method).toBe("GET");
+    expectNoSecrets(allOutput(json));
+  });
+
+  it("reports an unknown status when the console does not support the endpoint", async () => {
+    await initializedHome();
+    const entries: Record<string, string> = {};
+    const store = secretStoreStub(entries);
+    expect(
+      await runCli(["login", "--wallet", "researcher", "--no-browser"], captureIo().io, {
+        ...linkDependencies(),
+        secretStore: store,
+      }),
+    ).toBe(0);
+    delete process.env.VAPI_KEYSTORE_PASSWORD;
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 404 }));
+    const captured = captureIo();
+
+    expect(
+      await runCli(["whoami", "--wallet", "researcher"], captured.io, {
+        interactive: false,
+        env: {},
+        secretStore: store,
+        fetchImpl,
+      }),
+    ).toBe(0);
+    expect(captured.stdout.join("\n")).toContain(
+      "Status: not checked (this console does not support it yet)",
+    );
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe("https://api.vapinetwork.ai/api/agents/self");
+    expect(fetchImpl.mock.calls[0]?.[1]?.method).toBe("GET");
+    expectNoSecrets(allOutput(captured));
+
+    const json = captureIo();
+    expect(
+      await runCli(["whoami", "--wallet", "researcher", "--json"], json.io, {
+        interactive: false,
+        env: {},
+        secretStore: store,
+        fetchImpl,
+      }),
+    ).toBe(0);
+    expect(JSON.parse(json.stdout[0]!)).toMatchObject({ status: "unknown" });
+    expect(fetchImpl.mock.calls[1]?.[0]).toBe("https://api.vapinetwork.ai/api/agents/self");
+    expect(fetchImpl.mock.calls[1]?.[1]?.method).toBe("GET");
+    expectNoSecrets(allOutput(json));
+  });
+
+  it("reports an unknown status without exposing a network error", async () => {
+    await initializedHome();
+    const entries: Record<string, string> = {};
+    const store = secretStoreStub(entries);
+    expect(
+      await runCli(["login", "--wallet", "researcher", "--no-browser"], captureIo().io, {
+        ...linkDependencies(),
+        secretStore: store,
+      }),
+    ).toBe(0);
+    delete process.env.VAPI_KEYSTORE_PASSWORD;
+    const fetchImpl = vi.fn<typeof fetch>(async () => {
+      throw new TypeError("network detail with https://token:secret@example.test");
+    });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["whoami", "--wallet", "researcher"], captured.io, {
+        interactive: false,
+        env: {},
+        secretStore: store,
+        fetchImpl,
+      }),
+    ).toBe(0);
+    const text = allOutput(captured);
+    expect(text).toContain("Status: could not check (network error)");
+    expect(text).not.toContain("token:secret@example.test");
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe("https://api.vapinetwork.ai/api/agents/self");
+    expect(fetchImpl.mock.calls[0]?.[1]?.method).toBe("GET");
+    expectNoSecrets(allOutput(captured));
   });
 
   it("unlinks the wallet and removes its local agent credentials", async () => {

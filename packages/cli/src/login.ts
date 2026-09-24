@@ -1,11 +1,14 @@
 import { activeAgentMarker, createPublicFetch, getVapiPaths, loadConfig } from "@vapi-network/core";
 import {
   DEFAULT_AGENT_SCOPES,
+  AgentLinkError,
+  agentFetch,
   agentSecretAccounts,
   forgetAgentLink,
   pollDeviceLink,
   saveAgentLink,
   startDeviceLink,
+  withAgentCredentialLock,
 } from "@vapi-network/core/agent-link";
 
 import {
@@ -169,6 +172,7 @@ export async function whoamiCommand(
   ))
     ? "stored"
     : "missing";
+  const status = await checkAgentLinkStatus(target, link, dependencies);
   if (json) {
     io.stdout(
       JSON.stringify({
@@ -180,6 +184,7 @@ export async function whoamiCommand(
         scopes: link.scopes,
         linkedAt: link.linkedAt,
         routerKey,
+        status: status.value,
       }),
     );
     return;
@@ -193,7 +198,91 @@ export async function whoamiCommand(
       `Permissions: ${link.scopes.join(" ")}`,
       `Linked: ${link.linkedAt}`,
       `Router key: ${routerKey}`,
+      `Status: ${status.line}`,
     ].join("\n"),
+  );
+}
+
+type AgentLinkStatus = {
+  value: "active" | "revoked" | "unknown";
+  line: string;
+};
+
+async function checkAgentLinkStatus(
+  target: Awaited<ReturnType<typeof targetWallet>>,
+  link: NonNullable<Awaited<ReturnType<typeof targetWallet>>["entry"]["link"]>,
+  dependencies: CliDependencies,
+): Promise<AgentLinkStatus> {
+  const secrets = getSecretStore(dependencies);
+  try {
+    if (!secrets.available || !(await secrets.has(agentSecretAccounts(target.name).tokens))) {
+      return couldNotCheckStatus("no stored agent token");
+    }
+
+    const agentFetchArgs = {
+      secrets,
+      wallets: target.store,
+      wallet: target.name,
+      ...(dependencies.fetchImpl === undefined ? {} : { fetchImpl: dependencies.fetchImpl }),
+      ...(dependencies.now === undefined ? {} : { now: () => dependencies.now!().getTime() }),
+    };
+    return await withAgentCredentialLock(target.store, `wallet:${target.name}`, async () => {
+      await target.store.reload();
+      const currentLink = target.store.entry(target.name)?.link;
+      if (currentLink === undefined || !sameAgentLink(currentLink, link)) {
+        return couldNotCheckStatus("link changed during check");
+      }
+      const response = await agentFetch(
+        agentFetchArgs,
+        `${link.apiBase.replace(/\/+$/u, "")}/api/agents/self`,
+        { method: "GET" },
+      );
+      if (response.status === 200) return { value: "active", line: "active" };
+      if (response.status === 401) return revokedStatus();
+      if (response.status === 404) {
+        return {
+          value: "unknown",
+          line: "not checked (this console does not support it yet)",
+        };
+      }
+      return couldNotCheckStatus(`HTTP ${response.status}`);
+    });
+  } catch (error) {
+    if (error instanceof AgentLinkError && error.code === "not_linked") {
+      return revokedStatus();
+    }
+    return couldNotCheckStatus(
+      error instanceof AgentLinkError && error.code !== "http"
+        ? "agent link error"
+        : "network error",
+    );
+  }
+}
+
+function revokedStatus(): AgentLinkStatus {
+  return {
+    value: "revoked",
+    line: "revoked or expired on the server. Run vapi login to link again.",
+  };
+}
+
+function couldNotCheckStatus(reason: string): AgentLinkStatus {
+  return { value: "unknown", line: `could not check (${reason})` };
+}
+
+function sameAgentLink(
+  left: NonNullable<Awaited<ReturnType<typeof targetWallet>>["entry"]["link"]>,
+  right: NonNullable<Awaited<ReturnType<typeof targetWallet>>["entry"]["link"]>,
+): boolean {
+  return (
+    left.apiBase === right.apiBase &&
+    left.clientId === right.clientId &&
+    left.owner === right.owner &&
+    left.label === right.label &&
+    left.linkedAt === right.linkedAt &&
+    left.routerBaseUrl === right.routerBaseUrl &&
+    left.scopes.length === right.scopes.length &&
+    left.scopes.every((scope, index) => scope === right.scopes[index])
   );
 }
 

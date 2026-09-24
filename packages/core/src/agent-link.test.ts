@@ -7,6 +7,7 @@ import { verifyMessage, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import {
+  AGENT_LINK_REVOKED_MESSAGE,
   AGENT_LINK_STATEMENT,
   AgentLinkError,
   agentAccessToken,
@@ -517,7 +518,7 @@ describe("agentAccessToken", () => {
     expect(error).toBeInstanceOf(AgentLinkError);
     expect(error).toMatchObject({
       code: "not_linked",
-      message: "This agent's link was revoked or expired. Run vapi login again.",
+      message: AGENT_LINK_REVOKED_MESSAGE,
     });
     expect(String(error)).not.toContain(REFRESH_TOKEN);
   });
@@ -673,6 +674,38 @@ describe("agentFetch", () => {
       accessToken: "new-access",
       refreshToken: REFRESH_TOKEN,
     });
+  });
+
+  it("reports a revoked link when the refreshed bearer is also rejected", async () => {
+    const home = await temporaryHome();
+    const wallets = await walletStore(home);
+    await wallets.setLink("main", agentLink());
+    const accounts = agentSecretAccounts("main");
+    const secrets = memorySecretStore({
+      [accounts.tokens]: JSON.stringify({
+        accessToken: ACCESS_TOKEN,
+        refreshToken: REFRESH_TOKEN,
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        scopes: ["mcp:call", "router.use"],
+      }),
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async (url) => {
+      if (String(url).endsWith("/oauth/token")) {
+        return Response.json({ access_token: "new-access", expires_in: 3600 });
+      }
+      return new Response(null, { status: 401 });
+    });
+
+    await expect(
+      agentFetch(
+        { secrets, wallets, wallet: "main", fetchImpl, now: () => 1_000 },
+        `${API_BASE}/api/call/services`,
+      ),
+    ).rejects.toMatchObject({
+      code: "not_linked",
+      message: AGENT_LINK_REVOKED_MESSAGE,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 
   it("shares one forced rotation between concurrent 401 retries", async () => {

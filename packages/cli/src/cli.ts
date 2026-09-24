@@ -50,6 +50,7 @@ import {
   secretsAllowed,
   spendCapsForWallet,
   staleStoredPassphraseMessage,
+  SweepGasError,
   sweepBack,
   unlockKeystore,
   usdToAtomic,
@@ -1690,6 +1691,7 @@ async function sweepCommand(
     | { network: string; status: "swept"; amountAtomic: string; transaction: string }
     | { network: string; status: "error"; error: string }
   > = [];
+  const gasErrors: SweepGasError[] = [];
   for (const network of requestedNetwork ? [requestedNetwork] : Object.keys(config.networks)) {
     try {
       const result = await (dependencies.sweepBack ?? sweepBack)({
@@ -1702,6 +1704,7 @@ async function sweepCommand(
       results.push({ ...result, status: "swept" });
     } catch (error) {
       if (requestedNetwork) throw error;
+      if (error instanceof SweepGasError) gasErrors.push(error);
       results.push({
         network,
         status: "error",
@@ -1710,6 +1713,7 @@ async function sweepCommand(
     }
   }
   if (!results.some((result) => result.status === "swept")) {
+    if (gasErrors[0]) throw gasErrors[0];
     throw new Error("No configured network had a sweepable USDC balance.");
   }
   outputForWallet(io, json, target, { results }, formatSweepResults(results, ownerDestination));
