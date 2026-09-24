@@ -237,7 +237,7 @@ async function runCommand(
   const approve: RunAgentParameters["approve"] = async ({ ref, priceUsd, reason }) => {
     if (!tty) return false;
     const answer = await visibleLine(
-      `Pay $${priceUsd.toFixed(2)} to ${ref}? ${reason} [y/N] `,
+      `Pay ${usd(priceUsd)} to ${ref}? ${reason} [y/N] `,
       dependencies,
     );
     return answer === "y" || answer === "yes";
@@ -470,7 +470,7 @@ function formatEvent(
     } catch {
       // Unknown networks remain identifiable by their CAIP-2 id.
     }
-    return `✓ paid $${event.amountUsd.toFixed(2)} on ${network} to ${listingNames.get(event.ref) ?? event.ref}`;
+    return `✓ paid ${usd(event.amountUsd)} on ${network} to ${listingNames.get(event.ref) ?? event.ref}`;
   }
   if (event.type === "declined") return `✗ declined ${event.ref}: ${event.reason}`;
   return undefined;
@@ -548,4 +548,9 @@ function required(value: string | undefined, usage: string): string {
 
 function shortAddress(address: string): string {
   return address.length <= 12 ? address : `${address.slice(0, 6)}…${address.slice(-4)}`;
+}
+
+/** Exact USDC amount: $0.005 stays $0.005 instead of rounding to $0.01. */
+function usd(value: number): string {
+  return `$${formatUsdc(BigInt(Math.round(value * 1_000_000)))}`;
 }

@@ -69,7 +69,8 @@ const TOOL_DEFINITIONS = [
     type: "function",
     function: {
       name: "call_search",
-      description: "Search vAPI Call listings available to this agent.",
+      description:
+        "Search vAPI Call listings available to this agent. Set network to null to search every network, or to a CAIP-2 id such as eip155:8453 (Base) or eip155:5042 (Arc).",
       strict: true,
       parameters: {
         type: "object",
@@ -222,7 +223,7 @@ export async function runAgent(task: string, deps: RunAgentDeps): Promise<RunAge
       if (call.name === "call_search") {
         const args = parseObjectArgs(call.arguments);
         const query = requiredString(args, "query");
-        const network = nullableString(args, "network");
+        const network = searchNetwork(nullableString(args, "network"));
         const rows = await deps.search({
           query,
           ...(network === null ? {} : { network }),
@@ -414,6 +415,27 @@ function requiredString(args: Record<string, unknown>, name: string): string {
     throw new ToolInputError(`${name} must be a non-empty string.`);
   }
   return value;
+}
+
+const SEARCH_NETWORK_ALIASES: Readonly<Record<string, string>> = {
+  base: "eip155:8453",
+  "base mainnet": "eip155:8453",
+  arc: "eip155:5042",
+  "arc mainnet": "eip155:5042",
+};
+const CAIP2 = /^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$/;
+
+/**
+ * Models fill the optional network with "", chain names or ids we do not
+ * know. An empty or unknown value searches every network instead of erroring
+ * or filtering every listing out; a known name maps to its CAIP-2 id.
+ */
+function searchNetwork(value: string | null): string | null {
+  const trimmed = value?.trim() ?? "";
+  if (trimmed === "") return null;
+  const alias = SEARCH_NETWORK_ALIASES[trimmed.toLowerCase()];
+  if (alias !== undefined) return alias;
+  return CAIP2.test(trimmed) ? trimmed : null;
 }
 
 function nullableString(args: Record<string, unknown>, name: string): string | null {
