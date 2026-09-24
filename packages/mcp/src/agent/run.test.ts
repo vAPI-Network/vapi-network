@@ -20,6 +20,33 @@ afterEach(async () => {
 });
 
 describe("runAgent", () => {
+  it.each([
+    ["an empty string", "", undefined],
+    ["a chain name it does not know", "ethereum", undefined],
+    ["a friendly name for Base", "base", "eip155:8453"],
+    ["a friendly name for Arc", "Arc", "eip155:5042"],
+    ["a CAIP-2 id", "eip155:8453", "eip155:8453"],
+  ])("treats a search network of %s safely", async (_label, network, expected) => {
+    // Seen on staging: models fill the optional network with "" or "ethereum",
+    // which errored or filtered every listing out.
+    const deps = await agentDeps(
+      [
+        toolReply("search", "call_search", { query: "decode", network }),
+        toolReply("finish", "finish", { answer: "done" }),
+      ],
+      [],
+    );
+    deps.search = vi.fn().mockResolvedValue([]);
+
+    await runAgent("Find a decoder", deps);
+
+    expect(deps.search).toHaveBeenCalledWith({
+      query: "decode",
+      ...(expected === undefined ? {} : { network: expected }),
+      includeUnverified: false,
+    });
+  });
+
   it("searches, pays a verified $0.01 listing, and finishes", async () => {
     const events: AgentEvent[] = [];
     const requests: ChatRequest[] = [];
