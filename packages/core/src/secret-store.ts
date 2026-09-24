@@ -99,29 +99,88 @@ export function secretStore(options: SecretStoreOptions = {}): SecretStore {
  * entry when the wallet already has one.
  */
 function keychainStore(platform: NodeJS.Platform, run: SecretStoreRunner): SecretStore {
-  const find = async (name: string, withPassword: boolean): Promise<SecretStoreOutcome> =>
+  const find = async (account: string, withPassword: boolean): Promise<SecretStoreOutcome> =>
     await run(SECURITY_BINARY, [
       "find-generic-password",
       "-a",
-      accountFor(name),
+      account,
       "-s",
       SECRET_STORE_SERVICE,
       ...(withPassword ? ["-w"] : []),
     ]);
+
+  const read = async (account: string, what: string): Promise<string | undefined> => {
+    const result = await find(account, true);
+    if (result.code === SECURITY_ITEM_NOT_FOUND) return undefined;
+    requireSuccess(result, what);
+    const value = withoutTrailingNewline(result.stdout);
+    return value.length === 0 ? undefined : value;
+  };
+
+  const write = async (account: string, value: string, what: string): Promise<void> => {
+    const result = await run(
+      SECURITY_BINARY,
+      [
+        "add-generic-password",
+        "-a",
+        account,
+        "-s",
+        SECRET_STORE_SERVICE,
+        "-l",
+        `${SECRET_STORE_SERVICE} ${account}`,
+        "-U",
+        "-w",
+      ],
+      // `security` asks for the password and then for its confirmation.
+      `${value}\n${value}\n`,
+    );
+    requireSuccess(result, what);
+  };
+
+  const erase = async (account: string, what: string): Promise<boolean> => {
+    const result = await run(SECURITY_BINARY, [
+      "delete-generic-password",
+      "-a",
+      account,
+      "-s",
+      SECRET_STORE_SERVICE,
+    ]);
+    if (result.code === SECURITY_ITEM_NOT_FOUND) return false;
+    requireSuccess(result, what);
+    return true;
+  };
+
+  /** Deletes the parts after `keep`, until the first one that is not there. */
+  const erasePartsAfter = async (account: string, keep: number, what: string): Promise<void> => {
+    for (let part = keep + 1; part <= MAX_KEYCHAIN_PARTS; part += 1) {
+      if (!(await erase(keychainPart(account, part), what))) return;
+    }
+  };
 
   return {
     available: true,
     platform,
     description: "the macOS Keychain",
     async get(name) {
-      const result = await find(name, true);
-      if (result.code === SECURITY_ITEM_NOT_FOUND) return undefined;
-      requireSuccess(result, `read the passphrase of ${name} from the macOS Keychain`);
-      const value = withoutTrailingNewline(result.stdout);
-      return value.length === 0 ? undefined : value;
+      const account = accountFor(name);
+      const what = `read the passphrase of ${name} from the macOS Keychain`;
+      const value = await read(account, what);
+      const parts = value === undefined ? undefined : chunkedPartCount(value);
+      if (value === undefined || parts === undefined) return value;
+      let joined = "";
+      for (let part = 1; part <= parts; part += 1) {
+        const chunk = await read(keychainPart(account, part), what);
+        if (chunk === undefined) {
+          throw new KeystoreError(
+            `The stored secret ${name} is incomplete in the macOS Keychain. Store it again.`,
+          );
+        }
+        joined += chunk;
+      }
+      return joined;
     },
     async has(name) {
-      const result = await find(name, false);
+      const result = await find(accountFor(name), false);
       if (result.code === SECURITY_ITEM_NOT_FOUND) return false;
       requireSuccess(result, `look up ${name} in the macOS Keychain`);
       return true;
@@ -129,37 +188,54 @@ function keychainStore(platform: NodeJS.Platform, run: SecretStoreRunner): Secre
     async set(name, passphrase) {
       requirePassphrase(passphrase);
       const account = accountFor(name);
-      const result = await run(
-        SECURITY_BINARY,
-        [
-          "add-generic-password",
-          "-a",
-          account,
-          "-s",
-          SECRET_STORE_SERVICE,
-          "-l",
-          `${SECRET_STORE_SERVICE} ${account}`,
-          "-U",
-          "-w",
-        ],
-        // `security` asks for the password and then for its confirmation.
-        `${passphrase}\n${passphrase}\n`,
-      );
-      requireSuccess(result, `store the passphrase of ${name} in the macOS Keychain`);
+      const what = `store the passphrase of ${name} in the macOS Keychain`;
+      if (passphrase.length <= KEYCHAIN_PROMPT_LIMIT) {
+        await write(account, passphrase, what);
+        return;
+      }
+      // `security -w` reads at most 128 characters from its prompt and drops
+      // the rest without an error, so a longer value is stored in parts.
+      const chunks: string[] = [];
+      for (let index = 0; index < passphrase.length; index += KEYCHAIN_CHUNK) {
+        chunks.push(passphrase.slice(index, index + KEYCHAIN_CHUNK));
+      }
+      if (chunks.length > MAX_KEYCHAIN_PARTS) {
+        throw new KeystoreError(`The secret ${name} is too long for the macOS Keychain.`);
+      }
+      for (const [index, chunk] of chunks.entries()) {
+        await write(keychainPart(account, index + 1), chunk, what);
+      }
+      await erasePartsAfter(account, chunks.length, what);
+      await write(account, `${CHUNKED_MARKER}${chunks.length}`, what);
     },
     async remove(name) {
-      const result = await run(SECURITY_BINARY, [
-        "delete-generic-password",
-        "-a",
-        accountFor(name),
-        "-s",
-        SECRET_STORE_SERVICE,
-      ]);
-      if (result.code === SECURITY_ITEM_NOT_FOUND) return false;
-      requireSuccess(result, `remove the passphrase of ${name} from the macOS Keychain`);
-      return true;
+      const account = accountFor(name);
+      const what = `remove the passphrase of ${name} from the macOS Keychain`;
+      const found = await find(account, true);
+      if (found.code === SECURITY_ITEM_NOT_FOUND) return false;
+      requireSuccess(found, what);
+      if (chunkedPartCount(withoutTrailingNewline(found.stdout)) !== undefined) {
+        await erasePartsAfter(account, 0, what);
+      }
+      return await erase(account, what);
     },
   };
+}
+
+/** The longest value `security -w` accepts from its prompt. */
+const KEYCHAIN_PROMPT_LIMIT = 128;
+const KEYCHAIN_CHUNK = 120;
+const MAX_KEYCHAIN_PARTS = 32;
+const CHUNKED_MARKER = "vapi-chunked:v1:";
+
+function keychainPart(account: string, part: number): string {
+  return `${account}#${part}`;
+}
+
+function chunkedPartCount(value: string): number | undefined {
+  if (!value.startsWith(CHUNKED_MARKER)) return undefined;
+  const parts = Number(value.slice(CHUNKED_MARKER.length));
+  return Number.isInteger(parts) && parts > 0 && parts <= MAX_KEYCHAIN_PARTS ? parts : undefined;
 }
 
 /**

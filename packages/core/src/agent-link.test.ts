@@ -151,7 +151,7 @@ describe("startDeviceLink", () => {
     const calls: Array<[string, RequestInit | undefined]> = [];
     const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push([String(url), init]);
-      if (String(url).endsWith("/api/auth/siwe-nonce")) {
+      if (String(url).endsWith("/api/auth/siwe-nonce?purpose=link")) {
         return Response.json({ nonce: "n".repeat(108) });
       }
       return Response.json({
@@ -174,7 +174,8 @@ describe("startDeviceLink", () => {
     });
 
     expect(start.userCode).toBe("BCDF-GHJK");
-    expect(calls[0]).toEqual([`${API_BASE}/api/auth/siwe-nonce`, undefined]);
+    // The console consumes a link nonce under purpose "link", so it must be issued as one.
+    expect(calls[0]).toEqual([`${API_BASE}/api/auth/siwe-nonce?purpose=link`, undefined]);
     const body = JSON.parse(String(calls[1]![1]!.body)) as Record<string, unknown>;
     expect(body.agent_message).toContain(
       "api.vapinetwork.ai wants you to sign in with your Ethereum account:",
