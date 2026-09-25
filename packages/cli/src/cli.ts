@@ -208,7 +208,7 @@ Every command that touches a wallet takes \`--wallet <name>\`, falls back to \`V
 
 \`vapi search\` answers with vAPI-verified listings plus the mirrored external catalogs. \`--include-unverified\` also returns self-listed APIs that passed vAPI's automated x402 probe but were never reviewed; every result is tagged \`[verified]\`, \`[requested]\`, \`[unverified]\` or \`[external]\`.
 
-\`vapi check <url>\` grades an x402 API's 402 without paying: status, transport, declared version and its required fields, the exact scheme, canonical USDC, payTo, maxTimeoutSeconds, advertised extensions, and the origin's /.well-known/x402. It looks for OpenAPI beside the checked path, at /openapi.json, then through same-origin service-desc links in /.well-known/api-catalog. No wallet, no payment, no registry call. It exits 1 when a rule fails.
+\`vapi check <url>\` grades an x402 API's 402 without paying: status, transport, declared version and its required fields, the exact scheme, canonical USDC, payTo, maxTimeoutSeconds, advertised extensions, and the origin's /.well-known/x402. It looks for OpenAPI beside the checked path, at /openapi.json, then through same-origin service-desc links in /.well-known/api-catalog. No wallet, no payment, no registry call. It exits 1 when a rule fails. A 402 that answers with Stripe/Tempo's MPP challenge (WWW-Authenticate: Payment) is recognised and reported as transport mpp; vapi pay cannot pay it.
 
 \`vapi pay --resume <receipt-id>\` answers the one question a lost response leaves: did that payment settle? It reads the signed authorization's state on-chain — settled, expired, or still pending — and never pays.
 

@@ -304,19 +304,22 @@ vapi check https://weather.example/forecast
 vapi check https://weather.example/alerts --method POST --json
 ```
 
-| Rule         | Passes when                                                                                                  |
-| ------------ | ------------------------------------------------------------------------------------------------------------ |
-| `status`     | the URL answers HTTP 402                                                                                     |
-| `transport`  | the offer is readable: a base64 `PAYMENT-REQUIRED` header, a JSON body, or both                              |
-| `version`    | it declares `x402Version` 2 (1 is a warning: v2-only clients cannot pay it)                                  |
-| `fields`     | every field that version requires is present and well-typed                                                  |
-| `scheme`     | at least one accepted option is `exact`                                                                      |
-| `asset`      | an exact option pays canonical USDC, with USDC's EIP-712 domain, on Base, Arc mainnet, Arc testnet or Solana |
-| `pay_to`     | every exact option's `payTo` is a valid, non-zero address for its network                                    |
-| `timeout`    | `maxTimeoutSeconds` is a whole number between 10 and 3600                                                    |
-| `extensions` | the offer advertises Bazaar metadata; every known advertised extension is listed                             |
-| `discovery`  | `/.well-known/x402` serves a JSON document (a warning otherwise)                                             |
-| `openapi`    | a discovered OpenAPI document describes the operation with `x-payment-info`                                  |
+| Rule         | Passes when                                                                                                                                                                                             |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`     | the URL answers HTTP 402                                                                                                                                                                                |
+| `transport`  | the offer is readable: a base64 `PAYMENT-REQUIRED` header, a JSON body, or both; or the 402 carries an MPP (`WWW-Authenticate: Payment`) challenge, which is recognised but not payable with `vapi pay` |
+| `version`    | it declares `x402Version` 2 (1 is a warning: v2-only clients cannot pay it)                                                                                                                             |
+| `fields`     | every field that version requires is present and well-typed                                                                                                                                             |
+| `scheme`     | at least one accepted option is `exact`                                                                                                                                                                 |
+| `asset`      | an exact option pays canonical USDC, with USDC's EIP-712 domain, on Base, Arc mainnet, Arc testnet or Solana                                                                                            |
+| `pay_to`     | every exact option's `payTo` is a valid, non-zero address for its network                                                                                                                               |
+| `timeout`    | `maxTimeoutSeconds` is a whole number between 10 and 3600                                                                                                                                               |
+| `extensions` | the offer advertises Bazaar metadata; every known advertised extension is listed                                                                                                                        |
+| `discovery`  | `/.well-known/x402` serves a JSON document (a warning otherwise)                                                                                                                                        |
+| `openapi`    | a discovered OpenAPI document describes the operation with `x-payment-info`                                                                                                                             |
+
+The JSON report's `transport` field is `x402` or `mpp`; x402-only rules are
+skipped for an MPP 402.
 
 The `extensions` rule reports `bazaar`, `builder-code`, `payment-identifier`,
 `sign-in-with-x`, `offer-and-receipt` and `auth-hints` in that order. Missing

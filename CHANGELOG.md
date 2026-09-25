@@ -15,6 +15,10 @@ scoped packages. The packages share one version and are released together.
 - `vapi check` now lists known extensions advertised by a 402 offer. Missing
   Bazaar metadata is a warning because Bazaar and Coinbase for Agents use it to
   discover the API.
+- `vapi check` recognises Stripe/Tempo's Machine Payments Protocol: a 402 whose
+  `WWW-Authenticate: Payment` challenge replaces the x402 offer passes the
+  `transport` rule with the `mpp` tag, and the JSON report's new `transport`
+  field says `x402` or `mpp`. `vapi pay` cannot pay MPP.
 - Arc mainnet is now a payable x402 network (`eip155:5042`) with the public RPC
   `https://rpc.mainnet.arc.io`; `ARC_RPC_URL` overrides it. Enable it with
   `vapi init --networks base,arc`, `vapi accounts --enable arc`, or the
