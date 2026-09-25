@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { runCli, type CliIo } from "./cli.js";
+import { parseMppChallenge } from "./check.js";
 
 const BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const ARC_USDC = "0x3600000000000000000000000000000000000000";
@@ -13,6 +14,7 @@ const URL_UNDER_TEST = "https://weather.example/v1/weather/paris";
 
 type CheckJson = {
   status: number;
+  transport?: "x402" | "mpp";
   extensions: string[];
   conformance: {
     declaredVersion: 1 | 2 | null;
@@ -124,6 +126,20 @@ function ruleResult(report: CheckJson, name: string) {
   return report.rules.find((rule) => rule.rule === name);
 }
 
+it("parses MPP challenges and ignores headers without the Payment scheme", () => {
+  expect(parseMppChallenge(null)).toBeUndefined();
+  expect(parseMppChallenge("")).toBeUndefined();
+  expect(parseMppChallenge('Bearer realm="x"')).toBeUndefined();
+  expect(parseMppChallenge("Paymentx intent=charge")).toBeUndefined();
+  expect(parseMppChallenge('Payment intent=charge, method=tempo, id="ch_1"')).toEqual({
+    intent: "charge",
+    method: "tempo",
+  });
+  expect(parseMppChallenge('Bearer realm="api", Payment intent="authorize"')).toEqual({
+    intent: "authorize",
+  });
+});
+
 const originalHome = process.env.VAPI_HOME;
 beforeEach(async () => {
   process.env.VAPI_HOME = await mkdtemp(join(tmpdir(), "vapi-check-"));
@@ -169,6 +185,101 @@ describe("vapi check <url>", () => {
       "https://weather.example/openapi.json",
     ]);
     expect(ruleResult(report, "openapi")?.detail).toContain("https://weather.example/openapi.json");
+  });
+
+  it("grades an MPP-only 402 as transport mpp without x402 rule failures", async () => {
+    const api = conformantOrigin({
+      "/v1/weather/paris": {
+        status: 402,
+        headers: { "www-authenticate": 'Payment intent=charge, method=tempo, id="ch_123"' },
+      },
+    });
+
+    const { code, report } = await checkJson(api.fetchImpl);
+
+    expect(code).toBe(0);
+    expect(report.transport).toBe("mpp");
+    expect(ruleResult(report, "transport")).toMatchObject({ result: "pass", issues: ["mpp"] });
+    expect(ruleResult(report, "transport")?.detail).toContain("MPP (Stripe/Tempo)");
+    expect(ruleResult(report, "transport")?.detail).toContain("intent charge");
+    expect(ruleResult(report, "transport")?.detail).toContain("method tempo");
+    expect(ruleResult(report, "transport")?.detail).toContain("not payable with vapi pay");
+    expect(
+      report.rules.some((rule) =>
+        ["version", "fields", "scheme", "asset", "pay_to", "timeout", "extensions"].includes(
+          rule.rule,
+        ),
+      ),
+    ).toBe(false);
+    expect(report.summary.fail).toBe(0);
+    expect(report.conformance).toBeNull();
+    expect(report.extensions).toEqual([]);
+    expect(ruleResult(report, "discovery")).toBeDefined();
+    expect(ruleResult(report, "openapi")).toBeDefined();
+  });
+
+  it("keeps x402 grading when a 402 carries both an x402 offer and an MPP challenge", async () => {
+    const plain = await checkJson(conformantOrigin().fetchImpl);
+    const api = conformantOrigin({
+      "/v1/weather/paris": {
+        status: 402,
+        body: v2Offer(),
+        headers: { ...paymentRequired(v2Offer()), "www-authenticate": "Payment intent=charge" },
+      },
+    });
+
+    const { report } = await checkJson(api.fetchImpl);
+
+    expect(report.transport).toBe("x402");
+    expect(report.rules.map(({ rule, result, issues }) => ({ rule, result, issues }))).toEqual(
+      plain.report.rules.map(({ rule, result, issues }) => ({ rule, result, issues })),
+    );
+    expect(report.conformance).toEqual(plain.report.conformance);
+    expect(ruleResult(report, "transport")?.detail).toBe(
+      `${ruleResult(plain.report, "transport")?.detail} Also carries an MPP (Stripe/Tempo) challenge in WWW-Authenticate.`,
+    );
+    expect(ruleResult(report, "transport")?.issues).not.toContain("mpp");
+  });
+
+  it("still fails a 402 that carries neither an x402 offer nor an MPP challenge", async () => {
+    const api = conformantOrigin({
+      "/v1/weather/paris": {
+        status: 402,
+        headers: { "www-authenticate": 'Bearer realm="api"' },
+      },
+    });
+
+    const { code, report } = await checkJson(api.fetchImpl);
+
+    expect(code).toBe(1);
+    expect(ruleResult(report, "transport")).toEqual({
+      rule: "transport",
+      result: "fail",
+      issues: ["offer_missing"],
+      detail:
+        "The 402 carries no offer: no readable PAYMENT-REQUIRED header and no JSON body with accepts.",
+    });
+    expect("transport" in report).toBe(false);
+  });
+
+  it.each([
+    "Payment ???",
+    "payment",
+    "PAYMENT intent",
+    'Bearer realm="api", Payment =charge,,',
+    'Payment intent="charge',
+  ])("recognises MPP when the Payment challenge params are malformed", async (header) => {
+    const api = conformantOrigin({
+      "/v1/weather/paris": { status: 402, headers: { "www-authenticate": header } },
+    });
+
+    const { report } = await checkJson(api.fetchImpl);
+
+    expect(report.transport).toBe("mpp");
+    expect(ruleResult(report, "transport")).toMatchObject({ result: "pass", issues: ["mpp"] });
+    if (header === "Payment ???") {
+      expect(ruleResult(report, "transport")?.detail).not.toContain("intent");
+    }
   });
 
   it.each([
