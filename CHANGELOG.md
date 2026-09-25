@@ -29,7 +29,7 @@ Nothing yet.
   `vapi router buy --auto <tier> --below <usd>` refills automatically, still
   within the per-day cap. `vapi router usage` shows the balance.
 - `vapi stake status` shows the owner's stake and today's Compute; `vapi stake
-  open` opens the console's stake page. Staking itself stays in the console.
+open` opens the console's stake page. Staking itself stays in the console.
 - `vapi agent create`, `run`, `list`, `pause`, `resume` and `revoke`: a small
   agent that runs on your own machine, thinks with vAPI Router and pays for
   APIs on vAPI Call from its own capped wallet. Tool output reaches the model
