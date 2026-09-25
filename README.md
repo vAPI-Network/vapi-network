@@ -808,6 +808,8 @@ vapi stats --range 7d
 vapi receipts export --format csv --range 30d
 ```
 
+When the registry reports it, `vapi stats` also shows the network-wide amount routed through vAPI for 24h and 30d in USD plus the 30d transaction count. This covers all vAPI clients, not just this wallet.
+
 `vapi report "<what happened>"` writes `$VAPI_HOME/reports/<timestamp>.json` and
 prints that path plus a prefilled GitHub issue URL. Reports contain the message,
 client version, OS and Node information, and only the newest five receipt IDs.

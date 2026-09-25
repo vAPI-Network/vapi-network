@@ -27,6 +27,9 @@ scoped packages. The packages share one version and are released together.
   `VAPI_ARC_GAS_HEADROOM_USDC`, and print transaction links at
   `https://explorer.arc.io`; missing-authorization receipt messages link the
   payer there as well.
+- `vapi stats` now shows the network-wide amount routed through vAPI for 24h and
+  30d in USD plus the 30d transaction count when the registry reports it. The
+  figure covers all vAPI clients, not just the selected wallet.
 
 ### Changed
 
