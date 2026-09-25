@@ -22,6 +22,7 @@ import {
   type CliDependencies,
   type CliIo,
 } from "./cli.js";
+import { fetchWalletIdentity, formatIdentityLines } from "./identity.js";
 
 const WALLET_OPTION = "--wallet";
 
@@ -152,18 +153,21 @@ export async function whoamiCommand(
   const target = await targetWallet(parsed, dependencies);
   const link = target.entry.link;
   if (link === undefined) {
+    const identity = await lookupWalletIdentity(target.address, dependencies, io);
     if (json) {
       io.stdout(
         JSON.stringify({
           wallet: target.name,
           ...(target.address === undefined ? {} : { address: target.address }),
           linked: false,
+          ...(identity?.ok ? { identity: identity.identity } : {}),
         }),
       );
       return;
     }
     io.stdout(walletHeading(target.name, target.address));
     io.stdout("Not linked. Run vapi login.");
+    printIdentity(identity, io);
     return;
   }
 
@@ -173,6 +177,7 @@ export async function whoamiCommand(
     ? "stored"
     : "missing";
   const status = await checkAgentLinkStatus(target, link, dependencies);
+  const identity = await lookupWalletIdentity(target.address, dependencies, io);
   if (json) {
     io.stdout(
       JSON.stringify({
@@ -185,6 +190,7 @@ export async function whoamiCommand(
         linkedAt: link.linkedAt,
         routerKey,
         status: status.value,
+        ...(identity?.ok ? { identity: identity.identity } : {}),
       }),
     );
     return;
@@ -200,6 +206,37 @@ export async function whoamiCommand(
       `Router key: ${routerKey}`,
       `Status: ${status.line}`,
     ].join("\n"),
+  );
+  printIdentity(identity, io);
+}
+
+async function lookupWalletIdentity(
+  address: string | undefined,
+  dependencies: CliDependencies,
+  io: CliIo,
+): Promise<Awaited<ReturnType<typeof fetchWalletIdentity>> | undefined> {
+  if (address === undefined) return undefined;
+  try {
+    const config = await loadConfig(getVapiPaths().config, process.env, { notice: io.stderr });
+    return await fetchWalletIdentity({
+      baseUrl: registryBaseUrl(config),
+      wallet: address,
+      ...(dependencies.fetchImpl === undefined ? {} : { fetchImpl: dependencies.fetchImpl }),
+    });
+  } catch {
+    return { ok: false };
+  }
+}
+
+function printIdentity(
+  result: Awaited<ReturnType<typeof fetchWalletIdentity>> | undefined,
+  io: CliIo,
+): void {
+  if (result === undefined || !result.ok) return;
+  io.stdout(
+    result.identity === null
+      ? "On-chain identity: not registered"
+      : formatIdentityLines(result.identity).join("\n"),
   );
 }
 

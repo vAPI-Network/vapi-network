@@ -705,6 +705,90 @@ describe("inspect output", () => {
     expect(text).not.toContain("Liveness:");
     expect(text).not.toContain("Conformance:");
   });
+
+  it("prints the registry's ERC-8004 identity and reputation", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-identity-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json(
+        servicesResponse({
+          identity: { erc8004Id: "42", reputation: { score: 4.567, count: 1 } },
+        }),
+      ),
+    );
+    const captured = captureIo();
+
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization"], captured.io, { fetchImpl }),
+    ).toBe(0);
+
+    const text = captured.stdout.join("\n");
+    expect(text).toContain("On-chain identity: ERC-8004 agent #42 (Base)");
+    expect(text).toContain("Reputation: 4.57 (1 review)");
+  });
+
+  it("prints an identity without reputation and stays silent when it is absent", async () => {
+    const identityHome = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-identity-only-"));
+    process.env.VAPI_HOME = identityHome;
+    const identityFetch = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json(servicesResponse({ identity: { erc8004Id: "42" } })));
+    const identityCaptured = captureIo();
+
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization"], identityCaptured.io, {
+        fetchImpl: identityFetch,
+      }),
+    ).toBe(0);
+    const identityText = identityCaptured.stdout.join("\n");
+    expect(identityText).toContain("On-chain identity: ERC-8004 agent #42 (Base)");
+    expect(identityText).not.toContain("Reputation:");
+
+    const absentHome = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-no-identity-"));
+    process.env.VAPI_HOME = absentHome;
+    const absentFetch = vi.fn<typeof fetch>().mockResolvedValue(Response.json(servicesResponse()));
+    const absentCaptured = captureIo();
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization"], absentCaptured.io, {
+        fetchImpl: absentFetch,
+      }),
+    ).toBe(0);
+    expect(absentCaptured.stdout.join("\n")).not.toContain("On-chain identity:");
+  });
+
+  it("ignores malformed identity and carries valid identity through --json", async () => {
+    const malformedHome = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-bad-identity-"));
+    process.env.VAPI_HOME = malformedHome;
+    const malformedFetch = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json(servicesResponse({ identity: { erc8004Id: 7 } })));
+    const malformedCaptured = captureIo();
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization"], malformedCaptured.io, {
+        fetchImpl: malformedFetch,
+      }),
+    ).toBe(0);
+    expect(malformedCaptured.stdout.join("\n")).not.toContain("On-chain identity:");
+
+    const jsonHome = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-identity-json-"));
+    process.env.VAPI_HOME = jsonHome;
+    const jsonFetch = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        Response.json(
+          servicesResponse({ identity: { erc8004Id: "42", reputation: { score: 4, count: 0 } } }),
+        ),
+      );
+    const jsonCaptured = captureIo();
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization", "--json"], jsonCaptured.io, {
+        fetchImpl: jsonFetch,
+      }),
+    ).toBe(0);
+    expect(JSON.parse(jsonCaptured.stdout[0]!)).toMatchObject({
+      identity: { erc8004Id: "42", reputation: { score: 4, count: 0 } },
+    });
+  });
 });
 
 describe("vapi receipts", () => {
