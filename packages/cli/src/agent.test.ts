@@ -12,13 +12,19 @@ import {
   writeAgentProfile,
 } from "@vapi-network/core";
 import {
+  AGENT_LINK_REVOKED_MESSAGE,
+  AgentLinkError,
   type DeviceLinkStart,
   type LinkResult,
   type forgetAgentLink,
   type pollDeviceLink,
   type startDeviceLink,
 } from "@vapi-network/core/agent-link";
-import type { AgentRouterUsage, RouterClientDeps } from "@vapi-network/core/router-client";
+import {
+  RouterClientError,
+  type AgentRouterUsage,
+  type RouterClientDeps,
+} from "@vapi-network/core/router-client";
 import { type RunAgentDeps, type createAgentRunDeps, type getWallet } from "@vapi-network/mcp";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -294,6 +300,24 @@ describe("vapi agent run", () => {
     expect(await readAgentProfile(home, "researcher")).toMatchObject({ paused: true });
   });
 
+  it("exits 1 with the revoked-link sentence when Router access is rejected", async () => {
+    await homeWithAgent();
+    const routerChat = vi.fn(async () => {
+      throw new RouterClientError("not_linked", AGENT_LINK_REVOKED_MESSAGE);
+    });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["agent", "run", "researcher", "Do work"], captured.io, {
+        ...createDependencies(),
+        router: { routerChat },
+      }),
+    ).toBe(1);
+    expect(captured.stdout).toEqual([]);
+    expect(captured.stderr).toEqual([AGENT_LINK_REVOKED_MESSAGE]);
+    expect(noSecrets(allOutput(captured))).toBe(true);
+  });
+
   it("writes only the result JSON and never serializes credentials", async () => {
     await homeWithAgent();
     const scripted = [textReply("Safe answer.")];
@@ -401,6 +425,23 @@ describe("vapi agent lifecycle", () => {
     expect(captured.stdout).toEqual([
       `The wallet researcher still holds funds. Send it back with vapi sweep ${OWNER} --wallet researcher.`,
     ]);
+  });
+
+  it("removes the profile even when the link was already revoked remotely", async () => {
+    const home = await homeWithAgent();
+    const store = await WalletStore.open(home);
+    await store.setLink("researcher", linkedAgent());
+    const forget = vi.fn<typeof forgetAgentLink>(async () => {
+      throw new AgentLinkError("not_linked", AGENT_LINK_REVOKED_MESSAGE);
+    });
+
+    expect(
+      await runCli(["agent", "revoke", "researcher"], captureIo().io, {
+        ...createDependencies(),
+        agentLink: { forgetAgentLink: forget },
+      }),
+    ).toBe(1);
+    await expect(readAgentProfile(home, "researcher")).rejects.toThrow("No agent named researcher");
   });
 
   it("lists local and Router spend as JSON without exposing secrets", async () => {

@@ -11,6 +11,8 @@ import type { SecretStore } from "./secret-store.js";
 import type { AgentLink, WalletName, WalletStore } from "./wallet-store.js";
 
 export const AGENT_LINK_STATEMENT = "Link this wallet to a vAPI account as an agent.";
+export const AGENT_LINK_REVOKED_MESSAGE =
+  "This agent's link was revoked or has expired. Run vapi login to link it again.";
 
 export type DeviceLinkStart = {
   clientId: string;
@@ -243,7 +245,7 @@ export async function saveAgentLink(args: {
       : { routerBaseUrl: args.result.routerBaseUrl }),
   };
 
-  await withAgentCredentialLock(args.wallets, args.start.clientId, async () => {
+  await withAgentCredentialLock(args.wallets, `wallet:${args.wallet}`, async () => {
     await args.wallets.reload();
     const previousLink = args.wallets.entry(args.wallet)?.link;
     const accounts = agentSecretAccounts(args.wallet);
@@ -305,7 +307,11 @@ export async function agentFetch(
   if (response.status !== 401) return response;
 
   const refreshedToken = await resolveAgentAccessToken(args, { rejectedAccessToken: accessToken });
-  return await safeAgentFetch(fetchImpl, url, withBearer(init, refreshedToken));
+  const refreshedResponse = await safeAgentFetch(fetchImpl, url, withBearer(init, refreshedToken));
+  if (refreshedResponse.status === 401) {
+    throw new AgentLinkError("not_linked", AGENT_LINK_REVOKED_MESSAGE);
+  }
+  return refreshedResponse;
 }
 
 export async function forgetAgentLink(args: {
@@ -316,15 +322,20 @@ export async function forgetAgentLink(args: {
   home?: string;
 }): Promise<void> {
   const link = args.wallets.entry(args.wallet)?.link;
-  const fetchImpl = args.fetchImpl ?? publicFetch;
+  let revokedError: AgentLinkError | undefined;
   if (link !== undefined) {
     try {
-      const accessToken = await resolveAgentAccessToken(args, {});
-      await fetchImpl(apiEndpoint(link.apiBase, "/api/agents/self"), {
+      await agentFetch(args, apiEndpoint(link.apiBase, "/api/agents/self"), {
         method: "DELETE",
-        headers: { authorization: `Bearer ${accessToken}` },
       });
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof AgentLinkError &&
+        error.code === "not_linked" &&
+        error.message === AGENT_LINK_REVOKED_MESSAGE
+      ) {
+        revokedError = error;
+      }
       // Remote revocation is best effort. Local secrets must still be removed.
     }
   }
@@ -343,6 +354,7 @@ export async function forgetAgentLink(args: {
       tty: Boolean(process.stderr.isTTY),
     });
   }
+  if (revokedError !== undefined) throw revokedError;
 }
 
 async function resolveAgentAccessToken(
@@ -399,10 +411,7 @@ async function resolveAgentAccessToken(
     const payload = await responseRecord(response);
     if (!response.ok) {
       if (response.status === 400 && stringField(payload, "error") === "invalid_grant") {
-        throw new AgentLinkError(
-          "not_linked",
-          "This agent's link was revoked or expired. Run vapi login again.",
-        );
+        throw new AgentLinkError("not_linked", AGENT_LINK_REVOKED_MESSAGE);
       }
       throw httpError("The vAPI agent token refresh failed.");
     }

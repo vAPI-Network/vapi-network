@@ -4,6 +4,7 @@ import {
   ownerStake,
   type RouterClientDeps,
 } from "@vapi-network/core/router-client";
+import { AGENT_LINK_REVOKED_MESSAGE } from "@vapi-network/core/agent-link";
 import { formatUnits } from "viem";
 
 import {
@@ -110,7 +111,11 @@ async function withRouterError<T>(operation: () => Promise<T>): Promise<T> {
     return await operation();
   } catch (error) {
     if (error instanceof RouterClientError && error.code === "not_linked") {
-      throw new Error("Not linked. Run vapi login.");
+      throw new Error(
+        error.message === AGENT_LINK_REVOKED_MESSAGE
+          ? AGENT_LINK_REVOKED_MESSAGE
+          : "Not linked. Run vapi login.",
+      );
     }
     throw error;
   }

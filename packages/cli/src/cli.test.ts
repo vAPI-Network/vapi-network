@@ -10,9 +10,11 @@ import type { Hex } from "viem";
 import {
   ARC_MAINNET_CAIP2,
   appendReceipt,
+  BASE_MAINNET_CAIP2,
   appendSearchEvent,
   encryptPrivateKey,
   getVapiPaths,
+  SweepGasError,
   unlockKeystore,
   type SecretStore,
   WalletStore,
@@ -994,6 +996,65 @@ describe("vapi sweep destinations", () => {
     expect(sweepBack.mock.calls[0]![0]).toMatchObject({ destination: explicit });
     expect(captured.stdout.join("\n")).not.toContain("your owner wallet");
   });
+
+  it("prints a friendly gas error for an explicit network", async () => {
+    const home = await initializedHome("vapi-cli-sweep-gas-");
+    const address = (
+      JSON.parse(await readFile(walletKeystore(home), "utf8")) as { address: string }
+    ).address;
+    const captured = captureIo();
+
+    expect(
+      await runCli(["sweep", explicit, "--network", BASE_MAINNET_CAIP2], captured.io, {
+        sweepBack: failingGasSweep(),
+      }),
+    ).toBe(1);
+
+    expect(captured.stdout).toEqual([]);
+    expect(captured.stderr).toEqual([friendlySweepGasMessage(address)]);
+  });
+
+  it("returns the friendly gas error as the only JSON value", async () => {
+    const home = await initializedHome("vapi-cli-sweep-gas-json-");
+    const address = (
+      JSON.parse(await readFile(walletKeystore(home), "utf8")) as { address: string }
+    ).address;
+    const captured = captureIo();
+
+    expect(
+      await runCli(["sweep", explicit, "--network", BASE_MAINNET_CAIP2, "--json"], captured.io, {
+        sweepBack: failingGasSweep(),
+      }),
+    ).toBe(1);
+
+    expect(captured.stderr).toEqual([]);
+    expect(JSON.parse(captured.stdout[0]!)).toEqual({
+      error: friendlySweepGasMessage(address),
+      exitCode: 1,
+    });
+  });
+
+  it("surfaces a gas error when every configured network fails", async () => {
+    const home = await initializedHome("vapi-cli-sweep-gas-all-");
+    const address = (
+      JSON.parse(await readFile(walletKeystore(home), "utf8")) as { address: string }
+    ).address;
+    delete process.env.ARC_RPC_URL;
+    expect(await runCli(["accounts", "--enable", "arc", "--json"], captureIo().io)).toBe(0);
+    const captured = captureIo();
+    const sweepBack = vi.fn<NonNullable<CliDependencies["sweepBack"]>>(
+      async ({ account, network }) => {
+        if (network === BASE_MAINNET_CAIP2) {
+          throw new SweepGasError(account.address, new Error("insufficient funds"));
+        }
+        throw new Error("temporary RPC failure");
+      },
+    );
+
+    expect(await runCli(["sweep", explicit], captured.io, { sweepBack })).toBe(1);
+
+    expect(captured.stderr).toEqual([friendlySweepGasMessage(address)]);
+  });
 });
 
 /**
@@ -1653,4 +1714,17 @@ function successfulSweep() {
     amountAtomic: "1000000",
     transaction: "0x1234",
   }));
+}
+
+function failingGasSweep() {
+  return vi.fn<NonNullable<CliDependencies["sweepBack"]>>(async ({ account }) => {
+    throw new SweepGasError(
+      account.address,
+      new Error("insufficient funds for gas * price + value"),
+    );
+  });
+}
+
+function friendlySweepGasMessage(address: string): string {
+  return `This wallet has no ETH on Base to pay the gas for the sweep. Send a little ETH on Base (a few cents) to ${address}, then run vapi sweep again.`;
 }

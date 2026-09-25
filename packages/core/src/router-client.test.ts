@@ -6,12 +6,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getAddress, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
-import { agentSecretAccounts, saveAgentLink, type AgentTokens } from "./agent-link.js";
+import {
+  AGENT_LINK_REVOKED_MESSAGE,
+  agentSecretAccounts,
+  saveAgentLink,
+  type AgentTokens,
+} from "./agent-link.js";
 import { readAuditLog } from "./audit.js";
 import { DEFAULT_SPEND_CAPS, getDefaultConfig } from "./config.js";
 import { NETWORKS } from "./networks.js";
 import {
   DEFAULT_ROUTER_BASE_URL,
+  ROUTER_KEY_REVOKED_MESSAGE,
   RouterClientError,
   buyRouterBalance,
   listRouterModels,
@@ -577,14 +583,37 @@ describe("routerChat", () => {
   });
 
   it("maps a revoked key response to no_router_key", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(async () => new Response("revoked", { status: 401 }));
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/agents/self/router") return Response.json(usageResponse());
+      return new Response("revoked", { status: 401 });
+    });
 
     await expect(
       routerChat(await linkedDeps(fetchImpl), { model: "provider/model", messages: [] }),
     ).rejects.toMatchObject({
       code: "no_router_key",
       status: 401,
-      message: "The Router key was revoked. Run vapi router key --rotate.",
+      message: ROUTER_KEY_REVOKED_MESSAGE,
+    });
+  });
+
+  it("maps a revoked agent link before reporting the Router key as rejected", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.host === "router.example") return new Response("revoked", { status: 401 });
+      if (url.pathname === "/api/agents/self/router") return new Response(null, { status: 401 });
+      if (url.pathname === "/oauth/token") {
+        return Response.json({ error: "invalid_grant" }, { status: 400 });
+      }
+      throw new Error(`Unexpected test URL ${url.origin}${url.pathname}`);
+    });
+
+    await expect(
+      routerChat(await linkedDeps(fetchImpl), { model: "provider/model", messages: [] }),
+    ).rejects.toMatchObject({
+      code: "not_linked",
+      message: AGENT_LINK_REVOKED_MESSAGE,
     });
   });
 
@@ -655,6 +684,30 @@ describe("routerChat", () => {
 });
 
 describe("buyRouterBalance", () => {
+  it("maps a revoked agent link when the console rejects a balance purchase", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname === "/api/router/top-up/1") {
+        return new Response("revoked", { status: 401 });
+      }
+      if (url.pathname === "/api/agents/self/router") {
+        return new Response(null, { status: 401 });
+      }
+      if (url.pathname === "/oauth/token") {
+        return Response.json({ error: "invalid_grant" }, { status: 400 });
+      }
+      throw new Error(`Unexpected test URL ${url.origin}${url.pathname}`);
+    });
+    const deps = await linkedDeps(fetchImpl);
+
+    await expect(
+      buyRouterBalance({ ...deps, ...refillOptions(deps.wallets) }, 1),
+    ).rejects.toMatchObject({
+      code: "not_linked",
+      message: AGENT_LINK_REVOKED_MESSAGE,
+    });
+  });
+
   it("never combines an access token with a different link generation's API base", async () => {
     const mixedRequests: Array<{ url: string; authorization: string | null }> = [];
     const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
