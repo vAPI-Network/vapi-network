@@ -483,15 +483,28 @@ describe("receipts and stats per wallet", () => {
       (JSON.parse(all.stdout[0]!) as Array<{ id: string }>).map((receipt) => receipt.id),
     ).toEqual(["main-call", "agent-call"]);
 
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () =>
+      Response.json({
+        routedThroughVapi: { usd24h: "12.5", usd30d: "1234.567891", txCount: 42 },
+      }),
+    );
     const stats = captureIo();
-    expect(await runCli(["stats", "--json"], stats.io, AGENT)).toBe(0);
+    expect(await runCli(["stats", "--json"], stats.io, { ...AGENT, fetchImpl })).toBe(0);
     expect(JSON.parse(stats.stdout[0]!)).toMatchObject({
       wallet: "main",
       totals: { calls: 1, spendUsd: "0.0025" },
+      network: {
+        routedThroughVapi: { usd24h: "12.5", usd30d: "1234.567891", txCount: 42 },
+      },
     });
 
     const allStats = captureIo();
-    expect(await runCli(["stats", "--all-wallets", "--json"], allStats.io, AGENT)).toBe(0);
+    expect(
+      await runCli(["stats", "--all-wallets", "--json"], allStats.io, {
+        ...AGENT,
+        fetchImpl,
+      }),
+    ).toBe(0);
     expect(JSON.parse(allStats.stdout[0]!)).toMatchObject({ totals: { calls: 2 } });
   });
 

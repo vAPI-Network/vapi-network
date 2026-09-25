@@ -931,8 +931,11 @@ describe("local metrics commands", () => {
       paths.searches,
     );
 
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json({}));
     const statsOutput = captureIo();
-    expect(await runCli(["stats", "--range", "24h", "--json"], statsOutput.io)).toBe(0);
+    expect(await runCli(["stats", "--range", "24h", "--json"], statsOutput.io, { fetchImpl })).toBe(
+      0,
+    );
     expect(JSON.parse(statsOutput.stdout[0]!)).toMatchObject({
       range: "24h",
       totals: { spendUsd: "0.0025", calls: 1, uniqueApis: 1, policyDeclines: 0 },
@@ -947,6 +950,70 @@ describe("local metrics commands", () => {
     expect(csvOutput.stdout[0]).toContain("id,timestamp,outcome,resourceUrl");
     expect(csvOutput.stdout[0]).toContain("paid-weather");
     expect(csvOutput.stdout[0]).toContain("0.0025");
+  });
+
+  it("adds routed-through-vAPI network stats to text and JSON output", async () => {
+    await initializedHome("vapi-cli-network-stats-");
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () =>
+      Response.json({
+        routedThroughVapi: { usd24h: "12.5", usd30d: "1234.567891", txCount: 42 },
+      }),
+    );
+
+    const textOutput = captureIo();
+    expect(await runCli(["stats"], textOutput.io, { fetchImpl })).toBe(0);
+    const text = textOutput.stdout.join("\n");
+    expect(text).toContain("NETWORK (all vAPI clients)\tVALUE");
+    expect(text).toContain("Routed through vAPI (24h, USD)\t12.5");
+    expect(text).toContain("Routed through vAPI (30d, USD)\t1234.567891");
+    expect(text).toContain("Routed through vAPI (30d, tx)\t42");
+
+    const jsonOutput = captureIo();
+    expect(await runCli(["stats", "--json"], jsonOutput.io, { fetchImpl })).toBe(0);
+    expect(JSON.parse(jsonOutput.stdout[0]!)).toMatchObject({
+      network: {
+        routedThroughVapi: { usd24h: "12.5", usd30d: "1234.567891", txCount: 42 },
+      },
+    });
+    const requestedUrl = new URL(String(fetchImpl.mock.calls[0]![0]));
+    expect(requestedUrl.pathname.endsWith("/api/call/stats")).toBe(true);
+    expect(requestedUrl.searchParams.get("range")).toBe("30d");
+  });
+
+  it("keeps local stats successful and silent when network stats are unavailable", async () => {
+    const cases: Array<[string, typeof fetch]> = [
+      ["fetch throws", vi.fn<typeof fetch>().mockRejectedValue(new Error("offline"))],
+      [
+        "fetch returns 500",
+        vi.fn<typeof fetch>().mockResolvedValue(new Response("", { status: 500 })),
+      ],
+      [
+        "body is invalid JSON",
+        vi.fn<typeof fetch>().mockResolvedValue(new Response("not-json", { status: 200 })),
+      ],
+      [
+        "body omits routedThroughVapi",
+        vi.fn<typeof fetch>().mockResolvedValue(Response.json({ other: true })),
+      ],
+      [
+        "body has malformed fields",
+        vi.fn<typeof fetch>().mockResolvedValue(
+          Response.json({
+            routedThroughVapi: { usd24h: "12.1234567", usd30d: "1", txCount: -1 },
+          }),
+        ),
+      ],
+    ];
+
+    for (const [name, fetchImpl] of cases) {
+      await initializedHome(`vapi-cli-network-stats-${name.replaceAll(" ", "-")}-`);
+      const output = captureIo();
+
+      expect(await runCli(["stats", "--json"], output.io, { fetchImpl }), name).toBe(0);
+      expect(output.stdout[0]).not.toContain("NETWORK");
+      expect(JSON.parse(output.stdout[0]!).network).toBeNull();
+      expect(output.stderr).toEqual([]);
+    }
   });
 });
 
