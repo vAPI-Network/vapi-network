@@ -223,6 +223,45 @@ describe("Agent Cash listing inspection", () => {
     expect(malformed.conformance).toEqual(conformance);
   });
 
+  it("carries identity when present and omits it when absent", async () => {
+    const identity = { erc8004Id: "42", reputation: { score: 4.567, count: 1 } };
+    const respondWith = (overrides: Record<string, unknown>) =>
+      vi.fn<typeof fetch>().mockResolvedValue(
+        Response.json({
+          services: [
+            {
+              id: "decodepaymentauthorization",
+              name: "Decode Payment Authorization",
+              description: "Decode an x402 payment authorization.",
+              category: "crypto",
+              tier: "verified",
+              verified: true,
+              wrapped: false,
+              price: "$0.005",
+              networks: ["eip155:8453"],
+              ...overrides,
+              endpoints: [
+                {
+                  name: "decode",
+                  method: "POST",
+                  url: "https://decode.example/decode",
+                  price: "$0.005",
+                  description: "Decode an authorization payload.",
+                },
+              ],
+            },
+          ],
+        }),
+      );
+
+    await expect(
+      inspectService({ id: "decodepaymentauthorization" }, config, respondWith({ identity })),
+    ).resolves.toMatchObject({ identity });
+    await expect(
+      inspectService({ id: "decodepaymentauthorization" }, config, respondWith({})),
+    ).resolves.not.toHaveProperty("identity");
+  });
+
   it("reports an unknown listing id without calling a provider endpoint", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (request) =>
       new URL(request instanceof Request ? request.url : request).pathname.endsWith(

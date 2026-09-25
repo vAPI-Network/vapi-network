@@ -234,11 +234,25 @@ describe("vapi whoami and logout", () => {
     expectNoSecrets(allOutput(captured));
   });
 
-  it("reports an unlinked wallet without unlocking it", async () => {
+  it("reports an unlinked wallet and its identity without unlocking it", async () => {
     await initializedHome();
     delete process.env.VAPI_KEYSTORE_PASSWORD;
     const captured = captureIo();
-    const fetchImpl = vi.fn<typeof fetch>();
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.startsWith("/api/call/identity/")) {
+        return Response.json({
+          wallet: url.pathname.split("/").at(-1),
+          chain: "eip155:8453",
+          identity: {
+            erc8004Id: "42",
+            agentCount: 1,
+            registry: "0xregistry",
+          },
+        });
+      }
+      throw new Error(`Unexpected test URL ${url.pathname}`);
+    });
 
     expect(
       await runCli(["whoami", "--wallet", "researcher"], captured.io, {
@@ -248,8 +262,10 @@ describe("vapi whoami and logout", () => {
         fetchImpl,
       }),
     ).toBe(0);
-    expect(captured.stdout.join("\n")).toContain("Not linked. Run vapi login.");
-    expect(fetchImpl).not.toHaveBeenCalled();
+    const text = captured.stdout.join("\n");
+    expect(text).toContain("Not linked. Run vapi login.");
+    expect(text).toContain("On-chain identity: ERC-8004 agent #42 (Base)");
+    expect(fetchImpl).toHaveBeenCalledOnce();
     expectNoSecrets(allOutput(captured));
   });
 
@@ -264,7 +280,22 @@ describe("vapi whoami and logout", () => {
       }),
     ).toBe(0);
     delete process.env.VAPI_KEYSTORE_PASSWORD;
-    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 200 }));
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.startsWith("/api/call/identity/")) {
+        return Response.json({
+          wallet: url.pathname.split("/").at(-1),
+          chain: "eip155:8453",
+          identity: {
+            erc8004Id: "42",
+            agentCount: 1,
+            registry: "0xregistry",
+            reputation: { score: 4.5, count: 3 },
+          },
+        });
+      }
+      return new Response(null, { status: 200 });
+    });
     const captured = captureIo();
 
     expect(
@@ -282,7 +313,9 @@ describe("vapi whoami and logout", () => {
     expect(text).toContain("Permissions: mcp:call router.use");
     expect(text).toContain("Router key: stored");
     expect(text).toContain("Status: active");
-    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(text).toContain("On-chain identity: ERC-8004 agent #42 (Base)");
+    expect(text).toContain("Reputation: 4.5 (3 reviews)");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(fetchImpl.mock.calls[0]?.[0]).toBe("https://api.vapinetwork.ai/api/agents/self");
     expect(fetchImpl.mock.calls[0]?.[1]?.method).toBe("GET");
     expectNoSecrets(allOutput(captured));
@@ -306,10 +339,16 @@ describe("vapi whoami and logout", () => {
       linkedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/u),
       routerKey: "stored",
       status: "active",
+      identity: {
+        erc8004Id: "42",
+        agentCount: 1,
+        registry: "0xregistry",
+        reputation: { score: 4.5, count: 3 },
+      },
     });
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(fetchImpl.mock.calls[1]?.[0]).toBe("https://api.vapinetwork.ai/api/agents/self");
-    expect(fetchImpl.mock.calls[1]?.[1]?.method).toBe("GET");
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(fetchImpl.mock.calls[2]?.[0]).toBe("https://api.vapinetwork.ai/api/agents/self");
+    expect(fetchImpl.mock.calls[2]?.[1]?.method).toBe("GET");
     expectNoSecrets(allOutput(json));
   });
 
@@ -360,8 +399,11 @@ describe("vapi whoami and logout", () => {
       }),
     ).toBe(0);
     expect(JSON.parse(json.stdout[0]!)).toMatchObject({ status: "revoked" });
-    expect(fetchImpl.mock.calls[2]?.[0]).toBe("https://api.vapinetwork.ai/api/agents/self");
-    expect(fetchImpl.mock.calls[2]?.[1]?.method).toBe("GET");
+    expect(
+      fetchImpl.mock.calls.filter(
+        ([input]) => String(input) === "https://api.vapinetwork.ai/api/agents/self",
+      ),
+    ).toHaveLength(2);
     expectNoSecrets(allOutput(json));
   });
 
@@ -404,10 +446,105 @@ describe("vapi whoami and logout", () => {
       }),
     ).toBe(0);
     expect(JSON.parse(json.stdout[0]!)).toMatchObject({ status: "unknown" });
-    expect(fetchImpl.mock.calls[1]?.[0]).toBe("https://api.vapinetwork.ai/api/agents/self");
-    expect(fetchImpl.mock.calls[1]?.[1]?.method).toBe("GET");
+    expect(
+      fetchImpl.mock.calls.filter(
+        ([input]) => String(input) === "https://api.vapinetwork.ai/api/agents/self",
+      ),
+    ).toHaveLength(2);
     expectNoSecrets(allOutput(json));
   });
+
+  it("prints not registered and carries a null identity in JSON", async () => {
+    await initializedHome();
+    const entries: Record<string, string> = {};
+    const store = secretStoreStub(entries);
+    expect(
+      await runCli(["login", "--wallet", "researcher", "--no-browser"], captureIo().io, {
+        ...linkDependencies(),
+        secretStore: store,
+      }),
+    ).toBe(0);
+    delete process.env.VAPI_KEYSTORE_PASSWORD;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.startsWith("/api/call/identity/")) {
+        return Response.json({ wallet: "researcher", chain: "eip155:8453", identity: null });
+      }
+      return new Response(null, { status: 200 });
+    });
+
+    const captured = captureIo();
+    expect(
+      await runCli(["whoami", "--wallet", "researcher"], captured.io, {
+        interactive: false,
+        env: {},
+        secretStore: store,
+        fetchImpl,
+      }),
+    ).toBe(0);
+    expect(captured.stdout.join("\n")).toContain("On-chain identity: not registered");
+
+    const json = captureIo();
+    expect(
+      await runCli(["whoami", "--wallet", "researcher", "--json"], json.io, {
+        interactive: false,
+        env: {},
+        secretStore: store,
+        fetchImpl,
+      }),
+    ).toBe(0);
+    expect(JSON.parse(json.stdout[0]!)).toMatchObject({ linked: true, identity: null });
+    expectNoSecrets(allOutput(json));
+  });
+
+  it.each(["HTTP 400", "network failure"] as const)(
+    "keeps whoami successful when identity lookup has a %s",
+    async (failure) => {
+      await initializedHome();
+      const entries: Record<string, string> = {};
+      const store = secretStoreStub(entries);
+      expect(
+        await runCli(["login", "--wallet", "researcher", "--no-browser"], captureIo().io, {
+          ...linkDependencies(),
+          secretStore: store,
+        }),
+      ).toBe(0);
+      delete process.env.VAPI_KEYSTORE_PASSWORD;
+      const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname.startsWith("/api/call/identity/")) {
+          if (failure === "network failure") throw new TypeError("identity network failure");
+          return new Response(null, { status: 400 });
+        }
+        return new Response(null, { status: 200 });
+      });
+
+      const captured = captureIo();
+      expect(
+        await runCli(["whoami", "--wallet", "researcher"], captured.io, {
+          interactive: false,
+          env: {},
+          secretStore: store,
+          fetchImpl,
+        }),
+      ).toBe(0);
+      const text = captured.stdout.join("\n");
+      expect(text).toContain("Status: active");
+      expect(text).not.toContain("On-chain identity");
+
+      const json = captureIo();
+      expect(
+        await runCli(["whoami", "--wallet", "researcher", "--json"], json.io, {
+          interactive: false,
+          env: {},
+          secretStore: store,
+          fetchImpl,
+        }),
+      ).toBe(0);
+      expect(JSON.parse(json.stdout[0]!)).not.toHaveProperty("identity");
+      expectNoSecrets(allOutput(json));
+    },
+  );
 
   it("reports an unknown status without exposing a network error", async () => {
     await initializedHome();

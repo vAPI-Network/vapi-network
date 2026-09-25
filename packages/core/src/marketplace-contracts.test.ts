@@ -115,6 +115,42 @@ describe("marketplace discovery wire contract", () => {
     }
   });
 
+  it("carries ERC-8004 identity on hits and service records, tolerating malformed fields", () => {
+    const page = fixture as { items: Record<string, unknown>[] };
+    const identity = { erc8004Id: "42", reputation: { score: 4.567, count: 1 } };
+    const parsed = marketplaceDiscoveryPageSchema.parse({
+      ...page,
+      items: page.items.map((item, index) =>
+        index === 0 || index === 2 ? { ...item, identity } : item,
+      ),
+    });
+
+    expect(parsed.items[0]?.identity).toEqual(identity);
+    expect(parsed.items[2]?.identity).toEqual(identity);
+
+    for (const malformed of [42, { erc8004Id: "" }, null]) {
+      const malformedPage = marketplaceDiscoveryPageSchema.parse({
+        ...page,
+        items: page.items.map((item, index) =>
+          index === 0 || index === 2 ? { ...item, identity: malformed } : item,
+        ),
+      });
+      expect(malformedPage.items[0]?.identity).toBeUndefined();
+      expect(malformedPage.items[2]?.identity).toBeUndefined();
+    }
+
+    const malformedReputation = marketplaceDiscoveryPageSchema.parse({
+      ...page,
+      items: page.items.map((item, index) =>
+        index === 0 || index === 2
+          ? { ...item, identity: { erc8004Id: "42", reputation: { score: "4.5", count: -1 } } }
+          : item,
+      ),
+    });
+    expect(malformedReputation.items[0]?.identity).toEqual({ erc8004Id: "42" });
+    expect(malformedReputation.items[2]?.identity).toEqual({ erc8004Id: "42" });
+  });
+
   it("tolerates additive registry fields and passes them through untouched", () => {
     const page = fixture as { items: Record<string, unknown>[] };
     const parsed = marketplaceDiscoveryPageSchema.parse({

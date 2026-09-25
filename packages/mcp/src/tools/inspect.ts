@@ -4,6 +4,7 @@ import {
   type ListingConformance,
   type ListingFee,
   type ListingGroup,
+  type ListingIdentity,
   type ListingLiveness,
   type ListingVerification,
   type MarketplaceHit,
@@ -45,6 +46,8 @@ export type InspectToolResult = Omit<
   liveness?: ListingLiveness;
   /** How closely the listing's 402 follows its declared x402 version. */
   conformance?: ListingConformance;
+  /** ERC-8004 agent identity on Base, when the registry has read one. */
+  identity?: ListingIdentity;
   payment: DiscoveryEndpoint["payment"] | null;
 };
 
@@ -109,13 +112,15 @@ function inspectIndexedHit(hit: Extract<MarketplaceHit, { kind: "api"; provenanc
   } satisfies InspectToolResult;
 }
 
-/** The registry's liveness and conformance record, carried only when present. */
+/** The registry's liveness, conformance, and identity records, when present. */
 function healthOf(listing: {
   liveness?: ListingLiveness | undefined;
   conformance?: ListingConformance | undefined;
-}): Pick<InspectToolResult, "liveness" | "conformance"> {
+  identity?: ListingIdentity | undefined;
+}): Pick<InspectToolResult, "liveness" | "conformance" | "identity"> {
   return {
     ...(listing.liveness === undefined ? {} : { liveness: listing.liveness }),
     ...(listing.conformance === undefined ? {} : { conformance: listing.conformance }),
+    ...(listing.identity === undefined ? {} : { identity: listing.identity }),
   };
 }

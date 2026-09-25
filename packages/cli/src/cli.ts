@@ -112,6 +112,7 @@ import {
 import { detectColorLevel, renderBanner } from "./brand.js";
 import { checkX402, formatCheckReport } from "./check.js";
 import { agentCommand, type AgentCommandDependencies } from "./agent.js";
+import { formatIdentityLines } from "./identity.js";
 import { loginCommand, logoutCommand, whoamiCommand } from "./login.js";
 import { routerCommand } from "./router.js";
 import { stakeCommand } from "./stake.js";
@@ -3299,7 +3300,7 @@ function formatSearch(page: Awaited<ReturnType<typeof searchMarketplace>>): stri
  * `inspect` answers with the whole record, so the disclosures a human decides
  * on — how far vAPI reviewed this listing, what network fee is already inside
  * the price, and how the listing has behaved lately — are said in words above
- * it. Liveness and conformance are said only when the registry sent them.
+ * it. Liveness, conformance, and identity are said only when the registry sent them.
  */
 function formatInspect(result: Awaited<ReturnType<typeof inspectService>>): string {
   return [
@@ -3310,6 +3311,7 @@ function formatInspect(result: Awaited<ReturnType<typeof inspectService>>): stri
     ...(result.fee ? [`Fee: ${result.fee.label}`] : []),
     ...(result.liveness ? [formatLiveness(result.liveness)] : []),
     ...(result.conformance ? [formatConformance(result.conformance)] : []),
+    ...(result.identity ? formatIdentityLines(result.identity) : []),
     JSON.stringify(result, null, 2),
   ].join("\n");
 }

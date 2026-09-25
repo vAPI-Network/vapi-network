@@ -7,6 +7,14 @@ scoped packages. The packages share one version and are released together.
 
 ### Added
 
+- `vapi inspect` prints `On-chain identity:` and `Reputation:` lines when the
+  registry reports an ERC-8004 agent for the listing; `identity` reaches
+  `--json` and `call.inspect`. The client reads it from the registry and makes
+  no chain call.
+- `vapi whoami` prints `On-chain identity:` for the wallet: its ERC-8004 agent
+  on Base and reputation, or `not registered`, read from the vAPI API at
+  `/api/call/identity/<wallet>` with no chain call. `--json` carries `identity`;
+  a failed lookup prints nothing and does not change the exit code.
 - Every EVM and Solana x402 payment now carries the `builder-code` extension
   with the client code `vapi`. APIs that advertise `payment-identifier` receive
   one generated payment id, echoed with their extension metadata; receipts

@@ -16,6 +16,7 @@ import {
   listingConformanceSchema,
   listingFeeSchema,
   listingGroupSchema,
+  listingIdentitySchema,
   listingLivenessSchema,
   listingVerificationSchema,
   loadConfig,
@@ -150,6 +151,7 @@ const inspectToolResultSchema = z.object({
   verification: listingVerificationSchema,
   liveness: listingLivenessSchema.optional(),
   conformance: listingConformanceSchema.optional(),
+  identity: listingIdentitySchema.optional(),
   payment: z
     .object({
       scheme: z.literal("exact"),

@@ -108,6 +108,22 @@ export const listingConformanceSchema = z.looseObject({
 export type ListingConformance = z.infer<typeof listingConformanceSchema>;
 
 /**
+ * ERC-8004 agent identity on Base as the registry read it. This is newer than
+ * most registries, so a missing or malformed value reads as absent.
+ */
+export const listingIdentitySchema = z.looseObject({
+  erc8004Id: z.string().trim().min(1),
+  reputation: z
+    .looseObject({
+      score: z.number().finite(),
+      count: z.number().int().nonnegative(),
+    })
+    .optional()
+    .catch(undefined),
+});
+export type ListingIdentity = z.infer<typeof listingIdentitySchema>;
+
+/**
  * The disclosures the registry returns on every Call listing and discovery hit.
  * `liveness` and `conformance` are newer than most registries, so a missing or
  * malformed value reads as absent instead of failing the listing around it.
@@ -118,6 +134,7 @@ export const listingDisclosureShape = {
   verification: listingVerificationFieldSchema,
   liveness: listingLivenessSchema.optional().catch(undefined),
   conformance: listingConformanceSchema.optional().catch(undefined),
+  identity: listingIdentitySchema.optional().catch(undefined),
 } as const;
 
 export const marketplaceBadgeCodeSchema = z.enum([
