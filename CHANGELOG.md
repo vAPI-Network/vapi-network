@@ -5,8 +5,46 @@ scoped packages. The packages share one version and are released together.
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.5.0 (2026-09-25)
+
 ### Added
 
+- `vapi login`, `vapi logout` and `vapi whoami`: link a local agent wallet to
+  your vAPI account. The wallet signs a sign-in message, you approve the link
+  in the console with your own wallet (any provider) and set a daily vAPI
+  Router allowance, and the agent's tokens and Router key are stored in the OS
+  secret store under the wallet name, never in a file. `whoami` asks the
+  console whether the link is still active. Agents hold rights on your account,
+  never on your wallet; `vapi sweep` with no address sends funds back to the
+  linked owner.
+- `vapi router models`, `vapi router usage`, `vapi router chat` and
+  `vapi router key --rotate`: use vAPI Router from a linked wallet, paid from
+  the owner's daily Compute allowance. The Router key is sent only to the
+  Router host stored with the link and is printed only on a real terminal.
+- `vapi router buy <1|5|20|50>` buys prepaid Router balance with USDC over
+  x402 from the agent wallet, within its spend caps, and stores a balance key.
+  Chats use Compute first and the bought balance once Compute runs out;
+  `vapi router buy --auto <tier> --below <usd>` refills automatically, still
+  within the per-day cap. `vapi router usage` shows the balance.
+- `vapi stake status` shows the owner's stake and today's Compute; `vapi stake
+  open` opens the console's stake page. Staking itself stays in the console.
+- `vapi agent create`, `run`, `list`, `pause`, `resume` and `revoke`: a small
+  agent that runs on your own machine, thinks with vAPI Router and pays for
+  APIs on vAPI Call from its own capped wallet. Tool output reaches the model
+  only as untrusted data; it pays only verified listings it found in the same
+  run, asks above a price threshold, and stops when a settlement is uncertain,
+  a budget runs out, or after twelve steps. Every step is in the audit log.
+  `examples/agent-researcher.md` walks through a run.
+- MCP tools `auth.link` and `auth.status` (link from Claude, Cursor or Codex;
+  the owner still approves in the browser) and `router.models`, `router.usage`,
+  `router.chat` and `router.buy`. No tool ever returns a key.
+- `createVapiClient` in the `vapi-network` package: the same pieces in code,
+  including `router.openai()` for OpenAI-compatible frameworks and signing with
+  an injected account on a server.
+- `vapi publish` and `vapi claim` use the agent link when it carries
+  `call.publish` and no API key is set.
 - `vapi inspect` prints `On-chain identity:` and `Reputation:` lines when the
   registry reports an ERC-8004 agent for the listing; `identity` reaches
   `--json` and `call.inspect`. The client reads it from the registry and makes
@@ -47,6 +85,15 @@ scoped packages. The packages share one version and are released together.
 - `ARC_MAINNET_CAIP2_PLACEHOLDER` was replaced by `ARC_MAINNET_CAIP2`. The
   programmatic `getDefaultConfig` alias `arc` now means Arc mainnet; use
   `arc-testnet` for Arc testnet.
+
+### Fixed
+
+- The macOS Keychain stores values longer than 128 characters in parts (the
+  `security` tool silently truncates its prompt), so agent tokens survive a
+  restart. Short values are stored exactly as before.
+- After the owner revokes an agent, every router, agent and login command ends
+  in one sentence and exit code 1 instead of a stack trace. A sweep without ETH
+  for gas names the address to fund.
 
 ## 0.4.0
 
