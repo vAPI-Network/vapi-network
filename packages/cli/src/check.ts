@@ -38,6 +38,8 @@ export type CheckReport = {
   url: string;
   method: string;
   status: number;
+  /** Which payment protocol the 402 speaks; absent when the response is not a 402 or carries neither. */
+  transport?: "x402" | "mpp";
   /** The same record the registry keeps per listing; null when there is no offer to grade. */
   conformance: ListingConformance | null;
   /** Known x402 extensions advertised by the declared offer, in a stable order. */
@@ -98,6 +100,12 @@ type Offer = {
   header?: Record<string, unknown>;
   headerMalformed: boolean;
   body?: Record<string, unknown>;
+  mpp?: MppChallenge;
+};
+
+export type MppChallenge = {
+  intent?: string;
+  method?: string;
 };
 
 type Accept = Record<string, unknown>;
@@ -110,11 +118,13 @@ export async function checkX402(
   const rules = [statusRule(response)];
   let conformance: ListingConformance | null = null;
   let extensions: string[] = [];
+  let transport: CheckReport["transport"];
   if (response.status === 402) {
     const graded = gradeOffer(await readOffer(response));
     rules.push(...graded.rules);
     conformance = graded.conformance;
     extensions = graded.extensions;
+    transport = graded.transport;
   } else {
     void response.body?.cancel().catch(() => undefined);
   }
@@ -132,7 +142,8 @@ export async function checkX402(
       warn: rules.filter((rule) => rule.result === "warn").length,
       fail: rules.filter((rule) => rule.result === "fail").length,
     },
-  };
+    ...(transport === undefined ? {} : { transport }),
+  } satisfies CheckReport;
 }
 
 /** One line per rule, then the tally. */
@@ -201,18 +212,89 @@ async function readOffer(response: Response): Promise<Offer> {
   } catch {
     // A body that is not JSON carries no offer; the transport rule says so.
   }
-  return { ...(header ? { header } : {}), headerMalformed, ...(body ? { body } : {}) };
+  const mpp = parseMppChallenge(response.headers.get("www-authenticate"));
+  return {
+    ...(header ? { header } : {}),
+    headerMalformed,
+    ...(body ? { body } : {}),
+    ...(mpp ? { mpp } : {}),
+  };
+}
+
+/** Finds the MPP scheme and keeps only the challenge fields used in check output. */
+export function parseMppChallenge(headerValue: string | null): MppChallenge | undefined {
+  if (headerValue === null || headerValue.trim().length === 0) return undefined;
+  const paramsStart = findPaymentScheme(headerValue);
+  if (paramsStart === undefined) return undefined;
+  const segments = splitChallengeParams(headerValue.slice(paramsStart));
+  if (segments === undefined) return {};
+  const challenge: MppChallenge = {};
+  for (const segment of segments) {
+    const equals = segment.indexOf("=");
+    if (equals <= 0) continue;
+    const key = segment.slice(0, equals).trim().toLowerCase();
+    if (!/^[^\s=]+$/u.test(key)) continue;
+    let value = segment.slice(equals + 1).trim();
+    if (value.startsWith('"')) {
+      if (!value.endsWith('"') || value.length < 2) continue;
+      value = value.slice(1, -1);
+    }
+    if (value.length === 0) continue;
+    if (key === "intent") challenge.intent = value;
+    if (key === "method" && value.length <= 64 && !/\s/u.test(value)) {
+      challenge.method = value;
+    }
+  }
+  return challenge;
+}
+
+function findPaymentScheme(headerValue: string): number | undefined {
+  let quoted = false;
+  for (let index = 0; index < headerValue.length; index += 1) {
+    const character = headerValue[index];
+    if (character === '"' && headerValue[index - 1] !== "\\") quoted = !quoted;
+    if (quoted || (index !== 0 && character !== ",")) continue;
+    let start = index === 0 ? 0 : index + 1;
+    while (/\s/u.test(headerValue[start] ?? "")) start += 1;
+    if (headerValue.slice(start, start + 7).toLowerCase() !== "payment") continue;
+    const next = headerValue[start + 7];
+    if (next === undefined || next === "," || /\s/u.test(next)) return start + 7;
+  }
+  return undefined;
+}
+
+function splitChallengeParams(value: string): string[] | undefined {
+  const segments: string[] = [];
+  let start = 0;
+  let quoted = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (character === '"' && value[index - 1] !== "\\") quoted = !quoted;
+    if (character === "," && !quoted) {
+      segments.push(value.slice(start, index));
+      start = index + 1;
+    }
+  }
+  if (quoted) return undefined;
+  segments.push(value.slice(start));
+  return segments;
 }
 
 function gradeOffer(offer: Offer): {
   rules: CheckRule[];
   conformance: ListingConformance | null;
   extensions: string[];
+  transport?: CheckReport["transport"];
 } {
   const transport = transportRule(offer);
   const declared = offer.header ?? offer.body;
   if (declared === undefined || transport.offerTransport === undefined) {
-    return { rules: [transport.rule], conformance: null, extensions: [] };
+    return {
+      rules: [transport.rule],
+      conformance: null,
+      extensions: [],
+      ...(offer.mpp ? { transport: "mpp" } : {}),
+    };
   }
   const version =
     declared.x402Version === 1 || declared.x402Version === 2 ? declared.x402Version : null;
@@ -238,6 +320,7 @@ function gradeOffer(offer: Offer): {
       issues: [...new Set(offerRules.flatMap((graded) => graded.issues))],
     },
     extensions,
+    transport: "x402",
   };
 }
 
@@ -267,6 +350,9 @@ function transportRule(offer: Offer): {
   offerTransport?: ListingConformance["offerTransport"];
 } {
   const { header, body } = offer;
+  const mppSuffix = offer.mpp
+    ? " Also carries an MPP (Stripe/Tempo) challenge in WWW-Authenticate."
+    : "";
   if (header && body) {
     return header.x402Version === body.x402Version
       ? {
@@ -274,7 +360,7 @@ function transportRule(offer: Offer): {
           rule: rule(
             "transport",
             "pass",
-            "The offer is in the PAYMENT-REQUIRED header and the body.",
+            `The offer is in the PAYMENT-REQUIRED header and the body.${mppSuffix}`,
           ),
         }
       : {
@@ -282,7 +368,7 @@ function transportRule(offer: Offer): {
           rule: rule(
             "transport",
             "warn",
-            `The header declares x402 version ${String(header.x402Version)} and the body ${String(body.x402Version)}; clients will disagree on which to pay.`,
+            `The header declares x402 version ${String(header.x402Version)} and the body ${String(body.x402Version)}; clients will disagree on which to pay.${mppSuffix}`,
             ["offer_version_mismatch"],
           ),
         };
@@ -293,12 +379,31 @@ function transportRule(offer: Offer): {
       rule: rule(
         "transport",
         "warn",
-        "The offer is only in the PAYMENT-REQUIRED header; x402 v1 clients and several indexers read the JSON body.",
+        `The offer is only in the PAYMENT-REQUIRED header; x402 v1 clients and several indexers read the JSON body.${mppSuffix}`,
         ["offer_header_only"],
       ),
     };
   }
   if (!body) {
+    if (offer.mpp) {
+      const params = [
+        ...(offer.mpp.intent ? [`intent ${offer.mpp.intent}`] : []),
+        ...(offer.mpp.method ? [`method ${offer.mpp.method}`] : []),
+      ];
+      const detail = `MPP (Stripe/Tempo) challenge in WWW-Authenticate${
+        params.length === 0 ? "" : `, ${params.join(", ")}`
+      }. Known, not payable with vapi pay.${
+        offer.headerMalformed ? " The PAYMENT-REQUIRED header is not base64 JSON." : ""
+      }`;
+      return {
+        rule: rule(
+          "transport",
+          offer.headerMalformed ? "warn" : "pass",
+          detail,
+          offer.headerMalformed ? ["v2_header_malformed", "mpp"] : ["mpp"],
+        ),
+      };
+    }
     return {
       rule: rule(
         "transport",
@@ -314,7 +419,7 @@ function transportRule(offer: Offer): {
       rule: rule(
         "transport",
         "fail",
-        "The PAYMENT-REQUIRED header is not base64 JSON; a client that reads the header first fails before it reaches the body.",
+        `The PAYMENT-REQUIRED header is not base64 JSON; a client that reads the header first fails before it reaches the body.${mppSuffix}`,
         ["v2_header_malformed"],
       ),
     };
@@ -325,14 +430,18 @@ function transportRule(offer: Offer): {
       rule: rule(
         "transport",
         "warn",
-        "x402 v2 carries the offer in the PAYMENT-REQUIRED header, and this 402 sends none.",
+        `x402 v2 carries the offer in the PAYMENT-REQUIRED header, and this 402 sends none.${mppSuffix}`,
         ["v2_header_missing"],
       ),
     };
   }
   return {
     offerTransport: "body",
-    rule: rule("transport", "pass", "The offer is in the JSON body, where x402 v1 carries it."),
+    rule: rule(
+      "transport",
+      "pass",
+      `The offer is in the JSON body, where x402 v1 carries it.${mppSuffix}`,
+    ),
   };
 }
 

@@ -209,7 +209,7 @@ Every command that touches a wallet takes \`--wallet <name>\`, falls back to \`V
 
 \`vapi search\` answers with vAPI-verified listings plus the mirrored external catalogs. \`--include-unverified\` also returns self-listed APIs that passed vAPI's automated x402 probe but were never reviewed; every result is tagged \`[verified]\`, \`[requested]\`, \`[unverified]\` or \`[external]\`.
 
-\`vapi check <url>\` grades an x402 API's 402 without paying: status, transport, declared version and its required fields, the exact scheme, canonical USDC, payTo, maxTimeoutSeconds, advertised extensions, and the origin's /.well-known/x402. It looks for OpenAPI beside the checked path, at /openapi.json, then through same-origin service-desc links in /.well-known/api-catalog. No wallet, no payment, no registry call. It exits 1 when a rule fails.
+\`vapi check <url>\` grades an x402 API's 402 without paying: status, transport, declared version and its required fields, the exact scheme, canonical USDC, payTo, maxTimeoutSeconds, advertised extensions, and the origin's /.well-known/x402. It looks for OpenAPI beside the checked path, at /openapi.json, then through same-origin service-desc links in /.well-known/api-catalog. No wallet, no payment, no registry call. It exits 1 when a rule fails. A 402 that answers with Stripe/Tempo's MPP challenge (WWW-Authenticate: Payment) is recognised and reported as transport mpp; vapi pay cannot pay it.
 
 \`vapi pay --resume <receipt-id>\` answers the one question a lost response leaves: did that payment settle? It reads the signed authorization's state on-chain — settled, expired, or still pending — and never pays.
 
@@ -1648,17 +1648,81 @@ async function statsCommand(
     searches: await readSearchEvents(paths.searches),
     range,
   });
+  const network = await fetchNetworkStats(dependencies);
   if (target === undefined) {
-    output(io, json, stats, formatStats(stats));
+    output(io, json, { ...stats, network }, formatStats(stats, network));
     return;
   }
-  outputForWallet(
-    io,
-    json,
-    target,
-    stats as unknown as Record<string, unknown>,
-    formatStats(stats),
-  );
+  outputForWallet(io, json, target, { ...stats, network }, formatStats(stats, network));
+}
+
+const NETWORK_STATS_REQUEST_TIMEOUT_MS = 3_000;
+const DECIMAL_STATS_VALUE = /^\d+(\.\d{1,6})?$/u;
+
+type RoutedThroughVapiStats = {
+  usd24h: string;
+  usd30d: string;
+  txCount: number;
+};
+
+type NetworkStats = {
+  routedThroughVapi: RoutedThroughVapiStats;
+};
+
+async function fetchNetworkStats(dependencies: CliDependencies): Promise<NetworkStats | null> {
+  try {
+    const paths = getVapiPaths();
+    const config = await readConfig(paths.config, { stdout: () => {}, stderr: () => {} });
+    const baseUrl = registryBaseUrl(config);
+    const url = new URL("api/call/stats", baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+    url.searchParams.set("range", "30d");
+    const fetchImpl =
+      dependencies.fetchImpl ??
+      createPublicFetch({ allowPrivateNetwork: config.allowPrivateNetwork ?? false });
+    const signal = AbortSignal.timeout(NETWORK_STATS_REQUEST_TIMEOUT_MS);
+    const request = (async (): Promise<NetworkStats | null> => {
+      const response = await fetchImpl(url, { signal });
+      if (!response.ok) return null;
+      const body: unknown = await response.json();
+      if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
+      const routed = (body as { routedThroughVapi?: unknown }).routedThroughVapi;
+      if (routed === null || typeof routed !== "object" || Array.isArray(routed)) return null;
+      const values = routed as {
+        usd24h?: unknown;
+        usd30d?: unknown;
+        txCount?: unknown;
+      };
+      if (
+        typeof values.usd24h !== "string" ||
+        !DECIMAL_STATS_VALUE.test(values.usd24h) ||
+        typeof values.usd30d !== "string" ||
+        !DECIMAL_STATS_VALUE.test(values.usd30d) ||
+        typeof values.txCount !== "number" ||
+        !Number.isSafeInteger(values.txCount) ||
+        values.txCount < 0
+      ) {
+        return null;
+      }
+      return {
+        routedThroughVapi: {
+          usd24h: values.usd24h,
+          usd30d: values.usd30d,
+          txCount: values.txCount,
+        },
+      };
+    })();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timedOut = new Promise<null>((resolve) => {
+        timeout = setTimeout(() => resolve(null), NETWORK_STATS_REQUEST_TIMEOUT_MS);
+      });
+      return await Promise.race([request, timedOut]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+  } catch {
+    return null;
+  }
 }
 
 async function sweepCommand(
@@ -3511,7 +3575,10 @@ function formatReceipt(receipt: Awaited<ReturnType<typeof readReceipts>>[number]
   return `${receipt.timestamp}\t${status}\t${receipt.method ?? "GET"} ${receipt.resourceUrl}${explorerUrl ? ` (${explorerUrl})` : ""}`;
 }
 
-function formatStats(stats: ReturnType<typeof aggregateStats>): string {
+function formatStats(
+  stats: ReturnType<typeof aggregateStats>,
+  network: NetworkStats | null = null,
+): string {
   const lines = [
     `Metrics (${stats.range}, generated ${stats.generatedAt})`,
     "TOTALS\tVALUE",
@@ -3548,6 +3615,15 @@ function formatStats(stats: ReturnType<typeof aggregateStats>): string {
     ...Object.entries(stats.search.sources).map(
       ([source, value]) => `${source}\t${value.count}\t${formatLatency(value.p95Ms)}`,
     ),
+    ...(network === null
+      ? []
+      : [
+          "",
+          "NETWORK (all vAPI clients)\tVALUE",
+          `Routed through vAPI (24h, USD)\t${network.routedThroughVapi.usd24h}`,
+          `Routed through vAPI (30d, USD)\t${network.routedThroughVapi.usd30d}`,
+          `Routed through vAPI (30d, tx)\t${network.routedThroughVapi.txCount}`,
+        ]),
   ];
   return lines.join("\n");
 }
