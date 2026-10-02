@@ -1,0 +1,68 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.vAPI-Network/vapi-network",
+  "title": "vAPI Network",
+  "description": "vAPI Network: local, non-custodial MCP server to discover and pay x402 APIs in USDC on Base.",
+  "version": "0.8.0",
+  "websiteUrl": "https://vapinetwork.ai",
+  "repository": {
+    "url": "https://github.com/vAPI-Network/vapi-network",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "vapi-network",
+      "version": "0.8.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeHint": "npx",
+      "runtimeArguments": [
+        {
+          "type": "positional",
+          "value": "-y",
+          "isRequired": true
+        }
+      ],
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp",
+          "isRequired": true
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "VAPI_HOME",
+          "description": "Absolute path to local vAPI state. Defaults to .vapi under the user home directory.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "filepath"
+        },
+        {
+          "name": "VAPI_WALLET",
+          "description": "Initial local account name. Defaults to the account selected in wallets.json.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "VAPI_VAULT_PASSWORD",
+          "description": "Password for a protected local vault. Optional with an unlocked vault session; no vault needed for docs tools.",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "BASE_RPC_URL",
+          "description": "Override the Base RPC endpoint used by account and payment tools.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
