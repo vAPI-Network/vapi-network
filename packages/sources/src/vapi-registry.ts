@@ -1,0 +1,480 @@
+import {
+  marketplaceDiscoveryInputSchema,
+  marketplaceDiscoveryPageSchema,
+  appendSearchEvent,
+  createPublicFetch,
+  DEFAULT_REGISTRY_FALLBACKS,
+  DEFAULT_REGISTRY_URL,
+  DiscoveryCatalogError,
+  parseDiscovery,
+  type DiscoveryCatalog,
+  type DiscoveryEndpoint,
+  type Listing,
+  type ListingVerification,
+  type MarketplaceDiscoveryPage,
+  type MarketplaceHit,
+  type MarketplaceKind,
+  type ResolvedListing,
+  type Source,
+} from "@vapi-network/core";
+
+import { appendPath, type Fetch, type GuardedSourceOptions, sourceFetch } from "./common.js";
+
+export type MarketplaceSearchInput = {
+  query?: string;
+  kinds?: MarketplaceKind[];
+  network?: string;
+  limit?: number;
+  cursor?: string;
+  /**
+   * The registry's one trust switch. Left out or false, discovery answers with
+   * vAPI-verified listings plus the mirrored external catalogs; true also
+   * returns self-listed APIs that passed the automated x402 probe but were
+   * never reviewed.
+   */
+  includeUnverified?: boolean;
+};
+
+export type VapiRegistryConfig = Readonly<{
+  discoveryUrl: string;
+  marketplaceDiscoveryUrl: string;
+  registryFallbacks?: ReadonlyArray<
+    Readonly<{ discoveryUrl: string; marketplaceDiscoveryUrl: string }>
+  >;
+  allowPrivateNetwork?: boolean;
+}>;
+
+export type MarketplaceSearchOptions = Readonly<{
+  searchesPath?: string;
+  now?: Date;
+  nowMs?: () => number;
+  notice?: (message: string) => void;
+}>;
+
+export type VapiRegistrySourceOptions = GuardedSourceOptions &
+  Readonly<{
+    discoveryUrl?: string;
+  }>;
+
+/**
+ * Search the public marketplace while preserving its validation, filter, and
+ * ranking behavior from the original vAPI MCP adapter.
+ */
+export async function searchMarketplace(
+  input: MarketplaceSearchInput,
+  config: VapiRegistryConfig,
+  fetchImpl?: Fetch,
+  options: MarketplaceSearchOptions = {},
+): Promise<MarketplaceDiscoveryPage> {
+  const request =
+    fetchImpl ?? createPublicFetch({ allowPrivateNetwork: config.allowPrivateNetwork ?? false });
+  const normalized = marketplaceDiscoveryInputSchema.parse({
+    q: input.query,
+    kinds: input.kinds,
+    network: input.network,
+    limit: input.limit,
+    cursor: input.cursor,
+    includeUnverified: input.includeUnverified,
+  });
+  const startedAt = options.now ?? new Date();
+  const attempts: SearchAttempt[] = [];
+  let mergedCount = 0;
+  try {
+    const response = await registryRequest({
+      kind: "marketplace",
+      config,
+      request,
+      attempts,
+      nowMs: options.nowMs,
+      notice: options.notice,
+      configureUrl(url) {
+        if (normalized.q !== undefined) url.searchParams.set("q", normalized.q);
+        for (const kind of normalized.kinds ?? []) url.searchParams.append("kinds", kind);
+        if (normalized.network !== undefined) url.searchParams.set("network", normalized.network);
+        if (normalized.limit !== undefined) url.searchParams.set("limit", String(normalized.limit));
+        if (normalized.cursor !== undefined) url.searchParams.set("cursor", normalized.cursor);
+        // Only the opt-in is worth sending: `false` is the registry default, and
+        // an explicit `includeUnverified=false` would only make cached URLs and
+        // search logs harder to read.
+        if (normalized.includeUnverified === true) {
+          url.searchParams.set("includeUnverified", "true");
+        }
+      },
+    });
+    const page = marketplaceDiscoveryPageSchema.parse(await response.json());
+    mergedCount = page.items.length;
+    const attempt = attempts.at(-1);
+    if (attempt) attempt.count = mergedCount;
+    return page;
+  } finally {
+    if (options.searchesPath) {
+      await appendSearchEvent(
+        {
+          timestamp: startedAt.toISOString(),
+          query: normalized.q ?? "",
+          sources: attempts,
+          mergedCount,
+        },
+        options.searchesPath,
+      ).catch(() => undefined);
+    }
+  }
+}
+
+/** Resolve a registry ref through the executable Calls compatibility API. */
+export async function resolveServiceEndpoint(
+  id: string,
+  config: VapiRegistryConfig,
+  fetchImpl?: Fetch,
+  endpointName?: string,
+): Promise<DiscoveryEndpoint> {
+  return (await resolveServiceListing(id, config, fetchImpl, endpointName)).endpoint;
+}
+
+/**
+ * Resolve a registry ref to its endpoint together with the service record, for
+ * callers that also need the listing-level disclosures (`group`, `fee`).
+ */
+export async function resolveServiceListing(
+  id: string,
+  config: VapiRegistryConfig,
+  fetchImpl?: Fetch,
+  endpointName?: string,
+): Promise<ResolvedListing> {
+  const request =
+    fetchImpl ?? createPublicFetch({ allowPrivateNetwork: config.allowPrivateNetwork ?? false });
+  return (await fetchCallsDiscovery(id, config, request)).resolveListing(id, endpointName);
+}
+
+/**
+ * Resolve one exact API ref from marketplace discovery across fresh CLI
+ * processes. Resolving a ref the caller already holds is not a browse, so the
+ * verification tier must not hide it: the answer carries the tier and the
+ * interfaces disclose it instead.
+ */
+export async function findMarketplaceApiByRef(
+  ref: string,
+  config: VapiRegistryConfig,
+  fetchImpl?: Fetch,
+): Promise<MarketplaceHit | null> {
+  const page = await searchMarketplace(
+    { query: ref, kinds: ["api"], limit: 50, includeUnverified: true },
+    config,
+    fetchImpl,
+  );
+  const matches = page.items.filter((item) => item.kind === "api" && item.ref === ref);
+  if (matches.length > 1) {
+    throw new Error(`Marketplace ref ${JSON.stringify(ref)} is ambiguous.`);
+  }
+  return matches[0] ?? null;
+}
+
+export function vapiRegistrySource(
+  baseUrl: string,
+  options: VapiRegistrySourceOptions = {},
+): Source {
+  const config = registryConfig(baseUrl, options.discoveryUrl, options.allowPrivateNetwork);
+  const fetchImpl = sourceFetch(options);
+
+  return {
+    id: "vapi",
+    async search(query, searchOptions) {
+      const page = await searchMarketplace(
+        {
+          query,
+          kinds: ["api"],
+          ...(searchOptions?.includeUnverified === undefined
+            ? {}
+            : { includeUnverified: searchOptions.includeUnverified }),
+        },
+        config,
+        fetchImpl,
+      );
+      const mapped = await Promise.all(
+        page.items.map(async (hit): Promise<Listing | null> => {
+          if (hit.kind !== "api") return null;
+          if (hit.provenance === "indexed") {
+            return mirroredListing(hit, config);
+          }
+
+          try {
+            const endpoint = await resolveServiceEndpoint(hit.ref, config, fetchImpl);
+            return endpointListing(
+              endpoint,
+              hit.ref,
+              config,
+              {
+                card: hit.card,
+                action: hit.action,
+                execution: hit.execution,
+                registryProvenance: hit.provenance,
+              },
+              hit.verification,
+            );
+          } catch (error) {
+            // Marketplace cards deliberately omit executable targets. A stale or
+            // ambiguous compatibility record cannot form a valid core Listing.
+            if (!(error instanceof DiscoveryCatalogError)) throw error;
+            return null;
+          }
+        }),
+      );
+      return mapped.filter((listing): listing is Listing => listing !== null);
+    },
+    async inspect(ref) {
+      try {
+        const { endpoint, service } = await resolveServiceListing(ref, config, fetchImpl);
+        return endpointListing(endpoint, ref, config, {}, service.verification);
+      } catch (resolutionError) {
+        if (
+          !(resolutionError instanceof DiscoveryCatalogError) ||
+          resolutionError.code !== "service_not_found"
+        ) {
+          throw resolutionError;
+        }
+        // An exact ref, so the trust switch must not hide the answer.
+        const page = await searchMarketplace(
+          { query: ref, kinds: ["api"], includeUnverified: true },
+          config,
+          fetchImpl,
+        );
+        const hit = page.items.find((item) => item.kind === "api" && item.ref === ref);
+        if (hit?.kind === "api" && hit.provenance === "indexed") {
+          return mirroredListing(hit, config);
+        }
+        if (page.items.some((item) => item.kind === "api" && item.ref === ref)) {
+          throw resolutionError;
+        }
+        return null;
+      }
+    },
+  };
+}
+
+async function fetchCallsDiscovery(
+  query: string,
+  config: VapiRegistryConfig,
+  fetchImpl: Fetch,
+): Promise<DiscoveryCatalog> {
+  const response = await registryRequest({
+    kind: "services",
+    config,
+    request: fetchImpl,
+    configureUrl(url) {
+      url.searchParams.set("q", query);
+      // Same reason as `findMarketplaceApiByRef`: this resolves one ref the
+      // caller already chose, so an unverified listing must still resolve. Its
+      // tier travels with it and `inspect`/`pay` say so.
+      url.searchParams.set("includeUnverified", "true");
+    },
+  });
+  return parseDiscovery(await response.json());
+}
+
+/**
+ * A row mirrored from an external catalog. vAPI reviewed nothing it merely
+ * mirrored, so its verification is always `none`; the field is carried through
+ * from the registry rather than assumed here.
+ */
+function mirroredListing(
+  hit: Extract<MarketplaceHit, { kind: "api"; provenance: "indexed" }>,
+  config: VapiRegistryConfig,
+): Listing {
+  return {
+    resource: { url: hit.execution.url, description: hit.card.summary },
+    name: hit.card.title,
+    description: hit.card.summary,
+    ...(hit.execution.method === null ? {} : { method: hit.execution.method }),
+    network: hit.execution.network,
+    ...optionalPrice(hit.card.facts),
+    verification: hit.verification,
+    metadata: { card: hit.card, action: hit.action, execution: hit.execution },
+    provenance: [{ source: "vapi", sourceUrl: config.marketplaceDiscoveryUrl, ref: hit.ref }],
+  };
+}
+
+function endpointListing(
+  endpoint: DiscoveryEndpoint,
+  ref: string,
+  config: VapiRegistryConfig,
+  metadata: Readonly<Record<string, unknown>> = {},
+  verification?: ListingVerification,
+): Listing {
+  return {
+    resource: {
+      url: endpoint.url,
+      description: endpoint.description,
+      ...(endpoint.responseContentType === undefined
+        ? {}
+        : { mimeType: endpoint.responseContentType }),
+    },
+    name: endpoint.name,
+    description: endpoint.description,
+    method: endpoint.method,
+    ...(endpoint.payment?.network === undefined ? {} : { network: endpoint.payment.network }),
+    price: endpoint.price,
+    ...(verification === undefined ? {} : { verification }),
+    metadata: {
+      ...metadata,
+      ...(endpoint.operationId === undefined ? {} : { operationId: endpoint.operationId }),
+      ...(endpoint.requestContentType === undefined
+        ? {}
+        : { requestContentType: endpoint.requestContentType }),
+      ...(endpoint.requestSchema === undefined ? {} : { requestSchema: endpoint.requestSchema }),
+      ...(endpoint.responseContentType === undefined
+        ? {}
+        : { responseContentType: endpoint.responseContentType }),
+      ...(endpoint.payment === undefined ? {} : { payment: endpoint.payment }),
+    },
+    provenance: [{ source: "vapi", sourceUrl: config.marketplaceDiscoveryUrl, ref }],
+  };
+}
+
+/**
+ * Registry endpoints this client recognizes in a supplied base URL. The
+ * product-prefixed paths are canonical; the registry keeps the two historical
+ * paths mounted for one release with `Deprecation: true` and a `Link` header
+ * naming the successor, so this client accepts them as input but always
+ * requests the canonical pair.
+ */
+const REGISTRY_ENDPOINT_PATHS = [
+  "/api/call/discovery",
+  "/api/call/services",
+  "/api/marketplace/discovery",
+  "/api/network/services",
+] as const;
+
+function registryConfig(
+  baseUrl: string,
+  discoveryUrl?: string,
+  allowPrivateNetwork?: boolean,
+): VapiRegistryConfig {
+  const supplied = new URL(baseUrl);
+  const path = supplied.pathname.replace(/\/+$/, "");
+  const endpoint = REGISTRY_ENDPOINT_PATHS.find((candidate) => path.endsWith(candidate));
+  const canonical = (target: string): string =>
+    endpoint
+      ? replacePath(supplied, endpoint, target).href
+      : appendPath(supplied.href, target).href;
+  const marketplaceDiscoveryUrl = canonical("/api/call/discovery");
+  const callsDiscoveryUrl = discoveryUrl ?? canonical("/api/call/services");
+  return {
+    marketplaceDiscoveryUrl,
+    discoveryUrl: callsDiscoveryUrl,
+    ...(supplied.origin === new URL(DEFAULT_REGISTRY_URL).origin
+      ? { registryFallbacks: DEFAULT_REGISTRY_FALLBACKS }
+      : {}),
+    ...(allowPrivateNetwork === undefined ? {} : { allowPrivateNetwork }),
+  };
+}
+
+type SearchAttempt = {
+  source: string;
+  latencyMs: number;
+  count: number;
+  error?: string;
+};
+
+const loggedFallbacks = new Set<string>();
+
+async function registryRequest(args: {
+  kind: "marketplace" | "services";
+  config: VapiRegistryConfig;
+  request: Fetch;
+  configureUrl(url: URL): void;
+  attempts?: SearchAttempt[];
+  nowMs?: () => number;
+  notice?: (message: string) => void;
+}): Promise<Response> {
+  const fallbacks = args.config.registryFallbacks ?? [];
+  const endpoints = [
+    args.kind === "marketplace" ? args.config.marketplaceDiscoveryUrl : args.config.discoveryUrl,
+    ...fallbacks.map((fallback) =>
+      args.kind === "marketplace" ? fallback.marketplaceDiscoveryUrl : fallback.discoveryUrl,
+    ),
+  ].filter((endpoint, index, values) => values.indexOf(endpoint) === index);
+  const nowMs = args.nowMs ?? (() => performance.now());
+  for (let index = 0; index < endpoints.length; index += 1) {
+    const endpoint = endpoints[index]!;
+    const url = new URL(endpoint);
+    args.configureUrl(url);
+    const started = nowMs();
+    try {
+      const response = await args.request(url, {
+        method: "GET",
+        headers: { accept: "application/json" },
+      });
+      args.attempts?.push({
+        source: url.hostname,
+        latencyMs: Math.max(0, nowMs() - started),
+        count: 0,
+        ...(!response.ok ? { error: `HTTP ${response.status}` } : {}),
+      });
+      if (response.ok) return response;
+      if (response.status === 404 && index < endpoints.length - 1) {
+        logFallbackOnce(endpoints[0]!, endpoints[index + 1]!, args.notice);
+        continue;
+      }
+      const label = args.kind === "marketplace" ? "marketplace discovery" : "Calls discovery";
+      throw new Error(`vAPI ${label} returned HTTP ${response.status} ${response.statusText}.`);
+    } catch (error) {
+      if (!args.attempts?.at(-1) || args.attempts.at(-1)?.source !== url.hostname) {
+        args.attempts?.push({
+          source: url.hostname,
+          latencyMs: Math.max(0, nowMs() - started),
+          count: 0,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      if (isEnotfound(error) && index < endpoints.length - 1) {
+        logFallbackOnce(endpoints[0]!, endpoints[index + 1]!, args.notice);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error("No vAPI registry endpoint was available.");
+}
+
+function logFallbackOnce(
+  primary: string,
+  fallback: string,
+  notice?: (message: string) => void,
+): void {
+  const key = `${new URL(primary).origin}\u0000${new URL(fallback).origin}`;
+  if (loggedFallbacks.has(key)) return;
+  loggedFallbacks.add(key);
+  const message = `vAPI registry ${new URL(primary).origin} was unavailable; using fallback ${new URL(fallback).origin}.`;
+  (notice ?? ((value) => process.stderr.write(`${value}\n`)))(message);
+}
+
+function isEnotfound(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current instanceof Error; depth += 1) {
+    if ("code" in current && current.code === "ENOTFOUND") return true;
+    current = current.cause;
+  }
+  return false;
+}
+
+function replacePath(url: URL, suffix: string, replacement: string): URL {
+  const replaced = new URL(url);
+  replaced.pathname = replaced.pathname.replace(
+    new RegExp(`${escapeRegex(suffix)}/*$`),
+    replacement,
+  );
+  replaced.search = "";
+  replaced.hash = "";
+  return replaced;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function optionalPrice(
+  facts: readonly Readonly<{ label: string; value: string }>[],
+): Readonly<{ price?: string }> {
+  const price = facts.find((fact) => fact.label.trim().toLocaleLowerCase() === "price")?.value;
+  return price === undefined ? {} : { price };
+}

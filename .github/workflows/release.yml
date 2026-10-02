@@ -1,0 +1,43 @@
+name: Prepare npm release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify publish tarballs
+        run: pnpm pack:check
+
+      - name: Print manual publish commands
+        run: |
+          printf '%s\n' \
+            'npm login' \
+            'pnpm --dir packages/core publish:npm' \
+            'pnpm --dir packages/sources publish:npm' \
+            'pnpm --dir packages/mcp publish:npm' \
+            'pnpm --dir packages/cli publish:npm' \
+            'pnpm --dir packages/vapi-network publish:npm'
+          printf '%s\n' 'Publishing is intentionally manual; this workflow does not use npm credentials.'

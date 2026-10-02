@@ -1,0 +1,171 @@
+{
+  "version": 2,
+  "challengeEnvelopes": [
+    {
+      "name": "exact-v2-payment-required",
+      "transport": {
+        "kind": "header",
+        "header": "PAYMENT-REQUIRED",
+        "encoding": "base64-json"
+      },
+      "challenge": {
+        "x402Version": 2,
+        "resource": {
+          "url": "https://api.example.com/weather",
+          "description": "Weather lookup",
+          "mimeType": "application/json"
+        },
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "amount": "105",
+            "payTo": "0x1111111111111111111111111111111111111111",
+            "maxTimeoutSeconds": 300,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2",
+              "assetTransferMethod": "eip3009"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "legacy-body-challenge",
+      "transport": {
+        "kind": "body",
+        "contentType": "application/json",
+        "encoding": "json"
+      },
+      "challenge": {
+        "x402Version": 2,
+        "resource": {
+          "url": "https://api.example.com/weather",
+          "description": "Weather lookup",
+          "mimeType": "application/json"
+        },
+        "accepts": [
+          {
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "amount": "105",
+            "payTo": "0x1111111111111111111111111111111111111111",
+            "maxTimeoutSeconds": 300,
+            "extra": {
+              "name": "USD Coin",
+              "version": "2",
+              "assetTransferMethod": "eip3009"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "upto-v2-payment-required",
+      "transport": {
+        "kind": "header",
+        "header": "PAYMENT-REQUIRED",
+        "encoding": "base64-json"
+      },
+      "challenge": {
+        "x402Version": 2,
+        "resource": { "url": "https://api.example.com/weather" },
+        "accepts": [
+          {
+            "scheme": "upto",
+            "network": "eip155:8453",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "amount": "105",
+            "payTo": "0x1111111111111111111111111111111111111111",
+            "maxTimeoutSeconds": 300,
+            "extra": { "name": "USD Coin", "version": "2" }
+          }
+        ]
+      }
+    }
+  ],
+  "paymentEnvelopes": [
+    {
+      "name": "exact-v2-payment-signature",
+      "header": "PAYMENT-SIGNATURE",
+      "encoding": "base64-json",
+      "payload": {
+        "x402Version": 2,
+        "resource": {
+          "url": "https://api.example.com/weather",
+          "description": "Weather lookup",
+          "mimeType": "application/json"
+        },
+        "accepted": {
+          "scheme": "exact",
+          "network": "eip155:8453",
+          "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+          "amount": "105",
+          "payTo": "0x1111111111111111111111111111111111111111",
+          "maxTimeoutSeconds": 300,
+          "extra": {
+            "name": "USD Coin",
+            "version": "2",
+            "assetTransferMethod": "eip3009"
+          }
+        },
+        "payload": {
+          "signature": "0x14999b4652ffd0052bca0d96f350a87ce955c2aab990eee00a011fd1bd5b6b257547490f88ac7928927285531a59aa3bf4cd8fd0a204e4c1a082229d5e593cd11c",
+          "authorization": {
+            "from": "0xFCAd0B19bB29D4674531d6f115237E16AfCE377c",
+            "to": "0x1111111111111111111111111111111111111111",
+            "value": "105",
+            "validAfter": "0",
+            "validBefore": "1700000300",
+            "nonce": "0x1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        }
+      }
+    },
+    {
+      "name": "legacy-x-payment",
+      "header": "X-PAYMENT",
+      "encoding": "json",
+      "payload": {
+        "x402Version": 2,
+        "scheme": "exact",
+        "network": "eip155:8453",
+        "payload": {
+          "signature": "0x14999b4652ffd0052bca0d96f350a87ce955c2aab990eee00a011fd1bd5b6b257547490f88ac7928927285531a59aa3bf4cd8fd0a204e4c1a082229d5e593cd11c",
+          "authorization": {
+            "from": "0xFCAd0B19bB29D4674531d6f115237E16AfCE377c",
+            "to": "0x1111111111111111111111111111111111111111",
+            "value": "105",
+            "validAfter": "0",
+            "validBefore": "1700000300",
+            "nonce": "0x1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        }
+      }
+    }
+  ],
+  "settlementEnvelopes": [
+    {
+      "name": "canonical-payment-response",
+      "header": "PAYMENT-RESPONSE",
+      "encoding": "base64-json",
+      "payload": {
+        "success": true,
+        "transaction": "0xabc",
+        "network": "eip155:8453"
+      }
+    },
+    {
+      "name": "legacy-x-payment-response",
+      "header": "X-PAYMENT-RESPONSE",
+      "encoding": "json",
+      "payload": {
+        "success": false,
+        "error": "settlement rejected"
+      }
+    }
+  ]
+}

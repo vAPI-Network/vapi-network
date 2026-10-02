@@ -1,0 +1,47 @@
+import type { Address, Hex } from "viem";
+
+import { isSolanaNetwork, type ConfiguredNetwork } from "./networks.js";
+import type { PaymentIntent, Policy } from "./policy.js";
+import { readUsdcBalance } from "./sweep.js";
+import type { X402TypedData } from "./x402.js";
+
+export interface Signer {
+  readonly address: Address;
+  readonly solana?: { readonly address: string };
+  signTypedData(typedData: X402TypedData): Promise<Hex>;
+}
+
+/** Local wallet seam: policy authorization is explicit and precedes signing. */
+export interface Wallet extends Signer {
+  authorize(intent: PaymentIntent): Promise<void>;
+  balance(network: string, configured: ConfiguredNetwork): Promise<bigint>;
+}
+
+export class LocalWallet implements Wallet {
+  readonly address: Address;
+
+  constructor(
+    private readonly account: Signer,
+    private readonly policy: Policy,
+  ) {
+    this.address = account.address;
+  }
+
+  async authorize(intent: PaymentIntent): Promise<void> {
+    await this.policy.authorize(intent);
+  }
+
+  async signTypedData(typedData: X402TypedData): Promise<Hex> {
+    return await this.account.signTypedData(typedData);
+  }
+
+  async balance(network: string, configured: ConfiguredNetwork): Promise<bigint> {
+    const address = isSolanaNetwork(network) ? this.account.solana?.address : this.address;
+    if (!address) {
+      throw new Error(
+        "Solana is not enabled in this keystore. Run vapi accounts --enable solana first.",
+      );
+    }
+    return await readUsdcBalance({ network, configured, address });
+  }
+}

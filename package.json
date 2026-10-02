@@ -1,0 +1,46 @@
+{
+  "name": "vapi-network-workspace",
+  "version": "0.8.0",
+  "private": true,
+  "description": "Open-source, non-custodial access to x402 APIs",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.27.0",
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "test": "pnpm -r --if-present test",
+    "typecheck": "pnpm -r --if-present typecheck && tsc -p examples/tsconfig.json",
+    "lint": "eslint . --max-warnings 0",
+    "lint:copy": "node scripts/lint-copy.mjs",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm lint:copy",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "example:pay": "pnpm build && node --experimental-strip-types examples/pay-with-sdk.ts",
+    "prepare:publish": "pnpm build && node scripts/prepare-publish.mjs",
+    "pack:check": "pnpm prepare:publish && node scripts/pack-check.mjs",
+    "example:wallets": "pnpm build && node --experimental-strip-types examples/wallets.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.18.6",
+    "eslint": "^10.1.0",
+    "esbuild": "^0.28.2",
+    "prettier": "^3.6.2",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.44.1",
+    "vitest": "^4.1.0",
+    "@vapi-network/core": "workspace:*",
+    "@vapi-network/sources": "workspace:*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vAPI-Network/vapi-network.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vAPI-Network/vapi-network/issues"
+  },
+  "homepage": "https://github.com/vAPI-Network/vapi-network#readme"
+}

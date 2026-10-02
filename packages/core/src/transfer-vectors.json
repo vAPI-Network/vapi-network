@@ -1,0 +1,76 @@
+{
+  "base": {
+    "input": {
+      "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "recipient": "0x1111111111111111111111111111111111111111",
+      "value": "2000001",
+      "nowSeconds": 1790676000,
+      "nonce": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "expectedTypedData": {
+      "domain": {
+        "name": "USD Coin",
+        "version": "2",
+        "chainId": 8453,
+        "verifyingContract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      },
+      "types": {
+        "TransferWithAuthorization": [
+          { "name": "from", "type": "address" },
+          { "name": "to", "type": "address" },
+          { "name": "value", "type": "uint256" },
+          { "name": "validAfter", "type": "uint256" },
+          { "name": "validBefore", "type": "uint256" },
+          { "name": "nonce", "type": "bytes32" }
+        ]
+      },
+      "primaryType": "TransferWithAuthorization",
+      "message": {
+        "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "to": "0x1111111111111111111111111111111111111111",
+        "value": "2000001",
+        "validAfter": "0",
+        "validBefore": "1790676600",
+        "nonce": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    "expectedSignature": "0x835bbdaaff50010c5e11296a7fa208e5bf7f4717ca51d04023c1aa9dfdbf09486b2ab0e7658a9cfe28c20dda1d08829fc2e7f4b598bd8a522e19dd9a77eee1211c"
+  },
+  "arc": {
+    "input": {
+      "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      "recipient": "0x1111111111111111111111111111111111111111",
+      "value": "2000001",
+      "nowSeconds": 1790676000,
+      "nonce": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "expectedTypedData": {
+      "domain": {
+        "name": "USDC",
+        "version": "2",
+        "chainId": 5042,
+        "verifyingContract": "0x3600000000000000000000000000000000000000"
+      },
+      "types": {
+        "TransferWithAuthorization": [
+          { "name": "from", "type": "address" },
+          { "name": "to", "type": "address" },
+          { "name": "value", "type": "uint256" },
+          { "name": "validAfter", "type": "uint256" },
+          { "name": "validBefore", "type": "uint256" },
+          { "name": "nonce", "type": "bytes32" }
+        ]
+      },
+      "primaryType": "TransferWithAuthorization",
+      "message": {
+        "from": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+        "to": "0x1111111111111111111111111111111111111111",
+        "value": "2000001",
+        "validAfter": "0",
+        "validBefore": "1790676600",
+        "nonce": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    },
+    "expectedSignature": "0x3db158b86642a4864b2f291b6744bb92911b3bb3701d7a903a3d87b6cfb875af44a0fd0d0e9d6069927841f25563a05e4edace7f146b26f3bcb6b3ca24948a8f1b"
+  }
+}

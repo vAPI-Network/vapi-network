@@ -1,0 +1,249 @@
+# vAPI Network
+
+**One wallet, every x402 API.** vAPI Network is an open-source, non-custodial
+TypeScript toolkit for discovering and paying x402 services from a terminal, an
+MCP client, or your own code. Your key is generated on your machine, encrypted
+under your passphrase, and never leaves it. vAPI applies spend policy before
+signing, sends the payment straight to the service, and writes a local receipt.
+Every payment identifies this client as `vapi` through x402 `builder-code`; when
+an API advertises `payment-identifier`, the generated id is kept on that receipt.
+
+Call works today. Tasks and Compute are next.
+
+## Install
+
+```bash
+npm i -g vapi-network
+```
+
+No install? Prefix any command with `npx vapi-network`, for example
+`npx vapi-network init`. (`npx vapi` cannot work: the bare `vapi` name on npm
+belongs to an unrelated package.)
+
+## Quickstart
+
+```bash
+npm i -g vapi-network
+vapi setup [--no-cloud-backup]   # creates or restores the vault, derives main, links it to your owner wallet; safe to rerun
+vapi fund                        # opens the hosted funding page for your address
+vapi search "weather"            # every catalogue, merged, with provenance
+vapi pay <listing-ref> --max 0.02
+vapi receipts                    # one line per paid call: quote, settlement, latency
+```
+
+Back up the recovery phrase only in a terminal; vAPI cannot recover it.
+Turn on encrypted cloud backup with `vapi backup --cloud`; only the owner can approve a restore.
+
+## What you can do
+
+| Surface | What it does                                                        | Guide                                                        |
+| ------- | ------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Call    | Discover, check, publish and pay for x402 APIs.                     | [docs/call.md](./docs/call.md)                               |
+| Router  | Use vAPI Router for model access and balance.                       | [docs/router.md](./docs/router.md)                           |
+| Agents  | Run capped local agents with dedicated wallets and profiles.        | [docs/agents.md](./docs/agents.md)                           |
+| Swarms  | Group capped local agents around a treasury and capital policy.     | [docs/swarms.md](./docs/swarms.md)                           |
+| MCP     | Use namespaced payment tools from an MCP client.                    | [docs/mcp.md](./docs/mcp.md)                                 |
+| SDK     | Use Call, vAPI Router and local agents behind one wallet-bound API. | [docs/sdk.md](./docs/sdk.md)                                 |
+| Vault   | Manage the owner wallet, device vault, accounts and spend caps.     | [docs/wallets.md](./docs/wallets.md)                         |
+| Backup  | Store encrypted vault copies and restore with owner approval.       | [docs/backup-and-recovery.md](./docs/backup-and-recovery.md) |
+
+Wallets and custody are in [docs/wallets.md](./docs/wallets.md), and account transfers are in [docs/sending.md](./docs/sending.md). Configuration, funding, networks and bug reports are in [docs/configuration.md](./docs/configuration.md).
+
+The MCP server registers `docs.search`, `docs.read`, `vapi.status`, `vapi.accounts`, `vapi.siblings`, `accounts.add`, `accounts.caps`, `accounts.send`, `auth.link`, `auth.status`, `router.models`, `router.usage`, `router.chat`, `router.buy`, `call.search`, `call.inspect`, `call.pay`, `call.read`, `swarm.setup`, `swarm.add`, `swarm.leave`, `swarm.fund`, `swarm.rebalance`, `swarm.status`, `swarm.dissolve`, `wallet.address`, `wallet.balance`, `wallet.accounts`, `wallet.list`, `wallet.use`, `wallet.fund`, `receipts.list`, `receipts.stats`, `support.report`, `swarm.run`, `swarm.allocate`, `swarm.delegate`, `swarm.runs`; inputs and results are in [docs/mcp.md](./docs/mcp.md).
+
+### Swarms
+
+Swarms keep a treasury and capped member accounts on this machine. Setup is safe to rerun; the owner approves account links and funds the treasury.
+A deposit arriving at the treasury after dissolve stays on the treasury account, which is kept on this device.
+
+- `swarm.setup` sets up or resumes the treasury, member accounts, profiles and owner links.
+- `swarm.add` adds or resumes one member.
+- `swarm.leave` sweeps one member to the treasury and removes it from the swarm.
+- `swarm.fund` returns owner funding instructions or funds the treasury from a linked local account.
+- `swarm.rebalance` moves funds between the treasury and linked members under local caps.
+- `swarm.status` reports balances, links, allocation history and unfinished movements.
+- `swarm.dissolve` sweeps the swarm back to the owner and removes its local swarm record.
+- `swarm.run` runs the lead, which may delegate one level deep using treasury-funded budgets bounded by a per-run draw (default $2.00), or runs every member independently on its own capital.
+- `swarm.run` accepts `detach: true` to start in the background, and `swarm.runs` lists a swarm's runs with status.
+- `swarm.allocate` and `swarm.delegate` are agent-only operations and are refused outside a swarm run; their optional `requestId` input makes retries idempotent.
+
+MCP always declines approval prompts during swarm runs.
+
+CLI commands:
+
+- `vapi swarm create <name>` creates or resumes a local swarm and can fund it after linking.
+- `vapi swarm add <name> <role>` adds or resumes one member.
+- `vapi swarm remove <name> <member>` sweeps one member to the treasury and removes it.
+- `vapi swarm fund <name> <usd>` prints owner funding instructions or funds from a local account.
+- `vapi swarm rebalance <name>` moves capital toward the swarm's configured targets.
+- `vapi swarm status <name>` reports balances, links, allocation history and unfinished movements.
+- `vapi swarm dissolve <name>` sweeps the swarm to the owner and removes its swarm record.
+- `vapi swarm run <name> "<task>"` runs the lead or every eligible member with per-run budget and treasury-draw limits.
+- `vapi swarm run <name> "<task>" --detach [--runtime local]` starts the run in the background.
+- `vapi swarm runs <name>` lists background runs and their status.
+- `vapi swarm stop <name> [<runId>|--all] [--confirm-worker-stopped]` stops one or all running local processes for the swarm. The confirmation flag clears one stale start only after you verify its worker is gone.
+- `vapi agent run <name> "<task>" --detach` starts one agent run in the background.
+
+#### Deprecated tool aliases
+
+These pre-namespace names still work and each result carries a DEPRECATED: line naming its replacement.
+
+| Alias     | Use instead      |
+| --------- | ---------------- |
+| `search`  | `call.search`    |
+| `inspect` | `call.inspect`   |
+| `call`    | `call.pay`       |
+| `wallet`  | `wallet.balance` |
+
+## CLI reference
+
+Every command accepts `--json`, which writes one JSON value, success or error,
+to stdout. Exit codes are `0` for success, `1` for an operational failure, and
+`2` for invalid usage or an announced preview-only command.
+
+Every wallet command takes `--account <name>`, falls back to `VAPI_WALLET`, then the default from `vapi accounts use`; `--wallet <name>` keeps working for one release.
+
+| Command                                       | Options                                                                                                                                                                                                 | What it does                                                                                                                 |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `vapi init`                                   | `--networks <base,arc,solana>`                                                                                                                                                                          | Creates `~/.vapi`, the wallet `main` and the config. Says so if one exists.                                                  |
+| `vapi setup`                                  | `--no-cloud-backup`, `--json`                                                                                                                                                                           | Creates or restores the vault, links the first account, and can offer cloud backup. Safe to rerun.                           |
+| `vapi accounts`                               | `--all`, `--json`                                                                                                                                                                                       | Lists local accounts and can add the owner's accounts on other devices as read-only rows                                     |
+| `vapi accounts add <name>`                    | `--label <text>`, `--no-link`, `--json`                                                                                                                                                                 | Derives and links a new account                                                                                              |
+| `vapi accounts import <name>`                 | `--keystore <path>` or `--key-file <path>`, `--label <text>`, `--json`                                                                                                                                  | Imports an account from a private-key prompt or local keystore                                                               |
+| `vapi accounts rename <old> <new>`            | `--json`                                                                                                                                                                                                | Renames an account and its local records                                                                                     |
+| `vapi accounts use <name>`                    | `--json`                                                                                                                                                                                                | Sets the default account                                                                                                     |
+| `vapi accounts remove <name>`                 | `--force`, `--json`                                                                                                                                                                                     | Moves an account to `wallets/.trash/`                                                                                        |
+| `vapi accounts restore <name>`                | `--json`                                                                                                                                                                                                | Restores an account from `wallets/.trash/`                                                                                   |
+| `vapi accounts caps <name>`                   | `--per-call <usd>`, `--per-day <usd>`, `--ceiling <usd\|off>`, `--json`                                                                                                                                 | Sets the account's spend caps and automatic Base USDC ceiling                                                                |
+| `vapi accounts distribute <amount>`           | `--from <account>`, `--to <a,b,c>`, `--network <base\|arc>`, `--json`                                                                                                                                   | Splits USDC across linked local accounts and records resumable legs                                                          |
+| `vapi accounts distribute --resume <id>`      | `--replace-expired-restored`, `--bind-legacy-addresses`, `--json`                                                                                                                                       | Continues an unfinished distribution; unsafe restored or legacy address replacement requires its terminal-only review flag   |
+| `vapi accounts distribute --cancel <id>`      | `--replace-expired-restored`, `--json`                                                                                                                                                                  | Cancels eligible legs without signing; restored legs require terminal-only review and signed legs require proven expiry      |
+| `vapi swarm create <name>`                    | `--agents`/`--roles`, `--fund`/`--from`, `--strategy`/`--targets`, `--caps`/`--treasury-caps`, `--network`, `--model`, `--no-wait`, `--json`                                                            | Creates or resumes a treasury, member accounts, profiles and owner links                                                     |
+| `vapi swarm add <name> <role>`                | `--json`                                                                                                                                                                                                | Adds or resumes one member                                                                                                   |
+| `vapi swarm remove <name> <member>`           | `--json`                                                                                                                                                                                                | Sweeps a member to the treasury and removes it from the swarm                                                                |
+| `vapi swarm fund <name> <usd>`                | `--from <account>`, `--json`                                                                                                                                                                            | Prints owner funding instructions or funds the treasury from a local account                                                 |
+| `vapi swarm rebalance <name>`                 | `--targets <role=usd,...>`, `--json`                                                                                                                                                                    | Moves funds between the treasury and linked members under local caps                                                         |
+| `vapi swarm status <name>`                    | `--json`                                                                                                                                                                                                | Reports balances, links, allocation history and unfinished movements                                                         |
+| `vapi swarm dissolve <name>`                  | `--json`                                                                                                                                                                                                | Sweeps the swarm back to the owner and removes its local swarm record                                                        |
+| `vapi send <amount>`                          | `--from <account>`, `--to <account\|owner\|0x…>`, `--network <base\|arc>`, `--resume <nonce>`, `--json`                                                                                                 | Sends USDC to the owner or another active account; vAPI pays gas                                                             |
+| `vapi wallet list`                            | -                                                                                                                                                                                                       | Name, address, default marker, caps in USD, unlocked, label                                                                  |
+| `vapi wallet create <name>`                   | `--networks <base,arc,solana>`, `--label <text>`                                                                                                                                                        | A new wallet, with its own phrase, caps and passphrase                                                                       |
+| `vapi wallet use <name>`                      | -                                                                                                                                                                                                       | Makes it the default for every later command                                                                                 |
+| `vapi wallet rename <old> <new>`              | -                                                                                                                                                                                                       | Renames the keystore, the registry entry and that wallet's receipts                                                          |
+| `vapi wallet remove <name>`                   | `--force`                                                                                                                                                                                               | Moves the keystore to `wallets/.trash/`; asks you to type the name                                                           |
+| `vapi wallet restore <name>`                  | -                                                                                                                                                                                                       | Brings a removed wallet back, same passphrase                                                                                |
+| `vapi wallet caps <name>`                     | `--per-call <usd>`, `--per-day <usd>`                                                                                                                                                                   | Sets that wallet's spend caps, in US dollars                                                                                 |
+| `vapi fund`                                   | `--amount <usd>`, `--wallet <name>`                                                                                                                                                                     | Prints and opens the hosted funding page. Makes no network call.                                                             |
+| `vapi docs "<question>"`                      | `--json`                                                                                                                                                                                                | Asks the public vAPI documentation assistant and prints its answer and sources; no wallet or payment                         |
+| `vapi docs search "<query>"`                  | `--json`                                                                                                                                                                                                | Searches the vAPI documentation and prints matching excerpts; no wallet or payment                                           |
+| `vapi docs read <url-or-path>`                | `--json`                                                                                                                                                                                                | Reads one vAPI documentation page as Markdown; no wallet or payment                                                          |
+| `vapi accounts`                               | `--enable <solana\|arc>`, `--wallet <name>`                                                                                                                                                             | One deposit account per configured network, with balances and guidance                                                       |
+| `vapi search [query]`                         | `--kind <kind>` (repeatable), `--network <caip2>`, `--limit <n>`, `--cursor <cursor>`, `--include-unverified`                                                                                           | Merged discovery across every configured source, tagged by group and tier                                                    |
+| `vapi inspect <id>`                           | `--endpoint <name>`                                                                                                                                                                                     | Verification, fee, liveness, conformance, identity, contract and live quote, for free                                        |
+| `vapi pay <id-or-url>`                        | `--method`, `--endpoint`, `--body <json>`, `--content-type`, `--network <caip2>`, `--expected-pay-to`, `--max <usd>`, `--wallet <name>`                                                                 | Calls the API and pays it from the local wallet, naming an unverified tier                                                   |
+| `vapi pay --resume <receipt-id>`              | -                                                                                                                                                                                                       | Checks settlement, shows its payment id, and never pays                                                                      |
+| `vapi check <url>`                            | `--method <method>`                                                                                                                                                                                     | Grades its 402, extensions and same-origin discovery. Never pays                                                             |
+| `vapi balance`                                | `--wallet <name>`                                                                                                                                                                                       | The wallet's address and USDC balances                                                                                       |
+| `vapi receipts`                               | `--limit <n>`, `--wallet <name>`, `--all-wallets`                                                                                                                                                       | The local append-only call ledger, newest last                                                                               |
+| `vapi receipts export`                        | `--format <json\|csv>`, `--range <24h\|7d\|30d>`, `--wallet <name>`, `--all-wallets`                                                                                                                    | Raw receipts for a spreadsheet or dashboard                                                                                  |
+| `vapi stats`                                  | `--range <24h\|7d\|30d>`, `--wallet <name>`, `--all-wallets`                                                                                                                                            | Spend, outcomes, latency percentiles and top services                                                                        |
+| `vapi sweep [<address>]`                      | `--network <caip2>`, `--wallet <name>`                                                                                                                                                                  | Moves USDC to an address, or to the linked owner when omitted; open movement legs block it                                   |
+| `vapi agent create <name>`                    | `--model <id>`, `--instructions <file>`, `--call-budget <usd>`, `--max-per-call <usd>`, `--router-budget <usd>`, `--approve-above <usd>`, `--include-unverified`, `--max-steps <n>`                     | Creates a capped local agent wallet, profile and owner link                                                                  |
+| `vapi agent run <name> "<task>"`              | `--budget <usd>`                                                                                                                                                                                        | Runs the named agent on this machine with an optional hard budget across Call and Router top-ups                             |
+| `vapi agent list`                             | None                                                                                                                                                                                                    | Lists profiles, links and today's Call and Router budgets                                                                    |
+| `vapi agent pause <name>`                     | None                                                                                                                                                                                                    | Stops future runs until the agent is resumed                                                                                 |
+| `vapi agent resume <name>`                    | None                                                                                                                                                                                                    | Allows a paused agent to run again                                                                                           |
+| `vapi agent revoke <name>`                    | None                                                                                                                                                                                                    | Revokes the link and removes the profile, but keeps its wallet                                                               |
+| `vapi login`                                  | `--wallet <name>`, `--label <name>`, `--publish`, `--no-browser`                                                                                                                                        | Links the local agent wallet to your vAPI account                                                                            |
+| `vapi logout`                                 | `--wallet <name>`                                                                                                                                                                                       | Removes the selected wallet's agent link and stored credentials                                                              |
+| `vapi whoami`                                 | `--wallet <name>`                                                                                                                                                                                       | Shows the chosen wallet's owner link and permissions, whether the link is live, and its ERC-8004 agent identity.             |
+| `vapi router models`                          | `--wallet <name>`                                                                                                                                                                                       | Lists the vAPI Router model ids                                                                                              |
+| `vapi router usage`                           | `--wallet <name>`                                                                                                                                                                                       | Shows the agent's Compute allowance and Router balance                                                                       |
+| `vapi router chat --model <id> "<prompt>"`    | `--system <text>`, `--max-tokens <n>`, `--wallet <name>`                                                                                                                                                | Sends one chat request through vAPI Router                                                                                   |
+| `vapi router key`                             | `--rotate`, `--wallet <name>`                                                                                                                                                                           | Prints a gated Router key or rotates it without printing it                                                                  |
+| `vapi router buy <1\|5\|20\|50>`              | `--wallet <name>`, `--json`                                                                                                                                                                             | Buys vAPI Router balance with USDC from your wallet                                                                          |
+| `vapi router buy --auto <tier> --below <usd>` | `--wallet <name>`, or use `--auto off`                                                                                                                                                                  | Sets or clears automatic vAPI Router balance refill                                                                          |
+| `vapi stake status`                           | `--wallet <name>`                                                                                                                                                                                       | Shows the linked owner's stake and Compute today                                                                             |
+| `vapi stake open`                             | `--wallet <name>`, `--no-browser`                                                                                                                                                                       | Prints and optionally opens the staking page                                                                                 |
+| `vapi export-key`                             | `--network <caip2>`, `--wallet <name>`                                                                                                                                                                  | Prints the private key. Terminal only, never for an agent.                                                                   |
+| `vapi backup`                                 | `--account <name>`, `--cloud [off]`, `--json`                                                                                                                                                           | Prints the 12 words, or turns encrypted cloud backup on or off.                                                              |
+| `vapi restore`                                | `--from-owner [--owner <0x…>]`, `--json`                                                                                                                                                                | Rebuilds the vault from a recovery phrase typed at the prompt or piped on stdin, or restores an owner-approved cloud backup. |
+| `vapi import`                                 | `--phrase` or `--key`, `--wallet <name>`, `--networks <base,arc,solana>`, `--replace`, `--force`                                                                                                        | Restores a wallet from a prompt, never from argv                                                                             |
+| `vapi passphrase`                             | `--wallet <name>`                                                                                                                                                                                       | Re-encrypts the keystore under a new passphrase                                                                              |
+| `vapi vault protect`                          | `--json`                                                                                                                                                                                                | Adds a password to the device vault                                                                                          |
+| `vapi vault unprotect`                        | `--json`                                                                                                                                                                                                | Removes the password from the device vault                                                                                   |
+| `vapi vault lock`                             | `--json`                                                                                                                                                                                                | Closes the protected vault on this device                                                                                    |
+| `vapi vault unlock`                           | `--json`                                                                                                                                                                                                | Opens the protected vault for 8 hours, or set `VAPI_VAULT_PASSWORD`                                                          |
+| `vapi vault status`                           | `--json`                                                                                                                                                                                                | Shows whether the device vault is protected and open                                                                         |
+| `vapi unlock`                                 | `--wallet <name>`                                                                                                                                                                                       | Puts that wallet's passphrase in the OS secret store                                                                         |
+| `vapi lock`                                   | `--wallet <name>`, `--all`                                                                                                                                                                              | Takes a stored passphrase back out                                                                                           |
+| `vapi report "<what>"`                        | `--include-addresses`, `--send`                                                                                                                                                                         | Writes a privacy-preserving local bug report                                                                                 |
+| `vapi auth set-key`                           | -                                                                                                                                                                                                       | Types the registry API key on a prompt into the OS secret store                                                              |
+| `vapi auth status`                            | -                                                                                                                                                                                                       | Whether this machine has a key and where it comes from, masked                                                               |
+| `vapi auth clear`                             | -                                                                                                                                                                                                       | Takes the stored key back out                                                                                                |
+| `vapi publish <url>`                          | `--method`, `--mode <origin\|endpoint\|openapi>`, `--name <text>`, `--description <text>`, `--category <ai\|data\|crypto\|compute\|search>`, `--select <names>`, `--wallet <name>`, `--yes`, `--resume` | Probes your API, lists the endpoints you pick, signs the payout wallet                                                       |
+| `vapi publish activate <slug>`                | -                                                                                                                                                                                                       | Takes a listing live once its FeeSplitter is deployed                                                                        |
+| `vapi publish verify-request <slug>`          | -                                                                                                                                                                                                       | Asks vAPI to review the listing                                                                                              |
+| `vapi publish list`                           | -                                                                                                                                                                                                       | Every listing this API key owns                                                                                              |
+| `vapi claim <origin>`                         | `--wallet <name>`                                                                                                                                                                                       | Takes over the listings vAPI indexed from your API, signed by their payee                                                    |
+| `vapi mcp`                                    | `--wallet <name>`                                                                                                                                                                                       | Serves the MCP tools over stdio                                                                                              |
+| `vapi mcp install <claude\|cursor\|codex>`    | `--home <dir>`, `--registry <url>`                                                                                                                                                                      | Writes that app's MCP config and prints the file                                                                             |
+| `vapi serve`                                  | -                                                                                                                                                                                                       | Preview only; exits `2` with a message                                                                                       |
+| `vapi version`                                | -                                                                                                                                                                                                       | The client version, also as `--version` or `-v`                                                                              |
+| `vapi help`                                   | -                                                                                                                                                                                                       | The same help bare `vapi` shows, also as `--help` or `-h`                                                                    |
+
+## Packages
+
+| Package                 | Purpose                                                                 |
+| ----------------------- | ----------------------------------------------------------------------- |
+| `vapi-network`          | zero-dependency distribution with the `vapi` binary and defaults        |
+| `@vapi-network/core`    | x402 protocol, wallet store, spend policy, discovery merge and receipts |
+| `@vapi-network/sources` | vAPI Registry, Coinbase Bazaar, local-file and x402scan source adapters |
+| `@vapi-network/mcp`     | stdio MCP server with namespaced payment tools                          |
+| `@vapi-network/cli`     | command parsing and the command implementations behind `vapi`           |
+
+Every npm tarball is bundled and has zero runtime dependencies. The scoped
+packages are useful for embedding; most users should start with `vapi-network`.
+
+## Development
+
+A pnpm workspace for Node.js 22 and pnpm 10. The gate, in order:
+
+```sh
+pnpm install
+pnpm format:check
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm build
+pnpm pack:check
+```
+
+All five packages share one version and are released together. npm reads a
+package manifest before lifecycle hooks run, so the release is made from the
+generated `publish/` directories, never from the workspace package roots.
+
+```sh
+pnpm install --frozen-lockfile
+pnpm pack:check
+npm login
+pnpm --dir packages/core publish:npm
+pnpm --dir packages/sources publish:npm
+pnpm --dir packages/mcp publish:npm
+pnpm --dir packages/cli publish:npm
+pnpm --dir packages/vapi-network publish:npm
+```
+
+`publish:npm` publishes a package's staged `./publish` directory to the `latest`
+npm tag; `publish:npm:next` publishes the same tarball to `next`. The manual
+release workflow verifies artifacts and prints these commands; it never receives
+npm credentials and never publishes.
+
+See [AGENTS.md](./AGENTS.md) for layout and invariants,
+[CONTRIBUTING.md](./CONTRIBUTING.md) for the workflow,
+[CHANGELOG.md](./CHANGELOG.md) for what shipped in each release, and
+[SECURITY.md](./SECURITY.md) for private vulnerability reports.
+
+## License
+
+Apache-2.0. See [LICENSE](./LICENSE).

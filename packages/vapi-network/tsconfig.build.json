@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "paths": {
+      "@vapi-network/core": ["../core/dist/index.d.ts"],
+      "@vapi-network/sources": ["../sources/dist/index.d.ts"],
+      "@vapi-network/mcp": ["../mcp/dist/index.d.ts"],
+      "@vapi-network/cli": ["../cli/dist/index.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}
