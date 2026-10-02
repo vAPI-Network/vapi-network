@@ -9,10 +9,18 @@
     "url": "git+https://github.com/vAPI-Network/vapi-network.git",
     "directory": "packages/vapi-network"
   },
-  "homepage": "https://github.com/vAPI-Network/vapi-network#readme",
+  "homepage": "https://vapinetwork.ai",
   "bugs": {
     "url": "https://github.com/vAPI-Network/vapi-network/issues"
   },
+  "keywords": [
+    "x402",
+    "ai-agents",
+    "mcp",
+    "usdc",
+    "base",
+    "agent-payments"
+  ],
   "type": "module",
   "sideEffects": false,
   "files": [

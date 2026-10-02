@@ -1,14 +1,21 @@
 # vAPI Network
 
-**One wallet, every x402 API.** vAPI Network is an open-source, non-custodial
-TypeScript toolkit for discovering and paying x402 services from a terminal, an
+vAPI Network builds payment and trust infrastructure for AI agents on Base, with
+x402 API payments in USDC.
+
+**One wallet, every x402 API.** `vapi-network` is its open-source, non-custodial
+TypeScript client for discovering and paying x402 services from a terminal, an
 MCP client, or your own code. Your key is generated on your machine, encrypted
 under your passphrase, and never leaves it. vAPI applies spend policy before
 signing, sends the payment straight to the service, and writes a local receipt.
 Every payment identifies this client as `vapi` through x402 `builder-code`; when
 an API advertises `payment-identifier`, the generated id is kept on that receipt.
 
-Call works today. Tasks and Compute are next.
+Call is launching. Router, Stake and Agents are coming soon. Tasks is in preview.
+See [vapinetwork.ai](https://vapinetwork.ai) and the
+[documentation](https://docs.vapinetwork.ai).
+
+vAPI Network is not related to Vapi.ai, the voice AI company.
 
 ## Install
 
