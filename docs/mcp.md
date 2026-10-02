@@ -143,6 +143,34 @@ automated x402 probe but were not reviewed. Every result of `call.search`,
 Prefer a verified listing, and read the request contract and the price with
 `call.inspect` before paying one that is not.
 
+### MCP registry
+
+The root `server.json` describes the local vAPI Network server from the
+`vapi-network` npm distribution, run as `npx -y vapi-network@<version> mcp`.
+A fresh home needs no vault for initialization or the documentation tools.
+Account and payment tools require terminal setup first; an existing protected
+vault must be unlocked or supplied with `VAPI_VAULT_PASSWORD` before startup.
+
+Keep `server.json`'s version and its npm package version aligned with every
+package release. The source and staged `vapi-network/package.json` must retain
+`mcpName` equal to `server.json`'s name. `pnpm pack:check` checks these values.
+Already published npm versions cannot gain this marker, so release a new
+version with it before submitting registry metadata.
+
+After merging and publishing the staged npm packages through the normal release
+process, a GitHub organization Owner runs these commands from the repo root:
+
+```sh
+mcp-publisher validate server.json
+mcp-publisher login github
+mcp-publisher publish server.json
+```
+
+The [official registry quickstart](https://github.com/modelcontextprotocol/registry/blob/main/docs/modelcontextprotocol-io/quickstart.mdx)
+and [authentication guide](https://github.com/modelcontextprotocol/registry/blob/main/docs/modelcontextprotocol-io/authentication.mdx)
+cover package verification and organization access. The metadata lists only
+local stdio; hosted MCP needs separate production transport and auth validation.
+
 ### Install into a client
 
 Use this command to write or update a client's vAPI server entry:

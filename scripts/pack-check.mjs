@@ -16,6 +16,7 @@ const EXPECTED_PACKAGES = new Set([
 ]);
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const packagesRoot = join(repositoryRoot, "packages");
+const mcpServer = JSON.parse(await readFile(join(repositoryRoot, "server.json"), "utf8"));
 const packageEntries = await readdir(packagesRoot, { withFileTypes: true });
 const checked = [];
 
@@ -62,6 +63,21 @@ for (const entry of packageEntries.sort((left, right) => left.name.localeCompare
     throw new Error(
       `${manifest.name} must be version ${EXPECTED_VERSION}; received ${manifest.version}.`,
     );
+  }
+  if (manifest.name === "vapi-network") {
+    const mcpPackage = mcpServer.packages?.[0];
+    if (
+      mcpServer.version !== manifest.version ||
+      mcpServer.name !== sourceManifest.mcpName ||
+      mcpServer.name !== manifest.mcpName ||
+      mcpServer.packages?.length !== 1 ||
+      mcpPackage?.registryType !== "npm" ||
+      mcpPackage.identifier !== manifest.name ||
+      mcpPackage.version !== manifest.version ||
+      mcpPackage.transport?.type !== "stdio"
+    ) {
+      throw new Error("server.json must match the vapi-network source and staged npm manifests.");
+    }
   }
   if (manifest.publishConfig?.tag !== "latest" || manifest.publishConfig?.access !== "public") {
     throw new Error(`${manifest.name} publishConfig must set tag=latest and access=public.`);
