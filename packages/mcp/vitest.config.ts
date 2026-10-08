@@ -5,6 +5,9 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   resolve: {
     alias: {
+      "@vapi-network/core/tasks": fileURLToPath(
+        new URL("../core/src/tasks/index.ts", import.meta.url),
+      ),
       "@vapi-network/core/agent-link": fileURLToPath(
         new URL("../core/src/agent-link.ts", import.meta.url),
       ),

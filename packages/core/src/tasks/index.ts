@@ -4,6 +4,8 @@ export * from "./verbs.js";
 export * from "./chain-port.js";
 export * from "./money.js";
 export * from "./actions.js";
+export * from "./operations.js";
+export * from "./operation-support.js";
 export { createTasksClient, TasksClientError } from "./client.js";
 export type {
   TasksClient,
