@@ -1,6 +1,6 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -199,5 +199,225 @@ describe("spend caps", () => {
       date: "2026-08-05",
       spentAtomic: "3",
     });
+  });
+});
+
+describe("escrow funding spend caps", () => {
+  const now = new Date("2026-08-05T12:00:00.000Z");
+  const caps = { perCallAtomic: "10", perDayAtomic: "100" };
+
+  async function ledgerPath(): Promise<string> {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-escrow-ledger-"));
+    temporaryDirectories.push(directory);
+    return join(directory, "home", "spend-ledger.json");
+  }
+
+  it.each([false, true])(
+    "refuses over-task funding without changing ledger (existing: %s)",
+    async (existing) => {
+      const path = await ledgerPath();
+      if (existing) await reserveSpend(5n, caps, { ledgerPath: path, now });
+      const before = existing ? await readFile(path, "utf8") : undefined;
+
+      await expect(
+        reserveSpend(51n, caps, {
+          ledgerPath: path,
+          now,
+          kind: "escrow-funding",
+          maxPerTaskAtomic: 50n,
+          reservationId: "refused",
+        }),
+      ).rejects.toMatchObject({
+        name: "SpendCapError",
+        code: "per_task_cap_exceeded",
+        message: "Escrow funding 51 atomic USDC exceeds the per-task cap 50. Refusing to sign.",
+      });
+      if (existing) expect(await readFile(path, "utf8")).toBe(before);
+      else {
+        await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(readFile(`${path}.lock`)).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(stat(dirname(path))).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    },
+  );
+
+  it("accepts the exact task cap above the per-call cap", async () => {
+    const path = await ledgerPath();
+    await expect(
+      reserveSpend(50n, caps, {
+        ledgerPath: path,
+        now,
+        kind: "escrow-funding",
+        maxPerTaskAtomic: 50n,
+      }),
+    ).resolves.toEqual({ date: "2026-08-05", spentAtomic: "50" });
+  });
+
+  it("refuses escrow over the remaining daily budget without rewriting payment spend", async () => {
+    const path = await ledgerPath();
+    await reserveSpend(10n, caps, { ledgerPath: path, now, reservationId: "payment" });
+    const before = await readFile(path, "utf8");
+    await expect(
+      reserveSpend(91n, caps, {
+        ledgerPath: path,
+        now,
+        kind: "escrow-funding",
+        maxPerTaskAtomic: 100n,
+        reservationId: "refused",
+      }),
+    ).rejects.toMatchObject({
+      code: "per_day_cap_exceeded",
+      message:
+        "Escrow funding 91 atomic USDC would raise today's spend to 101 for wallet main, above the per-day cap 100. Refusing to sign.",
+    });
+    expect(await readFile(path, "utf8")).toBe(before);
+  });
+
+  it("shares the daily total with payments and keeps other wallets isolated", async () => {
+    const path = await ledgerPath();
+    await reserveSpend(90n, caps, {
+      ledgerPath: path,
+      now,
+      kind: "escrow-funding",
+      maxPerTaskAtomic: 100n,
+    });
+    await reserveSpend(10n, caps, { ledgerPath: path, now, kind: "payment" });
+    const before = await readFile(path, "utf8");
+    await expect(reserveSpend(1n, caps, { ledgerPath: path, now })).rejects.toMatchObject({
+      code: "per_day_cap_exceeded",
+      message:
+        "Payment quote 1 atomic USDC would raise today's spend to 101 for wallet main, above the per-day cap 100. Refusing to sign.",
+    });
+    expect(await readFile(path, "utf8")).toBe(before);
+    await reserveSpend(100n, caps, {
+      ledgerPath: path,
+      now,
+      wallet: "research",
+      kind: "escrow-funding",
+      maxPerTaskAtomic: 100n,
+    });
+    await expect(readSpendLedger(path, now)).resolves.toMatchObject({ spentAtomic: "100" });
+    await expect(readSpendLedger(path, now, "research")).resolves.toMatchObject({
+      spentAtomic: "100",
+    });
+  });
+
+  it.each([undefined, -1n])(
+    "rejects invalid task cap %s before touching the home",
+    async (maxPerTaskAtomic) => {
+      const path = await ledgerPath();
+      await expect(
+        reserveSpend(1n, caps, {
+          ledgerPath: path,
+          now,
+          kind: "escrow-funding",
+          maxPerTaskAtomic,
+        }),
+      ).rejects.toSatisfy(
+        (error: unknown) => error instanceof Error && !(error instanceof SpendCapError),
+      );
+      await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(stat(dirname(path))).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+
+  it("stores escrow kind, preserves it on unrelated writes, and releases once by id and amount", async () => {
+    const path = await ledgerPath();
+    for (const id of ["escrow-one", "escrow-two"]) {
+      await reserveSpend(20n, caps, {
+        ledgerPath: path,
+        now,
+        kind: "escrow-funding",
+        maxPerTaskAtomic: 20n,
+        reservationId: id,
+      });
+    }
+    await reserveSpend(5n, caps, { ledgerPath: path, now, reservationId: "payment" });
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+      date: "2026-08-05",
+      spentAtomic: "45",
+      reservations: [
+        { id: "escrow-one", amountAtomic: "20", kind: "escrow-funding" },
+        { id: "escrow-two", amountAtomic: "20", kind: "escrow-funding" },
+        { id: "payment", amountAtomic: "5" },
+      ],
+    });
+    await releaseSpend(5n, {
+      ledgerPath: path,
+      now,
+      reservedOn: "2026-08-05",
+      reservationId: "payment",
+    });
+    const releaseOptions = {
+      ledgerPath: path,
+      now,
+      reservedOn: "2026-08-05",
+      reservationId: "escrow-one",
+    };
+    await expect(releaseSpend(20n, releaseOptions)).resolves.toMatchObject({ spentAtomic: "20" });
+    const before = await readFile(path, "utf8");
+    expect(JSON.parse(before).reservations).toEqual([
+      { id: "escrow-two", amountAtomic: "20", kind: "escrow-funding" },
+    ]);
+    await releaseSpend(20n, releaseOptions);
+    expect(await readFile(path, "utf8")).toBe(before);
+  });
+
+  it.each([undefined, "payment"] as const)(
+    "preserves payment defaults and legacy reservations (kind: %s)",
+    async (kind) => {
+      const path = await ledgerPath();
+      await expect(reserveSpend(11n, caps, { ledgerPath: path, now, kind })).rejects.toMatchObject({
+        code: "per_call_cap_exceeded",
+        message: "Payment quote 11 atomic USDC exceeds the per-call cap 10. Refusing to sign.",
+      });
+      await expect(readFile(path)).rejects.toMatchObject({ code: "ENOENT" });
+      await reserveSpend(10n, caps, { ledgerPath: path, now, kind, reservationId: "payment" });
+      expect(JSON.parse(await readFile(path, "utf8"))).toEqual({
+        date: "2026-08-05",
+        spentAtomic: "10",
+        reservations: [{ id: "payment", amountAtomic: "10" }],
+      });
+    },
+  );
+
+  it("does not rewrite escrow reservations on duplicate id or mismatched release refusal", async () => {
+    const path = await ledgerPath();
+    const options = {
+      ledgerPath: path,
+      now,
+      kind: "escrow-funding" as const,
+      maxPerTaskAtomic: 50n,
+      reservationId: "escrow",
+    };
+    await reserveSpend(20n, caps, options);
+    const before = await readFile(path, "utf8");
+    await expect(reserveSpend(20n, caps, options)).rejects.toThrow("already exists");
+    expect(await readFile(path, "utf8")).toBe(before);
+    await expect(releaseSpend(19n, { ...options, reservedOn: "2026-08-05" })).rejects.toThrow(
+      "different amount",
+    );
+    expect(await readFile(path, "utf8")).toBe(before);
+  });
+
+  it("serializes concurrent escrow reservations against the same daily cap", async () => {
+    const path = await ledgerPath();
+    const results = await Promise.allSettled(
+      ["one", "two"].map((reservationId) =>
+        reserveSpend(60n, caps, {
+          ledgerPath: path,
+          now,
+          kind: "escrow-funding",
+          maxPerTaskAtomic: 60n,
+          reservationId,
+        }),
+      ),
+    );
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(results.find(({ status }) => status === "rejected")).toMatchObject({
+      reason: { code: "per_day_cap_exceeded" },
+    });
+    await expect(readSpendLedger(path, now)).resolves.toMatchObject({ spentAtomic: "60" });
+    expect(JSON.parse(await readFile(path, "utf8")).reservations).toHaveLength(1);
   });
 });

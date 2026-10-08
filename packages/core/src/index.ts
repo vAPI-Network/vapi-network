@@ -46,6 +46,7 @@ export {
   type DistributeResult,
 } from "./distribute.js";
 export * from "./device.js";
+export * from "./funding-policy.js";
 export {
   deriveEvmPrivateKey,
   deriveSolanaPrivateKey,

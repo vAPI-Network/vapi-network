@@ -24,9 +24,13 @@ export {
 export { buildSIWxProof, parseSIWxResponse } from "./siwx.js";
 export {
   UNTRUSTED_NOTICE,
+  decideFunding,
   decidePayment,
+  decideRelease,
   wrapUntrusted,
+  type FundingDecision,
   type PayDecision,
+  type ReleaseDecision,
 } from "./agent/guards.js";
 export { createAgentRunDeps } from "./agent/deps.js";
 export {

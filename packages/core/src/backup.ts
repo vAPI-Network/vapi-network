@@ -166,6 +166,8 @@ export type BackupAgentProfile = {
   instructions: string;
   verifiedOnly: boolean;
   approveAboveUsd: number;
+  maxPerTaskUsd?: number;
+  autoReleaseBelowUsd?: number;
   maxSteps: number;
   paused: boolean;
   createdAt: string;
@@ -440,6 +442,8 @@ const backupAgentProfileSchema = z.strictObject({
   instructions: z.string().max(20_000),
   verifiedOnly: z.boolean(),
   approveAboveUsd: z.number().min(0),
+  maxPerTaskUsd: z.number().min(0).optional(),
+  autoReleaseBelowUsd: z.number().min(0).optional(),
   maxSteps: z.number().int().min(1).max(50),
   paused: z.boolean(),
   createdAt: z.string(),
@@ -2537,6 +2541,10 @@ function copyAgentProfile(profile: BackupAgentProfile): BackupAgentProfile {
     instructions: profile.instructions,
     verifiedOnly: profile.verifiedOnly,
     approveAboveUsd: profile.approveAboveUsd,
+    ...(profile.maxPerTaskUsd === undefined ? {} : { maxPerTaskUsd: profile.maxPerTaskUsd }),
+    ...(profile.autoReleaseBelowUsd === undefined
+      ? {}
+      : { autoReleaseBelowUsd: profile.autoReleaseBelowUsd }),
     maxSteps: profile.maxSteps,
     paused: profile.paused,
     createdAt: profile.createdAt,

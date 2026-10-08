@@ -556,6 +556,8 @@ function agentProfile(overrides: Partial<AgentProfile> = {}): AgentProfile {
     instructions: "Research carefully.",
     verifiedOnly: true,
     approveAboveUsd: 0.5,
+    maxPerTaskUsd: 100,
+    autoReleaseBelowUsd: 25,
     maxSteps: 12,
     tools: ["call.search", "call.inspect", "call.pay"],
     paused: false,

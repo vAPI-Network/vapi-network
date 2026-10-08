@@ -234,6 +234,8 @@ function leadProfile(): AgentProfile {
     instructions: "Lead the swarm carefully.",
     verifiedOnly: true,
     approveAboveUsd: 1,
+    maxPerTaskUsd: 100,
+    autoReleaseBelowUsd: 25,
     maxSteps: 12,
     tools: ["call.search", "call.inspect", "call.pay"],
     grants: ["read", "delegate", "allocate"],

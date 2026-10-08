@@ -44,6 +44,12 @@ export const DEFAULT_SPEND_CAPS = {
   perDayAtomic: "1000000",
 } as const;
 
+/** The default maximum escrow funding for one task, in USD. */
+export const DEFAULT_MAX_PER_TASK_USD = 100;
+
+/** Task amounts strictly below this USD threshold may be released automatically. */
+export const DEFAULT_AUTO_RELEASE_BELOW_USD = 25;
+
 /** The per-wallet balance retained before an automatic ceiling sweep. */
 export const DEFAULT_CEILING_ATOMIC = 5_000_000n;
 

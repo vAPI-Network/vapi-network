@@ -4,7 +4,12 @@ import { join } from "node:path";
 
 import { z } from "zod";
 
-import { getVapiPaths, isMissingFile } from "./config.js";
+import {
+  DEFAULT_AUTO_RELEASE_BELOW_USD,
+  DEFAULT_MAX_PER_TASK_USD,
+  getVapiPaths,
+  isMissingFile,
+} from "./config.js";
 import { walletNameSchema } from "./wallet-name.js";
 
 /**
@@ -25,6 +30,8 @@ const agentProfileShape = {
   instructions: z.string().max(20_000),
   verifiedOnly: z.boolean().default(true),
   approveAboveUsd: z.number().min(0).default(0.5),
+  maxPerTaskUsd: z.number().min(0).default(DEFAULT_MAX_PER_TASK_USD),
+  autoReleaseBelowUsd: z.number().min(0).default(DEFAULT_AUTO_RELEASE_BELOW_USD),
   maxSteps: z.number().int().min(1).max(50).default(12),
   paused: z.boolean().default(false),
   grants: z.array(z.enum(AGENT_GRANTS)).default([]),

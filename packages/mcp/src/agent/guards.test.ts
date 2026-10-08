@@ -1,6 +1,26 @@
 import { describe, expect, it } from "vitest";
 
-import { decidePayment, wrapUntrusted } from "./guards.js";
+import {
+  decideFunding as coreDecideFunding,
+  decideRelease as coreDecideRelease,
+} from "@vapi-network/core";
+
+import {
+  decideFunding as publicDecideFunding,
+  decideRelease as publicDecideRelease,
+} from "../index.js";
+import { decideFunding, decidePayment, decideRelease, wrapUntrusted } from "./guards.js";
+
+it("re-exports core task policy functions from guards and the public MCP entry point", () => {
+  expect(decideFunding).toBe(coreDecideFunding);
+  expect(decideRelease).toBe(coreDecideRelease);
+  expect(publicDecideFunding).toBe(coreDecideFunding);
+  expect(publicDecideRelease).toBe(coreDecideRelease);
+  expect(
+    decideFunding({ amountUsd: 30, maxPerTaskUsd: 100, approveAboveUsd: 25, dayRemainingUsd: 100 }),
+  ).toEqual({ approval: true });
+  expect(decideRelease({ amountUsd: 24, autoReleaseBelowUsd: 25 })).toEqual({ auto: true });
+});
 
 describe("agent tool-result guards", () => {
   it("keeps an injected closing tag inside one untrusted wrapper", () => {

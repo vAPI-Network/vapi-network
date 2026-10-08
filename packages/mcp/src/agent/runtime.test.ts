@@ -832,6 +832,8 @@ function profile(account: string): AgentProfile {
     instructions: "Work safely.",
     verifiedOnly: true,
     approveAboveUsd: 0.5,
+    maxPerTaskUsd: 100,
+    autoReleaseBelowUsd: 25,
     maxSteps: 12,
     paused: false,
     grants: account.endsWith("lead-1") ? ["read", "delegate", "allocate"] : ["read"],

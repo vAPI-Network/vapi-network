@@ -4,6 +4,8 @@ import { createInterface } from "node:readline/promises";
 
 import {
   BASE_MAINNET_CAIP2,
+  DEFAULT_AUTO_RELEASE_BELOW_USD,
+  DEFAULT_MAX_PER_TASK_USD,
   assertWalletName,
   createRunBudget,
   createRunId,
@@ -73,9 +75,9 @@ export type AgentCommandDependencies = {
   getWallet?: typeof getWallet;
 };
 
-const AGENT_USAGE = "Usage: vapi agent create|run|list|pause|resume|revoke";
+const AGENT_USAGE = "Usage: vapi agent create|run|list|show|pause|resume|revoke";
 const CREATE_USAGE =
-  "Usage: vapi agent create <name> --model <id> --instructions <file> [--call-budget <usd>] [--max-per-call <usd>] [--router-budget <usd>] [--approve-above <usd>] [--include-unverified] [--max-steps <n>]";
+  "Usage: vapi agent create <name> --model <id> --instructions <file> [--call-budget <usd>] [--max-per-call <usd>] [--router-budget <usd>] [--approve-above <usd>] [--max-per-task <usd>] [--auto-release-below <usd>] [--include-unverified] [--max-steps <n>] [--yes]";
 const RUN_USAGE =
   'Usage: vapi agent run <name> "<task>" [--budget <usd>] [--detach] [--runtime local] [--result-file <path>]\n       vapi agent run --bundle-env <VAR> ("<task>" | --task-base64url <text>) [--budget <usd>] [--result-file <path>]';
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
@@ -111,6 +113,9 @@ export async function agentCommand(
     case "list":
       await listCommand(argv.slice(1), json, io, dependencies);
       return 0;
+    case "show":
+      await showCommand(argv.slice(1), json, io, dependencies);
+      return 0;
     case "pause":
       await setPausedCommand(argv.slice(1), true, json, io, dependencies);
       return 0;
@@ -143,9 +148,11 @@ async function createCommand(
       "--max-per-call",
       "--router-budget",
       "--approve-above",
+      "--max-per-task",
+      "--auto-release-below",
       "--max-steps",
     ]),
-    booleanOptions: new Set(["--include-unverified"]),
+    booleanOptions: new Set(["--include-unverified", "--yes"]),
     maximumPositionals: 1,
   });
   const name = assertWalletName(required(parsed.positionals[0], "<name>", CREATE_USAGE));
@@ -169,6 +176,28 @@ async function createCommand(
   const routerBudget = usdOption(parsed.one("--router-budget") ?? "1", "--router-budget", true);
   const approveAbove = usdOption(parsed.one("--approve-above") ?? "0.5", "--approve-above");
   const maxSteps = boundedInteger(parsed.one("--max-steps") ?? "12", "--max-steps", 1, 50);
+  const interactive =
+    !json && (dependencies.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY));
+  const promptForTaskPolicy = interactive && !parsed.has("--yes");
+  const maxPerTask = usdOption(
+    parsed.one("--max-per-task") ??
+      ((promptForTaskPolicy
+        ? await visibleLine(`Max per task in USD [${DEFAULT_MAX_PER_TASK_USD}]: `, dependencies)
+        : "") ||
+        String(DEFAULT_MAX_PER_TASK_USD)),
+    "--max-per-task",
+  );
+  const autoReleaseBelow = usdOption(
+    parsed.one("--auto-release-below") ??
+      ((promptForTaskPolicy
+        ? await visibleLine(
+            `Auto-release below in USD [${DEFAULT_AUTO_RELEASE_BELOW_USD}]: `,
+            dependencies,
+          )
+        : "") ||
+        String(DEFAULT_AUTO_RELEASE_BELOW_USD)),
+    "--auto-release-below",
+  );
   const commandIo = json ? { stdout: () => undefined, stderr: io.stderr } : io;
   const initialStore = await openWalletStore(dependencies);
   if (!initialStore.has(name)) {
@@ -189,6 +218,8 @@ async function createCommand(
     instructions,
     verifiedOnly: !parsed.has("--include-unverified"),
     approveAboveUsd: approveAbove.number,
+    maxPerTaskUsd: maxPerTask.number,
+    autoReleaseBelowUsd: autoReleaseBelow.number,
     maxSteps,
     tools: [...agentToolNames],
     grants: [],
@@ -215,6 +246,8 @@ async function createCommand(
         model: profile.model,
         verifiedOnly: profile.verifiedOnly,
         approveAboveUsd: profile.approveAboveUsd,
+        maxPerTaskUsd: profile.maxPerTaskUsd,
+        autoReleaseBelowUsd: profile.autoReleaseBelowUsd,
         maxSteps: profile.maxSteps,
         spendCaps: {
           perCallAtomic: maxPerCall.atomic,
@@ -634,6 +667,60 @@ async function listCommand(
   );
 }
 
+async function showCommand(
+  argv: string[],
+  json: boolean,
+  io: CliIo,
+  dependencies: CliDependencies,
+): Promise<void> {
+  const parsed = parseArguments(argv, { valueOptions: new Set(), maximumPositionals: 1 });
+  const name = assertWalletName(
+    required(parsed.positionals[0], "<name>", "Usage: vapi agent show <name> [--json]"),
+  );
+  const paths = getVapiPaths();
+  const readProfile = dependencies.agent?.readAgentProfile ?? readAgentProfile;
+  const profile = await readProfile(paths.directory, name, agentProfileOptions);
+  const store = await openWalletStore(dependencies);
+  const spendCaps = store.has(profile.wallet)
+    ? await spendCapsForWallet(store, assertWalletName(profile.wallet))
+    : null;
+  const result = {
+    name: profile.name,
+    wallet: profile.wallet,
+    model: profile.model,
+    paused: profile.paused,
+    verifiedOnly: profile.verifiedOnly,
+    approveAboveUsd: profile.approveAboveUsd,
+    maxPerTaskUsd: profile.maxPerTaskUsd,
+    autoReleaseBelowUsd: profile.autoReleaseBelowUsd,
+    maxSteps: profile.maxSteps,
+    tools: profile.tools,
+    grants: profile.grants,
+    spendCaps,
+  };
+  if (json) {
+    io.stdout(JSON.stringify(result));
+    return;
+  }
+  io.stdout(
+    [
+      `Name: ${profile.name}`,
+      `Wallet: ${profile.wallet}`,
+      `Model: ${profile.model}`,
+      `Paused: ${profile.paused ? "yes" : "no"}`,
+      `Verified only: ${profile.verifiedOnly ? "yes" : "no"}`,
+      `Approve above: ${usd(profile.approveAboveUsd, 2)}`,
+      `Max per task: ${usd(profile.maxPerTaskUsd, 2)}`,
+      `Auto-release below: ${usd(profile.autoReleaseBelowUsd, 2)}`,
+      `Max steps: ${profile.maxSteps}`,
+      `Tools: ${profile.tools.join(", ")}`,
+      `Grants: ${profile.grants.join(", ")}`,
+      `Per call: ${spendCaps === null ? "unavailable" : usd(Number(spendCaps.perCallAtomic) / 1_000_000, 2)}`,
+      `Per day: ${spendCaps === null ? "unavailable" : usd(Number(spendCaps.perDayAtomic) / 1_000_000, 2)}`,
+    ].join("\n"),
+  );
+}
+
 async function setPausedCommand(
   argv: string[],
   paused: boolean,
@@ -855,6 +942,8 @@ function shortAddress(address: string): string {
 }
 
 /** Exact USDC amount: $0.005 stays $0.005 instead of rounding to $0.01. */
-function usd(value: number): string {
-  return `$${formatUsdc(BigInt(Math.round(value * 1_000_000)))}`;
+function usd(value: number, minimumDecimals = 0): string {
+  const [whole, fraction = ""] = formatUsdc(BigInt(Math.round(value * 1_000_000))).split(".");
+  const decimals = fraction.padEnd(minimumDecimals, "0");
+  return `$${whole}${decimals === "" ? "" : `.${decimals}`}`;
 }
