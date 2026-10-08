@@ -1,12 +1,63 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { readSpendLedger, releaseSpend, reserveSpend, SpendCapError } from "./spend-policy.js";
+import {
+  escrowFundingDayRemainingAtomic,
+  readSpendLedger,
+  releaseSpend,
+  reserveSpend,
+  SpendCapError,
+} from "./spend-policy.js";
 
 const temporaryDirectories: string[] = [];
+
+describe("read-only escrow funding headroom", () => {
+  it("preserves ledger bytes and does not take the lock", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-task-headroom-"));
+    temporaryDirectories.push(directory);
+    const ledgerPath = join(directory, "spend-ledger.json");
+    const raw = JSON.stringify({
+      version: 1,
+      rows: [
+        { date: "2026-10-08", wallet: "worker", spentAtomic: "8" },
+        { date: "2026-10-08", wallet: "main", spentAtomic: "99" },
+      ],
+    });
+    await writeFile(ledgerPath, raw);
+    await writeFile(`${ledgerPath}.lock`, "held");
+    const input = {
+      caps: { perCallAtomic: "1", perDayAtomic: "10" },
+      ledgerPath,
+      now: new Date("2026-10-08T12:00:00Z"),
+      wallet: "worker",
+    };
+    expect(await escrowFundingDayRemainingAtomic(input)).toBe(2n);
+    expect(await escrowFundingDayRemainingAtomic({ ...input, wallet: "main" })).toBe(0n);
+    expect(
+      await escrowFundingDayRemainingAtomic({ ...input, now: new Date("2026-10-09T12:00:00Z") }),
+    ).toBe(10n);
+    expect(await readFile(ledgerPath, "utf8")).toBe(raw);
+    expect(await readFile(`${ledgerPath}.lock`, "utf8")).toBe("held");
+  });
+
+  it("does not create an absent ledger or directory", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-task-headroom-"));
+    temporaryDirectories.push(directory);
+    const ledgerPath = join(directory, "absent", "spend-ledger.json");
+    expect(
+      await escrowFundingDayRemainingAtomic({
+        caps: { perCallAtomic: "1", perDayAtomic: "10" },
+        ledgerPath,
+        now: new Date("2026-10-08T12:00:00Z"),
+        wallet: "main",
+      }),
+    ).toBe(10n);
+    await expect(stat(dirname(ledgerPath))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
 
 afterEach(async () => {
   await Promise.all(

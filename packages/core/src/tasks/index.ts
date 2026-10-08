@@ -1,6 +1,9 @@
 export * from "./canonical-json.js";
 export * from "./delivery-manifest.js";
 export * from "./verbs.js";
+export * from "./chain-port.js";
+export * from "./money.js";
+export * from "./actions.js";
 export { createTasksClient, TasksClientError } from "./client.js";
 export type {
   TasksClient,

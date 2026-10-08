@@ -157,6 +157,7 @@ import { routerCommand } from "./router.js";
 import { sendCommand } from "./send.js";
 import { setupCommand } from "./setup.js";
 import { stakeCommand } from "./stake.js";
+import { taskCommand, type TasksCommandDependencies } from "./task.js";
 import { statusCommand } from "./status.js";
 import { swarmCommand } from "./swarm.js";
 import { resolveRuntime, type RuntimeRequest } from "./runtime-local.js";
@@ -252,6 +253,22 @@ Usage:
   vapi router key [--rotate] [--account <name>] [--json]
   vapi stake status [--account <name>] [--json]
   vapi stake open [--account <name>] [--no-browser] [--json]
+  vapi task search [--open] [--min <usd>] [--tab trending|new|closing|paid] [--limit <n>] [--json]
+  vapi task show <id> [--account <name>] [--json]
+  vapi task post --title <text> --brief <file|-> --amount <usd> --deadline <duration|ISO> [--intake proposals|submissions] [--max-awards <k>] [--webhook <https-url>] [--account <name>] [--json]
+  vapi task propose <id> --price <usd> --duration <duration> --note <text> [--account <name>] [--json]
+  vapi task submit <id> --proof <https-url> [--proof <https-url>...] [--file <path>...] [--account <name>] [--json]
+  vapi task award <id> <proposalId> [--account <name>] [--json]
+  vapi task sign <id> [--account <name>] [--json]
+  vapi task fund <id> [--yes] [--account <name>] [--json]
+  vapi task deliver <id> --files <path...> --note <text> [--account <name>] [--json]
+  vapi task release <id> [--account <name>] [--json]
+  vapi task refund <id> [--account <name>] [--json]
+  vapi task dispute <id> --evidence-hash <0x + 64 hex> [--account <name>] [--json]
+  vapi task message <id> <text> [--account <name>] [--json]
+  vapi task thread <id> [--after <cursor>] [--account <name>] [--json]
+  vapi task watch <id> [--until <state>] [--auto-release] [--timeout 7d] [--interval 5s] [--account <name>] [--json]
+  vapi task status <id> [--account <name>] [--json]
   vapi export-key [--network <caip2>] [--account <name>] [--json]
   vapi backup [--account <name>] [--cloud [off]] [--json]
   vapi restore [--from-owner [--owner <0x…>]] [--json]
@@ -284,6 +301,8 @@ Every command that touches a wallet takes \`--account <name>\`, falls back to \`
 \`vapi search\` answers with vAPI-verified listings plus the mirrored external catalogs. \`--include-unverified\` also returns self-listed APIs that passed vAPI's automated x402 probe but were never reviewed; every result is tagged \`[verified]\`, \`[requested]\`, \`[unverified]\` or \`[external]\`.
 
 \`vapi docs\` asks the public vAPI documentation assistant; \`vapi docs search\` searches documentation excerpts and \`vapi docs read\` reads one Markdown page. They need no account, wallet or payment.
+
+\`vapi task --help\` lists task options and availability. Task exit codes: 0 ok, 1 error, 2 policy refusal (JSON ok:false with a policy. reason) or invalid usage (JSON error), 3 approval needed in non-interactive mode. Posting moves no money; the current create-order contract does not store amount, deadline, intake, max awards or webhook yet.
 
 \`vapi check <url>\` grades an x402 API's 402 without paying: status, transport, declared version and its required fields, the exact scheme, canonical USDC, payTo, maxTimeoutSeconds, advertised extensions, and the origin's /.well-known/x402. It looks for OpenAPI beside the checked path, at /openapi.json, then through same-origin service-desc links in /.well-known/api-catalog. No wallet, no payment, no registry call. It exits 1 when a rule fails. A 402 that answers with Stripe/Tempo's MPP challenge (WWW-Authenticate: Payment) is recognised and reported as transport mpp; vapi pay cannot pay it.
 
@@ -357,6 +376,8 @@ export type CliDependencies = {
     ownerStake?: typeof ownerStake;
     routerCredentials?: typeof routerCredentials;
   };
+  /** Task transport and chain seams for deterministic commands. */
+  tasks?: TasksCommandDependencies;
   /** Status-screen deadlines, injected so timeout behavior is deterministic in tests. */
   status?: { timeoutMs?: number };
   /** Cloud-backup seams, injected so relay and upload tests stay deterministic. */
@@ -685,6 +706,7 @@ export async function runCli(
   dependencies: CliDependencies = {},
 ): Promise<number> {
   let json = argv.includes("--json");
+  const taskInvocation = argv.find((argument) => argument !== "--json") === "task";
   const resultFile = runResultFile(argv);
   const runIo =
     resultFile === undefined
@@ -808,6 +830,9 @@ export async function runCli(
         await stakeCommand(args.slice(1), json, io, dependencies);
         exitCode = 0;
         break;
+      case "task":
+        exitCode = (await taskCommand(args.slice(1), json, io, dependencies)) ?? 0;
+        break;
       case "export-key":
         await exportKeyCommand(args.slice(1), json, io, dependencies);
         exitCode = 0;
@@ -888,7 +913,7 @@ export async function runCli(
     }
     return exitCode;
   } catch (error) {
-    const code = error instanceof UsageError ? 2 : 1;
+    const code = error instanceof UsageError && !taskInvocation ? 2 : 1;
     const rawMessage = error instanceof Error ? error.message : String(error);
     const message =
       resultFile === undefined
@@ -907,18 +932,31 @@ export async function runCli(
       ).catch(() => undefined);
     }
     if (json) {
-      runIo.stdout(
-        JSON.stringify({
-          error: message,
-          exitCode: code,
-          ...(error instanceof RuntimeError ? { code: error.code } : {}),
-          ...(error instanceof DocsError ? { code: error.code } : {}),
-          ...(error instanceof RemoteKeyRefusedError ? { code: error.code } : {}),
-          ...(error instanceof TransferError
-            ? { code: error.code, moneyMoved: error.moneyMoved }
-            : {}),
-        }),
-      );
+      if (taskInvocation) {
+        runIo.stdout(
+          JSON.stringify({
+            ok: false,
+            error: {
+              code:
+                error instanceof UsageError ? "usage_error" : (errorCodeOf(error) ?? "task_error"),
+              message,
+            },
+          }),
+        );
+      } else {
+        runIo.stdout(
+          JSON.stringify({
+            error: message,
+            exitCode: code,
+            ...(error instanceof RuntimeError ? { code: error.code } : {}),
+            ...(error instanceof DocsError ? { code: error.code } : {}),
+            ...(error instanceof RemoteKeyRefusedError ? { code: error.code } : {}),
+            ...(error instanceof TransferError
+              ? { code: error.code, moneyMoved: error.moneyMoved }
+              : {}),
+          }),
+        );
+      }
     } else {
       runIo.stderr(message);
     }

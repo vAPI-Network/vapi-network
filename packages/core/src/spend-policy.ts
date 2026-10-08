@@ -71,6 +71,19 @@ export async function readSpendLedger(
   return { date: utcDateKey(now), spentAtomic: row?.spentAtomic ?? "0" };
 }
 
+/** Read-only funding headroom; never creates directories, writes, or takes a lock. */
+export async function escrowFundingDayRemainingAtomic(input: {
+  caps: SpendCaps;
+  ledgerPath: string;
+  now: Date;
+  wallet: WalletName;
+}): Promise<bigint> {
+  const perDayAtomic = parseAtomicCap(input.caps.perDayAtomic, "per-day");
+  const ledger = await readSpendLedger(input.ledgerPath, input.now, input.wallet);
+  const remaining = perDayAtomic - BigInt(ledger.spentAtomic);
+  return remaining > 0n ? remaining : 0n;
+}
+
 /** Today's spend of every wallet that has spent today. */
 export async function readSpendLedgerRows(
   path = getAgentCashPaths().ledger,
