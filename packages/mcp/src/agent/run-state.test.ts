@@ -88,6 +88,8 @@ function profile(): AgentProfile {
     instructions: "Research carefully.",
     verifiedOnly: true,
     approveAboveUsd: 0.5,
+    maxPerTaskUsd: 100,
+    autoReleaseBelowUsd: 25,
     maxSteps: 4,
     tools: ["call.search", "call.inspect", "call.pay"],
     grants: [],

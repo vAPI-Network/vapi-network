@@ -89,11 +89,11 @@ describe("vapi agent create", () => {
   it.each([
     [
       ["agent", "create"],
-      "Missing <name>.\nUsage: vapi agent create <name> --model <id> --instructions <file> [--call-budget <usd>] [--max-per-call <usd>] [--router-budget <usd>] [--approve-above <usd>] [--include-unverified] [--max-steps <n>]",
+      "Missing <name>.\nUsage: vapi agent create <name> --model <id> --instructions <file> [--call-budget <usd>] [--max-per-call <usd>] [--router-budget <usd>] [--approve-above <usd>] [--max-per-task <usd>] [--auto-release-below <usd>] [--include-unverified] [--max-steps <n>] [--yes]",
     ],
     [
       ["agent", "create", "researcher"],
-      "Missing --model <id>.\nUsage: vapi agent create <name> --model <id> --instructions <file> [--call-budget <usd>] [--max-per-call <usd>] [--router-budget <usd>] [--approve-above <usd>] [--include-unverified] [--max-steps <n>]",
+      "Missing --model <id>.\nUsage: vapi agent create <name> --model <id> --instructions <file> [--call-budget <usd>] [--max-per-call <usd>] [--router-budget <usd>] [--approve-above <usd>] [--max-per-task <usd>] [--auto-release-below <usd>] [--include-unverified] [--max-steps <n>] [--yes]",
     ],
   ] as const)("names the missing argument and prints create usage", async (argv, expected) => {
     await temporaryHome();
@@ -204,6 +204,339 @@ describe("vapi agent create", () => {
     expect(noSecrets(allOutput(custom))).toBe(true);
   });
 
+  it.each([false, true])(
+    "uses defaults without prompting under --json (interactive: %s)",
+    async (interactive) => {
+      const home = await temporaryHome();
+      const instructions = join(home, "instructions.md");
+      await writeFile(instructions, "Research carefully.");
+      const line = vi.fn(async () => {
+        throw new Error("Unexpected prompt");
+      });
+      const captured = captureIo();
+      expect(
+        await runCli(
+          [
+            "agent",
+            "create",
+            "researcher",
+            "--model",
+            "router/test",
+            "--instructions",
+            instructions,
+            "--json",
+          ],
+          captured.io,
+          createDependencies({
+            interactive,
+            now: () => new Date("2026-09-23T00:00:00.000Z"),
+            prompts: { secret: async () => PASSPHRASE, line },
+            agentLink: {
+              startDeviceLink: async () => START,
+              pollDeviceLink: async () => LINK_RESULT,
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(line).not.toHaveBeenCalled();
+      expect(JSON.parse(onlyStdout(captured))).toMatchObject({
+        maxPerTaskUsd: 100,
+        autoReleaseBelowUsd: 25,
+      });
+      expect(
+        JSON.parse(await readFile(join(home, "agents", "researcher.json"), "utf8")),
+      ).toMatchObject({ maxPerTaskUsd: 100, autoReleaseBelowUsd: 25 });
+    },
+  );
+
+  it("uses defaults without prompting in noninteractive human mode", async () => {
+    const home = await temporaryHome();
+    const instructions = join(home, "instructions.md");
+    await writeFile(instructions, "Research carefully.");
+    const line = vi.fn(async () => {
+      throw new Error("Unexpected prompt");
+    });
+    expect(
+      await runCli(
+        ["agent", "create", "researcher", "--model", "router/test", "--instructions", instructions],
+        captureIo().io,
+        createDependencies({
+          now: () => new Date("2026-09-23T00:00:00.000Z"),
+          prompts: { secret: async () => PASSPHRASE, line },
+          agentLink: {
+            startDeviceLink: async () => START,
+            pollDeviceLink: async () => LINK_RESULT,
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(line).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(await readFile(join(home, "agents", "researcher.json"), "utf8")),
+    ).toMatchObject({ maxPerTaskUsd: 100, autoReleaseBelowUsd: 25 });
+  });
+
+  it("uses task policy defaults without prompting under --yes in interactive human mode", async () => {
+    const home = await temporaryHome();
+    const instructions = join(home, "instructions.md");
+    await writeFile(instructions, "Research carefully.");
+    const line = vi.fn(async () => {
+      throw new Error("Unexpected prompt");
+    });
+    expect(
+      await runCli(
+        [
+          "agent",
+          "create",
+          "researcher",
+          "--model",
+          "router/test",
+          "--instructions",
+          instructions,
+          "--yes",
+        ],
+        captureIo().io,
+        createDependencies({
+          interactive: true,
+          now: () => new Date("2026-09-23T00:00:00.000Z"),
+          prompts: { secret: async () => PASSPHRASE, line },
+          agentLink: {
+            startDeviceLink: async () => START,
+            pollDeviceLink: async () => LINK_RESULT,
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(line).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(await readFile(join(home, "agents", "researcher.json"), "utf8")),
+    ).toMatchObject({ maxPerTaskUsd: 100, autoReleaseBelowUsd: 25 });
+  });
+
+  it("honors explicit task policy flags with --yes", async () => {
+    const home = await temporaryHome();
+    const instructions = join(home, "instructions.md");
+    await writeFile(instructions, "Research carefully.");
+    const line = vi.fn(async () => {
+      throw new Error("Unexpected prompt");
+    });
+    const captured = captureIo();
+    expect(
+      await runCli(
+        [
+          "agent",
+          "create",
+          "researcher",
+          "--model",
+          "router/test",
+          "--instructions",
+          instructions,
+          "--yes",
+          "--max-per-task",
+          "42.5",
+          "--auto-release-below",
+          "7.25",
+          "--json",
+        ],
+        captured.io,
+        createDependencies({
+          interactive: true,
+          now: () => new Date("2026-09-23T00:00:00.000Z"),
+          prompts: { secret: async () => PASSPHRASE, line },
+          agentLink: {
+            startDeviceLink: async () => START,
+            pollDeviceLink: async () => LINK_RESULT,
+          },
+        }),
+      ),
+    ).toBe(0);
+    expect(line).not.toHaveBeenCalled();
+    expect(JSON.parse(onlyStdout(captured))).toMatchObject({
+      maxPerTaskUsd: 42.5,
+      autoReleaseBelowUsd: 7.25,
+    });
+  });
+
+  it.each([
+    { answers: ["", ""], expected: { maxPerTaskUsd: 100, autoReleaseBelowUsd: 25 } },
+    {
+      answers: ["12.345678", "2.5"],
+      expected: { maxPerTaskUsd: 12.345678, autoReleaseBelowUsd: 2.5 },
+    },
+  ])(
+    "prompts for task policy in interactive human mode: $answers",
+    async ({ answers, expected }) => {
+      const home = await temporaryHome();
+      const instructions = join(home, "instructions.md");
+      await writeFile(instructions, "Research carefully.");
+      const line = vi.fn().mockResolvedValueOnce(answers[0]).mockResolvedValueOnce(answers[1]);
+      expect(
+        await runCli(
+          [
+            "agent",
+            "create",
+            "researcher",
+            "--model",
+            "router/test",
+            "--instructions",
+            instructions,
+          ],
+          captureIo().io,
+          createDependencies({
+            interactive: true,
+            now: () => new Date("2026-09-23T00:00:00.000Z"),
+            prompts: { secret: async () => PASSPHRASE, line },
+            agentLink: {
+              startDeviceLink: async () => START,
+              pollDeviceLink: async () => LINK_RESULT,
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(line.mock.calls).toEqual([
+        ["Max per task in USD [100]: "],
+        ["Auto-release below in USD [25]: "],
+      ]);
+      expect(
+        JSON.parse(await readFile(join(home, "agents", "researcher.json"), "utf8")),
+      ).toMatchObject(expected);
+    },
+  );
+
+  it.each([false, true])(
+    "writes explicit task policy without prompting (json: %s)",
+    async (json) => {
+      const home = await temporaryHome();
+      const instructions = join(home, "instructions.md");
+      await writeFile(instructions, "Research carefully.");
+      const line = vi.fn(async () => {
+        throw new Error("Unexpected prompt");
+      });
+      const captured = captureIo();
+      expect(
+        await runCli(
+          [
+            "agent",
+            "create",
+            "researcher",
+            "--model",
+            "router/test",
+            "--instructions",
+            instructions,
+            "--max-per-task",
+            "50.123456",
+            "--auto-release-below",
+            "0",
+            ...(json ? ["--json"] : []),
+          ],
+          captured.io,
+          createDependencies({
+            interactive: true,
+            now: () => new Date("2026-09-23T00:00:00.000Z"),
+            prompts: { secret: async () => PASSPHRASE, line },
+            agentLink: {
+              startDeviceLink: async () => START,
+              pollDeviceLink: async () => LINK_RESULT,
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(line).not.toHaveBeenCalled();
+      const expected = { maxPerTaskUsd: 50.123456, autoReleaseBelowUsd: 0 };
+      expect(
+        JSON.parse(await readFile(join(home, "agents", "researcher.json"), "utf8")),
+      ).toMatchObject(expected);
+      if (json) expect(JSON.parse(onlyStdout(captured))).toMatchObject(expected);
+    },
+  );
+
+  it.each(["--max-per-task", "--auto-release-below"])(
+    "rejects invalid %s before creating a wallet or profile",
+    async (option) => {
+      const home = await temporaryHome();
+      const instructions = join(home, "instructions.md");
+      await writeFile(instructions, "Research carefully.");
+      const start = vi.fn<typeof startDeviceLink>(async () => START);
+      const writeProfile = vi.fn<typeof writeAgentProfile>();
+      const captured = captureIo();
+      expect(
+        await runCli(
+          [
+            "agent",
+            "create",
+            "researcher",
+            "--model",
+            "router/test",
+            "--instructions",
+            instructions,
+            "--yes",
+            option,
+            "invalid",
+            "--json",
+          ],
+          captured.io,
+          createDependencies({
+            agent: { writeAgentProfile: writeProfile },
+            agentLink: { startDeviceLink: start, pollDeviceLink: async () => LINK_RESULT },
+          }),
+        ),
+      ).toBe(2);
+      expect(JSON.parse(onlyStdout(captured))).toEqual({
+        error: `${option} must be a US dollar amount such as 0.25 or 10.`,
+        exitCode: 2,
+      });
+      expect((await WalletStore.open(home)).has("researcher")).toBe(false);
+      expect(await readdir(home)).not.toContain("agents");
+      expect(start).not.toHaveBeenCalled();
+      expect(writeProfile).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["--max-per-task", "--auto-release-below"])(
+    "rejects invalid prompted %s without changing existing wallet caps",
+    async (option) => {
+      const home = await homeWithAgent();
+      await rm(join(home, "agents", "researcher.json"));
+      const instructions = join(home, "instructions.md");
+      await writeFile(instructions, "Research carefully.");
+      const line = vi
+        .fn()
+        .mockResolvedValueOnce(option === "--max-per-task" ? "invalid" : "")
+        .mockResolvedValueOnce("invalid");
+      const start = vi.fn<typeof startDeviceLink>(async () => START);
+      const captured = captureIo();
+      expect(
+        await runCli(
+          [
+            "agent",
+            "create",
+            "researcher",
+            "--model",
+            "router/test",
+            "--instructions",
+            instructions,
+          ],
+          captured.io,
+          createDependencies({
+            interactive: true,
+            prompts: { secret: async () => PASSPHRASE, line },
+            agentLink: { startDeviceLink: start, pollDeviceLink: async () => LINK_RESULT },
+          }),
+        ),
+      ).toBe(2);
+      expect(captured.stdout).toEqual([]);
+      expect(captured.stderr).toEqual([`${option} must be a US dollar amount such as 0.25 or 10.`]);
+      expect((await WalletStore.open(home)).entry("researcher")?.spendCaps).toEqual({
+        perCallAtomic: "1000000",
+        perDayAtomic: "2000000",
+      });
+      await expect(stat(join(home, "agents", "researcher.json"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect(start).not.toHaveBeenCalled();
+    },
+  );
+
   it("refuses to replace an existing profile", async () => {
     const home = await temporaryHome();
     const instructions = join(home, "instructions.md");
@@ -237,6 +570,96 @@ describe("vapi agent create", () => {
     expect(start).not.toHaveBeenCalled();
     expect((await WalletStore.open(home)).has("researcher")).toBe(false);
   });
+});
+
+describe("vapi agent show", () => {
+  it("prints policy and wallet caps in human output", async () => {
+    await homeWithAgent();
+    const captured = captureIo();
+    expect(await runCli(["agent", "show", "researcher"], captured.io, createDependencies())).toBe(
+      0,
+    );
+    const output = onlyStdout(captured);
+    expect(output).toContain("Max per task: $100.00");
+    expect(output).toContain("Auto-release below: $25.00");
+    expect(output).toContain("Per call: $1.00");
+    expect(output).toContain("Per day: $2.00");
+    expect(captured.stderr).toEqual([]);
+  });
+
+  it("prints exactly the profile summary and spend caps as JSON", async () => {
+    await homeWithAgent({ maxPerTaskUsd: 40, autoReleaseBelowUsd: 10 });
+    const captured = captureIo();
+    expect(
+      await runCli(["agent", "show", "researcher", "--json"], captured.io, createDependencies()),
+    ).toBe(0);
+    expect(JSON.parse(onlyStdout(captured))).toEqual({
+      name: "researcher",
+      wallet: "researcher",
+      model: "router/test",
+      paused: false,
+      verifiedOnly: true,
+      approveAboveUsd: 0.5,
+      maxPerTaskUsd: 40,
+      autoReleaseBelowUsd: 10,
+      maxSteps: 12,
+      tools: ["call.search", "call.inspect", "call.pay"],
+      grants: [],
+      spendCaps: { perCallAtomic: "1000000", perDayAtomic: "2000000" },
+    });
+    expect(captured.stderr).toEqual([]);
+  });
+
+  it("reports null caps when the profile wallet is missing", async () => {
+    const home = await temporaryHome();
+    await writeAgentProfile(home, profile({ wallet: "absent" }));
+    const captured = captureIo();
+    expect(
+      await runCli(["agent", "show", "researcher", "--json"], captured.io, createDependencies()),
+    ).toBe(0);
+    expect(JSON.parse(onlyStdout(captured))).toMatchObject({ wallet: "absent", spendCaps: null });
+  });
+
+  it("shows defaults for older on-disk profiles without task policy fields", async () => {
+    const home = await homeWithAgent();
+    const path = join(home, "agents", "researcher.json");
+    const legacy = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+    delete legacy.maxPerTaskUsd;
+    delete legacy.autoReleaseBelowUsd;
+    await writeFile(path, JSON.stringify(legacy));
+    const captured = captureIo();
+    expect(
+      await runCli(["agent", "show", "researcher", "--json"], captured.io, createDependencies()),
+    ).toBe(0);
+    expect(JSON.parse(onlyStdout(captured))).toMatchObject({
+      maxPerTaskUsd: 100,
+      autoReleaseBelowUsd: 25,
+    });
+    expect(JSON.parse(await readFile(path, "utf8"))).not.toHaveProperty("maxPerTaskUsd");
+  });
+
+  it.each([false, true])(
+    "reports a missing agent through existing error handling (json: %s)",
+    async (json) => {
+      await temporaryHome();
+      const captured = captureIo();
+      expect(
+        await runCli(
+          ["agent", "show", "missing", ...(json ? ["--json"] : [])],
+          captured.io,
+          createDependencies(),
+        ),
+      ).toBe(1);
+      const error = "No agent named missing. Create it with vapi agent create missing.";
+      if (json) {
+        expect(JSON.parse(onlyStdout(captured))).toEqual({ error, exitCode: 1 });
+        expect(captured.stderr).toEqual([]);
+      } else {
+        expect(captured.stdout).toEqual([]);
+        expect(captured.stderr).toEqual([error]);
+      }
+    },
+  );
 });
 
 describe("vapi agent run", () => {
@@ -1032,6 +1455,8 @@ function profile(overrides: Partial<AgentProfile> = {}): AgentProfile {
     instructions: "Research carefully.",
     verifiedOnly: true,
     approveAboveUsd: 0.5,
+    maxPerTaskUsd: 100,
+    autoReleaseBelowUsd: 25,
     maxSteps: 12,
     tools: ["call.search", "call.inspect", "call.pay"],
     grants: [],

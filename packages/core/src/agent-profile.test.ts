@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -50,6 +50,8 @@ describe("agent profiles", () => {
       ...profile(),
       verifiedOnly: false,
       approveAboveUsd: 0.25,
+      maxPerTaskUsd: 80,
+      autoReleaseBelowUsd: 15,
       maxSteps: 6,
       tools: ["call.search", "call.pay"],
       grants: [],
@@ -69,11 +71,42 @@ describe("agent profiles", () => {
     await expect(readAgentProfile(home, "researcher")).resolves.toMatchObject({
       verifiedOnly: true,
       approveAboveUsd: 0.5,
+      maxPerTaskUsd: 100,
+      autoReleaseBelowUsd: 25,
       maxSteps: 12,
       tools: ["call.search", "call.inspect", "call.pay"],
       paused: false,
     });
+    expect(
+      JSON.parse(await readFile(join(home, "agents", "researcher.json"), "utf8")),
+    ).toMatchObject({
+      maxPerTaskUsd: 100,
+      autoReleaseBelowUsd: 25,
+    });
   });
+
+  it("reads and lists task policy defaults from an older profile file", async () => {
+    const home = await temporaryHome("vapi-agent-profile-old-task-policy-");
+    await mkdir(join(home, "agents"), { recursive: true });
+    await writeFile(join(home, "agents", "researcher.json"), JSON.stringify(profile()));
+
+    await expect(readAgentProfile(home, "researcher")).resolves.toMatchObject({
+      maxPerTaskUsd: 100,
+      autoReleaseBelowUsd: 25,
+    });
+    await expect(listAgentProfiles(home)).resolves.toEqual([
+      expect.objectContaining({ maxPerTaskUsd: 100, autoReleaseBelowUsd: 25 }),
+    ]);
+  });
+
+  it.each(["maxPerTaskUsd", "autoReleaseBelowUsd"] as const)(
+    "rejects a negative %s",
+    async (field) => {
+      const home = await temporaryHome("vapi-agent-profile-negative-task-policy-");
+      await expect(writeAgentProfile(home, profile({ [field]: -1 }))).rejects.toThrow();
+      expect(() => agentProfileSchema.parse({ ...profile(), [field]: -1 })).toThrow();
+    },
+  );
 
   it.each(["Bad Name", "../x", "a".repeat(33)])("rejects the bad name %j", async (name) => {
     const home = await temporaryHome("vapi-agent-profile-bad-name-");

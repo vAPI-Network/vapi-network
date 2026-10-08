@@ -404,6 +404,8 @@ function profile(grants: AgentProfile["grants"] = ["read"]): AgentProfile {
     instructions: "Find the cheapest weather listing and report it.",
     verifiedOnly: true,
     approveAboveUsd: 0.5,
+    maxPerTaskUsd: 100,
+    autoReleaseBelowUsd: 25,
     maxSteps: 12,
     tools: ["call.search", "call.inspect", "call.pay"],
     grants,

@@ -129,6 +129,8 @@ function profile(): AgentProfile {
     grants: [],
     verifiedOnly: true,
     approveAboveUsd: 0.5,
+    maxPerTaskUsd: 100,
+    autoReleaseBelowUsd: 25,
     maxSteps: 12,
     paused: false,
     createdAt: "2026-09-29T00:00:00.000Z",

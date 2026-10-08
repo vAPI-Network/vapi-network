@@ -384,6 +384,8 @@ function profile(tools: AgentProfile["tools"], grants: AgentProfile["grants"] = 
     instructions: "Research carefully.",
     verifiedOnly: true,
     approveAboveUsd: 0.5,
+    maxPerTaskUsd: 100,
+    autoReleaseBelowUsd: 25,
     maxSteps: 1,
     tools,
     grants,

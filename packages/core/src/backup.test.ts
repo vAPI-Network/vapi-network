@@ -19,7 +19,7 @@ import { encodeFunctionResult, recoverTypedDataAddress } from "viem";
 import { mnemonicToAccount, privateKeyToAccount } from "viem/accounts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { writeAgentProfile } from "./agent-profile.js";
+import { readAgentProfile, writeAgentProfile } from "./agent-profile.js";
 import * as backup from "./backup.js";
 import {
   BackupError,
@@ -1152,6 +1152,52 @@ describe("backup plaintext v1 and v2 compatibility", () => {
 });
 
 describe("backup v2 export allow-list", () => {
+  it("backs up and restores explicit task policy fields from agent profiles", async () => {
+    const home = await temporaryHome();
+    const secrets = memoryStore();
+    secrets.entries.set("vault-key", Buffer.from(KEY).toString("base64"));
+    const store = await WalletStore.open(home, {
+      secrets,
+      now: () => new Date(CREATED_AT),
+      audit: async () => undefined,
+    });
+    await store.create("main", "", { phrase: TEST_PHRASE });
+    const taskPolicy = { maxPerTaskUsd: 75, autoReleaseBelowUsd: 12.5 };
+    await writeAgentProfile(home, { ...agentFixture("task-poster"), ...taskPolicy });
+
+    const source = await exportBackupSource({ store, vaultKey: KEY });
+    expect(source.agents).toEqual([expect.objectContaining(taskPolicy)]);
+    const created = await createBackup({
+      vault: source,
+      ownerKey: { kdf: "hkdf-sha256", key: KEY, salt: SALT },
+      owner: OWNER,
+      device: "test-device",
+      now: () => new Date(CREATED_AT),
+      randomBytes: () => NONCE,
+    });
+    const plaintext = await openBackup({ envelope: created.envelope, key: KEY });
+    expect(plaintext).toMatchObject({ agents: [taskPolicy] });
+    const restoredHome = await temporaryHome();
+    await restoreFromBackup({ plaintext, home: restoredHome, vaultKey: KEY });
+    await expect(readAgentProfile(restoredHome, "task-poster")).resolves.toMatchObject(taskPolicy);
+  });
+
+  it("restores older backup profiles without task policy fields using read defaults", async () => {
+    const home = await temporaryHome();
+    const agent = agentFixture("old-task-poster");
+    expect(agent).not.toHaveProperty("maxPerTaskUsd");
+    expect(agent).not.toHaveProperty("autoReleaseBelowUsd");
+    await restoreFromBackup({
+      plaintext: restoreV2Plaintext({ agents: [agent] }),
+      home,
+      vaultKey: KEY,
+    });
+    await expect(readAgentProfile(home, agent.name)).resolves.toMatchObject({
+      maxPerTaskUsd: 100,
+      autoReleaseBelowUsd: 25,
+    });
+  });
+
   it("applies normal profile defaults and reports profiles that loader rejects", async () => {
     const home = await temporaryHome();
     const secrets = memoryStore();
@@ -1197,6 +1243,8 @@ describe("backup v2 export allow-list", () => {
         instructions: "Use the normal loader defaults.",
         verifiedOnly: true,
         approveAboveUsd: 0.5,
+        maxPerTaskUsd: 100,
+        autoReleaseBelowUsd: 25,
         maxSteps: 12,
         paused: false,
         createdAt: CREATED_AT,
@@ -1427,7 +1475,12 @@ describe("backup v2 export allow-list", () => {
               { mode: 0o600 },
             );
           }
-          return { ...agentFixture("snapshot-barrier"), grants: [] };
+          return {
+            ...agentFixture("snapshot-barrier"),
+            maxPerTaskUsd: 100,
+            autoReleaseBelowUsd: 25,
+            grants: [],
+          };
         },
       },
     });

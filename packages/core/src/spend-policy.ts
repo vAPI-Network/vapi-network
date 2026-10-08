@@ -16,6 +16,7 @@ const ledgerSchema = z.object({
 const spendReservationSchema = z.object({
   id: z.string().min(1),
   amountAtomic: z.string().regex(/^\d+$/),
+  kind: z.enum(["payment", "escrow-funding"]).optional(),
 });
 
 /**
@@ -38,6 +39,7 @@ const ledgerFileSchema = z.union([
 ]);
 
 export type SpendLedger = z.infer<typeof ledgerSchema>;
+export type SpendKind = "payment" | "escrow-funding";
 export type SpendLedgerRow = SpendLedger & { wallet: WalletName };
 type StoredSpendLedgerRow = SpendLedgerRow & {
   reservations?: Array<z.infer<typeof spendReservationSchema>>;
@@ -45,7 +47,8 @@ type StoredSpendLedgerRow = SpendLedgerRow & {
 
 export class SpendCapError extends Error {
   constructor(
-    public readonly code: "per_call_cap_exceeded" | "per_day_cap_exceeded",
+    public readonly code:
+      "per_call_cap_exceeded" | "per_task_cap_exceeded" | "per_day_cap_exceeded",
     message: string,
   ) {
     super(message);
@@ -102,8 +105,9 @@ async function readStoredSpendLedgerRows(path: string, now: Date): Promise<Store
 }
 
 /**
- * Reserves one payment against the caps of one wallet. Per-day totals are kept
- * per wallet, so an agent wallet cannot spend the owner's daily allowance.
+ * Reserves one payment or escrow funding against the caps of one wallet.
+ * Per-day totals are kept per wallet, so an agent wallet cannot spend the
+ * owner's daily allowance.
  */
 export async function reserveSpend(
   amountAtomic: bigint,
@@ -113,19 +117,37 @@ export async function reserveSpend(
     now?: Date;
     wallet?: WalletName;
     reservationId?: string;
+    kind?: SpendKind;
+    maxPerTaskAtomic?: bigint;
   },
 ): Promise<SpendLedger> {
   if (amountAtomic < 0n) {
     throw new Error("Spend amount cannot be negative.");
   }
 
-  const perCallAtomic = parseAtomicCap(caps.perCallAtomic, "per-call");
-  const perDayAtomic = parseAtomicCap(caps.perDayAtomic, "per-day");
-  if (amountAtomic > perCallAtomic) {
-    throw new SpendCapError(
-      "per_call_cap_exceeded",
-      `Payment quote ${amountAtomic} atomic USDC exceeds the per-call cap ${perCallAtomic}. Refusing to sign.`,
-    );
+  const kind = options?.kind ?? "payment";
+  let perDayAtomic: bigint;
+  if (kind === "escrow-funding") {
+    const maxPerTaskAtomic = options?.maxPerTaskAtomic;
+    if (maxPerTaskAtomic === undefined || maxPerTaskAtomic < 0n) {
+      throw new Error("Escrow funding requires a non-negative per-task cap.");
+    }
+    if (amountAtomic > maxPerTaskAtomic) {
+      throw new SpendCapError(
+        "per_task_cap_exceeded",
+        `Escrow funding ${amountAtomic} atomic USDC exceeds the per-task cap ${maxPerTaskAtomic}. Refusing to sign.`,
+      );
+    }
+    perDayAtomic = parseAtomicCap(caps.perDayAtomic, "per-day");
+  } else {
+    const perCallAtomic = parseAtomicCap(caps.perCallAtomic, "per-call");
+    perDayAtomic = parseAtomicCap(caps.perDayAtomic, "per-day");
+    if (amountAtomic > perCallAtomic) {
+      throw new SpendCapError(
+        "per_call_cap_exceeded",
+        `Payment quote ${amountAtomic} atomic USDC exceeds the per-call cap ${perCallAtomic}. Refusing to sign.`,
+      );
+    }
   }
 
   const ledgerPath = options?.ledgerPath ?? getAgentCashPaths().ledger;
@@ -144,7 +166,7 @@ export async function reserveSpend(
     if (nextSpent > perDayAtomic) {
       throw new SpendCapError(
         "per_day_cap_exceeded",
-        `Payment quote ${amountAtomic} atomic USDC would raise today's spend to ${nextSpent} for wallet ${wallet}, above the per-day cap ${perDayAtomic}. Refusing to sign.`,
+        `${kind === "escrow-funding" ? "Escrow funding" : "Payment quote"} ${amountAtomic} atomic USDC would raise today's spend to ${nextSpent} for wallet ${wallet}, above the per-day cap ${perDayAtomic}. Refusing to sign.`,
       );
     }
     const nextRow: StoredSpendLedgerRow = {
@@ -158,7 +180,13 @@ export async function reserveSpend(
               ...(current?.reservations ?? []),
               ...(options?.reservationId === undefined
                 ? []
-                : [{ id: options.reservationId, amountAtomic: amountAtomic.toString() }]),
+                : [
+                    {
+                      id: options.reservationId,
+                      amountAtomic: amountAtomic.toString(),
+                      ...(kind === "escrow-funding" ? { kind } : {}),
+                    },
+                  ]),
             ],
           }),
     };

@@ -301,7 +301,9 @@ export async function transferBetweenAccounts(args: TransferArgs): Promise<Trans
       );
       reservedOn = reservation.date;
     } catch (error) {
-      if (error instanceof SpendCapError) throw transferError(error.code);
+      if (error instanceof SpendCapError && isTransferErrorCode(error.code)) {
+        throw transferError(error.code);
+      }
       throw transferError("network_error");
     }
   }
