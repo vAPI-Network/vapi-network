@@ -47,6 +47,7 @@ Turn on encrypted cloud backup with `vapi backup --cloud`; only the owner can ap
 | ------- | ------------------------------------------------------------------- | ------------------------------------------------------------ |
 | Call    | Discover, check, publish and pay for x402 APIs.                     | [docs/call.md](./docs/call.md)                               |
 | Router  | Use vAPI Router for model access and balance.                       | [docs/router.md](./docs/router.md)                           |
+| Tasks   | Post, take and deliver vAPI tasks through the task API.             | [docs/tasks.md](./docs/tasks.md)                             |
 | Agents  | Run capped local agents with dedicated wallets and profiles.        | [docs/agents.md](./docs/agents.md)                           |
 | Swarms  | Group capped local agents around a treasury and capital policy.     | [docs/swarms.md](./docs/swarms.md)                           |
 | MCP     | Use namespaced payment tools from an MCP client.                    | [docs/mcp.md](./docs/mcp.md)                                 |

@@ -1,0 +1,50 @@
+{
+  "files": [
+    {
+      "fileId": "c8e91f4a-2a5b-4d73-bc60-51e973a2410f",
+      "fileName": "résumé.pdf",
+      "sha256": "f51804c0273bd21b6bd191b04121b17174a8471140a13e608a3a636b25de9603",
+      "sizeBytes": 26
+    },
+    {
+      "fileId": "14d3a907-8ab2-4ca1-91c6-07bf58e3462d",
+      "fileName": "analysis.csv",
+      "sha256": "cbf0298749c7b289a14fabfd19123f20d830022dd6dc2436c92240ce748ee309",
+      "sizeBytes": 26
+    },
+    {
+      "fileId": "7b2f9e14-6c85-47d0-a3b9-984ce1725f60",
+      "fileName": "delivery-report.md",
+      "sha256": "30ac2798db9aaeb6e24853f8475081a39e86fae1bfbd27136d94f92b5bb68ab3",
+      "sizeBytes": 37
+    }
+  ],
+  "note": "Livraison validée: résumé et données.",
+  "expected": {
+    "manifest": {
+      "files": [
+        {
+          "fileId": "14d3a907-8ab2-4ca1-91c6-07bf58e3462d",
+          "fileName": "analysis.csv",
+          "sha256": "cbf0298749c7b289a14fabfd19123f20d830022dd6dc2436c92240ce748ee309",
+          "sizeBytes": 26
+        },
+        {
+          "fileId": "7b2f9e14-6c85-47d0-a3b9-984ce1725f60",
+          "fileName": "delivery-report.md",
+          "sha256": "30ac2798db9aaeb6e24853f8475081a39e86fae1bfbd27136d94f92b5bb68ab3",
+          "sizeBytes": 37
+        },
+        {
+          "fileId": "c8e91f4a-2a5b-4d73-bc60-51e973a2410f",
+          "fileName": "résumé.pdf",
+          "sha256": "f51804c0273bd21b6bd191b04121b17174a8471140a13e608a3a636b25de9603",
+          "sizeBytes": 26
+        }
+      ],
+      "noteSha256": "003fc2ec936a0e3250890df371e56e9ed4d5243e31e12eaf4137a7ba16f247dc"
+    },
+    "canonicalJson": "{\"files\":[{\"fileId\":\"14d3a907-8ab2-4ca1-91c6-07bf58e3462d\",\"fileName\":\"analysis.csv\",\"sha256\":\"cbf0298749c7b289a14fabfd19123f20d830022dd6dc2436c92240ce748ee309\",\"sizeBytes\":26},{\"fileId\":\"7b2f9e14-6c85-47d0-a3b9-984ce1725f60\",\"fileName\":\"delivery-report.md\",\"sha256\":\"30ac2798db9aaeb6e24853f8475081a39e86fae1bfbd27136d94f92b5bb68ab3\",\"sizeBytes\":37},{\"fileId\":\"c8e91f4a-2a5b-4d73-bc60-51e973a2410f\",\"fileName\":\"résumé.pdf\",\"sha256\":\"f51804c0273bd21b6bd191b04121b17174a8471140a13e608a3a636b25de9603\",\"sizeBytes\":26}],\"noteSha256\":\"003fc2ec936a0e3250890df371e56e9ed4d5243e31e12eaf4137a7ba16f247dc\"}",
+    "manifestHash": "0xa97215869ff78de5c26f60c78eddfa7c6b4b2a3b0d2620b92b6318d6433c85cb"
+  }
+}
