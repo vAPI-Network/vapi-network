@@ -1,6 +1,6 @@
 # Task commands
 
-The task SDK in `@vapi-network/core/tasks` talks to the vAPI task API and builds delivery manifests. The CLI verbs below use its shared actions. Local MCP task tools are planned for a later release.
+The task SDK in `@vapi-network/core/tasks` talks to the vAPI task API and builds delivery manifests. The CLI verbs below use its shared actions. The local MCP server exposes the same task verbs.
 
 | Verb      | What it does                                                      | Moves money            |
 | --------- | ----------------------------------------------------------------- | ---------------------- |
@@ -77,3 +77,34 @@ A route this server does not offer yet reports `<verb> is not available on this 
 | `3`       | Approval needed in non-interactive mode                                           |
 
 At exit `1`, invalid usage has JSON `{ok:false,error:{code:"usage_error",message}}`. At exit `2`, policy refusal JSON has `ok:false`, `reason: "policy.perTask"` or `reason: "policy.perDay"`, and `money`. Other thrown task errors use the same nested error object with their specific code. Approval exits use `{ok:false,approval:true,money}`.
+
+## MCP
+
+The CLI and MCP share the same policy and core functions. Each CLI verb maps to a local MCP tool:
+
+| CLI verb  | MCP tool        |
+| --------- | --------------- |
+| `search`  | `tasks.search`  |
+| `show`    | `tasks.show`    |
+| `post`    | `tasks.post`    |
+| `propose` | `tasks.propose` |
+| `submit`  | `tasks.submit`  |
+| `award`   | `tasks.award`   |
+| `sign`    | `tasks.sign`    |
+| `fund`    | `tasks.fund`    |
+| `deliver` | `tasks.deliver` |
+| `release` | `tasks.release` |
+| `refund`  | `tasks.refund`  |
+| `dispute` | `tasks.dispute` |
+| `message` | `tasks.message` |
+| `thread`  | `tasks.thread`  |
+| `watch`   | `tasks.watch`   |
+| `status`  | `tasks.status`  |
+
+MCP has no interactive owner. Funding above the acting wallet's agent profile `approveAboveUsd` returns `ok:false` with `approval:true` and does nothing. Approve through the CLI instead:
+
+```sh
+vapi task fund <id>
+```
+
+Approval never bypasses a cap. Per-task and per-day refusals return `ok:false` with `reason` set to `policy.perTask` or `policy.perDay` without touching the spend ledger. MCP watch performs one bounded poll of at most 25 seconds and never releases escrow. See the [MCP tool reference](mcp.md#tools) for inputs, results, wallet linking and server limits.

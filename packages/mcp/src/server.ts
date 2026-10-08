@@ -92,6 +92,27 @@ import {
   type RouterCoreOverrides,
 } from "./tools/router.js";
 import {
+  createTasksTools,
+  tasksSearchTool,
+  tasksShowTool,
+  tasksPostTool,
+  tasksProposeTool,
+  tasksSubmitTool,
+  tasksAwardTool,
+  tasksSignTool,
+  tasksFundTool,
+  tasksDeliverTool,
+  tasksReleaseTool,
+  tasksRefundTool,
+  tasksDisputeTool,
+  tasksMessageTool,
+  tasksThreadTool,
+  tasksWatchTool,
+  tasksStatusTool,
+  tasksErrorResult,
+  type TasksOverrides,
+} from "./tools/tasks.js";
+import {
   createStatusTools,
   vapiAccountsTool,
   vapiStatusTool,
@@ -126,6 +147,8 @@ export type VapiServerOptions = {
   agentLink?: AuthAgentLinkOverrides | undefined;
   /** Core Router functions overridden by deterministic tests. */
   router?: RouterCoreOverrides | undefined;
+  /** Task transport, chain adapter and clocks overridden by deterministic tests. */
+  tasks?: TasksOverrides | undefined;
   /** Status probes and clock overridden by deterministic tests. */
   status?: StatusCoreOverrides | undefined;
   /** Account-link functions, device identity and clock overridden by deterministic tests. */
@@ -377,7 +400,7 @@ export class VapiMcpServer {
         ? withDeprecation(result, tool.deprecatedReplacement)
         : result;
     } catch (error) {
-      const result = toolError(error);
+      const result = request.name.startsWith("tasks.") ? tasksErrorResult(error) : toolError(error);
       return tool.deprecatedReplacement
         ? withDeprecation(result, tool.deprecatedReplacement)
         : result;
@@ -539,6 +562,32 @@ export function createVapiServer(options: VapiServerOptions = {}) {
   server.registerTool("router.usage", routerUsageTool, router.usage);
   server.registerTool("router.chat", routerChatTool, router.chat);
   server.registerTool("router.buy", routerBuyTool, router.buy);
+
+  const tasks = createTasksTools({
+    session,
+    secrets,
+    wallets: options.store,
+    fetchImpl: guardedFetch,
+    apiBase,
+    ...(options.ledgerPath === undefined ? {} : { ledgerPath: options.ledgerPath }),
+    ...options.tasks,
+  });
+  server.registerTool("tasks.search", tasksSearchTool, tasks.search);
+  server.registerTool("tasks.show", tasksShowTool, tasks.show);
+  server.registerTool("tasks.post", tasksPostTool, tasks.post);
+  server.registerTool("tasks.propose", tasksProposeTool, tasks.propose);
+  server.registerTool("tasks.submit", tasksSubmitTool, tasks.submit);
+  server.registerTool("tasks.award", tasksAwardTool, tasks.award);
+  server.registerTool("tasks.sign", tasksSignTool, tasks.sign);
+  server.registerTool("tasks.fund", tasksFundTool, tasks.fund);
+  server.registerTool("tasks.deliver", tasksDeliverTool, tasks.deliver);
+  server.registerTool("tasks.release", tasksReleaseTool, tasks.release);
+  server.registerTool("tasks.refund", tasksRefundTool, tasks.refund);
+  server.registerTool("tasks.dispute", tasksDisputeTool, tasks.dispute);
+  server.registerTool("tasks.message", tasksMessageTool, tasks.message);
+  server.registerTool("tasks.thread", tasksThreadTool, tasks.thread);
+  server.registerTool("tasks.watch", tasksWatchTool, tasks.watch);
+  server.registerTool("tasks.status", tasksStatusTool, tasks.status);
 
   const status = createStatusTools({
     version: VAPI_CLIENT_VERSION,
