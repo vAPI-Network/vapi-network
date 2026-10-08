@@ -676,6 +676,7 @@ const deploymentSchema = z
   .discriminatedUnion("configured", [
     z.looseObject({
       configured: z.literal(false),
+      feeBp: z.number().int().min(0).max(10_000).optional(),
       chainId: z.number().int().positive(),
       network: networkSchema,
       explorerUrl: z.url().nullable(),
@@ -687,6 +688,7 @@ const deploymentSchema = z
     }),
     z.looseObject({
       configured: z.literal(true),
+      feeBp: z.number().int().min(0).max(10_000).optional(),
       chainId: z.number().int().positive(),
       network: networkSchema,
       explorerUrl: z.url(),

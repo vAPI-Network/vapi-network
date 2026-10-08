@@ -19,6 +19,9 @@ export default defineConfig({
       "@vapi-network/core/router-client": fileURLToPath(
         new URL("../core/src/router-client.ts", import.meta.url),
       ),
+      "@vapi-network/core/tasks": fileURLToPath(
+        new URL("../core/src/tasks/index.ts", import.meta.url),
+      ),
       "@vapi-network/core": fileURLToPath(new URL("../core/src/index.ts", import.meta.url)),
       "@vapi-network/sources": fileURLToPath(new URL("../sources/src/index.ts", import.meta.url)),
       "@vapi-network/mcp": fileURLToPath(new URL("../mcp/src/index.ts", import.meta.url)),
