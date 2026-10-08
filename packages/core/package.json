@@ -46,10 +46,14 @@
     "./router-client": {
       "types": "./dist/router-client.d.ts",
       "import": "./dist/router-client.js"
+    },
+    "./tasks": {
+      "types": "./dist/tasks/index.d.ts",
+      "import": "./dist/tasks.js"
     }
   },
   "scripts": {
-    "build": "node ../../scripts/build-package.mjs index=src/index.ts secrets=src/secrets.ts backup=src/backup.ts cloud-backup=src/cloud-backup.ts api-key=src/api-key.ts agent-link=src/agent-link.ts router-client=src/router-client.ts",
+    "build": "node ../../scripts/build-package.mjs index=src/index.ts secrets=src/secrets.ts backup=src/backup.ts cloud-backup=src/cloud-backup.ts api-key=src/api-key.ts agent-link=src/agent-link.ts router-client=src/router-client.ts tasks=src/tasks/index.ts",
     "lint": "eslint src --max-warnings 0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

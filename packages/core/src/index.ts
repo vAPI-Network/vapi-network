@@ -27,6 +27,8 @@ export type {
   RouterModel,
 } from "./router-client.js";
 export { buyRouterBalance } from "./router-client.js";
+export { TASKS_CLIENT_VERBS, prepareDeliveryManifest, sha256Hex } from "./tasks/index.js";
+export type { TasksClientVerb, DeliveryManifest, FrozenDeliveryManifest } from "./tasks/index.js";
 export * from "./audit.js";
 export * from "./authorization-state.js";
 export { withAccountMovementLock } from "./account-movement-lock.js";
