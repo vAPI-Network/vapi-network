@@ -1,11 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 
+import {
+  getAddress,
+  isAddressEqual,
+  recoverMessageAddress,
+  verifyMessage,
+  type Address,
+  type Hex,
+} from "viem";
 import { z } from "zod";
 
-import type { SpendCaps } from "../config.js";
+import { getVapiPaths, type SpendCaps } from "../config.js";
 import { decideFunding, decideRelease, type ReleaseDecision } from "../funding-policy.js";
-import { escrowFundingDayRemainingAtomic, releaseSpend, reserveSpend } from "../spend-policy.js";
+import {
+  escrowFundingDayRemainingAtomic,
+  releaseSpend,
+  reserveSpend,
+  SpendCapError,
+} from "../spend-policy.js";
 import type { WalletName } from "../wallet-name.js";
 import { canonicalJson } from "./canonical-json.js";
 import {
@@ -16,6 +29,7 @@ import {
   type TasksChainResult,
 } from "./chain-port.js";
 import type { TasksClient } from "./client.js";
+import { taskFeeReservationKey } from "./dispute-fee.js";
 import type { PendingTransactions } from "./pending-transactions.js";
 import {
   freezeDeliveryManifest,
@@ -25,6 +39,7 @@ import {
 } from "./delivery-manifest.js";
 import { formatBaseUnitsUsd, parseFeeBp, taskMoney, type TaskMoney } from "./money.js";
 import { freezeScopeTerms } from "./scope-terms.js";
+import { createScopeBindings, type ScopeBinding, type ScopeBindings } from "./scope-bindings.js";
 import {
   deliverEscrowInputSchema,
   disputeEscrowInputSchema,
@@ -34,7 +49,7 @@ import {
 } from "./types.js";
 
 /** A milestone ID selects a tranche within this order; no implicit selection across tranches. */
-export type TaskTarget = { orderId: string; escrowId?: string };
+export type TaskTarget = { orderId: string; escrowId?: string; counterparty?: string };
 export type TaskActionInput = TaskTarget & {
   client: TasksClient;
   chain: TasksChain;
@@ -143,6 +158,7 @@ export async function fundTask(input: FundTaskInput): Promise<FundTaskOutcome> {
         orderId: milestone.workOrderId,
         escrowId: milestone.id,
         grossBaseUnits: grossAtomic,
+        ...(input.counterparty ? { counterparty: input.counterparty } : {}),
         idempotencyKey,
       };
       const result = await input.chain.fund(fundingOperation);
@@ -269,7 +285,11 @@ export async function deliverTask(input: DeliverTaskInput): Promise<DeliverTaskR
   const prepared = await prepareDelivery(input);
   requireChain(input.chain, prepared.manifest.manifestHash);
   try {
-    const result = await input.chain.deliver({ ...prepared, idempotencyKey: operationKey(input) });
+    const result = await input.chain.deliver({
+      ...prepared,
+      idempotencyKey: operationKey(input),
+      ...(input.counterparty ? { counterparty: input.counterparty } : {}),
+    });
     return { ...prepared, manifestHash: prepared.manifest.manifestHash, result };
   } catch (error) {
     if (error instanceof TasksChainUnavailableError)
@@ -287,6 +307,7 @@ export async function releaseTask(input: TaskActionInput): Promise<TaskMoneyResu
   const result = await input.chain.release({
     orderId: milestone.workOrderId,
     escrowId: milestone.id,
+    ...(input.counterparty ? { counterparty: input.counterparty } : {}),
     idempotencyKey: operationKey(input),
   });
   return { money, result };
@@ -299,31 +320,196 @@ export async function refundTask(input: TaskActionInput): Promise<TaskMoneyResul
   const result = await input.chain.refund({
     orderId: milestone.workOrderId,
     escrowId: milestone.id,
+    ...(input.counterparty ? { counterparty: input.counterparty } : {}),
     idempotencyKey: operationKey(input),
   });
   return { money, result };
 }
 
-export type DisputeTaskInput = TaskActionInput & { evidenceHash: string };
-export type DisputeTaskResult = TaskMoneyResult & { disputeFee: null; disputeFeeNote: string };
+export type DisputeTaskInput = FundTaskInput & { evidenceHash: string };
+export type DisputeTaskResult = FundTaskOutcome & {
+  disputeFee: { baseUnits: string; usd: string };
+};
 
-export async function disputeTask(input: DisputeTaskInput): Promise<DisputeTaskResult> {
+export function disputeTask(input: DisputeTaskInput): Promise<DisputeTaskResult> {
+  return feeTask(input, "dispute");
+}
+
+export function counterEvidenceTask(input: DisputeTaskInput): Promise<DisputeTaskResult> {
+  return feeTask(input, "counter-evidence");
+}
+
+/** Fee reservations are separate for each party action and serialize with milestone funding. */
+async function feeTask(
+  input: DisputeTaskInput,
+  action: "dispute" | "counter-evidence",
+): Promise<DisputeTaskResult> {
   const { evidenceHash } = disputeEscrowInputSchema.parse({ evidenceHash: input.evidenceHash });
+  const milestone = await resolveMilestone(input);
+  requireChain(input.chain);
+  const perform = async (): Promise<DisputeTaskResult> => {
+    const operation = {
+      orderId: milestone.workOrderId,
+      escrowId: milestone.id,
+      ...(input.counterparty ? { counterparty: input.counterparty } : {}),
+      evidenceHash,
+    };
+    const feeAtomic = await input.chain.disputeFee({
+      ...operation,
+      idempotencyKey: operationKey(input),
+    });
+    const fee = { baseUnits: feeAtomic.toString(), usd: formatBaseUnitsUsd(feeAtomic) };
+    const money = { ...taskMoney(feeAtomic.toString(), 0), line: `dispute fee $${fee.usd} USDC` };
+    const reservationKey = taskFeeReservationKey(milestone.id, action);
+    const retained = await input.pending?.retainedReservation?.(reservationKey);
+    const preparation = await input.pending?.preparation(milestone.id, action);
+    const submitted =
+      milestone.chainOperation?.kind ===
+        (action === "dispute" ? "escrow-dispute" : "escrow-counter-evidence") &&
+      milestone.chainOperation.state !== "prepared";
+    const resume =
+      preparation !== undefined ||
+      submitted ||
+      (retained?.exposed === true && retained.invalidated !== true);
+    const existingId = await input.pending?.existingReservationId?.(reservationKey);
+    if (
+      retained &&
+      (retained.wallet !== input.wallet || retained.amountAtomic !== feeAtomic.toString())
+    )
+      throw new TasksChainError(
+        "The retained dispute fee does not match this wallet and verified fee.",
+        false,
+        { authorizationExposed: retained.exposed === true },
+      );
+    let approvalGranted =
+      input.approval !== undefined && "granted" in input.approval && input.approval.granted;
+    const checkPolicy = async (reservationId?: string): Promise<DisputeTaskResult | undefined> => {
+      const remaining = await escrowFundingDayRemainingAtomic({
+        caps: input.caps,
+        ledgerPath: input.ledgerPath,
+        wallet: input.wallet,
+        now: input.now(),
+        ...(reservationId ? { reservationId } : {}),
+      });
+      if (feeAtomic > policyAtomic(input.policy.maxPerTaskUsd))
+        return { outcome: "refused", reason: "policy.perTask", money, disputeFee: fee };
+      if (feeAtomic > remaining)
+        return { outcome: "refused", reason: "policy.perDay", money, disputeFee: fee };
+      if (feeAtomic > policyAtomic(input.policy.approveAboveUsd) && !approvalGranted) {
+        if (input.approval && "ask" in input.approval) {
+          approvalGranted = await input.approval.ask({
+            money,
+            dayRemainingUsd: Number(formatBaseUnitsUsd(remaining)),
+          });
+          if (!approvalGranted) return { outcome: "declined", money, disputeFee: fee };
+        } else return { outcome: "approval_needed", money, disputeFee: fee };
+      }
+      return undefined;
+    };
+    if (!resume) {
+      const refusal = await checkPolicy(existingId);
+      if (refusal) return refusal;
+    }
+    const idempotencyKey = existingId ?? preparation?.idempotencyKey ?? operationKey(input);
+    let reservation: { date: string; reservationReused?: boolean } | undefined =
+      retained && retained.invalidated !== true
+        ? { date: retained.date, reservationReused: true }
+        : undefined;
+    const ensureReservation = async () => {
+      if (
+        reservation &&
+        (reservation.date === input.now().toISOString().slice(0, 10) || retained?.exposed === true)
+      )
+        return;
+      if (reservation) await input.pending?.clearReservation?.(reservationKey);
+      await input.pending?.reservationId(reservationKey, () => idempotencyKey);
+      reservation = await reserveSpend(feeAtomic, input.caps, {
+        kind: "dispute-fee",
+        maxPerTaskAtomic: policyAtomic(input.policy.maxPerTaskUsd),
+        wallet: input.wallet,
+        ledgerPath: input.ledgerPath,
+        now: input.now(),
+        reservationId: idempotencyKey,
+        reuseExistingEscrowReservation: input.pending !== undefined,
+      });
+      await input.pending?.bindReservation?.(reservationKey, {
+        id: idempotencyKey,
+        wallet: input.wallet,
+        amountAtomic: feeAtomic.toString(),
+        date: reservation.date,
+      });
+    };
+    if (!resume) await ensureReservation();
+    let preflightOutcome: DisputeTaskResult | undefined;
+    try {
+      const method =
+        action === "dispute"
+          ? input.chain.dispute.bind(input.chain)
+          : input.chain.counterEvidence.bind(input.chain);
+      const result = await method({
+        ...operation,
+        idempotencyKey,
+        feeBaseUnits: feeAtomic,
+        beforeSign: async () => {
+          preflightOutcome = await checkPolicy(idempotencyKey);
+          if (preflightOutcome)
+            throw new TasksChainError(
+              "The task dispute fee requires spend policy approval before a new signature.",
+              false,
+              { authorizationExposed: false },
+            );
+          try {
+            await ensureReservation();
+          } catch (error) {
+            if (error instanceof SpendCapError)
+              preflightOutcome = {
+                outcome: "refused",
+                reason: error.code === "per_day_cap_exceeded" ? "policy.perDay" : "policy.perTask",
+                money,
+                disputeFee: fee,
+              };
+            throw error;
+          }
+        },
+      });
+      return { outcome: "done", money, disputeFee: fee, result };
+    } catch (error) {
+      const exposed = await input.pending?.exposure(reservationKey);
+      if (
+        reservation &&
+        !exposed &&
+        error instanceof TasksChainError &&
+        !error.broadcast &&
+        !error.authorizationExposed
+      ) {
+        await input.pending?.invalidateReservation?.(reservationKey);
+        await releaseSpend(feeAtomic, {
+          ledgerPath: input.ledgerPath,
+          wallet: input.wallet,
+          now: input.now(),
+          reservedOn: reservation.date,
+          reservationId: idempotencyKey,
+        });
+        await input.pending?.clearReservation?.(reservationKey);
+      }
+      if (preflightOutcome) return preflightOutcome;
+      throw error;
+    }
+  };
+  return input.pending ? input.pending.withFundingLock(milestone.id, perform) : perform();
+}
+
+export async function resolveUnmatchedTask(input: TaskActionInput): Promise<TaskMoneyResult> {
   const milestone = await resolveMilestone(input);
   const money = await milestoneMoney(input.client, milestone);
   requireChain(input.chain);
-  const result = await input.chain.dispute({
+  const result = await input.chain.resolveUnmatched({
     orderId: milestone.workOrderId,
     escrowId: milestone.id,
-    evidenceHash,
     idempotencyKey: operationKey(input),
+    ...(input.counterparty ? { counterparty: input.counterparty } : {}),
   });
-  return {
-    money,
-    result,
-    disputeFee: null,
-    disputeFeeNote: "The contract charges a dispute fee; the amount is unavailable.",
-  };
+  return { money, result };
 }
 
 export function autoReleaseDecision(input: {
@@ -338,11 +524,15 @@ export type SignScopeActionInput = {
   chain: TasksChain;
   orderId: string;
   role: "poster" | "worker";
+  counterparty?: string;
+  bindings?: ScopeBindings;
+  onTerms?: (terms: SignedScopeTerms) => Promise<void> | void;
   /** Local EIP-191 signer, invoked only after validating the current scope. */
   signMessage?: (message: string) => Promise<`0x${string}`>;
   idempotencyKey?: () => string;
 };
 export type SignedScopeTerms = {
+  counterparty: Address;
   amountBaseUnits: string;
   asset: string;
   network: `eip155:${number}`;
@@ -383,9 +573,19 @@ export async function signScope(input: SignScopeActionInput): Promise<SignScopeA
     else if (scope.version === previous.version)
       throw new Error("The task has ambiguous scope versions.");
   }
-  const candidates = [...current.values()].filter(
+  let candidates = [...current.values()].filter(
     (scope) => scope.state === "proposed" && scope.proposedByRole !== actingRole,
   );
+  const recoveringAccepted = candidates.length === 0 && input.role === "worker";
+  if (recoveringAccepted) {
+    candidates = [...current.values()].filter(
+      (scope) =>
+        scope.state === "accepted" &&
+        order.milestones.some(
+          (milestone) => milestone.id === scope.milestoneId && milestone.escrowState === null,
+        ),
+    );
+  }
   if (candidates.length !== 1)
     throw new Error("Select a task with one current counterparty scope.");
   const scope = candidates[0]!;
@@ -406,7 +606,100 @@ export async function signScope(input: SignScopeActionInput): Promise<SignScopeA
   } catch {
     throw new Error("The scope terms do not match their hash; refusing to sign.");
   }
+  const message = canonicalJson(payload);
+  let recoverySelf: Address | undefined;
+  let recoveryBinding: ScopeBinding | undefined;
+  if (recoveringAccepted) {
+    requireChain(input.chain);
+    recoverySelf = input.chain.signingAddress ?? (await input.chain.getSigningAddress?.());
+    if (!recoverySelf)
+      throw new Error("A local signing wallet is required for accepted scope recovery.");
+    recoveryBinding = await (input.bindings ?? createScopeBindings(getVapiPaths().directory)).get({
+      orderId: input.orderId,
+      trancheOrdinal: scope.trancheOrdinal,
+      scopeVersion: scope.version,
+      termsHash: frozen.termsHash,
+      self: recoverySelf,
+    });
+    if (!input.counterparty && !recoveryBinding)
+      throw new Error(
+        "The task parties are not bound on this machine. Re-run with --counterparty <address> to confirm who you are working with.",
+      );
+    if (
+      recoveryBinding &&
+      (recoveryBinding.role !== "provider" ||
+        !isAddressEqual(recoveryBinding.self, recoverySelf) ||
+        (input.counterparty &&
+          !isAddressEqual(recoveryBinding.counterparty, getAddress(input.counterparty))))
+    )
+      throw new Error("The confirmed parties do not match the existing local provider binding.");
+  }
+  const counterparty = getAddress(
+    recoveringAccepted
+      ? (input.counterparty ?? recoveryBinding!.counterparty)
+      : scope.proposerAddress,
+  );
+  if (
+    !recoveringAccepted &&
+    input.counterparty &&
+    !isAddressEqual(getAddress(input.counterparty), counterparty)
+  )
+    throw new Error("The confirmed counterparty does not match the verified scope proposer.");
+  if (recoveringAccepted) {
+    requireChain(input.chain);
+    const self = recoverySelf;
+    if (
+      !self ||
+      !scope.counterpartyAddress ||
+      !scope.counterpartySignature ||
+      isAddressEqual(self, counterparty) ||
+      ![scope.proposerAddress, scope.counterpartyAddress].every(
+        (address) => isAddressEqual(address, self) || isAddressEqual(address, counterparty),
+      ) ||
+      isAddressEqual(scope.proposerAddress, scope.counterpartyAddress)
+    )
+      throw new Error(
+        "Both accepted scope signatures must belong to the local wallet and confirmed counterparty.",
+      );
+    let valid = false;
+    try {
+      const checks = await Promise.all([
+        verifyMessage({
+          address: scope.proposerAddress,
+          message,
+          signature: scope.proposerSignature as Hex,
+        }),
+        verifyMessage({
+          address: scope.counterpartyAddress,
+          message,
+          signature: scope.counterpartySignature as Hex,
+        }),
+      ]);
+      valid = checks.every(Boolean);
+    } catch {
+      /* A malformed accepted signature cannot authorize creation. */
+    }
+    if (!valid)
+      throw new Error("Both accepted scope signatures must verify before escrow recovery.");
+  }
+  let validCounterparty = false;
+  try {
+    validCounterparty = await verifyMessage({
+      address: counterparty,
+      message,
+      signature: (recoveringAccepted && !isAddressEqual(counterparty, scope.proposerAddress)
+        ? scope.counterpartySignature!
+        : scope.proposerSignature) as Hex,
+    });
+  } catch {
+    /* Invalid signatures are a local refusal, never a reason to invoke the signer. */
+  }
+  if (!validCounterparty)
+    throw new Error("The counterparty scope signature does not verify; refusing to sign.");
+  if (input.chain.signingAddress && isAddressEqual(input.chain.signingAddress, counterparty))
+    throw new Error("The scope counterparty must differ from the local signing wallet.");
   const terms: SignedScopeTerms = {
+    counterparty,
     amountBaseUnits: frozen.structured.budget.amountBaseUnits,
     asset: frozen.structured.budget.asset,
     network: frozen.structured.budget.network,
@@ -415,13 +708,79 @@ export async function signScope(input: SignScopeActionInput): Promise<SignScopeA
     title: frozen.structured.title,
   };
   const idempotencyKey = operationKey(input);
-  const message = canonicalJson(payload);
+  await input.onTerms?.(terms);
+  if (recoveringAccepted) {
+    const milestone = order.milestones.find((candidate) => candidate.id === scope.milestoneId);
+    const earliest = order.milestones
+      .filter((candidate) => candidate.escrowState === null)
+      .sort((a, b) => a.ordinal - b.ordinal)[0];
+    if (
+      !milestone ||
+      milestone.workOrderId !== input.orderId ||
+      milestone.ordinal !== scope.trancheOrdinal ||
+      milestone.termsHash !== payload.termsHash ||
+      !milestone.termsFrozenAt ||
+      earliest?.id !== milestone.id
+    )
+      throw new Error(
+        "The accepted scope milestone is unavailable or an earlier milestone still needs escrow creation.",
+      );
+    const accepted: SignScopeAcceptance = {
+      scope,
+      milestone: {
+        id: milestone.id,
+        workOrderId: milestone.workOrderId,
+        ordinal: milestone.ordinal,
+        termsHash: milestone.termsHash,
+        termsFrozenAt: milestone.termsFrozenAt,
+      },
+      terms,
+    };
+    await persistScopeBinding(input, {
+      orderId: input.orderId,
+      trancheOrdinal: scope.trancheOrdinal,
+      scopeVersion: scope.version,
+      termsHash: frozen.termsHash,
+      role: "provider",
+      self: getAddress(recoverySelf!),
+      counterparty,
+      signedAt: new Date().toISOString(),
+    });
+    try {
+      const escrowCreation = await input.chain.createEscrow({
+        orderId: input.orderId,
+        counterparty,
+        idempotencyKey,
+      });
+      return { ...accepted, escrowCreation };
+    } catch (error) {
+      throw new TasksScopeCreationError(accepted, error);
+    }
+  }
   let signature: `0x${string}`;
   if (input.signMessage) signature = await input.signMessage(message);
   else {
     requireChain(input.chain);
     signature = await input.chain.signScopeMessage(message);
   }
+  const self = getAddress(await recoverMessageAddress({ message, signature }));
+  if (
+    isAddressEqual(self, counterparty) ||
+    (input.chain.signingAddress && !isAddressEqual(self, input.chain.signingAddress))
+  )
+    throw new Error("The local scope signature does not match the signing wallet.");
+  const binding: ScopeBinding = {
+    orderId: input.orderId,
+    trancheOrdinal: scope.trancheOrdinal,
+    scopeVersion: scope.version,
+    termsHash: frozen.termsHash,
+    role: actingRole,
+    self,
+    counterparty,
+    signedAt: new Date().toISOString(),
+  };
+  // Persist consent before the signature can leave the machine.
+  await persistScopeBinding(input, binding);
   const acceptance = await input.client.signScope(
     scope.id,
     { signedPayload: payload, signature },
@@ -464,12 +823,22 @@ export async function signScope(input: SignScopeActionInput): Promise<SignScopeA
     requireChain(input.chain);
     const escrowCreation = await input.chain.createEscrow({
       orderId: input.orderId,
+      ...(input.counterparty ? { counterparty: input.counterparty } : {}),
       idempotencyKey: operationKey(input),
     });
     return { ...accepted, escrowCreation };
   } catch (error) {
     throw new TasksScopeCreationError(accepted, error);
   }
+}
+
+async function persistScopeBinding(
+  input: SignScopeActionInput,
+  binding: ScopeBinding,
+): Promise<void> {
+  if (input.bindings) await input.bindings.put(binding);
+  else if (input.chain.bindScope) await input.chain.bindScope(binding);
+  else await createScopeBindings(getVapiPaths().directory).put(binding);
 }
 
 async function privateOrder(

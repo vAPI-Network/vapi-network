@@ -9,6 +9,7 @@ import {
 } from "viem";
 
 import { TasksChainError, type TaskMilestone, type TasksChainResult } from "./chain-port.js";
+import { getTrustedTasksDurations } from "./trusted-deployments.js";
 import type { DeploymentResponse, FundEscrowInput } from "./types.js";
 
 // SPDX-License-Identifier: Apache-2.0
@@ -82,6 +83,20 @@ export const TASKS_CHAIN_ABI = [
   },
   {
     type: "function",
+    name: "submitCounterEvidence",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "evidenceHash", type: "bytes32" }],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "resolveUnmatchedDispute",
+    stateMutability: "nonpayable",
+    inputs: [],
+    outputs: [],
+  },
+  {
+    type: "function",
     name: "timeoutRefund",
     stateMutability: "nonpayable",
     inputs: [],
@@ -122,6 +137,13 @@ export const TASKS_READ_ABI = parseAbi([
   "function termsHash() view returns (bytes32)",
   "function state() view returns (uint8)",
   "function offerDeadline() view returns (uint64)",
+  "function workDeadline() view returns (uint64)",
+  "function reviewDeadline() view returns (uint64)",
+  "function disputedAt() view returns (uint64)",
+  "function counterEvidenceDeadline() view returns (uint64)",
+  "function resolution() view returns (uint8)",
+  "function disputeFee() view returns (uint256)",
+  "function predictEscrow(address seller, bytes32 salt) view returns (address)",
 ]);
 
 export type PlanExpectation = {
@@ -129,6 +151,10 @@ export type PlanExpectation = {
   deployment: Extract<DeploymentResponse, { configured: true }>;
   milestone: TaskMilestone;
   buyer: Address;
+  seller?: Address;
+  workDurationSeconds?: number;
+  reviewWindowSeconds?: number;
+  approveAmount?: bigint;
   steps: readonly string[];
   authorization?: NonNullable<FundEscrowInput["authorization"]>;
   manifestHash?: Hex;
@@ -188,6 +214,8 @@ export function verifyPlan(
     "release-funds": "releaseFunds",
     "refund-buyer": "refundBuyer",
     "raise-dispute": "raiseDispute",
+    "submit-counter-evidence": "submitCounterEvidence",
+    "resolve-unmatched-dispute": "resolveUnmatchedDispute",
     "timeout-refund": "timeoutRefund",
     finalize: "finalize",
   };
@@ -199,33 +227,37 @@ export function verifyPlan(
     if (args.length !== values.length || args.some((v, i) => !eq(v, values[i])))
       fail("unexpected arguments");
   };
-  if (plan.step === "create-escrow")
+  if (plan.step === "create-escrow") {
+    if (!expectation.seller || getAddress(expectation.signer) !== getAddress(expectation.seller))
+      fail("createEscrow requires the locally bound seller");
+    const workDuration =
+      expectation.workDurationSeconds ??
+      expectation.milestone.terms.workDurationSeconds ??
+      getTrustedTasksDurations(expectation.deployment.chainId).workDurationSeconds;
+    if (workDuration === undefined) fail("missing trusted work duration");
     requireArgs([
       expectation.buyer,
       expectation.deployment.usdc,
       BigInt(expectation.milestone.amountBaseUnits),
+      BigInt(workDuration!),
       BigInt(
-        expectation.milestone.terms.workDurationSeconds ??
-          expectation.deployment.defaults.workDurationSeconds,
+        expectation.reviewWindowSeconds ?? expectation.milestone.terms.acceptanceWindowSeconds,
       ),
-      BigInt(expectation.milestone.terms.acceptanceWindowSeconds),
       expectation.milestone.termsHash,
       keccak256(stringToHex(expectation.milestone.id)),
     ]);
-  else if (plan.step === "fund-with-authorization") {
+  } else if (plan.step === "fund-with-authorization") {
     const a = expectation.authorization;
     if (!a)
       throw new TasksChainError("Unsafe transaction plan: missing local authorization", false);
     requireArgs([BigInt(a.validAfter), BigInt(a.validBefore), a.nonce, a.signature]);
-  } else if (plan.step === "approve-usdc")
-    requireArgs([
-      expectation.milestone.escrowContract,
-      BigInt(expectation.milestone.amountBaseUnits),
-    ]);
-  else if (plan.step === "submit-delivery") {
+  } else if (plan.step === "approve-usdc") {
+    if (expectation.approveAmount === undefined) fail("missing verified approval amount");
+    requireArgs([expectation.milestone.escrowContract, expectation.approveAmount]);
+  } else if (plan.step === "submit-delivery") {
     if (!expectation.manifestHash) fail("missing manifest hash");
     requireArgs([expectation.manifestHash]);
-  } else if (plan.step === "raise-dispute") {
+  } else if (plan.step === "raise-dispute" || plan.step === "submit-counter-evidence") {
     if (!expectation.evidenceHash) fail("missing evidence hash");
     requireArgs([expectation.evidenceHash]);
   } else requireArgs([]);

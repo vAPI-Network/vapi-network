@@ -65,6 +65,7 @@ it.each([
   const expectation = {
     signer,
     buyer: signer,
+    seller: signer,
     steps: [step],
     deployment: {
       configured: true,
@@ -107,6 +108,8 @@ const authorization = {
 const baseExpectation = {
   signer,
   buyer: signer,
+  seller: signer,
+  approveAmount: 100n,
   steps: [],
   deployment: {
     configured: true,
@@ -233,9 +236,97 @@ it.each([
   if (step === "create-escrow") expected.buyer = factory;
   if (step === "fund-with-authorization")
     expected.authorization = { ...authorization, validBefore: "2000000001" };
-  if (step === "approve-usdc")
-    expected.milestone = { ...expected.milestone, amountBaseUnits: "101" };
+  if (step === "approve-usdc") expected.approveAmount = 101n;
   if (step === "submit-delivery") expected.manifestHash = `0x${"34".repeat(32)}`;
   if (step === "raise-dispute") expected.evidenceHash = `0x${"34".repeat(32)}`;
   expect(() => verifyPlan(op, expected)).toThrow(TasksChainError);
+});
+
+it("refuses a createEscrow readiness-only work duration instead of the pinned duration", () => {
+  const op = guardedOperation("create-escrow");
+  const expected = {
+    ...baseExpectation,
+    steps: ["create-escrow"],
+    milestone: {
+      ...baseExpectation.milestone,
+      terms: { ...baseExpectation.milestone.terms, workDurationSeconds: undefined },
+    },
+  };
+  expect(() => verifyPlan(op, expected)).toThrow(/unexpected arguments/);
+});
+
+it("uses the verified fee rather than funding gross for fee approvals", () => {
+  const op = guardedOperation("approve-usdc");
+  const expected = { ...baseExpectation, steps: ["approve-usdc"], approveAmount: 20n };
+  expect(() => verifyPlan(op, expected)).toThrow(/unexpected arguments/);
+  op.plan!.data = encodeFunctionData({
+    abi: TASKS_CHAIN_ABI,
+    functionName: "approve",
+    args: [escrow, 20n],
+  });
+  expect(() => verifyPlan(op, expected)).not.toThrow();
+});
+
+it("requires the createEscrow signer to be the locally bound seller", () => {
+  const op = guardedOperation("create-escrow");
+  expect(() =>
+    verifyPlan(op, { ...baseExpectation, steps: ["create-escrow"], seller: factory }),
+  ).toThrow(/seller/);
+});
+
+it.each([
+  ["submitCounterEvidence(bytes32)", "0x45fedefa"],
+  ["resolveUnmatchedDispute()", toFunctionSelector("resolveUnmatchedDispute()")],
+])("includes the V2 function selector for %s", (signature, selector) => {
+  const name = signature.split("(")[0];
+  const item = TASKS_CHAIN_ABI.find((entry) => entry.name === name);
+  expect(item).toBeDefined();
+  expect(toFunctionSelector(item!)).toBe(selector);
+});
+
+it("refuses an approval without a locally verified approval amount", () => {
+  const op = guardedOperation("approve-usdc");
+  expect(() =>
+    verifyPlan(op, { ...baseExpectation, steps: ["approve-usdc"], approveAmount: undefined }),
+  ).toThrow("missing verified approval amount");
+});
+
+it("refuses a createEscrow buyer substitution against the bound counterparty", () => {
+  expect(() =>
+    verifyPlan(guardedOperation("create-escrow"), {
+      ...baseExpectation,
+      steps: ["create-escrow"],
+      buyer: factory,
+    }),
+  ).toThrow("unexpected arguments");
+});
+
+it("refuses a fee approval with the wrong clone spender", () => {
+  const op = guardedOperation("approve-usdc");
+  op.plan!.data = encodeFunctionData({
+    abi: TASKS_CHAIN_ABI,
+    functionName: "approve",
+    args: [factory, 20n],
+  });
+  expect(() =>
+    verifyPlan(op, { ...baseExpectation, steps: ["approve-usdc"], approveAmount: 20n }),
+  ).toThrow("unexpected arguments");
+});
+
+it.each([
+  ["submit-counter-evidence", "submitCounterEvidence"],
+  ["resolve-unmatched-dispute", "resolveUnmatchedDispute"],
+] as const)("verifies the V2 plan for %s", (step, functionName) => {
+  const op = guardedOperation("raise-dispute");
+  op.step = step;
+  op.plan!.step = step;
+  op.plan!.data =
+    functionName === "submitCounterEvidence"
+      ? encodeFunctionData({ abi: TASKS_CHAIN_ABI, functionName, args: [hash] })
+      : encodeFunctionData({ abi: TASKS_CHAIN_ABI, functionName });
+  expect(() => verifyPlan(op, { ...baseExpectation, steps: [step] })).not.toThrow();
+  if (functionName === "submitCounterEvidence")
+    expect(() =>
+      verifyPlan(op, { ...baseExpectation, steps: [step], evidenceHash: `0x${"34".repeat(32)}` }),
+    ).toThrow("unexpected arguments");
 });

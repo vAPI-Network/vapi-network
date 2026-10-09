@@ -32,12 +32,15 @@ export type {
 
 import {
   disputeTask,
+  counterEvidenceTask,
+  resolveUnmatchedTask,
   fundTask,
   prepareDelivery,
   refundTask,
   releaseTask,
   signScope,
   type SignScopeActionResult,
+  type FundTaskOutcome,
   type TaskDeliveryFile,
   type TaskFundingApproval,
 } from "./actions.js";
@@ -436,7 +439,13 @@ export async function threadTask(
 }
 export async function signTaskScope(
   context: TaskOperationContext,
-  input: { id: string; signMessage: (message: string) => Promise<`0x${string}`> },
+  input: {
+    id: string;
+    counterparty?: string;
+    signMessage: (message: string) => Promise<`0x${string}`>;
+    bindings?: Parameters<typeof signScope>[0]["bindings"];
+    onTerms?: Parameters<typeof signScope>[0]["onTerms"];
+  },
 ): Promise<SignScopeActionResult> {
   const order = await taskRequest(
     "sign",
@@ -462,6 +471,9 @@ export async function signTaskScope(
         orderId: input.id,
         role,
         signMessage: input.signMessage,
+        ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
+        ...(input.bindings === undefined ? {} : { bindings: input.bindings }),
+        ...(input.onTerms === undefined ? {} : { onTerms: input.onTerms }),
         idempotencyKey: context.randomUUID,
       }),
     context,
@@ -472,6 +484,7 @@ export async function deliverTaskOperation(
   input: {
     id: string;
     files: TaskDeliveryFile[];
+    counterparty?: string;
     note: string;
     onPrepared?: (manifestHash: `0x${string}`) => void;
   },
@@ -496,7 +509,11 @@ export async function deliverTaskOperation(
     "deliverEscrow",
     async () => {
       if (!context.chain.available) throw new TasksChainUnavailableError(manifestHash);
-      return await context.chain.deliver({ ...prepared, idempotencyKey: context.randomUUID() });
+      return await context.chain.deliver({
+        ...prepared,
+        ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
+        idempotencyKey: context.randomUUID(),
+      });
     },
     context,
   );
@@ -515,6 +532,7 @@ export async function fundTaskOperation(
     approval?: TaskFundingApproval;
     idempotencyKey?: () => string;
     beforeChainFund?: () => void;
+    counterparty?: string;
   },
 ) {
   const snapshot =
@@ -541,6 +559,7 @@ export async function fundTaskOperation(
           client,
           chain,
           orderId: input.id,
+          ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
           policy: input.policy,
           caps: input.caps,
           wallet: input.wallet,
@@ -597,7 +616,7 @@ export async function fundTaskOperation(
 }
 export async function releaseTaskOperation(
   context: TaskOperationContext,
-  input: { id: string; snapshot?: MoneySnapshot; escrowId?: string },
+  input: { id: string; snapshot?: MoneySnapshot; escrowId?: string; counterparty?: string },
 ) {
   const snapshot =
     input.snapshot ?? (await taskMoneySnapshot(context.client, input.id, input.escrowId, context));
@@ -610,6 +629,7 @@ export async function releaseTaskOperation(
         chain: context.chain,
         orderId: input.id,
         escrowId: snapshot.escrowId,
+        ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
         idempotencyKey: context.randomUUID,
       }),
     context,
@@ -617,7 +637,7 @@ export async function releaseTaskOperation(
 }
 export async function refundTaskOperation(
   context: TaskOperationContext,
-  input: { id: string; snapshot?: MoneySnapshot; escrowId?: string },
+  input: { id: string; snapshot?: MoneySnapshot; escrowId?: string; counterparty?: string },
 ) {
   const snapshot =
     input.snapshot ?? (await taskMoneySnapshot(context.client, input.id, input.escrowId, context));
@@ -630,27 +650,140 @@ export async function refundTaskOperation(
         chain: context.chain,
         orderId: input.id,
         escrowId: snapshot.escrowId,
+        ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
         idempotencyKey: context.randomUUID,
       }),
     context,
   );
 }
-export async function disputeTaskOperation(
+export type TaskFeeOperationInput = {
+  id: string;
+  snapshot?: MoneySnapshot;
+  escrowId?: string;
+  counterparty?: string;
+  evidenceHash: string;
+  policy: TaskPolicy;
+  caps: SpendCaps;
+  wallet: WalletName;
+  ledgerPath: string;
+  now: () => Date;
+  approval?: TaskFundingApproval;
+  onFee?: (fee: bigint) => void;
+};
+
+export function disputeTaskOperation(context: TaskOperationContext, input: TaskFeeOperationInput) {
+  return feeTaskOperation("dispute", context, input);
+}
+
+export function counterEvidenceTaskOperation(
   context: TaskOperationContext,
-  input: { id: string; snapshot?: MoneySnapshot; escrowId?: string; evidenceHash: string },
+  input: TaskFeeOperationInput,
+) {
+  return feeTaskOperation("counter-evidence", context, input);
+}
+
+async function feeTaskOperation(
+  verb: "dispute" | "counter-evidence",
+  context: TaskOperationContext,
+  input: TaskFeeOperationInput,
+) {
+  const snapshot =
+    input.snapshot ?? (await taskMoneySnapshot(context.client, input.id, input.escrowId, context));
+  let feeMoney: TaskMoney | undefined;
+  const chain = new Proxy(context.chain, {
+    get(target, property) {
+      if (property === "disputeFee")
+        return async (value: Parameters<TasksChain["disputeFee"]>[0]) => {
+          const fee = await target.disputeFee(value);
+          feeMoney = taskMoney(fee, 0);
+          input.onFee?.(fee);
+          return fee;
+        };
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  let outcome: FundTaskOutcome & { disputeFee: { baseUnits: string; usd: string } };
+  try {
+    outcome = await taskRequest(
+      verb,
+      verb === "dispute" ? "disputeEscrow" : "counterEvidenceEscrow",
+      () =>
+        (verb === "dispute" ? disputeTask : counterEvidenceTask)({
+          client: cachedMoneyClient(context.client, snapshot),
+          chain,
+          orderId: input.id,
+          escrowId: snapshot.escrowId,
+          ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
+          evidenceHash: input.evidenceHash,
+          policy: input.policy,
+          caps: input.caps,
+          wallet: input.wallet,
+          ledgerPath: input.ledgerPath,
+          now: input.now,
+          ...(context.pending === undefined ? {} : { pending: context.pending }),
+          ...(input.approval === undefined ? {} : { approval: input.approval }),
+          idempotencyKey: context.randomUUID,
+        }),
+      context,
+    );
+  } catch (error) {
+    const reason = fundingRefusalReason(error);
+    if (!reason || !feeMoney) throw error;
+    return {
+      ok: false as const,
+      reason,
+      money: feeMoney,
+      disputeFee: feeMoney.gross,
+      policySource: input.policy.source,
+      policyDecision: reason,
+    };
+  }
+  const common = {
+    money: outcome.money,
+    disputeFee: outcome.disputeFee,
+    policySource: input.policy.source,
+  };
+  if (outcome.outcome === "refused")
+    return {
+      ...common,
+      ok: false as const,
+      reason: outcome.reason,
+      policyDecision: outcome.reason,
+    };
+  if (outcome.outcome === "approval_needed")
+    return {
+      ...common,
+      ok: false as const,
+      approval: true as const,
+      policyDecision: "approval" as const,
+    };
+  if (outcome.outcome === "declined")
+    return {
+      ...common,
+      ok: false as const,
+      declined: true as const,
+      policyDecision: "declined" as const,
+    };
+  return { ...common, ok: true as const, result: outcome.result, policyDecision: "ok" as const };
+}
+
+export async function resolveUnmatchedTaskOperation(
+  context: TaskOperationContext,
+  input: { id: string; snapshot?: MoneySnapshot; escrowId?: string; counterparty?: string },
 ) {
   const snapshot =
     input.snapshot ?? (await taskMoneySnapshot(context.client, input.id, input.escrowId, context));
   return await taskRequest(
-    "dispute",
-    "disputeEscrow",
+    "resolve-unmatched",
+    "resolveUnmatchedEscrow",
     () =>
-      disputeTask({
+      resolveUnmatchedTask({
         client: cachedMoneyClient(context.client, snapshot),
         chain: context.chain,
         orderId: input.id,
         escrowId: snapshot.escrowId,
-        evidenceHash: input.evidenceHash,
+        ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
         idempotencyKey: context.randomUUID,
       }),
     context,

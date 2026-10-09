@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { verifyMessage } from "viem";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { privateKeyToAccount } from "viem/accounts";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { WalletStore, type SecretStore } from "@vapi-network/core";
 import { agentSecretAccounts } from "@vapi-network/core/agent-link";
@@ -23,8 +24,8 @@ import {
   type TasksClientOptions,
 } from "../../core/src/tasks/index.js";
 import { tasksResponseSchemas } from "../../core/src/tasks/types.js";
-import { runCli, type CliDependencies } from "./cli.js";
-import { parseTaskDuration, TASK_HELP } from "./task.js";
+import { runCli, parseArguments, type CliDependencies } from "./cli.js";
+import { parseTaskDuration, taskContext, TASK_HELP } from "./task.js";
 
 const ID = "11111111-1111-4111-8111-111111111111";
 const PROPOSAL_ID = "22222222-2222-4222-8222-222222222222";
@@ -34,6 +35,13 @@ const ADDRESS = "0x1111111111111111111111111111111111111111";
 const ESCROW = "0x2222222222222222222222222222222222222222";
 const NOW = new Date("2026-10-08T12:00:00.000Z");
 const BRIEF = "Build a page with a working contact form.";
+const scopeProposer = privateKeyToAccount(`0x${"11".repeat(32)}`);
+let scopeSignature = `0x${"cd".repeat(65)}`;
+beforeAll(async () => {
+  scopeSignature = await scopeProposer.signMessage({
+    message: canonicalJson(scopeFixture().signingPayload),
+  });
+});
 const homes: string[] = [];
 
 afterEach(async () => {
@@ -347,6 +355,9 @@ function fakeChain(overrides: Partial<TasksChain> = {}): TasksChain {
     release: vi.fn(async () => chainResult("released")),
     refund: vi.fn(async () => chainResult("refunded")),
     dispute: vi.fn(async () => chainResult("disputed")),
+    disputeFee: vi.fn(async () => 20_000_000n),
+    counterEvidence: vi.fn(async () => chainResult("disputed")),
+    resolveUnmatched: vi.fn(async () => chainResult("refunded")),
     signScopeMessage: vi.fn(async (): Promise<`0x${string}`> => hex("ef".repeat(65))),
     ...overrides,
   } satisfies TasksChain;
@@ -418,8 +429,8 @@ function scopeFixture(
         brief: BRIEF,
         termsHash: frozen.termsHash,
         proposedByRole,
-        proposerAddress: ADDRESS,
-        proposerSignature: `0x${"cd".repeat(65)}`,
+        proposerAddress: scopeProposer.address,
+        proposerSignature: scopeSignature,
         counterpartyAddress: null,
         counterpartySignature: null,
         acceptedAt: null,
@@ -1234,25 +1245,119 @@ describe("vapi task", () => {
   });
 
   describe("escrow task verbs", () => {
+    it("exposes the lazy local signing identity without producing a signature", async () => {
+      const { dependencies } = await fixture(true, fakeClient());
+      const signer = privateKeyToAccount(`0x${"12".repeat(32)}`);
+      const signMessage = vi.fn(signer.signMessage);
+      const signTransaction = vi.fn(signer.signTransaction);
+      const unlock = vi
+        .spyOn(WalletStore.prototype, "unlock")
+        .mockResolvedValue({ ...signer, signMessage, signTransaction });
+      try {
+        const context = await taskContext(
+          parseArguments([], { valueOptions: new Set(["--wallet"]), maximumPositionals: 0 }),
+          { stdout: () => {}, stderr: () => {} },
+          dependencies,
+        );
+        const chain = context.chain as TasksChain & {
+          getSigningAddress?: () => Promise<`0x${string}`>;
+        };
+        expect(await chain.getSigningAddress?.()).toBe(signer.address);
+        expect(signMessage).not.toHaveBeenCalled();
+        expect(signTransaction).not.toHaveBeenCalled();
+        expect(dependencies.fetchImpl).not.toHaveBeenCalled();
+      } finally {
+        unlock.mockRestore();
+      }
+    });
+
+    it("forwards an explicit counterparty to each money action", async () => {
+      const client = fakeClient({ getOrder: async () => milestoneOrder() });
+      const chain = fakeChain();
+      const { dependencies, home } = await fixture(true, client);
+      dependencies.tasks!.chain = chain;
+      let sequence = 0;
+      dependencies.tasks!.randomUUID = () =>
+        `aaaaaaaa-aaaa-4aaa-8aaa-${String(++sequence).padStart(12, "0")}`;
+      await writeProfile(home, { maxPerTaskUsd: 200, approveAboveUsd: 200 });
+      for (const [verb, method] of [
+        ["fund", "fund"],
+        ["release", "release"],
+        ["refund", "refund"],
+        ["dispute", "dispute"],
+        ["counter-evidence", "counterEvidence"],
+        ["resolve-unmatched", "resolveUnmatched"],
+      ] as const) {
+        const args = [
+          verb,
+          ID,
+          "--counterparty",
+          ADDRESS,
+          ...(["dispute", "counter-evidence"].includes(verb)
+            ? ["--evidence-hash", `0x${"ab".repeat(32)}`]
+            : []),
+        ];
+        const result = await invoke(args, dependencies);
+        expect(result.code, JSON.stringify(result.value)).toBe(0);
+        expect(chain[method]).toHaveBeenCalledWith(
+          expect.objectContaining({ counterparty: ADDRESS }),
+        );
+      }
+    });
+
+    it.each(["dispute", "counter-evidence"])(
+      "requires approval for a %s fee in non-interactive mode",
+      async (verb) => {
+        const client = fakeClient({ getOrder: async () => milestoneOrder() });
+        const chain = fakeChain({ disputeFee: vi.fn(async () => 20_000_000n) });
+        const { dependencies, home } = await fixture(true, client);
+        dependencies.tasks!.chain = chain;
+        await writeProfile(home, { maxPerTaskUsd: 100, approveAboveUsd: 10 });
+        const result = await invoke(
+          [verb, ID, "--evidence-hash", `0x${"ab".repeat(32)}`],
+          dependencies,
+        );
+        expect(result.code).toBe(3);
+        expect(result.value).toMatchObject({
+          ok: false,
+          approval: true,
+          disputeFee: { baseUnits: "20000000", usd: "20.00" },
+        });
+        expect(chain.dispute).not.toHaveBeenCalled();
+        expect(chain.counterEvidence).not.toHaveBeenCalled();
+      },
+    );
+
     it("only rejects a genuinely unknown verb", async () => {
       const result = await invoke(["nonsense"], {});
       expect(result.code).toBe(1);
       expect(result.value).toMatchObject({ ok: false, error: { code: "usage_error" } });
     });
 
-    it.each([["sign"], ["fund"], ["deliver"], ["release"], ["refund"], ["dispute"], ["watch"]])(
-      "parses task %s as a known verb before validating its arguments",
-      async (verb) => {
-        const result = await invoke([verb], {});
-        expect(result.code).toBe(1);
-        expect((result.value!.error as { message: string }).message).not.toContain(
-          "task <search|show",
-        );
-      },
-    );
+    it.each([
+      ["sign"],
+      ["fund"],
+      ["deliver"],
+      ["release"],
+      ["refund"],
+      ["dispute"],
+      ["counter-evidence"],
+      ["resolve-unmatched"],
+      ["watch"],
+    ])("parses task %s as a known verb before validating its arguments", async (verb) => {
+      const result = await invoke([verb], {});
+      expect(result.code).toBe(1);
+      expect((result.value!.error as { message: string }).message).not.toContain(
+        "task <search|show",
+      );
+    });
 
     it.each([
       ["dispute", ID, "--evidence-hash", "abcd"],
+      ["counter-evidence", ID, "--evidence-hash", "abcd"],
+      ["release", ID, "--counterparty", "0x1234"],
+      ["sign", ID, "--counterparty", "0x1234"],
+      ["resolve-unmatched", ID, "--counterparty", "0x1234"],
       ["dispute", ID, "--evidence-hash", `0X${"ab".repeat(32)}`],
       ["deliver", ID, "--note", "Delivered"],
       ["deliver", ID, "--files", "missing.txt"],
@@ -1834,7 +1939,7 @@ describe("vapi task", () => {
 
       expect(result.code).toBe(0);
       expect(result.stdout.slice(-2)).toEqual([
-        `Build a page · $100.00 USDC · deadline ${NOW.toISOString()}`,
+        `Build a page · $100.00 USDC · deadline ${NOW.toISOString()} · with ${scopeProposer.address}`,
         `Accepted scope for task ${ID}.`,
       ]);
     });
@@ -1854,6 +1959,9 @@ describe("vapi task", () => {
         structuredTerms,
         termsHash: frozen.termsHash,
         signingPayload: { ...original.signingPayload, termsHash: frozen.termsHash },
+        proposerSignature: await scopeProposer.signMessage({
+          message: canonicalJson({ ...original.signingPayload, termsHash: frozen.termsHash }),
+        }),
       };
       const accepted = tasksResponseSchemas.signScope.parse({
         scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
@@ -1875,7 +1983,7 @@ describe("vapi task", () => {
       const result = await invoke(["sign", ID], dependencies, false);
 
       expect(result.stdout.at(-2)).toBe(
-        `Build a page · 100000000 base units (eip155:8453/erc20:${ESCROW}) · deadline ${NOW.toISOString()}`,
+        `Build a page · 100000000 base units (eip155:8453/erc20:${ESCROW}) · deadline ${NOW.toISOString()} · with ${scopeProposer.address}`,
       );
     });
 
@@ -1943,12 +2051,12 @@ describe("vapi task", () => {
         const args = [
           verb,
           ID,
-          ...(verb === "dispute" ? ["--evidence-hash", `0x${"ab".repeat(32)}`] : []),
+          ...(verb === "dispute" ? ["--evidence-hash", `0x${"ab".repeat(32)}`, "--yes"] : []),
         ];
         const result = await invoke(args, dependencies);
         expect(result.value).toMatchObject({
           command: `task ${verb}`,
-          money: { gross: { baseUnits: "100000000" } },
+          money: { gross: { baseUnits: verb === "dispute" ? "20000000" : "100000000" } },
           result: expect.any(Object),
         });
         const operation =
@@ -1956,8 +2064,7 @@ describe("vapi task", () => {
         expect(operation).toHaveBeenCalledOnce();
         if (verb === "dispute")
           expect(result.values[0]).toMatchObject({
-            disputeFee: null,
-            disputeFeeNote: expect.stringContaining("unavailable"),
+            disputeFee: { baseUnits: "20000000", usd: "20.00" },
           });
       },
     );
@@ -1968,6 +2075,7 @@ describe("vapi task", () => {
         const client = fakeClient({ getOrder: async () => milestoneOrder() });
         const observed = vi.fn(async () => {
           expect(stdout.join("\n")).toContain("$100.00 gross");
+          if (verb === "dispute") expect(stdout.join("\n")).toContain("dispute fee $20.00 USDC");
           return chainResult(
             verb === "release" ? "released" : verb === "refund" ? "refunded" : "disputed",
           );
@@ -1980,7 +2088,7 @@ describe("vapi task", () => {
             "task",
             verb,
             ID,
-            ...(verb === "dispute" ? ["--evidence-hash", `0x${"ab".repeat(32)}`] : []),
+            ...(verb === "dispute" ? ["--evidence-hash", `0x${"ab".repeat(32)}`, "--yes"] : []),
           ],
           { stdout: (line) => stdout.push(line), stderr: () => {} },
           dependencies,

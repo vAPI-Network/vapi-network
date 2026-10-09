@@ -16,7 +16,7 @@ const ledgerSchema = z.object({
 const spendReservationSchema = z.object({
   id: z.string().min(1),
   amountAtomic: z.string().regex(/^\d+$/),
-  kind: z.enum(["payment", "escrow-funding"]).optional(),
+  kind: z.enum(["payment", "escrow-funding", "dispute-fee"]).optional(),
 });
 
 /**
@@ -39,7 +39,7 @@ const ledgerFileSchema = z.union([
 ]);
 
 export type SpendLedger = z.infer<typeof ledgerSchema>;
-export type SpendKind = "payment" | "escrow-funding";
+export type SpendKind = "payment" | "escrow-funding" | "dispute-fee";
 export type SpendLedgerRow = SpendLedger & { wallet: WalletName };
 type StoredSpendLedgerRow = SpendLedgerRow & {
   reservations?: Array<z.infer<typeof spendReservationSchema>>;
@@ -155,7 +155,7 @@ export async function reserveSpend(
 
   const kind = options?.kind ?? "payment";
   let perDayAtomic: bigint;
-  if (kind === "escrow-funding") {
+  if (kind === "escrow-funding" || kind === "dispute-fee") {
     const maxPerTaskAtomic = options?.maxPerTaskAtomic;
     if (maxPerTaskAtomic === undefined || maxPerTaskAtomic < 0n) {
       throw new Error("Escrow funding requires a non-negative per-task cap.");
@@ -190,8 +190,8 @@ export async function reserveSpend(
       );
       if (existing && options.reuseExistingEscrowReservation) {
         if (
-          kind !== "escrow-funding" ||
-          existing.kind !== "escrow-funding" ||
+          (kind !== "escrow-funding" && kind !== "dispute-fee") ||
+          existing.kind !== kind ||
           existing.amountAtomic !== amountAtomic.toString()
         )
           throw new Error(
@@ -209,7 +209,7 @@ export async function reserveSpend(
       if (options.resumeEscrowReservation) {
         const resumed = options.resumeEscrowReservation;
         if (
-          kind !== "escrow-funding" ||
+          (kind !== "escrow-funding" && kind !== "dispute-fee") ||
           resumed.id !== options.reservationId ||
           resumed.wallet !== wallet ||
           resumed.amountAtomic !== amountAtomic.toString() ||
@@ -250,7 +250,7 @@ export async function reserveSpend(
                     {
                       id: options.reservationId,
                       amountAtomic: amountAtomic.toString(),
-                      ...(kind === "escrow-funding" ? { kind } : {}),
+                      ...(kind !== "payment" ? { kind } : {}),
                     },
                   ]),
             ],

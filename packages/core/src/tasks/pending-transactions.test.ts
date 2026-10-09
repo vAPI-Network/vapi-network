@@ -246,3 +246,76 @@ it("checkpoints only the approval-to-deposit prepared transition", async () => {
     "does not match",
   );
 });
+
+it.each([
+  ["escrow-dispute", "raise-dispute"],
+  ["escrow-counter-evidence", "submit-counter-evidence"],
+] as const)("persists a V2 %s approval checkpoint across process instances", async (kind, step) => {
+  const { home, pending } = await store();
+  const response = tasksResponseSchemas.reconcileOperation.parse({
+    operation: {
+      id: OPERATION,
+      kind,
+      state: "prepared",
+      step,
+      expectedActor: ADDRESS,
+      transactionHash: null,
+      plan: {
+        version: "work-transaction-plan-v2",
+        operationId: OPERATION,
+        step,
+        chainId: 84532,
+        network: "eip155:84532",
+        from: ADDRESS,
+        to: ADDRESS,
+        data: "0x12345678",
+        value: "0",
+      },
+    },
+    milestone: { id: KEY, workOrderId: OPERATION },
+  });
+  await pending.put(OPERATION, "approve-usdc", {
+    chainId: 84532,
+    txHash: HASH,
+    raw: "0x1234",
+    signer: ADDRESS,
+    nonce: 0,
+    createdAt: "2026-10-09T12:00:00.000Z",
+  });
+  await pending.complete(OPERATION, "approve-usdc", response);
+  const restarted = createPendingTransactions(home);
+  expect(await restarted.get(OPERATION, "approve-usdc")).toBeUndefined();
+  expect(await restarted.reconciled(OPERATION, "approve-usdc")).toEqual(response);
+});
+
+it("persists an unmatched resolution transaction and confirmation across process instances", async () => {
+  const { home, pending } = await store();
+  await pending.put(OPERATION, "resolve-unmatched-dispute", {
+    chainId: 84532,
+    txHash: HASH,
+    raw: "0x1234",
+    signer: ADDRESS,
+    nonce: 0,
+    createdAt: "2026-10-09T12:00:00.000Z",
+  });
+  const restarted = createPendingTransactions(home);
+  expect(await restarted.get(OPERATION, "resolve-unmatched-dispute")).toMatchObject({
+    txHash: HASH,
+  });
+  const response = tasksResponseSchemas.reconcileOperation.parse({
+    operation: {
+      id: OPERATION,
+      kind: "escrow-unmatched-resolution",
+      state: "confirmed",
+      step: "resolve-unmatched-dispute",
+      expectedActor: null,
+      transactionHash: HASH,
+      plan: null,
+    },
+    milestone: { id: KEY, workOrderId: OPERATION },
+  });
+  await restarted.complete(OPERATION, "resolve-unmatched-dispute", response);
+  expect(
+    await createPendingTransactions(home).reconciled(OPERATION, "resolve-unmatched-dispute"),
+  ).toEqual(response);
+});

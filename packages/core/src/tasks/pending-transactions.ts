@@ -84,6 +84,8 @@ const step = z.enum([
   "release-funds",
   "refund-buyer",
   "raise-dispute",
+  "submit-counter-evidence",
+  "resolve-unmatched-dispute",
   "timeout-refund",
   "finalize",
 ]);
@@ -174,7 +176,14 @@ function validCheckpointStep(storedStep: string, response: ReconcileOperationRes
     (response.operation.state === "confirmed" && response.operation.step === storedStep) ||
     (storedStep === "approve-usdc" &&
       response.operation.state === "prepared" &&
-      response.operation.step === "deposit-funds")
+      response.operation.step ===
+        (
+          {
+            "escrow-funding": "deposit-funds",
+            "escrow-dispute": "raise-dispute",
+            "escrow-counter-evidence": "submit-counter-evidence",
+          } as Record<string, string>
+        )[response.operation.kind])
   );
 }
 

@@ -21,3 +21,24 @@ describe("trusted Tasks deployments", () => {
     expect(() => getTrustedTasksFactory(84532, { "84532": "invalid" })).toThrow(/is invalid/i);
   });
 });
+
+import { getTrustedTasksDurations } from "./trusted-deployments.js";
+
+it("pins duration defaults and accepts only explicit local overrides", () => {
+  expect(getTrustedTasksDurations(84532)).toEqual({
+    workDurationSeconds: 604800,
+    reviewWindowSeconds: 604800,
+  });
+  expect(getTrustedTasksDurations(8453)).toEqual({
+    workDurationSeconds: undefined,
+    reviewWindowSeconds: undefined,
+  });
+  expect(
+    getTrustedTasksDurations(84532, {
+      "84532": { workDurationSeconds: 1200, reviewWindowSeconds: 600 },
+    }),
+  ).toEqual({ workDurationSeconds: 1200, reviewWindowSeconds: 600 });
+  expect(() => getTrustedTasksDurations(84532, { "84532": { workDurationSeconds: 0 } })).toThrow(
+    /positive integer seconds/,
+  );
+});
