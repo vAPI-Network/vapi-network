@@ -83,7 +83,7 @@ describe("auth.link", () => {
     expect(startArgs).toMatchObject({
       apiBase: API_BASE,
       label: "main",
-      scopes: [...DEFAULT_AGENT_SCOPES],
+      scopes: [...DEFAULT_AGENT_SCOPES, "tasks:read", "tasks:write"],
     });
     expect(startArgs.account.address).toBe(account.address);
     expect(startArgs.fetchImpl).toBe(fetchImpl);
@@ -175,7 +175,7 @@ describe("auth.link", () => {
       linked: true,
       owner: OWNER,
       label: "researcher",
-      scopes: [...DEFAULT_AGENT_SCOPES],
+      scopes: [...DEFAULT_AGENT_SCOPES, "tasks:read", "tasks:write"],
       linkedAt: expect.any(String),
       router: true,
     });
@@ -270,7 +270,7 @@ describe("auth.status", () => {
       clientId: deviceStart().clientId,
       owner: OWNER,
       label: "cli-login",
-      scopes: [...DEFAULT_AGENT_SCOPES],
+      scopes: [...DEFAULT_AGENT_SCOPES, "tasks:read", "tasks:write"],
       linkedAt: "2026-09-23T10:00:00.000Z",
     };
 
@@ -381,7 +381,7 @@ function linkResult(): LinkResult {
       accessToken: ACCESS_TOKEN,
       refreshToken: REFRESH_TOKEN,
       expiresAt: Date.now() + 3_600_000,
-      scopes: [...DEFAULT_AGENT_SCOPES],
+      scopes: [...DEFAULT_AGENT_SCOPES, "tasks:read", "tasks:write"],
     },
     routerKey: ROUTER_KEY,
     routerBaseUrl: "https://router.vapinetwork.ai",

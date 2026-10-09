@@ -84,7 +84,7 @@ describe("vapi login", () => {
     expect(start.mock.calls[0]![0]).toMatchObject({
       apiBase: "https://api.vapinetwork.ai/",
       label: "researcher",
-      scopes: ["mcp:call", "router.use"],
+      scopes: ["mcp:call", "router.use", "tasks:read", "tasks:write"],
     });
     expect(start.mock.calls[0]![0]).not.toHaveProperty("routerAllowanceUsd");
     expect(openUrl).toHaveBeenCalledWith(START.verificationUriComplete);
@@ -124,7 +124,7 @@ describe("vapi login", () => {
 
     expect(start.mock.calls[0]![0]).toMatchObject({
       label: "publisher",
-      scopes: ["mcp:call", "router.use", "call.publish"],
+      scopes: ["mcp:call", "router.use", "tasks:read", "tasks:write", "call.publish"],
     });
     expect(captured.stdout).toHaveLength(1);
     expect(JSON.parse(captured.stdout[0]!)).toEqual({
@@ -301,7 +301,7 @@ describe("vapi login", () => {
       agent_message: message,
       agent_signature: signature,
       label: "researcher",
-      scope: "mcp:call router.use",
+      scope: "mcp:call router.use tasks:read tasks:write",
     });
     expect(legacyBody).not.toHaveProperty("router_allowance_usd");
   });

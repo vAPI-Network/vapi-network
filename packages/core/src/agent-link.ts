@@ -61,7 +61,12 @@ export class AgentLinkError extends Error {
 
 export const DEFAULT_AGENT_SCOPES = ["mcp:call", "router.use"] as const;
 
-const ALLOWED_AGENT_SCOPES = new Set<string>([...DEFAULT_AGENT_SCOPES, "call.publish"]);
+const ALLOWED_AGENT_SCOPES = new Set<string>([
+  ...DEFAULT_AGENT_SCOPES,
+  "call.publish",
+  "tasks:read",
+  "tasks:write",
+]);
 const publicFetch = createPublicFetch({ allowPrivateNetwork: false });
 
 export async function startDeviceLink(args: {

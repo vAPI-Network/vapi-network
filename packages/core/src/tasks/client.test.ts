@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createTasksClient, TasksClientError } from "./client.js";
+import { freezeScopeTerms } from "./scope-terms.js";
 import { tasksResponseSchemas } from "./types.js";
 import type {
   CreateOrderInput,
@@ -152,32 +153,36 @@ const operation = {
   milestone: { id: ID, workOrderId: ID },
 } as const;
 
+const structuredScopeTerms = {
+  version: "work-milestone-terms-v1",
+  title: "Ship the integration",
+  description: "Implement and document it.",
+  deliverables: ["Source code"],
+  acceptanceCriteria: ["Tests pass"],
+  revisionCount: 1,
+  deadline: "2026-09-01T12:00:00.000Z",
+  workDurationSeconds: 604_800,
+  acceptanceWindowSeconds: 86_400,
+  budget: {
+    network: "eip155:84532",
+    asset: `eip155:84532/erc20:${OTHER_ADDRESS}`,
+    amountBaseUnits: "2500000",
+  },
+  escrow: { protocol: "escrow-v1", contract: OTHER_ADDRESS },
+  evidenceRules: { acceptedInputs: ["text"], exactCommitRequired: true },
+} as const;
+const scopeBrief = "Ship the exact agreed integration.";
+const frozenScope = freezeScopeTerms(structuredScopeTerms, scopeBrief);
+
 const scope = {
   id: ID,
   workOrderId: ID,
   trancheOrdinal: 1,
   version: 1,
   state: "proposed",
-  structuredTerms: {
-    version: "work-milestone-terms-v1",
-    title: "Ship the integration",
-    description: "Implement and document it.",
-    deliverables: ["Source code"],
-    acceptanceCriteria: ["Tests pass"],
-    revisionCount: 1,
-    deadline: "2026-09-01T12:00:00.000Z",
-    workDurationSeconds: 604_800,
-    acceptanceWindowSeconds: 86_400,
-    budget: {
-      network: "eip155:84532",
-      asset: `eip155:84532/erc20:${OTHER_ADDRESS}`,
-      amountBaseUnits: "2500000",
-    },
-    escrow: { protocol: "escrow-v1", contract: OTHER_ADDRESS },
-    evidenceRules: { acceptedInputs: ["text"], exactCommitRequired: true },
-  },
-  brief: "Ship the exact agreed integration.",
-  termsHash: HASH,
+  structuredTerms: structuredScopeTerms,
+  brief: scopeBrief,
+  termsHash: frozenScope.termsHash,
   proposedByRole: "client",
   proposerAddress: ADDRESS,
   proposerSignature: SIGNATURE,
@@ -191,7 +196,7 @@ const scope = {
     workOrderId: ID,
     trancheOrdinal: 1,
     scopeVersion: 1,
-    termsHash: HASH,
+    termsHash: frozenScope.termsHash,
   },
 } as const;
 
@@ -321,6 +326,59 @@ describe("tasks client recorded HTTP contract", () => {
     ).resolves.toMatchObject({ workOrder: { milestones: [{ dispute: { id: CUID } }] } });
   });
 
+  it("supports V2 counter-evidence and unmatched-resolution routes and steps", async () => {
+    const responses = [
+      {
+        ...operation,
+        operation: {
+          ...operation.operation,
+          kind: "escrow-counter-evidence",
+          step: "submit-counter-evidence",
+          plan: { ...operation.operation.plan, step: "submit-counter-evidence" },
+        },
+      },
+      {
+        ...operation,
+        operation: {
+          ...operation.operation,
+          kind: "escrow-unmatched-resolution",
+          step: "resolve-unmatched-dispute",
+          plan: { ...operation.operation.plan, step: "resolve-unmatched-dispute" },
+        },
+      },
+    ];
+    const fetchImpl = vi.fn<typeof fetch>(async () => Response.json(responses.shift()));
+    const client = createTasksClient({
+      baseUrl: "https://tasks.example",
+      token: "secret",
+      fetch: fetchImpl,
+    });
+    await expect(
+      client.counterEvidenceEscrow(ID, { evidenceHash: HASH }, { idempotencyKey: KEY }),
+    ).resolves.toMatchObject({
+      operation: { kind: "escrow-counter-evidence", step: "submit-counter-evidence" },
+    });
+    await expect(client.resolveUnmatchedEscrow(ID, { idempotencyKey: KEY })).resolves.toMatchObject(
+      { operation: { kind: "escrow-unmatched-resolution", step: "resolve-unmatched-dispute" } },
+    );
+    expect(
+      fetchImpl.mock.calls.map(([url, init]) => [
+        String(url),
+        init?.method,
+        JSON.parse(String(init?.body)),
+        new Headers(init?.headers).get("Idempotency-Key"),
+      ]),
+    ).toEqual([
+      [
+        `https://tasks.example/v1/escrows/${ID}/counter-evidence`,
+        "POST",
+        { evidenceHash: HASH },
+        KEY,
+      ],
+      [`https://tasks.example/v1/escrows/${ID}/resolve-unmatched`, "POST", {}, KEY],
+    ]);
+  });
+
   it("records every JSON method's URL, verb, body, and headers", async () => {
     const orderPage = { workOrders: [publicOrder], page: { nextCursor: OTHER_ID } };
     const orderResponse = { workOrder: publicOrder };
@@ -341,7 +399,7 @@ describe("tasks client recorded HTTP contract", () => {
         id: OTHER_ID,
         workOrderId: scope.workOrderId,
         ordinal: 1,
-        termsHash: HASH,
+        termsHash: scope.termsHash,
         termsFrozenAt: NOW,
       },
     };
@@ -418,6 +476,13 @@ describe("tasks client recorded HTTP contract", () => {
       json(chainState),
       json(upload),
       json({ file }),
+      json(operation),
+      json(operation),
+      json({ ...operation, recovered: false, scanComplete: true }),
+      json({ outcome: "abandoned", operation: null, milestone: operation.milestone }),
+      json(operation),
+      json({ workOrder: { id: ID, state: "completed", completedAt: NOW } }),
+      json({ webhookUrl: "https://example.com/hook", secret: "secret" }),
       json(deployment),
     );
     const client = createTasksClient({
@@ -456,7 +521,7 @@ describe("tasks client recorded HTTP contract", () => {
         workOrderId: ID,
         trancheOrdinal: 1,
         scopeVersion: 1,
-        termsHash: HASH,
+        termsHash: scope.termsHash,
       },
       signature: SIGNATURE,
     } satisfies ProposeScopeInput;
@@ -501,6 +566,21 @@ describe("tasks client recorded HTTP contract", () => {
       sizeBytes: 2,
     });
     await client.finalizeUpload(ID);
+    await client.recordTransaction(
+      ID,
+      { step: "create-escrow", transactionHash: HASH },
+      { idempotencyKey: KEY },
+    );
+    await client.reconcileOperation(
+      ID,
+      { step: "create-escrow", transactionHash: HASH },
+      { idempotencyKey: KEY },
+    );
+    await client.recoverOperation(ID, { step: "create-escrow" }, { idempotencyKey: KEY });
+    await client.abandonOperation(ID, { step: "create-escrow" }, { idempotencyKey: KEY });
+    await client.finalizeEscrow(ID, { idempotencyKey: KEY });
+    await client.finalizeOrder(ID, { idempotencyKey: KEY });
+    await client.configureWebhook(ID, { url: "https://example.com/hook" });
     await client.deployment();
 
     const expected = [
@@ -543,6 +623,38 @@ describe("tasks client recorded HTTP contract", () => {
         false,
       ],
       ["POST", `https://tasks.example/v1/files/${ID}/finalize`, undefined, false],
+      [
+        "POST",
+        `https://tasks.example/v1/work-operations/${ID}/transactions`,
+        { step: "create-escrow", transactionHash: HASH },
+        true,
+      ],
+      [
+        "POST",
+        `https://tasks.example/v1/work-operations/${ID}/reconcile`,
+        { step: "create-escrow", transactionHash: HASH },
+        true,
+      ],
+      [
+        "POST",
+        `https://tasks.example/v1/work-operations/${ID}/recover`,
+        { step: "create-escrow" },
+        true,
+      ],
+      [
+        "POST",
+        `https://tasks.example/v1/work-operations/${ID}/abandon`,
+        { step: "create-escrow" },
+        true,
+      ],
+      ["POST", `https://tasks.example/v1/escrows/${ID}/finalize`, {}, true],
+      ["POST", `https://tasks.example/v1/work-orders/${ID}/finalize`, {}, true],
+      [
+        "POST",
+        `https://tasks.example/v1/work-orders/${ID}/webhook`,
+        { url: "https://example.com/hook" },
+        false,
+      ],
       ["GET", "https://tasks.example/api/tasks/readiness", undefined, false],
     ] as const;
     expect(recorder.requests).toHaveLength(expected.length);
@@ -698,9 +810,12 @@ describe("tasks client recorded HTTP contract", () => {
 
   it("exports one response schema for every primitive client method", () => {
     expect(Object.keys(tasksResponseSchemas).sort()).toEqual([
+      "abandonOperation",
       "acceptProposal",
       "board",
       "chainState",
+      "configureWebhook",
+      "counterEvidenceEscrow",
       "createEscrow",
       "createOrder",
       "createUpload",
@@ -710,6 +825,8 @@ describe("tasks client recorded HTTP contract", () => {
       "earn",
       "events",
       "feed",
+      "finalizeEscrow",
+      "finalizeOrder",
       "finalizeUpload",
       "fundEscrow",
       "getOrder",
@@ -720,16 +837,64 @@ describe("tasks client recorded HTTP contract", () => {
       "proposeScope",
       "publicTask",
       "receipt",
+      "reconcileOperation",
+      "recordTransaction",
+      "recoverOperation",
       "refundEscrow",
       "releaseEscrow",
+      "resolveUnmatchedEscrow",
       "sendMessage",
       "signScope",
       "submit",
     ]);
   });
+
+  it("enforces abandon outcomes and accepts cancelled finalization", () => {
+    expect(
+      tasksResponseSchemas.abandonOperation.safeParse({
+        outcome: "abandoned",
+        operation,
+        milestone: operation.milestone,
+      }).success,
+    ).toBe(false);
+    expect(
+      tasksResponseSchemas.abandonOperation.safeParse({
+        outcome: "recovered",
+        operation: null,
+        milestone: operation.milestone,
+      }).success,
+    ).toBe(false);
+    expect(
+      tasksResponseSchemas.finalizeOrder.parse({
+        workOrder: { id: ID, state: "cancelled", completedAt: null },
+      }),
+    ).toMatchObject({ workOrder: { state: "cancelled", completedAt: null } });
+  });
 });
 
 describe("tasks client errors and transport safety", () => {
+  it("preserves Retry-After on retryable operation conflicts", async () => {
+    const recorder = recordedFetch(
+      json(
+        { error: "Transaction not visible" },
+        {
+          status: 409,
+          headers: { "Retry-After": "2" },
+        },
+      ),
+    );
+    await expect(
+      createTasksClient({
+        baseUrl: "https://tasks.example",
+        fetch: recorder.fetch,
+      }).recordTransaction(
+        ID,
+        { step: "release-funds", transactionHash: HASH },
+        { idempotencyKey: KEY },
+      ),
+    ).rejects.toMatchObject({ status: 409, retryAfter: "2" });
+  });
+
   it.each([undefined, "unexpected"])(
     "reports an invalid response discriminator",
     async (configured) => {

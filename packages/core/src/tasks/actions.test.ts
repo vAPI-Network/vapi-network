@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { readSpendLedger, reserveSpend } from "../spend-policy.js";
@@ -23,7 +24,9 @@ import {
   type TasksChainResult,
 } from "./chain-port.js";
 import { createTasksClient } from "./client.js";
-import { prepareDeliveryManifest } from "./delivery-manifest.js";
+import { prepareDeliveryManifest, sha256Hex } from "./delivery-manifest.js";
+import { createPendingTransactions, type PendingTransactions } from "./pending-transactions.js";
+import { freezeScopeTerms } from "./scope-terms.js";
 import { tasksResponseSchemas } from "./types.js";
 
 const ORDER = "11111111-1111-4111-8111-111111111111";
@@ -33,7 +36,8 @@ const KEY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const CREATE_KEY = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const ADDRESS = "0x1111111111111111111111111111111111111111";
 const HASH = `0x${"ab".repeat(32)}` as const;
-const SIGNATURE = `0x${"cd".repeat(65)}` as const;
+const signingAccount = privateKeyToAccount(`0x${"11".repeat(32)}`);
+const proposingAccount = privateKeyToAccount(`0x${"22".repeat(32)}`);
 const NOW = "2026-10-08T12:00:00.000Z";
 const directories: string[] = [];
 
@@ -51,6 +55,27 @@ const terms = {
   escrow: { protocol: "escrow-v1", contract: ADDRESS },
   evidenceRules: { acceptedInputs: ["text"], exactCommitRequired: false },
 };
+
+const structuredTerms = {
+  ...terms,
+  deliverables: ["A report"],
+  revisionCount: 0,
+  deadline: NOW,
+};
+const brief = "Report";
+const frozenScope = freezeScopeTerms(structuredTerms, brief);
+const signingPayload = (version = 1, ordinal = 1) => ({
+  version: "work-scope-signature-v1",
+  workOrderId: ORDER,
+  trancheOrdinal: ordinal,
+  scopeVersion: version,
+  termsHash: frozenScope.termsHash,
+});
+const SIGNATURE = await signingAccount.signMessage({ message: canonicalJson(signingPayload()) });
+const proposerSignatures = new Map([
+  [1, await proposingAccount.signMessage({ message: canonicalJson(signingPayload()) })],
+  [2, await proposingAccount.signMessage({ message: canonicalJson(signingPayload(2)) })],
+]);
 
 function orderResponse(
   amountBaseUnits = "100000000",
@@ -86,7 +111,7 @@ function orderResponse(
           ordinal: 1,
           state: "agreed",
           terms,
-          termsHash: HASH,
+          termsHash: frozenScope.termsHash,
           termsFrozenAt: NOW,
           network: "eip155:84532",
           asset: `eip155:84532/erc20:${ADDRESS}`,
@@ -124,12 +149,12 @@ function scope(proposedByRole: "client" | "provider" = "client", version = 1) {
         trancheOrdinal: 1,
         version,
         state: "proposed",
-        structuredTerms: { ...terms, deliverables: ["A report"], revisionCount: 0, deadline: NOW },
-        brief: "Report",
-        termsHash: HASH,
+        structuredTerms,
+        brief,
+        termsHash: frozenScope.termsHash,
         proposedByRole,
-        proposerAddress: ADDRESS,
-        proposerSignature: SIGNATURE,
+        proposerAddress: proposingAccount.address,
+        proposerSignature: proposerSignatures.get(version)!,
         counterpartyAddress: null,
         counterpartySignature: null,
         acceptedAt: null,
@@ -140,7 +165,7 @@ function scope(proposedByRole: "client" | "provider" = "client", version = 1) {
           workOrderId: ORDER,
           trancheOrdinal: 1,
           scopeVersion: version,
-          termsHash: HASH,
+          termsHash: frozenScope.termsHash,
         },
       },
     ],
@@ -199,7 +224,7 @@ function dependencies(amount = "100000000") {
         id: ESCROW,
         workOrderId: ORDER,
         ordinal: 1,
-        termsHash: HASH,
+        termsHash: frozenScope.termsHash,
         termsFrozenAt: NOW,
       },
     }),
@@ -212,9 +237,18 @@ function dependencies(amount = "100000000") {
     release: vi.fn().mockResolvedValue(chainResult()),
     refund: vi.fn().mockResolvedValue(chainResult()),
     dispute: vi.fn().mockResolvedValue(chainResult()),
-    signScopeMessage: vi.fn().mockResolvedValue(SIGNATURE),
+    disputeFee: vi.fn().mockResolvedValue(20000000n),
+    counterEvidence: vi.fn().mockResolvedValue(chainResult()),
+    resolveUnmatched: vi.fn().mockResolvedValue(chainResult()),
+    signScopeMessage: vi.fn(async (message: string) => signingAccount.signMessage({ message })),
+    bindScope: vi.fn().mockResolvedValue(undefined),
+    signingAddress: signingAccount.address,
   } satisfies TasksChain;
-  return { client, chain, orderId: ORDER, idempotencyKey: () => KEY };
+  const bindings = {
+    get: vi.fn().mockResolvedValue(undefined),
+    put: vi.fn().mockResolvedValue(undefined),
+  };
+  return { client, chain, bindings, orderId: ORDER, idempotencyKey: () => KEY };
 }
 
 async function funding(amount = "100000000") {
@@ -279,9 +313,156 @@ describe("task funding", () => {
       outcome: "done",
     });
     expect(args.chain.fund).toHaveBeenCalledExactlyOnceWith({
+      orderId: ORDER,
       escrowId: ESCROW,
       grossBaseUnits: 100000000n,
       idempotencyKey: KEY,
+    });
+  });
+
+  it("reuses the durable reservation id for funding reruns", async () => {
+    const args = await funding();
+    const pending = {
+      existingReservationId: vi.fn().mockResolvedValue(undefined),
+      reservationId: vi.fn().mockResolvedValue(CREATE_KEY),
+      withFundingLock: vi.fn(async (_id, action) => action()),
+    } as unknown as import("./pending-transactions.js").PendingTransactions;
+    await fundTask({ ...args, pending, approval: { granted: true } });
+    expect(pending.reservationId).toHaveBeenCalledExactlyOnceWith(ESCROW, expect.any(Function));
+    expect(args.chain.fund).toHaveBeenCalledWith(
+      expect.objectContaining({ idempotencyKey: CREATE_KEY }),
+    );
+  });
+
+  it("retries an exposed funding reservation with the same key and no double count", async () => {
+    const args = await funding();
+    const pending = createPendingTransactions(join(args.ledgerPath, ".."));
+    args.chain.fund
+      .mockImplementationOnce(async () => {
+        await pending.markExposure(ESCROW);
+        throw new TasksChainError("Submission uncertain", true);
+      })
+      .mockResolvedValueOnce(chainResult());
+    await expect(fundTask({ ...args, pending, approval: { granted: true } })).rejects.toThrow(
+      "Submission uncertain",
+    );
+    expect(await readSpendLedger(args.ledgerPath, new Date(NOW))).toMatchObject({
+      spentAtomic: "100000000",
+    });
+    await expect(
+      fundTask({ ...args, pending, approval: { granted: true } }),
+    ).resolves.toMatchObject({
+      outcome: "done",
+    });
+    expect(await readSpendLedger(args.ledgerPath, new Date(NOW))).toMatchObject({
+      spentAtomic: "100000000",
+    });
+    expect(args.chain.fund.mock.calls[0]![0].idempotencyKey).toBe(
+      args.chain.fund.mock.calls[1]![0].idempotencyKey,
+    );
+  });
+
+  it("serializes concurrent funding across independent pending store instances", async () => {
+    const args = await funding();
+    const home = join(args.ledgerPath, "..");
+    const firstPending = createPendingTransactions(home);
+    const secondPending = createPendingTransactions(home);
+    let active = 0;
+    let highest = 0;
+    args.chain.fund.mockImplementation(async () => {
+      active += 1;
+      highest = Math.max(highest, active);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      active -= 1;
+      return chainResult();
+    });
+    await Promise.all([
+      fundTask({ ...args, pending: firstPending, approval: { granted: true } }),
+      fundTask({ ...args, pending: secondPending, approval: { granted: true } }),
+    ]);
+    expect(highest).toBe(1);
+    expect(args.chain.fund).toHaveBeenCalledTimes(2);
+    expect(await readSpendLedger(args.ledgerPath, new Date(NOW))).toMatchObject({
+      spentAtomic: "100000000",
+    });
+  });
+
+  it("can reserve the same durable id again after a proven-safe rollback", async () => {
+    const args = await funding();
+    const pending = createPendingTransactions(join(args.ledgerPath, ".."));
+    args.chain.fund
+      .mockRejectedValueOnce(
+        new TasksChainError("Signing refused", false, { authorizationExposed: false }),
+      )
+      .mockResolvedValueOnce(chainResult());
+    await expect(fundTask({ ...args, pending, approval: { granted: true } })).rejects.toThrow(
+      "Signing refused",
+    );
+    expect(await readSpendLedger(args.ledgerPath, new Date(NOW))).toMatchObject({
+      spentAtomic: "0",
+    });
+    await expect(
+      fundTask({ ...args, pending, approval: { granted: true } }),
+    ).resolves.toMatchObject({
+      outcome: "done",
+    });
+    expect(await readSpendLedger(args.ledgerPath, new Date(NOW))).toMatchObject({
+      spentAtomic: "100000000",
+    });
+  });
+
+  it("retains spend when execution stops immediately after reservation invalidation", async () => {
+    const args = await funding();
+    const stored = createPendingTransactions(join(args.ledgerPath, ".."));
+    const pending: PendingTransactions = {
+      ...stored,
+      async invalidateReservation(escrowId) {
+        await stored.invalidateReservation?.(escrowId);
+        throw new Error("Simulated crash after invalidation");
+      },
+    };
+    args.chain.fund.mockRejectedValueOnce(
+      new TasksChainError("Signing refused", false, { authorizationExposed: false }),
+    );
+    await expect(fundTask({ ...args, pending, approval: { granted: true } })).rejects.toMatchObject(
+      {
+        name: "AggregateError",
+        message: "Task funding failed and its spend reservation could not be released.",
+      },
+    );
+    expect(await readSpendLedger(args.ledgerPath, new Date(NOW))).toMatchObject({
+      spentAtomic: "100000000",
+    });
+    expect(await stored.retainedReservation?.(ESCROW)).toMatchObject({ invalidated: true });
+  });
+
+  it("persists reservation metadata before the chain call and resumes it across UTC days", async () => {
+    const args = await funding();
+    const home = join(args.ledgerPath, "..");
+    const pending = createPendingTransactions(home);
+    args.chain.fund.mockImplementationOnce(async () => {
+      expect(await pending.retainedReservation?.(ESCROW)).toMatchObject({
+        wallet: "main",
+        amountAtomic: "100000000",
+        date: "2026-10-08",
+      });
+      await pending.markExposure(ESCROW);
+      throw new TasksChainError("Submission uncertain", true);
+    });
+    await expect(fundTask({ ...args, pending, approval: { granted: true } })).rejects.toThrow(
+      "Submission uncertain",
+    );
+    const nextDay = new Date("2026-10-09T12:00:00.000Z");
+    await writeFile(
+      args.ledgerPath,
+      JSON.stringify({ date: "2026-10-09", spentAtomic: "200000000" }),
+    );
+    args.chain.fund.mockResolvedValueOnce(chainResult());
+    await expect(
+      fundTask({ ...args, pending, now: () => nextDay, approval: { granted: true } }),
+    ).resolves.toMatchObject({ outcome: "done" });
+    expect(await readSpendLedger(args.ledgerPath, nextDay)).toMatchObject({
+      spentAtomic: "200000000",
     });
   });
 
@@ -289,13 +470,13 @@ describe("task funding", () => {
     const args = await funding();
     await expect(
       fundTask({ ...args, chain: missingTasksChain, approval: { granted: true } }),
-    ).rejects.toThrow("chain operations need C2");
+    ).rejects.toThrow("An acting wallet is required for task chain operations.");
     await expect(stat(args.ledgerPath)).rejects.toMatchObject({ code: "ENOENT" });
     const raw = JSON.stringify({ date: "2026-10-08", spentAtomic: "1000" });
     await writeFile(args.ledgerPath, raw);
     await expect(
       fundTask({ ...args, chain: missingTasksChain, approval: { granted: true } }),
-    ).rejects.toThrow("chain operations need C2");
+    ).rejects.toThrow("An acting wallet is required for task chain operations.");
     expect(await readFile(args.ledgerPath, "utf8")).toBe(raw);
   });
 
@@ -367,6 +548,15 @@ describe("task funding", () => {
 
   it("uses no fee when readiness omits it or fails", async () => {
     const args = await funding();
+    args.client.deployment.mockResolvedValueOnce({ configured: false, feeBp: null });
+    expect(await fundTask(args)).toMatchObject({
+      money: {
+        feeBp: null,
+        fee: null,
+        net: null,
+        line: "$100.00 gross · fee unavailable",
+      },
+    });
     args.client.deployment.mockResolvedValueOnce({ configured: false });
     expect(await fundTask(args)).toMatchObject({
       money: { feeBp: null, line: "$100.00 gross · fee unavailable" },
@@ -466,11 +656,52 @@ describe("task delivery", () => {
       purpose: "delivery",
     });
     expect(args.chain.deliver).toHaveBeenCalledExactlyOnceWith({
+      orderId: ORDER,
       escrowId: ESCROW,
       manifest,
       note: "Exact note ",
       idempotencyKey: KEY,
     });
+  });
+
+  it("reuses saved delivery file IDs only when note and local file content match", async () => {
+    const args = dependencies();
+    const home = await mkdtemp(join(tmpdir(), "vapi-delivery-"));
+    directories.push(home);
+    const pending = createPendingTransactions(home);
+    const note = "Exact note";
+    const manifest = await prepareDeliveryManifest(
+      [
+        {
+          fileId: FILE,
+          fileName: "local.md",
+          sha256: await sha256Hex(files[0]!.bytes),
+          sizeBytes: files[0]!.bytes.byteLength,
+        },
+      ],
+      note,
+    );
+    await pending.putPreparation(ESCROW, "deliver", {
+      idempotencyKey: KEY,
+      inputs: { manifestHash: manifest.manifestHash, manifest: manifest.manifest, note },
+    });
+    await expect(deliverTask({ ...args, pending, files, note })).resolves.toMatchObject({
+      manifestHash: manifest.manifestHash,
+    });
+    expect(args.client.uploadFile).not.toHaveBeenCalled();
+    expect(args.chain.deliver).toHaveBeenCalledWith(expect.objectContaining({ manifest, note }));
+    await expect(deliverTask({ ...args, pending, files, note: `${note}!` })).rejects.toThrow(
+      "does not match",
+    );
+    await expect(
+      deliverTask({
+        ...args,
+        pending,
+        files: [{ ...files[0]!, bytes: new Uint8Array([1, 3]) }],
+        note,
+      }),
+    ).rejects.toThrow("does not match");
+    expect(args.client.uploadFile).not.toHaveBeenCalled();
   });
 
   it("exposes the computed hash even when the chain is unavailable", async () => {
@@ -503,24 +734,29 @@ describe("explicit settlement and dispute", () => {
     });
     expect(await refundTask(args)).toMatchObject({ money: { feeBp: 500 } });
     expect(args.chain.release).toHaveBeenCalledExactlyOnceWith({
+      orderId: ORDER,
       escrowId: ESCROW,
       idempotencyKey: KEY,
     });
     expect(args.chain.refund).toHaveBeenCalledExactlyOnceWith({
+      orderId: ORDER,
       escrowId: ESCROW,
       idempotencyKey: KEY,
     });
   });
 
-  it("reports an unknown contract dispute fee and validates evidence", async () => {
-    const args = dependencies();
+  it("reports the verified contract dispute fee and validates evidence", async () => {
+    const args = await funding();
     expect(await disputeTask({ ...args, evidenceHash: HASH })).toMatchObject({
-      disputeFee: null,
-      disputeFeeNote: "The contract charges a dispute fee; the amount is unavailable.",
+      outcome: "done",
+      disputeFee: { baseUnits: "20000000", usd: "20.00" },
     });
     expect(args.chain.dispute).toHaveBeenCalledExactlyOnceWith({
+      orderId: ORDER,
       escrowId: ESCROW,
       evidenceHash: HASH,
+      feeBaseUnits: 20000000n,
+      beforeSign: expect.any(Function),
       idempotencyKey: KEY,
     });
     await expect(disputeTask({ ...args, evidenceHash: "0x1234" })).rejects.toThrow();
@@ -538,6 +774,243 @@ describe("explicit settlement and dispute", () => {
 });
 
 describe("scope acceptance", () => {
+  it("recovers accepted worker scope using the asynchronous local signer address", async () => {
+    const args = dependencies();
+    args.client.getOrder.mockResolvedValue(orderResponse("100000000", "provider", null));
+    args.client.getScopes.mockResolvedValue({
+      scopes: [
+        {
+          ...scope(),
+          state: "accepted",
+          milestoneId: ESCROW,
+          counterpartyAddress: signingAccount.address,
+          counterpartySignature: SIGNATURE,
+          acceptedAt: NOW,
+        },
+      ],
+    });
+    const chain = {
+      ...args.chain,
+      signingAddress: undefined,
+      getSigningAddress: vi.fn().mockResolvedValue(signingAccount.address),
+    };
+    await signScope({ ...args, chain, role: "worker", counterparty: proposingAccount.address });
+    expect(chain.getSigningAddress).toHaveBeenCalledOnce();
+    expect(chain.createEscrow).toHaveBeenCalledOnce();
+    expect(chain.signScopeMessage).not.toHaveBeenCalled();
+  });
+  it("recovers accepted worker scope when the local wallet proposed it", async () => {
+    const args = dependencies();
+    args.client.getOrder.mockResolvedValue(orderResponse("100000000", "provider", null));
+    args.client.getScopes.mockResolvedValue({
+      scopes: [
+        {
+          ...scope("provider"),
+          state: "accepted",
+          milestoneId: ESCROW,
+          proposerAddress: signingAccount.address,
+          proposerSignature: SIGNATURE,
+          counterpartyAddress: proposingAccount.address,
+          counterpartySignature: proposerSignatures.get(1)!,
+          acceptedAt: NOW,
+        },
+      ],
+    });
+    await signScope({ ...args, role: "worker", counterparty: proposingAccount.address });
+    expect(args.chain.createEscrow).toHaveBeenCalledOnce();
+    expect(args.chain.signScopeMessage).not.toHaveBeenCalled();
+  });
+  it("requires explicit counterparty confirmation for accepted worker scope without a local binding", async () => {
+    const args = dependencies();
+    args.client.getOrder.mockResolvedValue(orderResponse("100000000", "provider", null));
+    args.client.getScopes.mockResolvedValue({
+      scopes: [
+        {
+          ...scope(),
+          state: "accepted",
+          milestoneId: ESCROW,
+          counterpartyAddress: signingAccount.address,
+          counterpartySignature: SIGNATURE,
+          acceptedAt: NOW,
+        },
+      ],
+    });
+    await expect(signScope({ ...args, role: "worker" })).rejects.toThrow(
+      "The task parties are not bound on this machine. Re-run with --counterparty <address> to confirm who you are working with.",
+    );
+    expect(args.chain.createEscrow).not.toHaveBeenCalled();
+    expect(args.chain.signScopeMessage).not.toHaveBeenCalled();
+  });
+
+  it("resumes accepted worker escrow creation from the persisted local binding without another scope signature", async () => {
+    const args = dependencies();
+    args.client.getOrder.mockResolvedValue(orderResponse("100000000", "provider", null));
+    args.client.getScopes.mockResolvedValue({
+      scopes: [
+        {
+          ...scope(),
+          state: "accepted",
+          milestoneId: ESCROW,
+          counterpartyAddress: signingAccount.address,
+          counterpartySignature: SIGNATURE,
+          acceptedAt: NOW,
+        },
+      ],
+    });
+    args.bindings.get.mockResolvedValue({
+      orderId: ORDER,
+      trancheOrdinal: 1,
+      scopeVersion: 1,
+      termsHash: frozenScope.termsHash,
+      role: "provider",
+      self: signingAccount.address,
+      counterparty: proposingAccount.address,
+      signedAt: NOW,
+    });
+    await signScope({ ...args, role: "worker" });
+    expect(args.chain.createEscrow).toHaveBeenCalledExactlyOnceWith({
+      orderId: ORDER,
+      counterparty: proposingAccount.address,
+      idempotencyKey: KEY,
+    });
+    expect(args.chain.signScopeMessage).not.toHaveBeenCalled();
+    expect(args.client.signScope).not.toHaveBeenCalled();
+  });
+
+  it("recovers worker escrow creation from an accepted scope with an explicit counterparty and no second scope signature", async () => {
+    const args = dependencies();
+    args.client.getOrder.mockResolvedValue(orderResponse("100000000", "provider", null));
+    args.client.getScopes.mockResolvedValue({
+      scopes: [
+        {
+          ...scope(),
+          state: "accepted",
+          milestoneId: ESCROW,
+          counterpartyAddress: signingAccount.address,
+          counterpartySignature: SIGNATURE,
+          acceptedAt: NOW,
+        },
+      ],
+    });
+    const signMessage = vi.fn().mockResolvedValue(SIGNATURE);
+    const result = await signScope({
+      ...args,
+      role: "worker",
+      counterparty: proposingAccount.address,
+      signMessage,
+    });
+    expect(result.terms.counterparty).toBe(proposingAccount.address);
+    expect(args.chain.createEscrow).toHaveBeenCalledExactlyOnceWith({
+      orderId: ORDER,
+      counterparty: proposingAccount.address,
+      idempotencyKey: KEY,
+    });
+    expect(args.bindings.put).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: "provider",
+        self: signingAccount.address,
+        counterparty: proposingAccount.address,
+      }),
+    );
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(args.chain.signScopeMessage).not.toHaveBeenCalled();
+    expect(args.client.signScope).not.toHaveBeenCalled();
+  });
+  it("refuses accepted worker recovery unless the local wallet also signed the accepted scope", async () => {
+    const args = dependencies();
+    args.client.getOrder.mockResolvedValue(orderResponse("100000000", "provider", null));
+    args.client.getScopes.mockResolvedValue({
+      scopes: [
+        {
+          ...scope(),
+          state: "accepted",
+          milestoneId: ESCROW,
+          counterpartyAddress: signingAccount.address,
+          counterpartySignature: `0x${"00".repeat(65)}`,
+          acceptedAt: NOW,
+        },
+      ],
+    });
+    await expect(
+      signScope({ ...args, role: "worker", counterparty: proposingAccount.address }),
+    ).rejects.toThrow(/accepted scope signatures/);
+    expect(args.chain.createEscrow).not.toHaveBeenCalled();
+    expect(args.chain.signScopeMessage).not.toHaveBeenCalled();
+    expect(args.bindings.put).not.toHaveBeenCalled();
+  });
+
+  it("refuses an explicitly confirmed scope counterparty that differs from the proposer", async () => {
+    const args = dependencies();
+    args.client.getScopes.mockResolvedValueOnce({ scopes: [scope("provider")] });
+    const signMessage = vi.fn().mockResolvedValue(SIGNATURE);
+    await expect(
+      signScope({ ...args, role: "poster", signMessage, counterparty: ADDRESS } as Parameters<
+        typeof signScope
+      >[0]),
+    ).rejects.toThrow(/confirmed counterparty/);
+    expect(signMessage).not.toHaveBeenCalled();
+  });
+
+  it("shows verified parties and persists their binding before acceptance leaves the machine", async () => {
+    const args = dependencies();
+    args.client.getScopes.mockResolvedValueOnce({ scopes: [scope("provider")] });
+    const order: string[] = [];
+    args.bindings.put.mockImplementation(async () => {
+      order.push("binding");
+    });
+    const signMessage = vi.fn(async (message: string) => {
+      order.push("signature");
+      return signingAccount.signMessage({ message });
+    });
+    args.client.signScope.mockImplementationOnce(async () => {
+      order.push("acceptance");
+      return {
+        scope: { ...scope("provider"), state: "accepted", milestoneId: ESCROW },
+        milestone: {
+          id: ESCROW,
+          workOrderId: ORDER,
+          ordinal: 1,
+          termsHash: frozenScope.termsHash,
+          termsFrozenAt: NOW,
+        },
+      };
+    });
+    await signScope({
+      ...args,
+      role: "poster",
+      signMessage,
+      onTerms: (terms) => {
+        expect(terms.counterparty).toBe(proposingAccount.address);
+        order.push("terms");
+      },
+    });
+    expect(order).toEqual(["terms", "signature", "binding", "acceptance"]);
+    expect(args.bindings.put).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderId: ORDER,
+        trancheOrdinal: 1,
+        scopeVersion: 1,
+        termsHash: frozenScope.termsHash,
+        role: "client",
+        self: signingAccount.address,
+        counterparty: proposingAccount.address,
+      }),
+    );
+  });
+
+  it("refuses an invalid counterparty scope signature before local signing", async () => {
+    const args = dependencies();
+    args.client.getScopes.mockResolvedValueOnce({
+      scopes: [{ ...scope("provider"), proposerSignature: `0x${"00".repeat(65)}` }],
+    });
+    const signMessage = vi.fn().mockResolvedValue(SIGNATURE);
+    await expect(signScope({ ...args, role: "poster", signMessage })).rejects.toThrow(
+      /counterparty scope signature/,
+    );
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(args.client.signScope).not.toHaveBeenCalled();
+  });
+
   it("accepts a poster scope with a local message signer and no chain adapter", async () => {
     const args = dependencies();
     args.client.getScopes.mockResolvedValueOnce({ scopes: [scope("provider")] });
@@ -554,7 +1027,7 @@ describe("scope acceptance", () => {
     expect(args.chain.signScopeMessage).not.toHaveBeenCalled();
   });
 
-  it("preserves worker acceptance when local signing succeeds but escrow creation needs C2", async () => {
+  it("preserves worker acceptance when local signing succeeds but escrow creation has no acting chain wallet", async () => {
     const args = dependencies();
     args.client.getOrder.mockResolvedValue(orderResponse("100000000", "provider", null));
     const signMessage = vi.fn().mockResolvedValue(SIGNATURE);
@@ -562,7 +1035,10 @@ describe("scope acceptance", () => {
       signScope({ ...args, chain: missingTasksChain, role: "worker", signMessage }),
     ).rejects.toMatchObject({
       acceptance: { scope: { state: "accepted" } },
-      cause: { code: "chain_unavailable", message: "chain operations need C2" },
+      cause: {
+        code: "chain_unavailable",
+        message: "An acting wallet is required for task chain operations.",
+      },
     });
     expect(args.client.signScope).toHaveBeenCalledTimes(1);
   });
@@ -591,6 +1067,37 @@ describe("scope acceptance", () => {
     expect(args.chain.createEscrow).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["brief", { ...scope(), brief: "Tampered report brief" }],
+    ["malformed brief", { ...scope(), brief: " \n" }],
+    [
+      "structured terms",
+      {
+        ...scope(),
+        structuredTerms: { ...scope().structuredTerms, title: "Tampered report" },
+      },
+    ],
+    [
+      "malformed terms",
+      {
+        ...scope(),
+        structuredTerms: { ...scope().structuredTerms, title: "x" },
+      },
+    ],
+  ])("refuses tampered %s before invoking either signer", async (_name, tampered) => {
+    const args = dependencies();
+    args.client.getOrder.mockResolvedValue(orderResponse("100000000", "provider", null));
+    args.client.getScopes.mockResolvedValueOnce({ scopes: [tampered] });
+    const signMessage = vi.fn().mockResolvedValue(SIGNATURE);
+
+    await expect(signScope({ ...args, role: "worker", signMessage })).rejects.toMatchObject({
+      message: "The scope terms do not match their hash; refusing to sign.",
+    });
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(args.chain.signScopeMessage).not.toHaveBeenCalled();
+    expect(args.client.signScope).not.toHaveBeenCalled();
+  });
+
   it("signs canonical payload bytes and reports worker escrow creation separately", async () => {
     const args = dependencies();
     args.client.getOrder.mockResolvedValue(orderResponse("100000000", "provider", null));
@@ -609,6 +1116,15 @@ describe("scope acceptance", () => {
       idempotencyKey: CREATE_KEY,
     });
     expect(result.escrowCreation).toEqual(chainResult());
+    expect(result.terms).toEqual({
+      counterparty: proposingAccount.address,
+      amountBaseUnits: "100000000",
+      asset: `eip155:84532/erc20:${ADDRESS}`,
+      network: "eip155:84532",
+      deadline: NOW,
+      deliverables: ["A report"],
+      title: "Prepare a report",
+    });
   });
 
   it("does not create an escrow for a poster or one already created", async () => {
@@ -661,7 +1177,7 @@ describe("scope acceptance", () => {
         id: ESCROW,
         workOrderId: ORDER,
         ordinal: 1,
-        termsHash: HASH,
+        termsHash: frozenScope.termsHash,
         termsFrozenAt: NOW,
       },
     });
@@ -681,7 +1197,13 @@ describe("scope acceptance", () => {
     args.client.getOrder.mockResolvedValue(orderResponse("100000000", "provider", null));
     args.client.signScope.mockResolvedValueOnce({
       scope: { ...scope(), state: "accepted", milestoneId: ESCROW },
-      milestone: { id: ESCROW, workOrderId: FILE, ordinal: 1, termsHash: HASH, termsFrozenAt: NOW },
+      milestone: {
+        id: ESCROW,
+        workOrderId: FILE,
+        ordinal: 1,
+        termsHash: frozenScope.termsHash,
+        termsFrozenAt: NOW,
+      },
     });
     await expect(signScope({ ...args, role: "worker" })).rejects.toThrow("accepted scope");
     expect(args.chain.createEscrow).not.toHaveBeenCalled();
@@ -707,6 +1229,9 @@ describe("scope acceptance", () => {
     const next = {
       ...scope(),
       trancheOrdinal: 2,
+      proposerSignature: await proposingAccount.signMessage({
+        message: canonicalJson(signingPayload(1, 2)),
+      }),
       signingPayload: { ...scope().signingPayload, trancheOrdinal: 2 },
     };
     args.client.getScopes.mockResolvedValueOnce({ scopes: [next] });
@@ -716,7 +1241,7 @@ describe("scope acceptance", () => {
         id: ESCROW,
         workOrderId: ORDER,
         ordinal: 2,
-        termsHash: HASH,
+        termsHash: frozenScope.termsHash,
         termsFrozenAt: NOW,
       },
     });

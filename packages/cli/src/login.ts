@@ -60,7 +60,12 @@ export async function runLoginFlow(
   const target = await targetWallet(parsed, dependencies);
   const { account } = await unlockTarget(target, dependencies);
   const label = parsed.one("--label") ?? target.name;
-  const scopes = [...DEFAULT_AGENT_SCOPES, ...(parsed.has("--publish") ? ["call.publish"] : [])];
+  const scopes = [
+    ...DEFAULT_AGENT_SCOPES,
+    "tasks:read",
+    "tasks:write",
+    ...(parsed.has("--publish") ? ["call.publish"] : []),
+  ];
   const config = await loadConfig(getVapiPaths().config, process.env, { notice: io.stderr });
   const apiBase = registryBaseUrl(config);
   const fetchImpl = dependencies.fetchImpl ?? createPublicFetch({ allowPrivateNetwork: false });

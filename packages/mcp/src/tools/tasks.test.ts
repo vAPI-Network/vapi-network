@@ -12,7 +12,10 @@ import {
 } from "@vapi-network/core";
 import { agentSecretAccounts } from "@vapi-network/core/agent-link";
 import {
+  freezeScopeTerms,
+  canonicalJson,
   TasksClientError,
+  createPendingTransactions,
   createTasksClient,
   missingTasksChain,
   type GetOrderResponse,
@@ -20,6 +23,7 @@ import {
   type TasksClient,
   type TasksClientOptions,
 } from "@vapi-network/core/tasks";
+import { safeTasksChainError } from "../../../core/src/tasks/index.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -125,8 +129,68 @@ async function watchServer(
     await server.close();
     await rm(home, { recursive: true, force: true });
   });
-  return { server, store, secrets };
+  return { server, store, secrets, home };
 }
+
+describe("V2 task fee interfaces", () => {
+  it.each(["dispute", "counter-evidence"])("refuses %s fee approval through MCP", async (verb) => {
+    const client = {
+      getOrder: vi.fn(async () => ({
+        workOrder: {
+          version: "work-order-view-v1",
+          id: ID,
+          milestones: [
+            {
+              id: ESCROW,
+              workOrderId: ID,
+              amountBaseUnits: "100000000",
+              escrowContract: "0x1111111111111111111111111111111111111111",
+            },
+          ],
+        },
+      })),
+      deployment: vi.fn(async () => ({ configured: true, feeBp: 500 })),
+    } as unknown as TasksClient;
+    const chain = {
+      ...missingTasksChain,
+      available: true,
+      disputeFee: vi.fn(async () => 20_000_000n),
+      dispute: vi.fn(),
+      counterEvidence: vi.fn(),
+      resolveUnmatched: vi.fn(),
+    };
+    const { server, home, store } = await watchServer({ client, chain, now: () => new Date(NOW) });
+    await store.setSpendCaps("main", { perCallAtomic: "100000000", perDayAtomic: "100000000" });
+    await mkdir(join(home, "agents"));
+    await writeFile(
+      join(home, "agents", "strict.json"),
+      JSON.stringify({
+        version: 1,
+        name: "strict",
+        wallet: "main",
+        model: "test",
+        instructions: "Require approval",
+        maxPerTaskUsd: 100,
+        approveAboveUsd: 10,
+        createdAt: NOW,
+      }),
+    );
+    const result = await server.callTool({
+      name: `tasks.${verb}`,
+      arguments: { id: ID, evidenceHash: TX },
+    });
+    expect(result, JSON.stringify(result)).toMatchObject({
+      isError: true,
+      structuredContent: {
+        ok: false,
+        approval: true,
+        disputeFee: { baseUnits: "20000000", usd: "20.00" },
+      },
+    });
+    expect(chain.dispute).not.toHaveBeenCalled();
+    expect(chain.counterEvidence).not.toHaveBeenCalled();
+  });
+});
 
 describe("bounded task watch", () => {
   it("polls until the window expires without polling at or beyond the deadline", async () => {
@@ -347,12 +411,35 @@ describe("task wallet and route boundaries", () => {
   );
 
   it("reports missing chain after signing a worker scope and preserves the acceptance", async () => {
+    const structuredTerms = {
+      version: "work-milestone-terms-v1" as const,
+      title: "Write a report",
+      description: "Write a complete useful report.",
+      acceptanceCriteria: ["Report is complete"],
+      workDurationSeconds: 86_400,
+      acceptanceWindowSeconds: 604_800,
+      budget: {
+        network: "eip155:8453" as const,
+        asset: "eip155:8453/erc20:0x1111111111111111111111111111111111111111",
+        amountBaseUnits: "1000000",
+      },
+      escrow: {
+        protocol: "escrow-v1" as const,
+        contract: "0x2222222222222222222222222222222222222222",
+      },
+      evidenceRules: { acceptedInputs: ["text" as const], exactCommitRequired: false },
+      deliverables: ["A written report"],
+      revisionCount: 0,
+      deadline: NOW,
+    };
+    const brief = "Write and deliver the agreed report.";
+    const frozen = freezeScopeTerms(structuredTerms, brief);
     const payload = {
       version: "work-scope-signature-v1",
       workOrderId: ID,
       trancheOrdinal: 1,
       scopeVersion: 1,
-      termsHash: TX,
+      termsHash: frozen.termsHash,
     };
     const scope = {
       id: ESCROW,
@@ -361,10 +448,22 @@ describe("task wallet and route boundaries", () => {
       trancheOrdinal: 1,
       state: "proposed",
       proposedByRole: "client",
-      termsHash: TX,
+      structuredTerms,
+      brief,
+      termsHash: frozen.termsHash,
       signingPayload: payload,
+      proposerAddress: privateKeyToAccount(`0x${"11".repeat(32)}`).address,
+      proposerSignature: await privateKeyToAccount(`0x${"11".repeat(32)}`).signMessage({
+        message: canonicalJson(payload),
+      }),
     };
-    const milestone = { id: ESCROW, workOrderId: ID, ordinal: 1, termsHash: TX, escrowState: null };
+    const milestone = {
+      id: ESCROW,
+      workOrderId: ID,
+      ordinal: 1,
+      termsHash: frozen.termsHash,
+      escrowState: null as null | "locked",
+    };
     const acceptance = { scope: { ...scope, state: "accepted", milestoneId: ESCROW }, milestone };
     const client = {
       getOrder: vi.fn(async () => ({
@@ -384,6 +483,7 @@ describe("task wallet and route boundaries", () => {
       .mockResolvedValue({ wallet: { name: "main" }, account: signer });
     const { server } = await watchServer({
       client,
+      chain: missingTasksChain,
       now: () => new Date(NOW),
       randomUUID: () => ID,
     });
@@ -391,12 +491,130 @@ describe("task wallet and route boundaries", () => {
     expect(result.isError).toBe(true);
     expect(JSON.parse(result.content[0]!.text)).toEqual({
       code: "chain_unavailable",
-      message: "chain operations need C2",
-      acceptance,
+      message: "An acting wallet is required for task chain operations.",
+      acceptance: {
+        ...acceptance,
+        terms: {
+          counterparty: privateKeyToAccount(`0x${"11".repeat(32)}`).address,
+          amountBaseUnits: "1000000",
+          asset: structuredTerms.budget.asset,
+          network: "eip155:8453",
+          deadline: NOW,
+          deliverables: ["A written report"],
+          title: "Write a report",
+        },
+      },
     });
     expect(payment).toHaveBeenCalledWith("main");
     expect(client.signScope).toHaveBeenCalledOnce();
     expect(JSON.stringify(result)).not.toContain(PRIVATE_KEY);
+
+    milestone.escrowState = "locked";
+    const succeeded = await server.callTool({ name: "tasks.sign", arguments: { id: ID } });
+    expect(succeeded.isError).toBeFalsy();
+    expect(succeeded.structuredContent).toMatchObject({
+      terms: {
+        amountBaseUnits: "1000000",
+        asset: structuredTerms.budget.asset,
+        network: "eip155:8453",
+        deadline: NOW,
+        deliverables: ["A written report"],
+        title: "Write a report",
+      },
+    });
+  });
+
+  it("recovers accepted worker signing through the lazy wallet identity without a new scope signature", async () => {
+    const signer = privateKeyToAccount(PRIVATE_KEY);
+    const other = privateKeyToAccount(`0x${"11".repeat(32)}`);
+    const structuredTerms = {
+      version: "work-milestone-terms-v1" as const,
+      title: "Write a report",
+      description: "Write a complete useful report.",
+      deliverables: ["A report"],
+      acceptanceCriteria: ["Complete"],
+      revisionCount: 0,
+      deadline: NOW,
+      workDurationSeconds: 86400,
+      acceptanceWindowSeconds: 604800,
+      budget: {
+        network: "eip155:8453" as const,
+        asset: "eip155:8453/erc20:0x1111111111111111111111111111111111111111",
+        amountBaseUnits: "1000000",
+      },
+      escrow: {
+        protocol: "escrow-v1" as const,
+        contract: "0x2222222222222222222222222222222222222222",
+      },
+      evidenceRules: { acceptedInputs: ["text" as const], exactCommitRequired: false },
+    };
+    const brief = "The exact report.";
+    const frozen = freezeScopeTerms(structuredTerms, brief);
+    const signingPayload = {
+      version: "work-scope-signature-v1",
+      workOrderId: ID,
+      trancheOrdinal: 1,
+      scopeVersion: 1,
+      termsHash: frozen.termsHash,
+    };
+    const message = canonicalJson(signingPayload);
+    const scope = {
+      id: ESCROW,
+      workOrderId: ID,
+      version: 1,
+      trancheOrdinal: 1,
+      state: "accepted",
+      proposedByRole: "client",
+      structuredTerms,
+      brief,
+      termsHash: frozen.termsHash,
+      signingPayload,
+      milestoneId: ESCROW,
+      acceptedAt: NOW,
+      proposerAddress: other.address,
+      proposerSignature: await other.signMessage({ message }),
+      counterpartyAddress: signer.address,
+      counterpartySignature: await signer.signMessage({ message }),
+    };
+    const milestone = {
+      id: ESCROW,
+      workOrderId: ID,
+      ordinal: 1,
+      termsHash: frozen.termsHash,
+      termsFrozenAt: NOW,
+      escrowState: null,
+    };
+    const signMessage = vi.fn(signer.signMessage);
+    vi.spyOn(WalletSession.prototype, "payment").mockResolvedValue({
+      wallet: { name: "main" },
+      account: { ...signer, signMessage },
+    });
+    const client = {
+      getOrder: vi.fn(async () => ({
+        workOrder: {
+          id: ID,
+          version: "work-order-view-v1",
+          role: "provider",
+          milestones: [milestone],
+        },
+      })),
+      getScopes: vi.fn(async () => ({ scopes: [scope] })),
+      signScope: vi.fn(),
+      deployment: vi.fn(async () => ({ configured: false })),
+    } as unknown as TasksClient;
+    const { server, home } = await watchServer({ client, now: () => new Date(NOW) });
+    const result = await server.callTool({
+      name: "tasks.sign",
+      arguments: { id: ID, counterparty: other.address },
+    });
+    expect(JSON.parse(result.content[0]!.text)).toMatchObject({
+      acceptance: { scope: { state: "accepted" }, terms: { counterparty: other.address } },
+    });
+    expect(await readFile(join(home, "tasks", "scope-bindings.json"), "utf8")).toContain(
+      signer.address,
+    );
+    expect(client.signScope).not.toHaveBeenCalled();
+    expect(signMessage).not.toHaveBeenCalled();
   });
 
   it("signs proposals and submissions using the selected wallet without returning secrets", async () => {
@@ -407,6 +625,11 @@ describe("task wallet and route boundaries", () => {
       .mockResolvedValue({ wallet: { name: "work" }, account: { ...signer, signMessage } });
     const proposal = vi.fn(async () => ({ proposal: { id: ESCROW } }));
     const submission = vi.fn(async () => ({ submission: { id: ESCROW } }));
+    const createOrder = vi.fn(async () => ({ workOrder: { id: ID } }));
+    const configureWebhook = vi.fn(async () => ({
+      webhookUrl: "https://example.test/hook",
+      secret: "webhook-secret",
+    }));
     const deployment = {
       configured: true,
       feeBp: 250,
@@ -425,18 +648,31 @@ describe("task wallet and route boundaries", () => {
       deployment: vi.fn(async () => deployment),
       propose: proposal,
       submit: submission,
+      createOrder,
+      configureWebhook,
+      sendMessage: vi.fn(async () => {
+        throw new TasksClientError("http", "Denied", 403, "insufficient_scope");
+      }),
       publicTask: vi.fn(async () => ({
         id: ID,
         title: "Write a report",
         briefFull: "Write a complete useful report.",
         durationSeconds: 3600,
-        amount: { gross: "0.10" },
+        amount: { gross: "100000" },
       })),
     } as unknown as TasksClient;
-    const factory = vi.fn<(options: TasksClientOptions) => TasksClient>(() => client);
+    let clock = Date.parse(NOW);
+    let advanceDuringClientSetup = false;
+    const factory = vi.fn<(options: TasksClientOptions) => TasksClient>(() => {
+      if (advanceDuringClientSetup) {
+        clock += 5 * 60 * 1_000;
+        advanceDuringClientSetup = false;
+      }
+      return client;
+    });
     const { server, store, secrets } = await watchServer({
       client: factory,
-      now: () => new Date(NOW),
+      now: () => new Date(clock),
     });
     await store.create("work", "");
     await store.setLink("work", {
@@ -462,7 +698,7 @@ describe("task wallet and route boundaries", () => {
         id: ID,
         wallet: "work",
         priceUsd: "0.10",
-        duration: "1h",
+        duration: "10m",
         note: "A complete proposal note.",
       },
     });
@@ -470,8 +706,48 @@ describe("task wallet and route boundaries", () => {
       name: "tasks.submit",
       arguments: { id: ID, wallet: "work", proofUrls: ["https://example.test/proof"] },
     });
+    advanceDuringClientSetup = true;
+    const posted = await server.callTool({
+      name: "tasks.post",
+      arguments: {
+        wallet: "work",
+        title: "Build an API",
+        brief: "Build a complete useful API.",
+        amountUsd: "12.50",
+        deadline: "10m",
+        intake: "submissions",
+        maxAwards: 3,
+        webhookUrl: "https://example.test/hook",
+      },
+    });
+    const insufficient = await server.callTool({
+      name: "tasks.message",
+      arguments: { id: ID, wallet: "work", text: "Hello" },
+    });
     expect(proposed.isError, JSON.stringify(proposed)).not.toBe(true);
     expect(submitted.isError, JSON.stringify(submitted)).not.toBe(true);
+    expect(posted.isError, JSON.stringify(posted)).not.toBe(true);
+    expect(createOrder).toHaveBeenCalledWith(
+      {
+        title: "Build an API",
+        description: "Build a complete useful API.",
+        policyFamily: "general-digital",
+        market: {
+          intake: "submissions",
+          maxAwards: 3,
+          audience: "anyone",
+          proofKinds: ["url", "file"],
+          budget: { network: "eip155:8453", asset: "USDC", amountBaseUnits: "12500000" },
+          deadlineAt: "2026-10-08T12:10:00.000Z",
+        },
+      },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(configureWebhook).toHaveBeenCalledWith(ID, { url: "https://example.test/hook" });
+    expect(JSON.parse(insufficient.content[0]!.text)).toEqual({
+      code: "insufficient_scope",
+      message: "This sign-in lacks Tasks access. Call auth.link again.",
+    });
     expect(payment.mock.calls).toEqual([["work"], ["work"]]);
     expect(signMessage).toHaveBeenCalledTimes(2);
     for (const [input] of signMessage.mock.calls) expect(typeof input.message).toBe("string");
@@ -539,6 +815,7 @@ describe("task wallet and route boundaries", () => {
   );
 
   it("uses the public settled card and the signed-in order with receipts", async () => {
+    const payment = vi.spyOn(WalletSession.prototype, "payment");
     const receiptUrl = `${API_BASE}/receipts/settled`;
     const order = {
       workOrder: {
@@ -565,10 +842,66 @@ describe("task wallet and route boundaries", () => {
     });
     expect(client.publicTask).toHaveBeenCalledOnce();
     expect(client.getOrder).toHaveBeenCalledOnce();
+    expect(payment).not.toHaveBeenCalled();
   });
 });
 
 describe("task MCP tools", () => {
+  it("retains funding when persisted exposure predates lazy wallet initialization failure", async () => {
+    const client = {
+      getOrder: vi.fn(async () => ({
+        workOrder: {
+          version: "work-order-view-v1",
+          id: ID,
+          role: "client",
+          milestones: [
+            {
+              id: ESCROW,
+              workOrderId: ID,
+              amountBaseUnits: "100000",
+              state: "agreed",
+              escrowState: "created",
+              resolution: null,
+              escrowContract: "0x1111111111111111111111111111111111111111",
+            },
+          ],
+        },
+      })),
+      deployment: vi.fn(async () => ({
+        configured: true,
+        network: "eip155:8453",
+        escrowContract: "0x2222222222222222222222222222222222222222",
+        usdc: "0x3333333333333333333333333333333333333333",
+        feeBp: 250,
+      })),
+    } as unknown as TasksClient;
+    const payment = vi
+      .spyOn(WalletSession.prototype, "payment")
+      .mockRejectedValue(new Error("vault unavailable"));
+    const { server, home } = await watchServer({
+      client,
+      randomUUID: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      now: () => new Date(NOW),
+    });
+    await createPendingTransactions(home).markExposure(ESCROW);
+
+    const result = await server.callTool({ name: "tasks.fund", arguments: { id: ID } });
+
+    expect(result.isError).toBe(true);
+    expect(payment).toHaveBeenCalledOnce();
+    expect(JSON.parse(await readFile(join(home, "spend-ledger.json"), "utf8"))).toMatchObject({
+      date: "2026-10-08",
+      spentAtomic: "100000",
+      reservations: [
+        {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          amountAtomic: "100000",
+          kind: "escrow-funding",
+        },
+      ],
+    });
+  });
+
   it("registers the complete documented task surface in canonical order with safe schemas", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () => {
       throw new Error("No network in task tests.");
@@ -587,6 +920,9 @@ describe("task MCP tools", () => {
       release: vi.fn(),
       refund: vi.fn(),
       dispute: vi.fn(),
+      disputeFee: vi.fn(),
+      counterEvidence: vi.fn(),
+      resolveUnmatched: vi.fn(),
       createEscrow: vi.fn(),
       signScopeMessage: vi.fn(),
     } satisfies TasksChain;
@@ -611,7 +947,14 @@ describe("task MCP tools", () => {
         const verb = tool.name.slice("tasks.".length);
         expect(readme).toContain(`\`${tool.name}\``);
         expect(tool.description).toContain(
-          ["fund", "release", "refund", "dispute"].includes(verb)
+          [
+            "fund",
+            "release",
+            "refund",
+            "dispute",
+            "counter-evidence",
+            "resolve-unmatched",
+          ].includes(verb)
             ? "Moves money"
             : "Does not move money",
         );
@@ -691,6 +1034,10 @@ describe("task MCP tools", () => {
         ["tasks.watch", { id: "11111111-1111-4111-8111-111111111111", waitSeconds: 26 }],
         ["tasks.fund", { id: "11111111-1111-4111-8111-111111111111", yes: true }],
         ["tasks.fund", { id: ID, approve: true }],
+        ["tasks.dispute", { id: ID, evidenceHash: TX, yes: true }],
+        ["tasks.counter-evidence", { id: ID, evidenceHash: TX, approve: true }],
+        ["tasks.resolve-unmatched", { id: ID, counterparty: "0x1234" }],
+        ["tasks.sign", { id: ID, counterparty: "0x1234" }],
         ["tasks.fund", { id: ID, confirm: true }],
         ["tasks.watch", { id: ID, autoRelease: true }],
         ["tasks.thread", { id: ID, after: 0 }],
@@ -698,7 +1045,7 @@ describe("task MCP tools", () => {
           "tasks.post",
           { title: "A task", brief: "A sufficiently long brief", amountUsd: "0", deadline: "10m" },
         ],
-        ["tasks.propose", { id: ID, priceUsd: "1", duration: "59m", note: "Terms" }],
+        ["tasks.propose", { id: ID, priceUsd: "1", duration: "9m", note: "Terms" }],
         ["tasks.submit", { id: ID, proofUrls: ["http://example.test/proof"] }],
       ] as const;
       for (const [name, arguments_] of invalidCalls) {
@@ -811,11 +1158,15 @@ describe("task MCP tools", () => {
         release: vi.fn(async () => chainResult),
         refund: vi.fn(async () => chainResult),
         dispute: vi.fn(async () => chainResult),
+        disputeFee: vi.fn(async () => 20_000_000n),
+        counterEvidence: vi.fn(async () => chainResult),
+        resolveUnmatched: vi.fn(async () => chainResult),
         signScopeMessage: vi.fn(async (message: string) => {
           expect(typeof message).toBe("string");
           return `0x${"cd".repeat(65)}` as `0x${string}`;
         }),
       } satisfies TasksChain;
+      let sequence = 0;
       const behaviorServer = createVapiServer({
         account: privateKeyToAccount(PRIVATE_KEY),
         config: getDefaultConfig({}),
@@ -832,7 +1183,7 @@ describe("task MCP tools", () => {
             return fakeClient;
           },
           chain: fakeChain,
-          randomUUID: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          randomUUID: () => `aaaaaaaa-aaaa-4aaa-8aaa-${String(++sequence).padStart(12, "0")}`,
           now: () => new Date("2026-10-08T12:00:00.000Z"),
           sleep: async () => await new Promise<void>(() => undefined),
         },
@@ -861,13 +1212,36 @@ describe("task MCP tools", () => {
         expect(funded.isError).not.toBe(true);
         expect(fakeChain.fund).toHaveBeenCalledOnce();
         expect(calls).toContain("main-token");
+        const rawTransaction = `0x${"12".repeat(96)}`;
+        const authorizationSignature = `0x${"34".repeat(65)}`;
+        const source = Object.assign(
+          new Error(`RPC 503 included ${rawTransaction} and ${authorizationSignature}`),
+          {
+            name: "HttpRequestError",
+            shortMessage: `RPC request failed with status 503: ${rawTransaction} ${authorizationSignature}`,
+            details: { rawTransaction, authorizationSignature },
+            cause: { status: 503, rawTransaction, authorizationSignature },
+          },
+        );
+        fakeChain.release.mockRejectedValueOnce(safeTasksChainError(source, false, true));
+        const failedRelease = await behaviorServer.callTool({
+          name: "tasks.release",
+          arguments: { id: ID },
+        });
+        const serializedFailure = JSON.stringify(failedRelease);
+        expect(failedRelease).toMatchObject({ isError: true });
+        expect(serializedFailure).toContain("HttpRequestError");
+        expect(serializedFailure).not.toContain(rawTransaction);
+        expect(serializedFailure).not.toContain(authorizationSignature);
+        expect(serializedFailure).not.toContain("details");
+        expect(serializedFailure).not.toContain("cause");
         const unauthorized = await behaviorServer.callTool({
           name: "tasks.message",
           arguments: { id: ID, text: "hello" },
         });
         expect(unauthorized).toMatchObject({ isError: true });
         expect(JSON.stringify(unauthorized)).toContain(
-          "message needs sign-in. This server does not accept bearer tokens on task routes yet; sign in in the console.",
+          "message needs sign-in. Call auth.link for the acting wallet.",
         );
         const ledgerBeforeRefusal = await readFile(ledgerPath);
         await mkdir(join(home, "agents"));
@@ -943,7 +1317,7 @@ describe("task MCP tools", () => {
             createdAt: "2026-10-08T00:00:00.000Z",
           }),
         );
-        await store.setSpendCaps("main", { perCallAtomic: "1000000", perDayAtomic: "100000" });
+        await store.setSpendCaps("main", { perCallAtomic: "1000000", perDayAtomic: "99999" });
         const perDay = await behaviorServer.callTool({
           name: "tasks.fund",
           arguments: { id: ID },
@@ -978,17 +1352,35 @@ describe("task MCP tools", () => {
             },
           });
         }
+        await store.setSpendCaps("main", {
+          perCallAtomic: "1000000000",
+          perDayAtomic: "1000000000",
+        });
+        await writeFile(
+          join(home, "agents", "strict.json"),
+          JSON.stringify({
+            version: 1,
+            name: "strict",
+            wallet: "main",
+            model: "router/test",
+            instructions: "Permit verified fees",
+            maxPerTaskUsd: 100,
+            approveAboveUsd: 100,
+            createdAt: NOW,
+          }),
+        );
         const disputed = await behaviorServer.callTool({
           name: "tasks.dispute",
           arguments: { id: ID, evidenceHash: TX },
         });
         expect(disputed).toMatchObject({
           structuredContent: {
-            money: { gross: { baseUnits: "100000" }, fee: { baseUnits: "2500" } },
+            money: { gross: { baseUnits: "20000000" } },
+            disputeFee: { baseUnits: "20000000", usd: "20.00" },
             result: { txHash: TX },
           },
         });
-        expect(JSON.stringify(disputed)).toContain("disputeFeeNote");
+        expect(JSON.stringify(disputed)).not.toContain("disputeFeeNote");
 
         const deliveryFile = join(home, "delivery.txt");
         await writeFile(deliveryFile, "finished work");
@@ -1011,7 +1403,11 @@ describe("task MCP tools", () => {
           agentLink: { apiBase: API_BASE },
           fetchImpl: () => Promise.reject(new Error("delivery used injected client")),
           ledgerPath: join(home, "missing-chain-ledger.json"),
-          tasks: { client: fakeClient, now: () => new Date("2026-10-08T12:00:00Z") },
+          tasks: {
+            client: fakeClient,
+            chain: missingTasksChain,
+            now: () => new Date("2026-10-08T12:00:00Z"),
+          },
         });
         try {
           const missingFund = await noChainServer.callTool({
@@ -1021,7 +1417,7 @@ describe("task MCP tools", () => {
           expect(missingFund).toMatchObject({ isError: true });
           expect(JSON.parse(missingFund.content[0]!.text)).toEqual({
             code: "chain_unavailable",
-            message: "chain operations need C2",
+            message: "An acting wallet is required for task chain operations.",
           });
           await expect(readFile(join(home, "missing-chain-ledger.json"))).rejects.toMatchObject({
             code: "ENOENT",
@@ -1032,7 +1428,9 @@ describe("task MCP tools", () => {
           });
           expect(noChain).toMatchObject({ isError: true });
           expect(JSON.stringify(noChain)).toContain("chain_unavailable");
-          expect(JSON.stringify(noChain)).toContain("chain operations need C2");
+          expect(JSON.stringify(noChain)).toContain(
+            "An acting wallet is required for task chain operations.",
+          );
           expect(JSON.stringify(noChain)).toMatch(/manifestHash.*0x[0-9a-f]{64}/u);
         } finally {
           await noChainServer.close();

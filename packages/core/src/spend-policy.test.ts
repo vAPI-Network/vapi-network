@@ -304,6 +304,44 @@ describe("escrow funding spend caps", () => {
     ).resolves.toEqual({ date: "2026-08-05", spentAtomic: "50" });
   });
 
+  it("resumes only an exposed, valid prior-day escrow reservation", async () => {
+    const path = await ledgerPath();
+    await reserveSpend(100n, caps, {
+      ledgerPath: path,
+      now,
+      kind: "escrow-funding",
+      maxPerTaskAtomic: 100n,
+    });
+    const proof = {
+      id: "prior",
+      wallet: "main" as const,
+      amountAtomic: "20",
+      date: "2026-08-04",
+    };
+    const options = {
+      ledgerPath: path,
+      now,
+      kind: "escrow-funding" as const,
+      maxPerTaskAtomic: 20n,
+      reservationId: "prior",
+    };
+    await expect(
+      reserveSpend(20n, caps, { ...options, resumeEscrowReservation: proof }),
+    ).rejects.toThrow("does not match");
+    await expect(
+      reserveSpend(20n, caps, {
+        ...options,
+        resumeEscrowReservation: { ...proof, exposed: true, invalidated: true },
+      }),
+    ).rejects.toThrow("does not match");
+    await expect(
+      reserveSpend(20n, caps, {
+        ...options,
+        resumeEscrowReservation: { ...proof, exposed: true },
+      }),
+    ).resolves.toMatchObject({ reservationReused: true, date: "2026-08-04" });
+  });
+
   it("refuses escrow over the remaining daily budget without rewriting payment spend", async () => {
     const path = await ledgerPath();
     await reserveSpend(10n, caps, { ledgerPath: path, now, reservationId: "payment" });

@@ -16,7 +16,7 @@ const ledgerSchema = z.object({
 const spendReservationSchema = z.object({
   id: z.string().min(1),
   amountAtomic: z.string().regex(/^\d+$/),
-  kind: z.enum(["payment", "escrow-funding"]).optional(),
+  kind: z.enum(["payment", "escrow-funding", "dispute-fee"]).optional(),
 });
 
 /**
@@ -39,7 +39,7 @@ const ledgerFileSchema = z.union([
 ]);
 
 export type SpendLedger = z.infer<typeof ledgerSchema>;
-export type SpendKind = "payment" | "escrow-funding";
+export type SpendKind = "payment" | "escrow-funding" | "dispute-fee";
 export type SpendLedgerRow = SpendLedger & { wallet: WalletName };
 type StoredSpendLedgerRow = SpendLedgerRow & {
   reservations?: Array<z.infer<typeof spendReservationSchema>>;
@@ -77,10 +77,16 @@ export async function escrowFundingDayRemainingAtomic(input: {
   ledgerPath: string;
   now: Date;
   wallet: WalletName;
+  reservationId?: string;
 }): Promise<bigint> {
   const perDayAtomic = parseAtomicCap(input.caps.perDayAtomic, "per-day");
-  const ledger = await readSpendLedger(input.ledgerPath, input.now, input.wallet);
-  const remaining = perDayAtomic - BigInt(ledger.spentAtomic);
+  const rows = await readStoredSpendLedgerRows(input.ledgerPath, input.now);
+  const row = rows.find((candidate) => candidate.wallet === input.wallet);
+  const reserved = input.reservationId
+    ? row?.reservations?.find((candidate) => candidate.id === input.reservationId)
+    : undefined;
+  const remaining =
+    perDayAtomic - BigInt(row?.spentAtomic ?? "0") + BigInt(reserved?.amountAtomic ?? "0");
   return remaining > 0n ? remaining : 0n;
 }
 
@@ -132,15 +138,24 @@ export async function reserveSpend(
     reservationId?: string;
     kind?: SpendKind;
     maxPerTaskAtomic?: bigint;
+    reuseExistingEscrowReservation?: boolean;
+    resumeEscrowReservation?: {
+      id: string;
+      wallet: WalletName;
+      amountAtomic: string;
+      date: string;
+      exposed?: boolean;
+      invalidated?: boolean;
+    };
   },
-): Promise<SpendLedger> {
+): Promise<SpendLedger & { reservationReused?: boolean }> {
   if (amountAtomic < 0n) {
     throw new Error("Spend amount cannot be negative.");
   }
 
   const kind = options?.kind ?? "payment";
   let perDayAtomic: bigint;
-  if (kind === "escrow-funding") {
+  if (kind === "escrow-funding" || kind === "dispute-fee") {
     const maxPerTaskAtomic = options?.maxPerTaskAtomic;
     if (maxPerTaskAtomic === undefined || maxPerTaskAtomic < 0n) {
       throw new Error("Escrow funding requires a non-negative per-task cap.");
@@ -170,8 +185,46 @@ export async function reserveSpend(
     const rows = await readStoredSpendLedgerRows(ledgerPath, now);
     const current = rows.find((row) => row.wallet === wallet);
     if (options?.reservationId !== undefined) {
-      if (current?.reservations?.some((reservation) => reservation.id === options.reservationId)) {
+      const existing = current?.reservations?.find(
+        (reservation) => reservation.id === options.reservationId,
+      );
+      if (existing && options.reuseExistingEscrowReservation) {
+        if (
+          (kind !== "escrow-funding" && kind !== "dispute-fee") ||
+          existing.kind !== kind ||
+          existing.amountAtomic !== amountAtomic.toString()
+        )
+          throw new Error(
+            `Spend reservation ${options.reservationId} does not match this funding.`,
+          );
+        return {
+          date: current!.date,
+          spentAtomic: current!.spentAtomic,
+          reservationReused: true,
+        };
+      }
+      if (existing) {
         throw new Error(`Spend reservation ${options.reservationId} already exists.`);
+      }
+      if (options.resumeEscrowReservation) {
+        const resumed = options.resumeEscrowReservation;
+        if (
+          (kind !== "escrow-funding" && kind !== "dispute-fee") ||
+          resumed.id !== options.reservationId ||
+          resumed.wallet !== wallet ||
+          resumed.amountAtomic !== amountAtomic.toString() ||
+          resumed.date >= utcDateKey(now) ||
+          resumed.exposed !== true ||
+          resumed.invalidated === true
+        )
+          throw new Error(
+            `Spend reservation ${options.reservationId} does not match this funding.`,
+          );
+        return {
+          date: resumed.date,
+          spentAtomic: current?.spentAtomic ?? "0",
+          reservationReused: true,
+        };
       }
     }
     const spentAtomic = current?.spentAtomic ?? "0";
@@ -197,7 +250,7 @@ export async function reserveSpend(
                     {
                       id: options.reservationId,
                       amountAtomic: amountAtomic.toString(),
-                      ...(kind === "escrow-funding" ? { kind } : {}),
+                      ...(kind !== "payment" ? { kind } : {}),
                     },
                   ]),
             ],

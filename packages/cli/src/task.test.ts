@@ -3,24 +3,29 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { verifyMessage } from "viem";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { privateKeyToAccount } from "viem/accounts";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { WalletStore, type SecretStore } from "@vapi-network/core";
 import { agentSecretAccounts } from "@vapi-network/core/agent-link";
+import { TasksClientError } from "@vapi-network/core/tasks";
 import {
   canonicalJson,
+  createPendingTransactions,
+  freezeScopeTerms,
+  missingTasksChain,
   prepareDeliveryManifest,
+  safeTasksChainError,
   TasksChainError,
   TasksChainUnavailableError,
-  TasksClientError,
   type TasksClient,
   type TasksChain,
   type TasksChainResult,
   type TasksClientOptions,
 } from "../../core/src/tasks/index.js";
 import { tasksResponseSchemas } from "../../core/src/tasks/types.js";
-import { runCli, type CliDependencies } from "./cli.js";
-import { parseTaskDuration, TASK_HELP } from "./task.js";
+import { runCli, parseArguments, type CliDependencies } from "./cli.js";
+import { parseTaskDuration, taskContext, TASK_HELP } from "./task.js";
 
 const ID = "11111111-1111-4111-8111-111111111111";
 const PROPOSAL_ID = "22222222-2222-4222-8222-222222222222";
@@ -30,6 +35,13 @@ const ADDRESS = "0x1111111111111111111111111111111111111111";
 const ESCROW = "0x2222222222222222222222222222222222222222";
 const NOW = new Date("2026-10-08T12:00:00.000Z");
 const BRIEF = "Build a page with a working contact form.";
+const scopeProposer = privateKeyToAccount(`0x${"11".repeat(32)}`);
+let scopeSignature = `0x${"cd".repeat(65)}`;
+beforeAll(async () => {
+  scopeSignature = await scopeProposer.signMessage({
+    message: canonicalJson(scopeFixture().signingPayload),
+  });
+});
 const homes: string[] = [];
 
 afterEach(async () => {
@@ -44,7 +56,13 @@ function card(state: "open" | "paid" = "open") {
     brief: BRIEF,
     briefFull: BRIEF,
     shape: "task" as const,
-    amount: { gross: "100", fee: "5", net: "95", asset: "USDC" as const, feeBp: 500 },
+    amount: {
+      gross: "100000000",
+      fee: "5000000",
+      net: "95000000",
+      asset: "USDC" as const,
+      feeBp: 500,
+    },
     deadlineAt: null,
     durationSeconds: 172800,
     createdAt: NOW.toISOString(),
@@ -115,6 +133,7 @@ function fakeClient(overrides: Partial<TasksClient> = {}): TasksClient {
     publicTask: vi.fn(async () => card()),
     getOrder: vi.fn(async () => order()),
     createOrder: vi.fn(async () => order()),
+    configureWebhook: vi.fn(async (_id, input) => ({ webhookUrl: input.url })),
     deployment: vi.fn(async () => ({
       configured: true,
       chainId: 8453,
@@ -266,7 +285,7 @@ function milestoneOrder(
             escrow: { protocol: "escrow-v1", contract: ESCROW },
             evidenceRules: { acceptedInputs: ["text"], exactCommitRequired: false },
           },
-          termsHash: `0x${"ab".repeat(32)}`,
+          termsHash: scopeFixture().termsHash,
           termsFrozenAt: NOW.toISOString(),
           network: "eip155:8453",
           asset: `eip155:8453/erc20:${ADDRESS}`,
@@ -336,6 +355,9 @@ function fakeChain(overrides: Partial<TasksChain> = {}): TasksChain {
     release: vi.fn(async () => chainResult("released")),
     refund: vi.fn(async () => chainResult("refunded")),
     dispute: vi.fn(async () => chainResult("disputed")),
+    disputeFee: vi.fn(async () => 20_000_000n),
+    counterEvidence: vi.fn(async () => chainResult("disputed")),
+    resolveUnmatched: vi.fn(async () => chainResult("refunded")),
     signScopeMessage: vi.fn(async (): Promise<`0x${string}`> => hex("ef".repeat(65))),
     ...overrides,
   } satisfies TasksChain;
@@ -376,6 +398,25 @@ async function writeProfile(
 function scopeFixture(
   proposedByRole: "client" | "provider" = "client",
 ): Awaited<ReturnType<TasksClient["getScopes"]>>["scopes"][number] {
+  const structuredTerms = {
+    version: "work-milestone-terms-v1" as const,
+    title: "Build a page",
+    description: BRIEF,
+    acceptanceCriteria: ["Contact form works"],
+    workDurationSeconds: 172800,
+    acceptanceWindowSeconds: 604800,
+    budget: {
+      network: "eip155:8453" as const,
+      asset: `eip155:8453/erc20:${ADDRESS}`,
+      amountBaseUnits: "100000000",
+    },
+    escrow: { protocol: "escrow-v1" as const, contract: ESCROW },
+    evidenceRules: { acceptedInputs: ["text" as const], exactCommitRequired: false },
+    deliverables: ["A working page"],
+    revisionCount: 0,
+    deadline: NOW.toISOString(),
+  };
+  const frozen = freezeScopeTerms(structuredTerms, BRIEF);
   return tasksResponseSchemas.getScopes.parse({
     scopes: [
       {
@@ -384,29 +425,12 @@ function scopeFixture(
         trancheOrdinal: 1,
         version: 1,
         state: "proposed",
-        structuredTerms: {
-          version: "work-milestone-terms-v1",
-          title: "Build a page",
-          description: BRIEF,
-          acceptanceCriteria: ["Contact form works"],
-          workDurationSeconds: 172800,
-          acceptanceWindowSeconds: 604800,
-          budget: {
-            network: "eip155:8453",
-            asset: `eip155:8453/erc20:${ADDRESS}`,
-            amountBaseUnits: "100000000",
-          },
-          escrow: { protocol: "escrow-v1", contract: ESCROW },
-          evidenceRules: { acceptedInputs: ["text"], exactCommitRequired: false },
-          deliverables: ["A working page"],
-          revisionCount: 0,
-          deadline: NOW.toISOString(),
-        },
+        structuredTerms,
         brief: BRIEF,
-        termsHash: `0x${"ab".repeat(32)}`,
+        termsHash: frozen.termsHash,
         proposedByRole,
-        proposerAddress: ADDRESS,
-        proposerSignature: `0x${"cd".repeat(65)}`,
+        proposerAddress: scopeProposer.address,
+        proposerSignature: scopeSignature,
         counterpartyAddress: null,
         counterpartySignature: null,
         acceptedAt: null,
@@ -417,7 +441,7 @@ function scopeFixture(
           workOrderId: ID,
           trancheOrdinal: 1,
           scopeVersion: 1,
-          termsHash: `0x${"ab".repeat(32)}`,
+          termsHash: frozen.termsHash,
         },
       },
     ],
@@ -555,7 +579,7 @@ describe("vapi task", () => {
       pinned: card("paid"),
       cards: [
         card(),
-        { ...card(), id: "small", amount: { ...card().amount, gross: "49.999999" } },
+        { ...card(), id: "small", amount: { ...card().amount, gross: "49999999" } },
         card("paid"),
       ],
     }));
@@ -568,6 +592,27 @@ describe("vapi task", () => {
     expect(client.board).toHaveBeenCalledWith({ tab: "closing", limit: 2 });
     expect(result.value!.cards).toEqual([card()]);
     expect(result.value!.pinned).toBeNull();
+  });
+
+  it("uses each card's nullable fee and handles cards without an amount", async () => {
+    const client = fakeClient();
+    const board = await client.board();
+    client.board = vi.fn(async () => ({
+      ...board,
+      cards: [
+        { ...card(), amount: { ...card().amount, fee: null, net: null, feeBp: null } },
+        { ...card(), id: "no-amount", title: "Unpriced task", amount: null },
+      ],
+    }));
+    const { dependencies } = await fixture(false, client);
+    const result = await invoke(["search"], dependencies, false);
+    expect(result.code).toBe(0);
+    expect(result.stdout.join("\n")).toContain("$100.00 gross · fee unavailable");
+    expect(result.stdout.join("\n")).toContain("Unpriced task · amount unavailable");
+
+    const filtered = await invoke(["search", "--min", "1"], dependencies);
+    expect(filtered.value!.cards).toHaveLength(1);
+    expect(filtered.value!.cards).not.toContainEqual(expect.objectContaining({ id: "no-amount" }));
   });
 
   it("maps an unavailable board to the existing global JSON error shape", async () => {
@@ -588,13 +633,15 @@ describe("vapi task", () => {
   });
 
   it("uses authenticated show, and public status even when signed in", async () => {
-    const { client, dependencies } = await fixture();
+    const { client, dependencies, store } = await fixture();
+    const unlock = vi.spyOn(store, "unlock");
     expect((await invoke(["show", ID], dependencies)).code).toBe(0);
     expect(client.getOrder).toHaveBeenCalledWith(ID);
     const result = await invoke(["status", ID], dependencies);
     expect(result.code).toBe(0);
     expect(result.value!.task).toEqual(card());
     expect(client.publicTask).toHaveBeenCalledWith(ID);
+    expect(unlock).not.toHaveBeenCalled();
   });
 
   it("prints the server receipt URL for a settled public task", async () => {
@@ -624,15 +671,18 @@ describe("vapi task", () => {
     });
   });
 
-  it.each([500, undefined])(
+  it.each([500, undefined, null])(
     "reads stdin and prints deployed money with feeBp %s",
     async (feeBp) => {
       const client = fakeClient();
       const deployment = await client.deployment();
       client.deployment = vi.fn(async () => {
-        const rest = { ...deployment };
-        delete rest.feeBp;
-        return feeBp === undefined ? rest : { ...rest, feeBp };
+        if (feeBp === undefined) {
+          const withoutFee = { ...deployment };
+          delete withoutFee.feeBp;
+          return withoutFee;
+        }
+        return { ...deployment, feeBp };
       });
       const { dependencies } = await fixture(true, client);
       dependencies.readStdin = vi.fn(async () => BRIEF);
@@ -653,7 +703,7 @@ describe("vapi task", () => {
       });
       const human = await invoke(postArgs, dependencies, false);
       expect(human.stdout.join("\n")).toContain(
-        feeBp === undefined ? "fee unavailable" : "$100.00 gross · $5.00 fee · $95.00 net",
+        feeBp == null ? "fee unavailable" : "$100.00 gross · $5.00 fee · $95.00 net",
       );
       expect(human.stdout.join("\n")).toContain("Posting a task moves no money.");
     },
@@ -709,7 +759,7 @@ describe("vapi task", () => {
   it("signs proposal terms locally without using the chain adapter", async () => {
     const { client, dependencies } = await fixture();
     const result = await invoke(
-      ["propose", ID, "--price", "95.123456", "--duration", "2d", "--note", BRIEF],
+      ["propose", ID, "--price", "95.123456", "--duration", "10m", "--note", BRIEF],
       dependencies,
     );
     expect(result.code).toBe(0);
@@ -718,7 +768,7 @@ describe("vapi task", () => {
     expect(id).toBe(ID);
     expect(options).toEqual({ idempotencyKey: KEY });
     expect(input.signedPayload.milestones[0]!.budget.amountBaseUnits).toBe("95123456");
-    expect(input.signedPayload.milestones[0]!.workDurationSeconds).toBe(172800);
+    expect(input.signedPayload.milestones[0]!.workDurationSeconds).toBe(600);
     expect(
       await verifyMessage({
         address: input.signedPayload.providerAddress as `0x${string}`,
@@ -765,7 +815,7 @@ describe("vapi task", () => {
     expect(result.value!.proposal).toMatchObject({ id: PROPOSAL_ID });
   });
 
-  it.each([401, 403])("explains console sign-in for participant HTTP %s", async (status) => {
+  it.each([401, 403])("explains sign-in for participant HTTP %s", async (status) => {
     const { dependencies } = await fixture(
       true,
       fakeClient({
@@ -776,10 +826,29 @@ describe("vapi task", () => {
     );
     const result = await invoke(["message", ID, "Hello"], dependencies);
     expect(result.code).toBe(1);
-    expect((result.value!.error as { message: string }).message).toContain(
-      "does not accept bearer tokens on task routes yet",
-    );
+    expect((result.value!.error as { message: string }).message).toContain("Run vapi login");
     expect((result.value!.error as { message: string }).message).toContain("sign-in");
+  });
+
+  it("maps an insufficient Tasks scope through the CLI command", async () => {
+    const { dependencies } = await fixture(
+      true,
+      fakeClient({
+        sendMessage: async () => {
+          throw new TasksClientError("http", "Denied", 403, "insufficient_scope");
+        },
+      }),
+    );
+    const result = await invoke(["message", ID, "Hello"], dependencies);
+    expect(result).toMatchObject({
+      code: 1,
+      value: {
+        error: {
+          code: "insufficient_scope",
+          message: "This sign-in lacks Tasks access. Run vapi login again.",
+        },
+      },
+    });
   });
 
   it("maps submit route 404 and chain unavailability without extra JSON", async () => {
@@ -808,15 +877,21 @@ describe("vapi task", () => {
     const unavailable = await invoke(["message", ID, "Hello"], dependencies);
     expect(unavailable.value).toEqual({
       ok: false,
-      error: { code: "chain_unavailable", message: "chain operations need C2" },
+      error: {
+        code: "chain_unavailable",
+        message: "An acting wallet is required for task chain operations.",
+      },
     });
   });
 
   it("preserves the unavailable code from a separately bundled chain error", async () => {
-    const error = Object.assign(new Error("chain operations need C2"), {
-      name: "TasksChainUnavailableError",
-      code: "chain_unavailable",
-    });
+    const error = Object.assign(
+      new Error("An acting wallet is required for task chain operations."),
+      {
+        name: "TasksChainUnavailableError",
+        code: "chain_unavailable",
+      },
+    );
     const { dependencies } = await fixture(
       true,
       fakeClient({
@@ -828,7 +903,10 @@ describe("vapi task", () => {
     const result = await invoke(["message", ID, "Hello"], dependencies);
     expect(result.value).toEqual({
       ok: false,
-      error: { code: "chain_unavailable", message: "chain operations need C2" },
+      error: {
+        code: "chain_unavailable",
+        message: "An acting wallet is required for task chain operations.",
+      },
     });
   });
 
@@ -986,17 +1064,24 @@ describe("vapi task", () => {
       dependencies,
     );
     expect(result.code).toBe(0);
-    expect(result.value!.unsupportedFields).toEqual([
-      "amount",
-      "deadline",
-      "intake",
-      "maxAwards",
-      "webhook",
-    ]);
+    expect(result.value!.unsupportedFields).toEqual([]);
     expect(client.createOrder).toHaveBeenCalledWith(
-      { title: "Build a page", description: BRIEF, policyFamily: "general-digital" },
+      {
+        title: "Build a page",
+        description: BRIEF,
+        policyFamily: "general-digital",
+        market: {
+          intake: "submissions",
+          maxAwards: 3,
+          audience: "anyone",
+          proofKinds: ["url", "file"],
+          budget: { network: "eip155:8453", asset: "USDC", amountBaseUnits: "100000000" },
+          deadlineAt: "2026-10-10T12:00:00.000Z",
+        },
+      },
       { idempotencyKey: KEY },
     );
+    expect(client.configureWebhook).toHaveBeenCalledWith(ID, { url: "https://example.com/hook" });
     client.createOrder = vi.fn(async () => {
       throw new TasksClientError("timeout", "The task request timed out.");
     });
@@ -1021,9 +1106,7 @@ describe("vapi task", () => {
       dependencies,
     );
     expect(failed.code).toBe(1);
-    expect((failed.value!.error as { message: string }).message).toContain(
-      "does not accept bearer tokens on task routes yet",
-    );
+    expect((failed.value!.error as { message: string }).message).toContain("Run vapi login");
     expect(client.submit).not.toHaveBeenCalled();
   });
 
@@ -1162,25 +1245,119 @@ describe("vapi task", () => {
   });
 
   describe("escrow task verbs", () => {
+    it("exposes the lazy local signing identity without producing a signature", async () => {
+      const { dependencies } = await fixture(true, fakeClient());
+      const signer = privateKeyToAccount(`0x${"12".repeat(32)}`);
+      const signMessage = vi.fn(signer.signMessage);
+      const signTransaction = vi.fn(signer.signTransaction);
+      const unlock = vi
+        .spyOn(WalletStore.prototype, "unlock")
+        .mockResolvedValue({ ...signer, signMessage, signTransaction });
+      try {
+        const context = await taskContext(
+          parseArguments([], { valueOptions: new Set(["--wallet"]), maximumPositionals: 0 }),
+          { stdout: () => {}, stderr: () => {} },
+          dependencies,
+        );
+        const chain = context.chain as TasksChain & {
+          getSigningAddress?: () => Promise<`0x${string}`>;
+        };
+        expect(await chain.getSigningAddress?.()).toBe(signer.address);
+        expect(signMessage).not.toHaveBeenCalled();
+        expect(signTransaction).not.toHaveBeenCalled();
+        expect(dependencies.fetchImpl).not.toHaveBeenCalled();
+      } finally {
+        unlock.mockRestore();
+      }
+    });
+
+    it("forwards an explicit counterparty to each money action", async () => {
+      const client = fakeClient({ getOrder: async () => milestoneOrder() });
+      const chain = fakeChain();
+      const { dependencies, home } = await fixture(true, client);
+      dependencies.tasks!.chain = chain;
+      let sequence = 0;
+      dependencies.tasks!.randomUUID = () =>
+        `aaaaaaaa-aaaa-4aaa-8aaa-${String(++sequence).padStart(12, "0")}`;
+      await writeProfile(home, { maxPerTaskUsd: 200, approveAboveUsd: 200 });
+      for (const [verb, method] of [
+        ["fund", "fund"],
+        ["release", "release"],
+        ["refund", "refund"],
+        ["dispute", "dispute"],
+        ["counter-evidence", "counterEvidence"],
+        ["resolve-unmatched", "resolveUnmatched"],
+      ] as const) {
+        const args = [
+          verb,
+          ID,
+          "--counterparty",
+          ADDRESS,
+          ...(["dispute", "counter-evidence"].includes(verb)
+            ? ["--evidence-hash", `0x${"ab".repeat(32)}`]
+            : []),
+        ];
+        const result = await invoke(args, dependencies);
+        expect(result.code, JSON.stringify(result.value)).toBe(0);
+        expect(chain[method]).toHaveBeenCalledWith(
+          expect.objectContaining({ counterparty: ADDRESS }),
+        );
+      }
+    });
+
+    it.each(["dispute", "counter-evidence"])(
+      "requires approval for a %s fee in non-interactive mode",
+      async (verb) => {
+        const client = fakeClient({ getOrder: async () => milestoneOrder() });
+        const chain = fakeChain({ disputeFee: vi.fn(async () => 20_000_000n) });
+        const { dependencies, home } = await fixture(true, client);
+        dependencies.tasks!.chain = chain;
+        await writeProfile(home, { maxPerTaskUsd: 100, approveAboveUsd: 10 });
+        const result = await invoke(
+          [verb, ID, "--evidence-hash", `0x${"ab".repeat(32)}`],
+          dependencies,
+        );
+        expect(result.code).toBe(3);
+        expect(result.value).toMatchObject({
+          ok: false,
+          approval: true,
+          disputeFee: { baseUnits: "20000000", usd: "20.00" },
+        });
+        expect(chain.dispute).not.toHaveBeenCalled();
+        expect(chain.counterEvidence).not.toHaveBeenCalled();
+      },
+    );
+
     it("only rejects a genuinely unknown verb", async () => {
       const result = await invoke(["nonsense"], {});
       expect(result.code).toBe(1);
       expect(result.value).toMatchObject({ ok: false, error: { code: "usage_error" } });
     });
 
-    it.each([["sign"], ["fund"], ["deliver"], ["release"], ["refund"], ["dispute"], ["watch"]])(
-      "parses task %s as a known verb before validating its arguments",
-      async (verb) => {
-        const result = await invoke([verb], {});
-        expect(result.code).toBe(1);
-        expect((result.value!.error as { message: string }).message).not.toContain(
-          "task <search|show",
-        );
-      },
-    );
+    it.each([
+      ["sign"],
+      ["fund"],
+      ["deliver"],
+      ["release"],
+      ["refund"],
+      ["dispute"],
+      ["counter-evidence"],
+      ["resolve-unmatched"],
+      ["watch"],
+    ])("parses task %s as a known verb before validating its arguments", async (verb) => {
+      const result = await invoke([verb], {});
+      expect(result.code).toBe(1);
+      expect((result.value!.error as { message: string }).message).not.toContain(
+        "task <search|show",
+      );
+    });
 
     it.each([
       ["dispute", ID, "--evidence-hash", "abcd"],
+      ["counter-evidence", ID, "--evidence-hash", "abcd"],
+      ["release", ID, "--counterparty", "0x1234"],
+      ["sign", ID, "--counterparty", "0x1234"],
+      ["resolve-unmatched", ID, "--counterparty", "0x1234"],
       ["dispute", ID, "--evidence-hash", `0X${"ab".repeat(32)}`],
       ["deliver", ID, "--note", "Delivered"],
       ["deliver", ID, "--files", "missing.txt"],
@@ -1266,14 +1443,23 @@ describe("vapi task", () => {
       expect((invalid.value!.error as { message: string }).message).toMatch(/file|directory/iu);
     });
 
-    it.each([500, undefined])("reports fund money and feeBp %s", async (feeBp) => {
+    it.each([500, undefined, null])("reports fund money and feeBp %s", async (feeBp) => {
       const client = fakeClient({ getOrder: async () => milestoneOrder() });
       const deployed = await client.deployment();
-      client.deployment = vi.fn(async () => ({ ...deployed, feeBp }));
-      const { home, dependencies } = await fixture(true, client);
+      client.deployment = vi.fn(async () => {
+        if (feeBp === undefined) {
+          const withoutFee = { ...deployed };
+          delete withoutFee.feeBp;
+          return withoutFee;
+        }
+        return { ...deployed, feeBp };
+      });
+      const { home, dependencies, store } = await fixture(true, client);
+      dependencies.tasks!.chain = missingTasksChain;
       await writeProfile(home);
       const chain = fakeChain();
       dependencies.tasks!.chain = chain;
+      const unlock = vi.spyOn(store, "unlock");
       const result = await invoke(["fund", ID, "--yes"], dependencies);
       expect(result.code).toBe(0);
       expect(result.value).toMatchObject({
@@ -1286,6 +1472,7 @@ describe("vapi task", () => {
         result: expect.any(Object),
       });
       expect(chain.fund).toHaveBeenCalledOnce();
+      expect(unlock).not.toHaveBeenCalled();
     });
 
     it("uses defaults without a matching profile and fails closed on ambiguous or invalid profiles", async () => {
@@ -1326,8 +1513,7 @@ describe("vapi task", () => {
               })
             : "missing";
         if (setup === "perDay") await writeFile(ledger, before);
-        const chain = fakeChain();
-        dependencies.tasks!.chain = chain;
+        const unlock = vi.spyOn(store, "unlock");
         const result = await invoke(["fund", ID, "--yes"], dependencies);
         expect(result.code).toBe(2);
         expect(result.value).toMatchObject({
@@ -1335,7 +1521,7 @@ describe("vapi task", () => {
           reason: `policy.${setup}`,
           policyDecision: `policy.${setup}`,
         });
-        expect(chain.fund).not.toHaveBeenCalled();
+        expect(unlock).not.toHaveBeenCalled();
         expect(await readFile(ledger, "utf8").catch(() => "missing")).toBe(before);
       }
     });
@@ -1348,17 +1534,16 @@ describe("vapi task", () => {
       "requires approval without prompting or funding in mode %j",
       async ({ json, interactive, env }) => {
         const client = fakeClient({ getOrder: async () => milestoneOrder() });
-        const { home, dependencies } = await fixture(true, client);
+        const { home, dependencies, store } = await fixture(true, client);
         await writeProfile(home, { approveAboveUsd: 10 });
-        const chain = fakeChain();
-        dependencies.tasks!.chain = chain;
+        const unlock = vi.spyOn(store, "unlock");
         dependencies.env = env;
         dependencies.interactive = interactive;
         const line = vi.fn(async () => "yes");
         dependencies.prompts = { secret: async () => "test-passphrase", line };
         const result = await invoke(["fund", ID], dependencies, json);
         expect(result.code).toBe(3);
-        expect(chain.fund).not.toHaveBeenCalled();
+        expect(unlock).not.toHaveBeenCalled();
         expect(line).not.toHaveBeenCalled();
         expect(await readFile(join(home, "spend-ledger.json"), "utf8").catch(() => "missing")).toBe(
           "missing",
@@ -1426,10 +1611,14 @@ describe("vapi task", () => {
       const client = fakeClient({ getOrder: async () => milestoneOrder() });
       const { home, dependencies } = await fixture(true, client);
       await writeProfile(home);
+      dependencies.tasks!.chain = missingTasksChain;
       const missing = await invoke(["fund", ID, "--yes"], dependencies);
       expect(missing.value).toEqual({
         ok: false,
-        error: { code: "chain_unavailable", message: "chain operations need C2" },
+        error: {
+          code: "chain_unavailable",
+          message: "An acting wallet is required for task chain operations.",
+        },
       });
       expect(await readFile(join(home, "spend-ledger.json"), "utf8").catch(() => "missing")).toBe(
         "missing",
@@ -1443,6 +1632,69 @@ describe("vapi task", () => {
       dependencies.tasks!.chain = chain;
       expect((await invoke(["fund", ID, "--yes"], dependencies)).code).toBe(1);
       expect(chain.fund).toHaveBeenCalledOnce();
+    });
+
+    it("releases a funding reservation when lazy chain initialization fails", async () => {
+      const client = fakeClient({ getOrder: async () => milestoneOrder() });
+      const { home, dependencies } = await fixture(true, client);
+      await writeProfile(home);
+      const unlock = vi
+        .spyOn(WalletStore.prototype, "unlock")
+        .mockRejectedValue(new Error("vault unavailable"));
+
+      const result = await invoke(["fund", ID, "--yes"], dependencies);
+      unlock.mockRestore();
+
+      expect(result).toMatchObject({
+        code: 1,
+        value: {
+          error: {
+            code: "task_error",
+            message: "Error: Task chain operation failed.",
+          },
+        },
+      });
+      expect(JSON.parse(await readFile(join(home, "spend-ledger.json"), "utf8"))).toEqual({
+        version: 1,
+        rows: [{ date: "2026-10-08", spentAtomic: "0", wallet: "worker" }],
+      });
+    });
+
+    it("retains a funding reservation when persisted exposure predates lazy initialization failure", async () => {
+      const client = fakeClient({ getOrder: async () => milestoneOrder() });
+      const { home, dependencies } = await fixture(true, client);
+      await writeProfile(home);
+      await createPendingTransactions(home).markExposure(PROPOSAL_ID);
+      const unlock = vi
+        .spyOn(WalletStore.prototype, "unlock")
+        .mockRejectedValue(new Error("vault unavailable"));
+
+      const result = await invoke(["fund", ID, "--yes"], dependencies);
+      unlock.mockRestore();
+
+      expect(result.code).toBe(1);
+      expect(JSON.parse(await readFile(join(home, "spend-ledger.json"), "utf8"))).toMatchObject({
+        version: 1,
+        rows: [{ date: "2026-10-08", spentAtomic: "100000000", wallet: "worker" }],
+      });
+    });
+
+    it("rejects funding when the local signer does not match the task party", async () => {
+      const client = fakeClient({ getOrder: async () => milestoneOrder() });
+      const { home, dependencies } = await fixture(true, client);
+      await writeProfile(home);
+
+      const result = await invoke(["fund", ID, "--yes"], dependencies);
+
+      expect(result).toMatchObject({
+        code: 1,
+        value: {
+          error: {
+            code: "task_error",
+            message: "The local signer does not match the authenticated task party.",
+          },
+        },
+      });
     });
 
     it("records the escrow-funding reservation before a --yes chain call", async () => {
@@ -1475,6 +1727,7 @@ describe("vapi task", () => {
     it("emits one canonical error when delivery preparation succeeds but C2 is unavailable", async () => {
       const client = fakeClient({ getOrder: async () => milestoneOrder({ role: "provider" }) });
       const { home, dependencies } = await fixture(true, client);
+      dependencies.tasks!.chain = missingTasksChain;
       const path = join(home, "result.txt");
       await writeFile(path, "result");
       const unavailable = await invoke(
@@ -1484,7 +1737,10 @@ describe("vapi task", () => {
       );
       expect(unavailable.value).toEqual({
         ok: false,
-        error: { code: "chain_unavailable", message: "chain operations need C2" },
+        error: {
+          code: "chain_unavailable",
+          message: "An acting wallet is required for task chain operations.",
+        },
       });
       expect(client.uploadFile).toHaveBeenCalledOnce();
     });
@@ -1545,6 +1801,44 @@ describe("vapi task", () => {
       });
     });
 
+    it("does not serialize raw RPC transaction or authorization data", async () => {
+      const rawTransaction = `0x${"12".repeat(96)}`;
+      const authorizationSignature = `0x${"34".repeat(65)}`;
+      const source = Object.assign(
+        new Error(`RPC 503 included ${rawTransaction} and ${authorizationSignature}`),
+        {
+          name: "HttpRequestError",
+          shortMessage: `RPC request failed with status 503: ${rawTransaction} ${authorizationSignature}`,
+          details: { rawTransaction, authorizationSignature },
+          cause: { status: 503, rawTransaction, authorizationSignature },
+        },
+      );
+      const client = fakeClient({ getOrder: async () => milestoneOrder({ role: "provider" }) });
+      const { home, dependencies } = await fixture(true, client);
+      const path = join(home, "result.txt");
+      await writeFile(path, "result");
+      dependencies.tasks!.chain = fakeChain({
+        deliver: vi.fn(async () => {
+          throw safeTasksChainError(source, false, true);
+        }),
+      });
+
+      const result = await invoke(
+        ["deliver", ID, "--files", path, "--note", "Finished"],
+        dependencies,
+      );
+      const serialized = JSON.stringify(result.value);
+
+      expect(result.value).toMatchObject({
+        ok: false,
+        error: { code: "task_error", message: expect.stringContaining("HttpRequestError") },
+      });
+      expect(serialized).not.toContain(rawTransaction);
+      expect(serialized).not.toContain(authorizationSignature);
+      expect(serialized).not.toContain("details");
+      expect(serialized).not.toContain("cause");
+    });
+
     it("signs the canonical scope then accepts it, maps roles, and reports a partial create failure", async () => {
       const scope = scopeFixture();
       const accepted = tasksResponseSchemas.signScope.parse({
@@ -1597,6 +1891,14 @@ describe("vapi task", () => {
         scope: expect.any(Object),
         milestone: expect.any(Object),
         escrowCreation: expect.any(Object),
+        terms: {
+          amountBaseUnits: "100000000",
+          asset: `eip155:8453/erc20:${ADDRESS}`,
+          network: "eip155:8453",
+          deadline: NOW.toISOString(),
+          deliverables: ["A working page"],
+          title: "Build a page",
+        },
       });
 
       chain.createEscrow = vi.fn(async () => {
@@ -1611,6 +1913,78 @@ describe("vapi task", () => {
       expect(failed.value).toMatchObject({
         error: { message: expect.stringContaining("create failed") },
       });
+    });
+
+    it("prints verified scope terms before the signed confirmation", async () => {
+      const scope = scopeFixture("provider");
+      const accepted = tasksResponseSchemas.signScope.parse({
+        scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
+        milestone: {
+          id: PROPOSAL_ID,
+          workOrderId: ID,
+          ordinal: 1,
+          termsHash: scope.termsHash,
+          termsFrozenAt: NOW.toISOString(),
+        },
+      });
+      const client = fakeClient({
+        getOrder: vi.fn(async () => milestoneOrder({ role: "client", escrowState: null })),
+        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+        signScope: vi.fn(async () => accepted),
+      });
+      const { dependencies } = await fixture(true, client);
+      dependencies.tasks!.chain = missingTasksChain;
+
+      const result = await invoke(["sign", ID], dependencies, false);
+
+      expect(result.code).toBe(0);
+      expect(result.stdout.slice(-2)).toEqual([
+        `Build a page · $100.00 USDC · deadline ${NOW.toISOString()} · with ${scopeProposer.address}`,
+        `Accepted scope for task ${ID}.`,
+      ]);
+    });
+
+    it("prints raw base units and the asset identifier for an unknown token", async () => {
+      const original = scopeFixture("provider");
+      const structuredTerms = {
+        ...original.structuredTerms,
+        budget: {
+          ...original.structuredTerms.budget,
+          asset: `eip155:8453/erc20:${ESCROW}`,
+        },
+      };
+      const frozen = freezeScopeTerms(structuredTerms, original.brief);
+      const scope = {
+        ...original,
+        structuredTerms,
+        termsHash: frozen.termsHash,
+        signingPayload: { ...original.signingPayload, termsHash: frozen.termsHash },
+        proposerSignature: await scopeProposer.signMessage({
+          message: canonicalJson({ ...original.signingPayload, termsHash: frozen.termsHash }),
+        }),
+      };
+      const accepted = tasksResponseSchemas.signScope.parse({
+        scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
+        milestone: {
+          id: PROPOSAL_ID,
+          workOrderId: ID,
+          ordinal: 1,
+          termsHash: frozen.termsHash,
+          termsFrozenAt: NOW.toISOString(),
+        },
+      });
+      const client = fakeClient({
+        getOrder: vi.fn(async () => milestoneOrder({ role: "client", escrowState: null })),
+        getScopes: vi.fn(async () => ({ scopes: [scope] })),
+        signScope: vi.fn(async () => accepted),
+      });
+      const { dependencies } = await fixture(true, client);
+
+      const result = await invoke(["sign", ID], dependencies, false);
+
+      expect(result.stdout.at(-2)).toBe(
+        `Build a page · 100000000 base units (eip155:8453/erc20:${ESCROW}) · deadline ${NOW.toISOString()} · with ${scopeProposer.address}`,
+      );
     });
 
     it("lets the poster accept a scope with a local vault signature without C2", async () => {
@@ -1655,11 +2029,15 @@ describe("vapi task", () => {
       });
       client.signScope = vi.fn(async () => accepted);
       const { dependencies } = await fixture(true, client);
+      dependencies.tasks!.chain = missingTasksChain;
       const result = await invoke(["sign", ID], dependencies, true, true);
       expect(result.values[0]).toMatchObject({ scope: { state: "accepted" } });
       expect(result.value).toEqual({
         ok: false,
-        error: { code: "chain_unavailable", message: "chain operations need C2" },
+        error: {
+          code: "chain_unavailable",
+          message: "An acting wallet is required for task chain operations.",
+        },
       });
     });
 
@@ -1673,12 +2051,12 @@ describe("vapi task", () => {
         const args = [
           verb,
           ID,
-          ...(verb === "dispute" ? ["--evidence-hash", `0x${"ab".repeat(32)}`] : []),
+          ...(verb === "dispute" ? ["--evidence-hash", `0x${"ab".repeat(32)}`, "--yes"] : []),
         ];
         const result = await invoke(args, dependencies);
         expect(result.value).toMatchObject({
           command: `task ${verb}`,
-          money: { gross: { baseUnits: "100000000" } },
+          money: { gross: { baseUnits: verb === "dispute" ? "20000000" : "100000000" } },
           result: expect.any(Object),
         });
         const operation =
@@ -1686,8 +2064,7 @@ describe("vapi task", () => {
         expect(operation).toHaveBeenCalledOnce();
         if (verb === "dispute")
           expect(result.values[0]).toMatchObject({
-            disputeFee: null,
-            disputeFeeNote: expect.stringContaining("unavailable"),
+            disputeFee: { baseUnits: "20000000", usd: "20.00" },
           });
       },
     );
@@ -1698,6 +2075,7 @@ describe("vapi task", () => {
         const client = fakeClient({ getOrder: async () => milestoneOrder() });
         const observed = vi.fn(async () => {
           expect(stdout.join("\n")).toContain("$100.00 gross");
+          if (verb === "dispute") expect(stdout.join("\n")).toContain("dispute fee $20.00 USDC");
           return chainResult(
             verb === "release" ? "released" : verb === "refund" ? "refunded" : "disputed",
           );
@@ -1710,7 +2088,7 @@ describe("vapi task", () => {
             "task",
             verb,
             ID,
-            ...(verb === "dispute" ? ["--evidence-hash", `0x${"ab".repeat(32)}`] : []),
+            ...(verb === "dispute" ? ["--evidence-hash", `0x${"ab".repeat(32)}`, "--yes"] : []),
           ],
           { stdout: (line) => stdout.push(line), stderr: () => {} },
           dependencies,

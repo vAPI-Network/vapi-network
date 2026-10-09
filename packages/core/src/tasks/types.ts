@@ -1,5 +1,19 @@
 import { z } from "zod";
 
+import {
+  milestoneTermsSchema,
+  scopeBriefSchema,
+  scopeSigningPayloadSchema,
+  scopeStructuredTermsSchema,
+} from "./scope-terms.js";
+
+export {
+  milestoneTermsSchema,
+  scopeBriefSchema,
+  scopeSigningPayloadSchema,
+  scopeStructuredTermsSchema,
+} from "./scope-terms.js";
+
 const uuidSchema = z.uuid();
 const isoDateTimeSchema = z.iso.datetime();
 const addressSchema = z
@@ -15,15 +29,14 @@ const signatureSchema = z
   .regex(/^0x(?:[0-9a-fA-F]{2})+$/)
   .max(32_770);
 const unsignedDecimalSchema = z.string().regex(/^(0|[1-9][0-9]*)$/);
-const positiveDecimalSchema = unsignedDecimalSchema.pipe(
+const positiveDecimalBoundarySchema = unsignedDecimalSchema.pipe(
   z.string().refine((value) => BigInt(value) > 0n, "Amount must be greater than zero"),
 );
 const networkSchema = z
   .string()
   .regex(/^eip155:[1-9][0-9]*$/)
   .transform((value) => value as `eip155:${string}`);
-// Tasks milestone terms permit CAIP-2 chain id zero; transaction plans and
-// deployment responses use the positive-chain schema above.
+// Milestone response records allow the same CAIP-2 chain ids as frozen terms.
 const milestoneNetworkSchema = z
   .string()
   .regex(/^eip155:(0|[1-9][0-9]*)$/)
@@ -41,49 +54,18 @@ export const workPolicyFamilySchema = z.enum([
   "design-content",
 ]);
 
-export const milestoneTermsSchema = z
-  .object({
-    version: z.literal("work-milestone-terms-v1"),
-    title: z.string().trim().min(3).max(120),
-    description: z.string().trim().min(10).max(8_000),
-    acceptanceCriteria: z.array(z.string().trim().min(3).max(500)).min(1).max(20),
-    workDurationSeconds: z.number().int().min(3_600).max(7_776_000).optional(),
-    acceptanceWindowSeconds: z.number().int().min(60).max(2_592_000).default(604_800),
-    budget: z.object({
-      network: milestoneNetworkSchema,
-      asset: assetSchema,
-      amountBaseUnits: positiveDecimalSchema,
-    }),
-    escrow: z.object({ protocol: z.literal("escrow-v1"), contract: addressSchema }),
-    evidenceRules: z.object({
-      acceptedInputs: z
-        .array(z.enum(["text", "private-file", "git-commit"]))
-        .min(1)
-        .max(3)
-        .refine(
-          (values) => new Set(values).size === values.length,
-          "Evidence inputs must be unique",
-        ),
-      exactCommitRequired: z.boolean(),
-    }),
-  })
-  .superRefine((terms, context) => {
-    if (terms.budget.asset.split("/")[0] !== terms.budget.network) {
-      context.addIssue({
-        code: "custom",
-        path: ["budget", "asset"],
-        message: "Asset and escrow must use the same network",
-      });
-    }
-  });
-
-const scopeStructuredTermsSchema = milestoneTermsSchema.safeExtend({
-  deliverables: z.array(z.string().trim().min(3).max(500)).min(1).max(50),
-  revisionCount: z.number().int().min(0).max(100),
-  deadline: isoDateTimeSchema,
+// Guard malformed transport values before the server-equivalent BigInt refinement runs.
+const milestoneTermsBoundarySchema = milestoneTermsSchema.safeExtend({
+  budget: milestoneTermsSchema.shape.budget.safeExtend({
+    amountBaseUnits: positiveDecimalBoundarySchema,
+  }),
+});
+const scopeStructuredTermsBoundarySchema = scopeStructuredTermsSchema.safeExtend({
+  budget: scopeStructuredTermsSchema.shape.budget.safeExtend({
+    amountBaseUnits: positiveDecimalBoundarySchema,
+  }),
 });
 
-/** (plan 032 Lane B; not on the server yet) */
 export const submissionProofSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("url"),
@@ -103,10 +85,8 @@ export const proposalSigningPayloadSchema = z
     workOrderId: uuidSchema,
     providerAddress: addressSchema,
     pricingModel: z.literal("fixed"),
-    milestones: z.array(milestoneTermsSchema).length(1),
-    /** (plan 032 Lane B; not on the server yet) */
+    milestones: z.array(milestoneTermsBoundarySchema).length(1),
     kind: z.enum(["proposal", "submission"]).optional(),
-    /** (plan 032 Lane B; not on the server yet) */
     proof: z.array(submissionProofSchema).optional(),
   })
   .superRefine((payload, context) => {
@@ -119,28 +99,43 @@ export const proposalSigningPayloadSchema = z
     }
   });
 
-export const scopeSigningPayloadSchema = z.object({
-  version: z.literal("work-scope-signature-v1"),
-  workOrderId: uuidSchema,
-  trancheOrdinal: z.number().int().positive(),
-  scopeVersion: z.number().int().positive(),
-  termsHash: bytes32Schema,
-});
-
-export const createOrderInputSchema = z.object({
-  title: z.string().trim().min(3).max(120),
-  description: z.string().trim().min(10).max(8_000),
-  policyFamily: workPolicyFamilySchema,
-  listingDeliveryTimeSeconds: z.number().int().min(3_600).max(7_776_000).optional(),
-  invitedProviderAddress: addressSchema.optional(),
-});
+export const createOrderInputSchema = z
+  .object({
+    title: z.string().trim().min(3).max(120),
+    description: z.string().trim().min(10).max(8_000),
+    policyFamily: workPolicyFamilySchema,
+    listingDeliveryTimeSeconds: z.number().int().min(3_600).max(7_776_000).optional(),
+    invitedProviderAddress: addressSchema.optional(),
+    market: z
+      .object({
+        intake: z.enum(["proposals", "submissions"]).optional(),
+        maxAwards: z.number().int().min(1).max(50).optional(),
+        audience: z.enum(["anyone", "verified", "agents", "humans", "invited"]).optional(),
+        proofKinds: z
+          .array(z.enum(["url", "file", "photo"]))
+          .max(3)
+          .refine((values) => new Set(values).size === values.length, "Proof kinds must be unique")
+          .optional(),
+        budget: z
+          .object({
+            network: milestoneNetworkSchema,
+            asset: z.literal("USDC"),
+            amountBaseUnits: positiveDecimalBoundarySchema,
+          })
+          .strict()
+          .optional(),
+        deadlineAt: isoDateTimeSchema.optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
 
 export const proposeInputSchema = z.object({
   signedPayload: proposalSigningPayloadSchema,
   signature: signatureSchema,
 });
 
-/** (plan 032 Lane B; not on the server yet) */
 export const submitInputSchema = z.object({
   signedPayload: proposalSigningPayloadSchema.safeExtend({
     kind: z.literal("submission"),
@@ -152,11 +147,8 @@ export const submitInputSchema = z.object({
 export const acceptProposalInputSchema = z.object({ proposalId: uuidSchema });
 
 export const proposeScopeInputSchema = z.object({
-  structuredTerms: scopeStructuredTermsSchema,
-  brief: z
-    .string()
-    .max(32_000)
-    .refine((value) => value.trim().length > 0, "Scope brief is required"),
+  structuredTerms: scopeStructuredTermsBoundarySchema,
+  brief: scopeBriefSchema,
   signedPayload: scopeSigningPayloadSchema,
   signature: signatureSchema,
 });
@@ -194,7 +186,7 @@ export const fundEscrowInputSchema = z.union([
 export const deliverEscrowInputSchema = z.object({
   fileIds: z
     .array(uuidSchema)
-    .min(1)
+    .min(0)
     .max(20)
     .refine((values) => new Set(values).size === values.length, "File ids must be unique"),
   note: z
@@ -203,6 +195,7 @@ export const deliverEscrowInputSchema = z.object({
     .refine((value) => value.trim().length > 0, "Delivery note is required"),
 });
 export const disputeEscrowInputSchema = z.object({ evidenceHash: bytes32Schema });
+export const counterEvidenceEscrowInputSchema = z.object({ evidenceHash: bytes32Schema });
 
 export const workFileMimeTypeSchema = z.enum([
   "image/png",
@@ -257,20 +250,51 @@ export const sendMessageInputSchema = z.object({
     }),
 });
 
-/** (plan 032 Lane B; not on the server yet) */
 export const eventsQuerySchema = z.object({
-  after: z.number().int().nonnegative().optional(),
-  wait: z.number().min(0).max(25).optional(),
+  after: z.number().int().nonnegative().safe().optional(),
+  wait: z
+    .number()
+    .int()
+    .safe()
+    .transform((value) => Math.min(25, Math.max(0, value)))
+    .optional(),
 });
 
-/** (plan 032 Lane B; not on the server yet) */
+export const operationMutationInputSchema = z
+  .object({
+    step: z.union([
+      z.enum([
+        "create-escrow",
+        "approve-usdc",
+        "deposit-funds",
+        "fund-with-authorization",
+        "submit-delivery",
+        "release-funds",
+        "refund-buyer",
+        "raise-dispute",
+        "submit-counter-evidence",
+        "resolve-unmatched-dispute",
+        "timeout-refund",
+        "finalize",
+        "vote-dispute",
+        "mint-vendor-credential",
+      ]),
+      z.literal("register-erc8004"),
+    ]),
+    transactionHash: bytes32Schema,
+  })
+  .strict();
+export const operationStepInputSchema = z
+  .object({ step: operationMutationInputSchema.shape.step })
+  .strict();
+export const configureWebhookInputSchema = z.object({ url: z.url().max(2048).nullable() }).strict();
+
 export const boardQuerySchema = z.object({
   tab: z.enum(["trending", "new", "closing", "paid"]).optional(),
   limit: z.number().int().positive().optional(),
   cursor: z.string().optional(),
 });
 
-/** (plan 032 Lane B; not on the server yet) */
 export const feedQuerySchema = z.object({
   after: z.string().optional(),
   limit: z.number().int().positive().optional(),
@@ -284,7 +308,7 @@ const proposalResponseSchema = z.looseObject({
   signedPayload: proposalSigningPayloadSchema.loose(),
   signature: signatureSchema,
   signatureHash: bytes32Schema,
-  proposedMilestones: z.array(milestoneTermsSchema).length(1),
+  proposedMilestones: z.array(milestoneTermsBoundarySchema).length(1),
   acceptedAt: isoDateTimeSchema.nullable(),
   createdAt: isoDateTimeSchema,
   updatedAt: isoDateTimeSchema,
@@ -303,6 +327,8 @@ const chainPlanSchema = z
       "release-funds",
       "refund-buyer",
       "raise-dispute",
+      "submit-counter-evidence",
+      "resolve-unmatched-dispute",
       "timeout-refund",
       "finalize",
       "vote-dispute",
@@ -335,6 +361,8 @@ const chainOperationSchema = z
       "escrow-delivery",
       "escrow-release",
       "escrow-dispute",
+      "escrow-counter-evidence",
+      "escrow-unmatched-resolution",
       "escrow-vote",
       "escrow-finalize",
       "vendor-credential-mint",
@@ -349,6 +377,8 @@ const chainOperationSchema = z
       "release-funds",
       "refund-buyer",
       "raise-dispute",
+      "submit-counter-evidence",
+      "resolve-unmatched-dispute",
       "timeout-refund",
       "finalize",
       "vote-dispute",
@@ -410,7 +440,7 @@ const manifestResponseSchema = z.looseObject({
         sizeBytes: z.number().int().positive(),
       }),
     )
-    .min(1)
+    .min(0)
     .max(20)
     .refine((files) => new Set(files.map((file) => file.fileId)).size === files.length, {
       message: "File ids must be unique",
@@ -489,7 +519,7 @@ const milestoneResponseSchema = z
       "released",
       "refunded",
     ]),
-    terms: milestoneTermsSchema,
+    terms: milestoneTermsBoundarySchema,
     termsHash: bytes32Schema,
     termsFrozenAt: isoDateTimeSchema,
     network: milestoneNetworkSchema,
@@ -595,7 +625,7 @@ const scopeResponseSchema = z.looseObject({
   trancheOrdinal: z.number().int().positive(),
   version: z.number().int().positive(),
   state: z.enum(["proposed", "accepted", "superseded", "withdrawn"]),
-  structuredTerms: scopeStructuredTermsSchema,
+  structuredTerms: scopeStructuredTermsBoundarySchema,
   brief: z.string(),
   termsHash: bytes32Schema,
   proposedByRole: z.enum(["client", "provider"]),
@@ -676,7 +706,7 @@ const deploymentSchema = z
   .discriminatedUnion("configured", [
     z.looseObject({
       configured: z.literal(false),
-      feeBp: z.number().int().min(0).max(10_000).optional(),
+      feeBp: z.number().int().min(0).max(10_000).nullable().optional(),
       chainId: z.number().int().positive(),
       network: networkSchema,
       explorerUrl: z.url().nullable(),
@@ -688,7 +718,7 @@ const deploymentSchema = z
     }),
     z.looseObject({
       configured: z.literal(true),
-      feeBp: z.number().int().min(0).max(10_000).optional(),
+      feeBp: z.number().int().min(0).max(10_000).nullable().optional(),
       chainId: z.number().int().positive(),
       network: networkSchema,
       explorerUrl: z.url(),
@@ -741,7 +771,6 @@ const deploymentSchema = z
     }
   });
 
-/** (plan 032 Lane B; not on the server yet) */
 export const partyBadgeSchema = z.looseObject({
   kind: z.enum(["agent", "human"]),
   source: z.enum(["agent-link", "erc8004", "none"]),
@@ -752,10 +781,10 @@ export const partyBadgeSchema = z.looseObject({
 const publicPartySchema = z.looseObject({ address: z.string(), badge: partyBadgeSchema });
 const publicAmountSchema = z.looseObject({
   gross: z.string(),
-  fee: z.string(),
-  net: z.string(),
+  fee: z.string().nullable(),
+  net: z.string().nullable(),
   asset: z.literal("USDC"),
-  feeBp: z.number(),
+  feeBp: z.number().nullable(),
 });
 const publicTaskStateSchema = z.enum([
   "open",
@@ -769,13 +798,12 @@ const publicTaskStateSchema = z.enum([
   "closed",
 ]);
 
-/** (plan 032 Lane B; not on the server yet) */
 export const publicTaskCardSchema = z.looseObject({
   id: z.string(),
   title: z.string(),
   brief: z.string(),
   shape: z.enum(["task", "open-bounty"]),
-  amount: publicAmountSchema,
+  amount: publicAmountSchema.nullable(),
   deadlineAt: z.string().nullable(),
   durationSeconds: z.number().nullable(),
   createdAt: z.string(),
@@ -789,7 +817,6 @@ export const publicTaskCardSchema = z.looseObject({
   receiptUrl: z.string().nullable(),
 });
 
-/** (plan 032 Lane B; not on the server yet) */
 export const publicReceiptSchema = z.looseObject({
   escrow: z.string(),
   orderId: z.string(),
@@ -802,25 +829,26 @@ export const publicReceiptSchema = z.looseObject({
   deliveredAt: z.string().nullable(),
   settledAt: z.string(),
   outcome: z.enum(["released", "refunded", "split", "expired"]),
-  allocations: z.looseObject({
-    worker: z.string(),
-    poster: z.string(),
-    fee: z.string(),
-    reviewers: z.string(),
-  }),
+  allocations: z
+    .looseObject({
+      worker: z.string(),
+      poster: z.string(),
+      fee: z.string(),
+      reviewers: z.string(),
+    })
+    .nullable(),
   txs: z.looseObject({ funded: z.string().nullable(), settled: z.string().nullable() }),
   explorerUrl: z.string(),
   disputed: z.boolean(),
   network: z.string(),
 });
 
-/** (plan 032 Lane B; not on the server yet) */
 export const boardNumbersSchema = z.looseObject({
   escrowedNow: z.string(),
   paidOutAllTime: z.string(),
   tasksSettled: z.number(),
   agentsActive30d: z.number(),
-  feeBp: z.number(),
+  feeBp: z.number().nullable(),
   call: z
     .looseObject({
       routedThroughVapi30d: z.number(),
@@ -828,10 +856,10 @@ export const boardNumbersSchema = z.looseObject({
       volumeUsdOnBase30d: z.string(),
       asOf: z.string(),
     })
-    .nullable(),
+    .nullable()
+    .optional(),
 });
 
-/** (plan 032 Lane B; not on the server yet) */
 export const feedRowSchema = z.looseObject({
   cursor: z.string(),
   at: z.string(),
@@ -853,7 +881,6 @@ export const feedRowSchema = z.looseObject({
   receiptUrl: z.string().nullable(),
 });
 
-/** (plan 032 Lane B; not on the server yet) */
 export const publicTaskDetailSchema = publicTaskCardSchema.extend({
   briefFull: z.string(),
   children: z.array(
@@ -866,7 +893,6 @@ export const publicTaskDetailSchema = publicTaskCardSchema.extend({
   ),
 });
 
-/** (plan 032 Lane B; not on the server yet) */
 export const boardResponseSchema = z.looseObject({
   pinned: publicTaskCardSchema.nullable(),
   numbers: boardNumbersSchema,
@@ -874,13 +900,11 @@ export const boardResponseSchema = z.looseObject({
   nextCursor: z.string().nullable(),
 });
 
-/** (plan 032 Lane B; not on the server yet) */
 export const feedResponseSchema = z.looseObject({
   rows: z.array(feedRowSchema),
   nextCursor: z.string().nullable(),
 });
 
-/** (plan 032 Lane B; not on the server yet) */
 export const earnResponseSchema = z.looseObject({
   numbers: boardNumbersSchema,
   topEarners: z.looseObject({
@@ -904,7 +928,6 @@ export const earnResponseSchema = z.looseObject({
   openByPayout: z.array(publicTaskCardSchema),
 });
 
-/** (plan 032 Lane B; not on the server yet) */
 export const eventsResponseSchema = z.looseObject({
   events: z.array(
     z.looseObject({
@@ -933,7 +956,15 @@ export const tasksResponseSchemas = {
   publicTask: publicTaskDetailSchema.nullable(),
   receipt: publicReceiptSchema.nullable(),
   earn: earnResponseSchema,
-  acceptProposal: z.looseObject({ workOrder: privateOrderSchema }),
+  acceptProposal: z.union([
+    z.looseObject({ workOrder: privateOrderSchema }),
+    z.looseObject({
+      childOrderId: uuidSchema,
+      awards: z.number().int().positive(),
+      maxAwards: z.number().int().min(1).max(50),
+      parentState: z.enum(["open", "completed"]),
+    }),
+  ]),
   getScopes: z.looseObject({ scopes: z.array(scopeResponseSchema) }),
   proposeScope: z.looseObject({ scope: scopeResponseSchema }),
   signScope: z.looseObject({
@@ -957,6 +988,8 @@ export const tasksResponseSchemas = {
   releaseEscrow: escrowActionResponseSchema,
   refundEscrow: escrowActionResponseSchema,
   disputeEscrow: escrowActionResponseSchema,
+  counterEvidenceEscrow: escrowActionResponseSchema,
+  resolveUnmatchedEscrow: escrowActionResponseSchema,
   chainState: z.looseObject({
     workOrderId: uuidSchema,
     milestones: z.array(
@@ -981,28 +1014,70 @@ export const tasksResponseSchemas = {
     }),
   }),
   deployment: deploymentSchema,
+  recordTransaction: escrowActionResponseSchema,
+  reconcileOperation: escrowActionResponseSchema,
+  recoverOperation: escrowActionResponseSchema
+    .extend({ recovered: z.boolean(), scanComplete: z.boolean().default(true) })
+    .superRefine((value, context) => {
+      if (value.recovered && !value.scanComplete)
+        context.addIssue({
+          code: "custom",
+          path: ["scanComplete"],
+          message: "Recovered operations require a complete scan",
+        });
+    }),
+  abandonOperation: z
+    .looseObject({
+      outcome: z.enum(["abandoned", "recovered", "scanning"]),
+      operation: chainOperationSchema.nullable(),
+      milestone: z.looseObject({ id: uuidSchema, workOrderId: uuidSchema }),
+    })
+    .superRefine((value, context) => {
+      if (
+        (value.outcome === "abandoned" && value.operation !== null) ||
+        (value.outcome !== "abandoned" && value.operation === null)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["operation"],
+          message:
+            "Abandoned operations must be cleared; recovered or scanning operations must be returned",
+        });
+      }
+    }),
+  finalizeEscrow: escrowActionResponseSchema,
+  finalizeOrder: z.looseObject({
+    workOrder: z.looseObject({
+      id: uuidSchema,
+      state: z.enum(["completed", "cancelled"]),
+      completedAt: isoDateTimeSchema.nullable(),
+    }),
+  }),
+  configureWebhook: z.looseObject({
+    webhookUrl: z.url().nullable(),
+    secret: z.string().optional(),
+  }),
 } as const;
 
 export type ListOrdersQuery = z.input<typeof listOrdersQuerySchema>;
 export type ListMessagesQuery = z.input<typeof listMessagesQuerySchema>;
 export type SendMessageInput = z.input<typeof sendMessageInputSchema>;
 export type CreateOrderInput = z.input<typeof createOrderInputSchema>;
+export type OperationMutationInput = z.input<typeof operationMutationInputSchema>;
+export type OperationStepInput = z.input<typeof operationStepInputSchema>;
+export type ConfigureWebhookInput = z.input<typeof configureWebhookInputSchema>;
 export type ProposeInput = z.input<typeof proposeInputSchema>;
-/** (plan 032 Lane B; not on the server yet) */
 export type SubmissionProof = z.input<typeof submissionProofSchema>;
-/** (plan 032 Lane B; not on the server yet) */
 export type SubmitInput = z.input<typeof submitInputSchema>;
-/** (plan 032 Lane B; not on the server yet) */
 export type EventsQuery = z.input<typeof eventsQuerySchema>;
-/** (plan 032 Lane B; not on the server yet) */
 export type BoardQuery = z.input<typeof boardQuerySchema>;
-/** (plan 032 Lane B; not on the server yet) */
 export type FeedQuery = z.input<typeof feedQuerySchema>;
 export type AcceptProposalInput = z.input<typeof acceptProposalInputSchema>;
 export type ProposeScopeInput = z.input<typeof proposeScopeInputSchema>;
 export type SignScopeInput = z.input<typeof signScopeInputSchema>;
 export type FundEscrowInput = z.input<typeof fundEscrowInputSchema>;
 export type DeliverEscrowInput = z.input<typeof deliverEscrowInputSchema>;
+export type CounterEvidenceEscrowInput = z.input<typeof counterEvidenceEscrowInputSchema>;
 export type DisputeEscrowInput = z.input<typeof disputeEscrowInputSchema>;
 export type CreateUploadInput = z.input<typeof createUploadInputSchema>;
 export type UploadFileInput = {
@@ -1016,31 +1091,18 @@ export type ListOrdersResponse = z.infer<typeof tasksResponseSchemas.listOrders>
 export type GetOrderResponse = z.infer<typeof tasksResponseSchemas.getOrder>;
 export type CreateOrderResponse = z.infer<typeof tasksResponseSchemas.createOrder>;
 export type ProposeResponse = z.infer<typeof tasksResponseSchemas.propose>;
-/** (plan 032 Lane B; not on the server yet) */
 export type PartyBadge = z.infer<typeof partyBadgeSchema>;
-/** (plan 032 Lane B; not on the server yet) */
 export type PublicTaskCard = z.infer<typeof publicTaskCardSchema>;
-/** (plan 032 Lane B; not on the server yet) */
 export type PublicReceipt = z.infer<typeof publicReceiptSchema>;
-/** (plan 032 Lane B; not on the server yet) */
 export type BoardNumbers = z.infer<typeof boardNumbersSchema>;
-/** (plan 032 Lane B; not on the server yet) */
 export type FeedRow = z.infer<typeof feedRowSchema>;
-/** (plan 032 Lane B; not on the server yet) */
 export type PublicTaskDetail = z.infer<typeof publicTaskDetailSchema>;
-/** (plan 032 Lane B; not on the server yet) */
 export type EventsResponse = z.infer<typeof tasksResponseSchemas.events>;
-/** (plan 032 Lane B; not on the server yet) */
 export type BoardResponse = z.infer<typeof tasksResponseSchemas.board>;
-/** (plan 032 Lane B; not on the server yet) */
 export type FeedResponse = z.infer<typeof tasksResponseSchemas.feed>;
-/** (plan 032 Lane B; not on the server yet) */
 export type PublicTaskResponse = z.infer<typeof tasksResponseSchemas.publicTask>;
-/** (plan 032 Lane B; not on the server yet) */
 export type ReceiptResponse = z.infer<typeof tasksResponseSchemas.receipt>;
-/** (plan 032 Lane B; not on the server yet) */
 export type EarnResponse = z.infer<typeof tasksResponseSchemas.earn>;
-/** (plan 032 Lane B; not on the server yet) */
 export type SubmitResponse = z.infer<typeof tasksResponseSchemas.submit>;
 export type AcceptProposalResponse = z.infer<typeof tasksResponseSchemas.acceptProposal>;
 export type GetScopesResponse = z.infer<typeof tasksResponseSchemas.getScopes>;
@@ -1053,8 +1115,21 @@ export type FundEscrowResponse = z.infer<typeof tasksResponseSchemas.fundEscrow>
 export type DeliverEscrowResponse = z.infer<typeof tasksResponseSchemas.deliverEscrow>;
 export type ReleaseEscrowResponse = z.infer<typeof tasksResponseSchemas.releaseEscrow>;
 export type RefundEscrowResponse = z.infer<typeof tasksResponseSchemas.refundEscrow>;
+export type CounterEvidenceEscrowResponse = z.infer<
+  typeof tasksResponseSchemas.counterEvidenceEscrow
+>;
+export type ResolveUnmatchedEscrowResponse = z.infer<
+  typeof tasksResponseSchemas.resolveUnmatchedEscrow
+>;
 export type DisputeEscrowResponse = z.infer<typeof tasksResponseSchemas.disputeEscrow>;
 export type ChainStateResponse = z.infer<typeof tasksResponseSchemas.chainState>;
 export type CreateUploadResponse = z.infer<typeof tasksResponseSchemas.createUpload>;
 export type FinalizeUploadResponse = z.infer<typeof tasksResponseSchemas.finalizeUpload>;
 export type DeploymentResponse = z.infer<typeof tasksResponseSchemas.deployment>;
+export type RecordTransactionResponse = z.infer<typeof tasksResponseSchemas.recordTransaction>;
+export type ReconcileOperationResponse = z.infer<typeof tasksResponseSchemas.reconcileOperation>;
+export type RecoverOperationResponse = z.infer<typeof tasksResponseSchemas.recoverOperation>;
+export type AbandonOperationResponse = z.infer<typeof tasksResponseSchemas.abandonOperation>;
+export type FinalizeEscrowResponse = z.infer<typeof tasksResponseSchemas.finalizeEscrow>;
+export type FinalizeOrderResponse = z.infer<typeof tasksResponseSchemas.finalizeOrder>;
+export type ConfigureWebhookResponse = z.infer<typeof tasksResponseSchemas.configureWebhook>;

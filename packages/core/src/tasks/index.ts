@@ -1,7 +1,12 @@
 export * from "./canonical-json.js";
+export * from "./scope-terms.js";
+export * from "./scope-bindings.js";
 export * from "./delivery-manifest.js";
 export * from "./verbs.js";
 export * from "./chain-port.js";
+export * from "./chain.js";
+export * from "./rpc.js";
+export * from "./pending-transactions.js";
 export * from "./money.js";
 export * from "./actions.js";
 export * from "./operations.js";
@@ -20,6 +25,10 @@ export {
   earnResponseSchema,
   eventsQuerySchema,
   eventsResponseSchema,
+  operationMutationInputSchema,
+  operationStepInputSchema,
+  configureWebhookInputSchema,
+  createOrderInputSchema,
   feedQuerySchema,
   feedResponseSchema,
   feedRowSchema,
@@ -31,3 +40,8 @@ export {
   submitInputSchema,
 } from "./types.js";
 export type * from "./types.js";
+
+export * from "./trusted-deployments.js";
+export { safeTasksChainError } from "./chain-error.js";
+
+export * from "./dispute-fee.js";
