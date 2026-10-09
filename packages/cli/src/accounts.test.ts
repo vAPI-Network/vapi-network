@@ -204,7 +204,7 @@ describe("vapi accounts add", () => {
 
     expect(authorizationBodies).toEqual([
       expect.objectContaining({
-        scope: "mcp:call router.use",
+        scope: "mcp:call router.use tasks:read tasks:write",
         device: "test-workstation",
         trust_device: true,
       }),

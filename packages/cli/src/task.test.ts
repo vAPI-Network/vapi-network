@@ -44,7 +44,13 @@ function card(state: "open" | "paid" = "open") {
     brief: BRIEF,
     briefFull: BRIEF,
     shape: "task" as const,
-    amount: { gross: "100", fee: "5", net: "95", asset: "USDC" as const, feeBp: 500 },
+    amount: {
+      gross: "100000000",
+      fee: "5000000",
+      net: "95000000",
+      asset: "USDC" as const,
+      feeBp: 500,
+    },
     deadlineAt: null,
     durationSeconds: 172800,
     createdAt: NOW.toISOString(),
@@ -115,6 +121,7 @@ function fakeClient(overrides: Partial<TasksClient> = {}): TasksClient {
     publicTask: vi.fn(async () => card()),
     getOrder: vi.fn(async () => order()),
     createOrder: vi.fn(async () => order()),
+    configureWebhook: vi.fn(async (_id, input) => ({ webhookUrl: input.url })),
     deployment: vi.fn(async () => ({
       configured: true,
       chainId: 8453,
@@ -555,7 +562,7 @@ describe("vapi task", () => {
       pinned: card("paid"),
       cards: [
         card(),
-        { ...card(), id: "small", amount: { ...card().amount, gross: "49.999999" } },
+        { ...card(), id: "small", amount: { ...card().amount, gross: "49999999" } },
         card("paid"),
       ],
     }));
@@ -568,6 +575,27 @@ describe("vapi task", () => {
     expect(client.board).toHaveBeenCalledWith({ tab: "closing", limit: 2 });
     expect(result.value!.cards).toEqual([card()]);
     expect(result.value!.pinned).toBeNull();
+  });
+
+  it("uses each card's nullable fee and handles cards without an amount", async () => {
+    const client = fakeClient();
+    const board = await client.board();
+    client.board = vi.fn(async () => ({
+      ...board,
+      cards: [
+        { ...card(), amount: { ...card().amount, fee: null, net: null, feeBp: null } },
+        { ...card(), id: "no-amount", title: "Unpriced task", amount: null },
+      ],
+    }));
+    const { dependencies } = await fixture(false, client);
+    const result = await invoke(["search"], dependencies, false);
+    expect(result.code).toBe(0);
+    expect(result.stdout.join("\n")).toContain("$100.00 gross · fee unavailable");
+    expect(result.stdout.join("\n")).toContain("Unpriced task · amount unavailable");
+
+    const filtered = await invoke(["search", "--min", "1"], dependencies);
+    expect(filtered.value!.cards).toHaveLength(1);
+    expect(filtered.value!.cards).not.toContainEqual(expect.objectContaining({ id: "no-amount" }));
   });
 
   it("maps an unavailable board to the existing global JSON error shape", async () => {
@@ -624,15 +652,18 @@ describe("vapi task", () => {
     });
   });
 
-  it.each([500, undefined])(
+  it.each([500, undefined, null])(
     "reads stdin and prints deployed money with feeBp %s",
     async (feeBp) => {
       const client = fakeClient();
       const deployment = await client.deployment();
       client.deployment = vi.fn(async () => {
-        const rest = { ...deployment };
-        delete rest.feeBp;
-        return feeBp === undefined ? rest : { ...rest, feeBp };
+        if (feeBp === undefined) {
+          const withoutFee = { ...deployment };
+          delete withoutFee.feeBp;
+          return withoutFee;
+        }
+        return { ...deployment, feeBp };
       });
       const { dependencies } = await fixture(true, client);
       dependencies.readStdin = vi.fn(async () => BRIEF);
@@ -653,7 +684,7 @@ describe("vapi task", () => {
       });
       const human = await invoke(postArgs, dependencies, false);
       expect(human.stdout.join("\n")).toContain(
-        feeBp === undefined ? "fee unavailable" : "$100.00 gross · $5.00 fee · $95.00 net",
+        feeBp == null ? "fee unavailable" : "$100.00 gross · $5.00 fee · $95.00 net",
       );
       expect(human.stdout.join("\n")).toContain("Posting a task moves no money.");
     },
@@ -709,7 +740,7 @@ describe("vapi task", () => {
   it("signs proposal terms locally without using the chain adapter", async () => {
     const { client, dependencies } = await fixture();
     const result = await invoke(
-      ["propose", ID, "--price", "95.123456", "--duration", "2d", "--note", BRIEF],
+      ["propose", ID, "--price", "95.123456", "--duration", "10m", "--note", BRIEF],
       dependencies,
     );
     expect(result.code).toBe(0);
@@ -718,7 +749,7 @@ describe("vapi task", () => {
     expect(id).toBe(ID);
     expect(options).toEqual({ idempotencyKey: KEY });
     expect(input.signedPayload.milestones[0]!.budget.amountBaseUnits).toBe("95123456");
-    expect(input.signedPayload.milestones[0]!.workDurationSeconds).toBe(172800);
+    expect(input.signedPayload.milestones[0]!.workDurationSeconds).toBe(600);
     expect(
       await verifyMessage({
         address: input.signedPayload.providerAddress as `0x${string}`,
@@ -765,7 +796,7 @@ describe("vapi task", () => {
     expect(result.value!.proposal).toMatchObject({ id: PROPOSAL_ID });
   });
 
-  it.each([401, 403])("explains console sign-in for participant HTTP %s", async (status) => {
+  it.each([401, 403])("explains sign-in for participant HTTP %s", async (status) => {
     const { dependencies } = await fixture(
       true,
       fakeClient({
@@ -776,10 +807,29 @@ describe("vapi task", () => {
     );
     const result = await invoke(["message", ID, "Hello"], dependencies);
     expect(result.code).toBe(1);
-    expect((result.value!.error as { message: string }).message).toContain(
-      "does not accept bearer tokens on task routes yet",
-    );
+    expect((result.value!.error as { message: string }).message).toContain("Run vapi login");
     expect((result.value!.error as { message: string }).message).toContain("sign-in");
+  });
+
+  it("maps an insufficient Tasks scope through the CLI command", async () => {
+    const { dependencies } = await fixture(
+      true,
+      fakeClient({
+        sendMessage: async () => {
+          throw new TasksClientError("http", "Denied", 403, "insufficient_scope");
+        },
+      }),
+    );
+    const result = await invoke(["message", ID, "Hello"], dependencies);
+    expect(result).toMatchObject({
+      code: 1,
+      value: {
+        error: {
+          code: "insufficient_scope",
+          message: "This sign-in lacks Tasks access. Run vapi login again.",
+        },
+      },
+    });
   });
 
   it("maps submit route 404 and chain unavailability without extra JSON", async () => {
@@ -986,17 +1036,24 @@ describe("vapi task", () => {
       dependencies,
     );
     expect(result.code).toBe(0);
-    expect(result.value!.unsupportedFields).toEqual([
-      "amount",
-      "deadline",
-      "intake",
-      "maxAwards",
-      "webhook",
-    ]);
+    expect(result.value!.unsupportedFields).toEqual([]);
     expect(client.createOrder).toHaveBeenCalledWith(
-      { title: "Build a page", description: BRIEF, policyFamily: "general-digital" },
+      {
+        title: "Build a page",
+        description: BRIEF,
+        policyFamily: "general-digital",
+        market: {
+          intake: "submissions",
+          maxAwards: 3,
+          audience: "anyone",
+          proofKinds: ["url", "file"],
+          budget: { network: "eip155:8453", asset: "USDC", amountBaseUnits: "100000000" },
+          deadlineAt: "2026-10-10T12:00:00.000Z",
+        },
+      },
       { idempotencyKey: KEY },
     );
+    expect(client.configureWebhook).toHaveBeenCalledWith(ID, { url: "https://example.com/hook" });
     client.createOrder = vi.fn(async () => {
       throw new TasksClientError("timeout", "The task request timed out.");
     });
@@ -1021,9 +1078,7 @@ describe("vapi task", () => {
       dependencies,
     );
     expect(failed.code).toBe(1);
-    expect((failed.value!.error as { message: string }).message).toContain(
-      "does not accept bearer tokens on task routes yet",
-    );
+    expect((failed.value!.error as { message: string }).message).toContain("Run vapi login");
     expect(client.submit).not.toHaveBeenCalled();
   });
 
@@ -1266,10 +1321,17 @@ describe("vapi task", () => {
       expect((invalid.value!.error as { message: string }).message).toMatch(/file|directory/iu);
     });
 
-    it.each([500, undefined])("reports fund money and feeBp %s", async (feeBp) => {
+    it.each([500, undefined, null])("reports fund money and feeBp %s", async (feeBp) => {
       const client = fakeClient({ getOrder: async () => milestoneOrder() });
       const deployed = await client.deployment();
-      client.deployment = vi.fn(async () => ({ ...deployed, feeBp }));
+      client.deployment = vi.fn(async () => {
+        if (feeBp === undefined) {
+          const withoutFee = { ...deployed };
+          delete withoutFee.feeBp;
+          return withoutFee;
+        }
+        return { ...deployed, feeBp };
+      });
       const { home, dependencies } = await fixture(true, client);
       await writeProfile(home);
       const chain = fakeChain();

@@ -418,6 +418,13 @@ describe("tasks client recorded HTTP contract", () => {
       json(chainState),
       json(upload),
       json({ file }),
+      json(operation),
+      json(operation),
+      json({ ...operation, recovered: false, scanComplete: true }),
+      json({ outcome: "abandoned", operation: null, milestone: operation.milestone }),
+      json(operation),
+      json({ workOrder: { id: ID, state: "completed", completedAt: NOW } }),
+      json({ webhookUrl: "https://example.com/hook", secret: "secret" }),
       json(deployment),
     );
     const client = createTasksClient({
@@ -501,6 +508,21 @@ describe("tasks client recorded HTTP contract", () => {
       sizeBytes: 2,
     });
     await client.finalizeUpload(ID);
+    await client.recordTransaction(
+      ID,
+      { step: "create-escrow", transactionHash: HASH },
+      { idempotencyKey: KEY },
+    );
+    await client.reconcileOperation(
+      ID,
+      { step: "create-escrow", transactionHash: HASH },
+      { idempotencyKey: KEY },
+    );
+    await client.recoverOperation(ID, { step: "create-escrow" }, { idempotencyKey: KEY });
+    await client.abandonOperation(ID, { step: "create-escrow" }, { idempotencyKey: KEY });
+    await client.finalizeEscrow(ID, { idempotencyKey: KEY });
+    await client.finalizeOrder(ID, { idempotencyKey: KEY });
+    await client.configureWebhook(ID, { url: "https://example.com/hook" });
     await client.deployment();
 
     const expected = [
@@ -543,6 +565,38 @@ describe("tasks client recorded HTTP contract", () => {
         false,
       ],
       ["POST", `https://tasks.example/v1/files/${ID}/finalize`, undefined, false],
+      [
+        "POST",
+        `https://tasks.example/v1/work-operations/${ID}/transactions`,
+        { step: "create-escrow", transactionHash: HASH },
+        true,
+      ],
+      [
+        "POST",
+        `https://tasks.example/v1/work-operations/${ID}/reconcile`,
+        { step: "create-escrow", transactionHash: HASH },
+        true,
+      ],
+      [
+        "POST",
+        `https://tasks.example/v1/work-operations/${ID}/recover`,
+        { step: "create-escrow" },
+        true,
+      ],
+      [
+        "POST",
+        `https://tasks.example/v1/work-operations/${ID}/abandon`,
+        { step: "create-escrow" },
+        true,
+      ],
+      ["POST", `https://tasks.example/v1/escrows/${ID}/finalize`, {}, true],
+      ["POST", `https://tasks.example/v1/work-orders/${ID}/finalize`, {}, true],
+      [
+        "POST",
+        `https://tasks.example/v1/work-orders/${ID}/webhook`,
+        { url: "https://example.com/hook" },
+        false,
+      ],
       ["GET", "https://tasks.example/api/tasks/readiness", undefined, false],
     ] as const;
     expect(recorder.requests).toHaveLength(expected.length);
@@ -698,9 +752,11 @@ describe("tasks client recorded HTTP contract", () => {
 
   it("exports one response schema for every primitive client method", () => {
     expect(Object.keys(tasksResponseSchemas).sort()).toEqual([
+      "abandonOperation",
       "acceptProposal",
       "board",
       "chainState",
+      "configureWebhook",
       "createEscrow",
       "createOrder",
       "createUpload",
@@ -710,6 +766,8 @@ describe("tasks client recorded HTTP contract", () => {
       "earn",
       "events",
       "feed",
+      "finalizeEscrow",
+      "finalizeOrder",
       "finalizeUpload",
       "fundEscrow",
       "getOrder",
@@ -720,12 +778,37 @@ describe("tasks client recorded HTTP contract", () => {
       "proposeScope",
       "publicTask",
       "receipt",
+      "reconcileOperation",
+      "recordTransaction",
+      "recoverOperation",
       "refundEscrow",
       "releaseEscrow",
       "sendMessage",
       "signScope",
       "submit",
     ]);
+  });
+
+  it("enforces abandon outcomes and accepts cancelled finalization", () => {
+    expect(
+      tasksResponseSchemas.abandonOperation.safeParse({
+        outcome: "abandoned",
+        operation,
+        milestone: operation.milestone,
+      }).success,
+    ).toBe(false);
+    expect(
+      tasksResponseSchemas.abandonOperation.safeParse({
+        outcome: "recovered",
+        operation: null,
+        milestone: operation.milestone,
+      }).success,
+    ).toBe(false);
+    expect(
+      tasksResponseSchemas.finalizeOrder.parse({
+        workOrder: { id: ID, state: "cancelled", completedAt: null },
+      }),
+    ).toMatchObject({ workOrder: { state: "cancelled", completedAt: null } });
   });
 });
 

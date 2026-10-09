@@ -118,6 +118,14 @@ export async function taskRequest<T>(
     }
     if (error instanceof TasksClientError) {
       if (error.code === "invalid_input") throw new TaskInputError(error.message);
+      if (error.status === 403 && error.serverCode === "insufficient_scope") {
+        throw new TaskOperationError(
+          "insufficient_scope",
+          options.signInHint.includes("auth.link")
+            ? "This sign-in lacks Tasks access. Call auth.link again."
+            : "This sign-in lacks Tasks access. Run vapi login again.",
+        );
+      }
       if (
         error.status === 404 &&
         PENDING_SERVER_ROUTES.has(route) &&
@@ -133,9 +141,7 @@ export async function taskRequest<T>(
       )
         throw new TaskOperationError(
           "not_signed_in",
-          route === "createOrder" || route === "propose"
-            ? `${verb} needs sign-in. ${options.signInHint}`
-            : `${verb} needs sign-in. This server does not accept bearer tokens on task routes yet; sign in in the console.`,
+          `${verb} needs sign-in. ${options.signInHint}`,
         );
       throw new TaskOperationError(error.serverCode ?? error.code, error.message);
     }
@@ -182,7 +188,7 @@ export async function resolveTaskBearer(args: {
 
 export const TASK_LIMITS = {
   postDeadlineMinMs: 600000,
-  proposalDurationMinMs: 3600000,
+  proposalDurationMinMs: 600000,
   proposalDurationMaxMs: 7776000000,
   proposalDurationUnitMs: 1000,
   proposalNoteMin: 1,

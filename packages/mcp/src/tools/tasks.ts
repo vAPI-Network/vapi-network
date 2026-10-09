@@ -95,7 +95,7 @@ export const tasksShowTool = descriptor(
   participant,
 );
 export const tasksPostTool = descriptor(
-  "Does not move money. Posting a task moves no money. The server stores the title and brief; validated amount, deadline, intake, max awards and webhook are returned as unsupportedFields.",
+  "Does not move money. Post a task with its market budget, deadline, intake, award limit and optional webhook.",
   {
     ...walletArgument,
     title: z.string().trim().min(TASK_LIMITS.titleMin).max(TASK_LIMITS.titleMax),
@@ -299,12 +299,15 @@ export function createTasksTools(options: TasksToolsOptions) {
       return taskResult(await showTask(ctx, { id: input.id, signedIn: Boolean(ctx.token) }));
     },
     async post(input: Input<typeof tasksPostTool>) {
-      if (parseTaskDuration(input.deadline, now()) < TASK_LIMITS.postDeadlineMinMs)
+      const postedAt = now();
+      const deadlineDuration = parseTaskDuration(input.deadline, postedAt);
+      if (deadlineDuration < TASK_LIMITS.postDeadlineMinMs)
         throw new TaskInputError("deadline must be at least 10 minutes from now.");
       const ctx = await acting(input.wallet);
       const outcome = await postTask(ctx, {
         order: { title: input.title, description: input.brief, policyFamily: "general-digital" },
         amount: parseUsdToBaseUnits(input.amountUsd),
+        deadlineAt: new Date(postedAt.getTime() + deadlineDuration).toISOString(),
         ...(input.intake === undefined ? {} : { intake: input.intake }),
         ...(input.maxAwards === undefined ? {} : { maxAwards: input.maxAwards }),
         ...(input.webhookUrl === undefined ? {} : { webhook: input.webhookUrl }),
@@ -324,9 +327,7 @@ export function createTasksTools(options: TasksToolsOptions) {
         duration > TASK_LIMITS.proposalDurationMaxMs ||
         duration % TASK_LIMITS.proposalDurationUnitMs !== 0
       )
-        throw new TaskInputError(
-          "duration must be whole seconds between one hour and 90 days under the current contract.",
-        );
+        throw new TaskInputError("duration must be whole seconds between 10 minutes and 90 days.");
       const ctx = await acting(input.wallet);
       return taskResult(
         await proposeTask(ctx, {

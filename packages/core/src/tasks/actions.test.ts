@@ -367,6 +367,15 @@ describe("task funding", () => {
 
   it("uses no fee when readiness omits it or fails", async () => {
     const args = await funding();
+    args.client.deployment.mockResolvedValueOnce({ configured: false, feeBp: null });
+    expect(await fundTask(args)).toMatchObject({
+      money: {
+        feeBp: null,
+        fee: null,
+        net: null,
+        line: "$100.00 gross · fee unavailable",
+      },
+    });
     args.client.deployment.mockResolvedValueOnce({ configured: false });
     expect(await fundTask(args)).toMatchObject({
       money: { feeBp: null, line: "$100.00 gross · fee unavailable" },

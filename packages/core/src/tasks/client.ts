@@ -3,8 +3,11 @@ import { z } from "zod";
 import { createPublicFetch } from "../net-guard.js";
 import {
   boardQuerySchema,
+  configureWebhookInputSchema,
   eventsQuerySchema,
   feedQuerySchema,
+  operationMutationInputSchema,
+  operationStepInputSchema,
   proposeInputSchema,
   submitInputSchema,
   tasksResponseSchemas,
@@ -12,6 +15,7 @@ import {
 import type {
   AcceptProposalInput,
   BoardQuery,
+  ConfigureWebhookInput,
   CreateOrderInput,
   CreateUploadInput,
   DeliverEscrowInput,
@@ -22,6 +26,8 @@ import type {
   FundEscrowInput,
   ListMessagesQuery,
   ListOrdersQuery,
+  OperationMutationInput,
+  OperationStepInput,
   ProposeInput,
   ProposeScopeInput,
   SendMessageInput,
@@ -80,7 +86,9 @@ const serverErrorSchema = z.object({
   message: z.string().optional().catch(undefined),
 });
 
-/** HTTP transport for task routes; signing happens outside this client. */
+/** HTTP transport for Tasks; OAuth reads use tasks:read and writes use tasks:write.
+ * Signing happens outside this client.
+ */
 export function createTasksClient(options: TasksClientOptions): TasksClient {
   let base: URL;
   try {
@@ -268,7 +276,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
 
   const client = {
     /** Use scope: "public" for anonymous reads; the server defaults to "private".
-     * Bearer access arrives with plan 032 Lane B6; the route needs a browser session today.
      */
     listOrders(input: ListOrdersQuery = {}, call: TasksRequestOptions = {}) {
       return request(
@@ -278,8 +285,7 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         call,
       );
     },
-    /** Anonymous reads return the public projection; private reads require a session.
-     * Bearer access arrives with plan 032 Lane B6; the route needs a browser session today.
+    /** Anonymous reads return the public projection; private reads accept scoped OAuth or a session.
      */
     getOrder(id: string, call: TasksRequestOptions = {}) {
       return request(`/v1/work-orders/${segment(id)}`, "GET", tasksResponseSchemas.getOrder, call);
@@ -302,7 +308,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         { ...call, body: proposal },
       );
     },
-    /** (plan 032 Lane B; not on the server yet) */
     async submit(id: string, submission: SubmitInput, call: TasksMutationOptions) {
       input(submitInputSchema, submission);
       return request(
@@ -313,7 +318,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         { ...call, body: submission },
       );
     },
-    /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
     acceptProposal(id: string, input: AcceptProposalInput, call: TasksMutationOptions) {
       return request(
         `/v1/work-orders/${segment(id)}/accept`,
@@ -322,7 +326,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         { ...call, body: input },
       );
     },
-    /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
     getScopes(id: string, call: TasksRequestOptions = {}) {
       return request(
         `/v1/work-orders/${segment(id)}/scopes`,
@@ -332,7 +335,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
       );
     },
     /** Proposes an already signed scope; acceptance is a separate signScope call.
-     * Bearer access arrives with plan 032 Lane B6; the route needs a browser session today.
      */
     proposeScope(id: string, input: ProposeScopeInput, call: TasksMutationOptions) {
       return request(
@@ -343,7 +345,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
       );
     },
     /** Accepts a scope using the supplied signature; no signing occurs here.
-     * Bearer access arrives with plan 032 Lane B6; the route needs a browser session today.
      */
     signScope(scopeId: string, input: SignScopeInput, call: TasksMutationOptions) {
       return request(`/v1/scopes/${segment(scopeId)}`, "POST", tasksResponseSchemas.signScope, {
@@ -351,7 +352,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         body: { ...input, action: "accept" },
       });
     },
-    /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
     listMessages(id: string, input: ListMessagesQuery = {}, call: TasksRequestOptions = {}) {
       return request(
         `/v1/work-orders/${segment(id)}/messages${query(input)}`,
@@ -360,7 +360,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         call,
       );
     },
-    /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
     sendMessage(id: string, input: SendMessageInput, call: TasksMutationOptions) {
       return request(
         `/v1/work-orders/${segment(id)}/messages`,
@@ -370,7 +369,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
       );
     },
     /** Prepares a transaction operation.
-     * Bearer access arrives with plan 032 Lane B6; the route needs a browser session today.
      */
     createEscrow(id: string, call: TasksMutationOptions) {
       return request(
@@ -381,7 +379,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
       );
     },
     /** Prepares funding with an already signed authorization when ERC-3009 is enabled.
-     * Bearer access arrives with plan 032 Lane B6; the route needs a browser session today.
      */
     fundEscrow(id: string, input: FundEscrowInput, call: TasksMutationOptions) {
       return request(`/v1/escrows/${segment(id)}/fund`, "POST", tasksResponseSchemas.fundEscrow, {
@@ -390,7 +387,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
       });
     },
     /** Prepares delivery from finalized files and a note before chain broadcast.
-     * Bearer access arrives with plan 032 Lane B6; the route needs a browser session today.
      */
     deliverEscrow(id: string, input: DeliverEscrowInput, call: TasksMutationOptions) {
       return request(
@@ -400,7 +396,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         { ...call, body: input },
       );
     },
-    /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
     releaseEscrow(id: string, call: TasksMutationOptions) {
       return request(
         `/v1/escrows/${segment(id)}/release`,
@@ -409,7 +404,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         { ...call, body: {} },
       );
     },
-    /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
     refundEscrow(id: string, call: TasksMutationOptions) {
       return request(
         `/v1/escrows/${segment(id)}/refund`,
@@ -418,7 +412,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         { ...call, body: {} },
       );
     },
-    /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
     disputeEscrow(id: string, input: DisputeEscrowInput, call: TasksMutationOptions) {
       return request(
         `/v1/escrows/${segment(id)}/dispute`,
@@ -427,7 +420,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         { ...call, body: input },
       );
     },
-    /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
     chainState(id: string, call: TasksRequestOptions = {}) {
       return request(
         `/v1/work-orders/${segment(id)}/chain-state`,
@@ -436,7 +428,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         call,
       );
     },
-    /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
     createUpload(input: CreateUploadInput, call: TasksRequestOptions = {}) {
       return request("/v1/files", "POST", tasksResponseSchemas.createUpload, {
         ...call,
@@ -444,7 +435,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
       });
     },
     /** The server computes sha256 when finalizing the stored bytes.
-     * Bearer access arrives with plan 032 Lane B6; the route needs a browser session today.
      */
     finalizeUpload(id: string, call: TasksRequestOptions = {}) {
       return request(
@@ -455,7 +445,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
       );
     },
     /** Defaults to a delivery file with text/plain content type.
-     * Bearer access arrives with plan 032 Lane B6; the route needs a browser session today.
      */
     async uploadFile(
       input: UploadFileInput,
@@ -482,7 +471,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
     deployment(call: TasksRequestOptions = {}) {
       return request("/api/tasks/readiness", "GET", tasksResponseSchemas.deployment, call);
     },
-    /** (plan 032 Lane B; not on the server yet) */
     async events(id: string, values: EventsQuery = {}, call: TasksRequestOptions = {}) {
       const params = input(eventsQuerySchema, values);
       return request(
@@ -492,7 +480,66 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         { ...call, timeoutFloorMs: ((params.wait ?? 0) + 10) * 1_000 },
       );
     },
-    /** (plan 032 Lane B; not on the server yet) */
+    recordTransaction(id: string, values: OperationMutationInput, call: TasksMutationOptions) {
+      const body = input(operationMutationInputSchema, values);
+      return request(
+        `/v1/work-operations/${segment(id)}/transactions`,
+        "POST",
+        tasksResponseSchemas.recordTransaction,
+        { ...call, body },
+      );
+    },
+    reconcileOperation(id: string, values: OperationMutationInput, call: TasksMutationOptions) {
+      const body = input(operationMutationInputSchema, values);
+      return request(
+        `/v1/work-operations/${segment(id)}/reconcile`,
+        "POST",
+        tasksResponseSchemas.reconcileOperation,
+        { ...call, body },
+      );
+    },
+    recoverOperation(id: string, values: OperationStepInput, call: TasksMutationOptions) {
+      const body = input(operationStepInputSchema, values);
+      return request(
+        `/v1/work-operations/${segment(id)}/recover`,
+        "POST",
+        tasksResponseSchemas.recoverOperation,
+        { ...call, body },
+      );
+    },
+    abandonOperation(id: string, values: OperationStepInput, call: TasksMutationOptions) {
+      const body = input(operationStepInputSchema, values);
+      return request(
+        `/v1/work-operations/${segment(id)}/abandon`,
+        "POST",
+        tasksResponseSchemas.abandonOperation,
+        { ...call, body },
+      );
+    },
+    finalizeEscrow(id: string, call: TasksMutationOptions) {
+      return request(
+        `/v1/escrows/${segment(id)}/finalize`,
+        "POST",
+        tasksResponseSchemas.finalizeEscrow,
+        { ...call, body: {} },
+      );
+    },
+    finalizeOrder(id: string, call: TasksMutationOptions) {
+      return request(
+        `/v1/work-orders/${segment(id)}/finalize`,
+        "POST",
+        tasksResponseSchemas.finalizeOrder,
+        { ...call, body: {} },
+      );
+    },
+    configureWebhook(id: string, values: ConfigureWebhookInput, call: TasksRequestOptions = {}) {
+      return request(
+        `/v1/work-orders/${segment(id)}/webhook`,
+        "POST",
+        tasksResponseSchemas.configureWebhook,
+        { ...call, body: input(configureWebhookInputSchema, values) },
+      );
+    },
     async board(values: BoardQuery = {}, call: TasksRequestOptions = {}) {
       return request(
         `/api/board${query(input(boardQuerySchema, values))}`,
@@ -501,7 +548,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         { ...call, publicRead: true },
       );
     },
-    /** (plan 032 Lane B; not on the server yet) */
     async feed(values: FeedQuery = {}, call: TasksRequestOptions = {}) {
       return request(
         `/api/board/feed${query(input(feedQuerySchema, values))}`,
@@ -510,7 +556,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         { ...call, publicRead: true },
       );
     },
-    /** (plan 032 Lane B; not on the server yet) */
     publicTask(id: string, call: TasksRequestOptions = {}) {
       return request(`/api/tasks/${segment(id)}`, "GET", tasksResponseSchemas.publicTask, {
         ...call,
@@ -518,7 +563,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         notFoundAsNull: true,
       });
     },
-    /** (plan 032 Lane B; not on the server yet) */
     receipt(escrow: string, call: TasksRequestOptions = {}) {
       return request(`/api/receipts/${segment(escrow)}`, "GET", tasksResponseSchemas.receipt, {
         ...call,
@@ -526,7 +570,6 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         notFoundAsNull: true,
       });
     },
-    /** (plan 032 Lane B; not on the server yet) */
     earn(call: TasksRequestOptions = {}) {
       return request("/api/earn", "GET", tasksResponseSchemas.earn, { ...call, publicRead: true });
     },
@@ -540,14 +583,12 @@ type TaskResponse<Method extends keyof typeof tasksResponseSchemas> = z.infer<
 
 export type TasksClient = {
   /** Public scope is anonymous; the server defaults to private scope.
-   * Bearer access arrives with plan 032 Lane B6; the route needs a browser session today.
    */
   listOrders(
     input?: ListOrdersQuery,
     call?: TasksRequestOptions,
   ): Promise<TaskResponse<"listOrders">>;
-  /** Anonymous reads return the public projection; private reads require a session.
-   * Bearer access arrives with plan 032 Lane B6; the route needs a browser session today.
+  /** Anonymous reads return the public projection; private reads accept scoped OAuth or a session.
    */
   getOrder(id: string, call?: TasksRequestOptions): Promise<TaskResponse<"getOrder">>;
   createOrder(
@@ -559,94 +600,98 @@ export type TasksClient = {
     input: ProposeInput,
     call: TasksMutationOptions,
   ): Promise<TaskResponse<"propose">>;
-  /** (plan 032 Lane B; not on the server yet) */
   submit(
     id: string,
     input: SubmitInput,
     call: TasksMutationOptions,
   ): Promise<TaskResponse<"submit">>;
-  /** (plan 032 Lane B; not on the server yet) */
   events(
     id: string,
     input?: EventsQuery,
     call?: TasksRequestOptions,
   ): Promise<TaskResponse<"events">>;
-  /** (plan 032 Lane B; not on the server yet) */
   board(input?: BoardQuery, call?: TasksRequestOptions): Promise<TaskResponse<"board">>;
-  /** (plan 032 Lane B; not on the server yet) */
   feed(input?: FeedQuery, call?: TasksRequestOptions): Promise<TaskResponse<"feed">>;
-  /** (plan 032 Lane B; not on the server yet) */
   publicTask(id: string, call?: TasksRequestOptions): Promise<TaskResponse<"publicTask">>;
-  /** (plan 032 Lane B; not on the server yet) */
   receipt(escrow: string, call?: TasksRequestOptions): Promise<TaskResponse<"receipt">>;
-  /** (plan 032 Lane B; not on the server yet) */
   earn(call?: TasksRequestOptions): Promise<TaskResponse<"earn">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   acceptProposal(
     id: string,
     input: AcceptProposalInput,
     call: TasksMutationOptions,
   ): Promise<TaskResponse<"acceptProposal">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   getScopes(id: string, call?: TasksRequestOptions): Promise<TaskResponse<"getScopes">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   proposeScope(
     id: string,
     input: ProposeScopeInput,
     call: TasksMutationOptions,
   ): Promise<TaskResponse<"proposeScope">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   signScope(
     scopeId: string,
     input: SignScopeInput,
     call: TasksMutationOptions,
   ): Promise<TaskResponse<"signScope">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   listMessages(
     id: string,
     input?: ListMessagesQuery,
     call?: TasksRequestOptions,
   ): Promise<TaskResponse<"listMessages">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   sendMessage(
     id: string,
     input: SendMessageInput,
     call: TasksMutationOptions,
   ): Promise<TaskResponse<"sendMessage">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   createEscrow(id: string, call: TasksMutationOptions): Promise<TaskResponse<"createEscrow">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   fundEscrow(
     id: string,
     input: FundEscrowInput,
     call: TasksMutationOptions,
   ): Promise<TaskResponse<"fundEscrow">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   deliverEscrow(
     id: string,
     input: DeliverEscrowInput,
     call: TasksMutationOptions,
   ): Promise<TaskResponse<"deliverEscrow">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   releaseEscrow(id: string, call: TasksMutationOptions): Promise<TaskResponse<"releaseEscrow">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   refundEscrow(id: string, call: TasksMutationOptions): Promise<TaskResponse<"refundEscrow">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   disputeEscrow(
     id: string,
     input: DisputeEscrowInput,
     call: TasksMutationOptions,
   ): Promise<TaskResponse<"disputeEscrow">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   chainState(id: string, call?: TasksRequestOptions): Promise<TaskResponse<"chainState">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   createUpload(
     input: CreateUploadInput,
     call?: TasksRequestOptions,
   ): Promise<TaskResponse<"createUpload">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   finalizeUpload(id: string, call?: TasksRequestOptions): Promise<TaskResponse<"finalizeUpload">>;
-  /** Bearer access arrives with plan 032 Lane B6; the route needs a browser session today. */
   uploadFile(input: UploadFileInput, call?: TasksRequestOptions): Promise<FinalizeUploadResponse>;
   deployment(call?: TasksRequestOptions): Promise<TaskResponse<"deployment">>;
+  recordTransaction(
+    id: string,
+    input: OperationMutationInput,
+    call: TasksMutationOptions,
+  ): Promise<TaskResponse<"recordTransaction">>;
+  reconcileOperation(
+    id: string,
+    input: OperationMutationInput,
+    call: TasksMutationOptions,
+  ): Promise<TaskResponse<"reconcileOperation">>;
+  recoverOperation(
+    id: string,
+    input: OperationStepInput,
+    call: TasksMutationOptions,
+  ): Promise<TaskResponse<"recoverOperation">>;
+  abandonOperation(
+    id: string,
+    input: OperationStepInput,
+    call: TasksMutationOptions,
+  ): Promise<TaskResponse<"abandonOperation">>;
+  finalizeEscrow(id: string, call: TasksMutationOptions): Promise<TaskResponse<"finalizeEscrow">>;
+  finalizeOrder(id: string, call: TasksMutationOptions): Promise<TaskResponse<"finalizeOrder">>;
+  configureWebhook(
+    id: string,
+    input: ConfigureWebhookInput,
+    call?: TasksRequestOptions,
+  ): Promise<TaskResponse<"configureWebhook">>;
 };

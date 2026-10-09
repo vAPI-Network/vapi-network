@@ -407,6 +407,11 @@ describe("task wallet and route boundaries", () => {
       .mockResolvedValue({ wallet: { name: "work" }, account: { ...signer, signMessage } });
     const proposal = vi.fn(async () => ({ proposal: { id: ESCROW } }));
     const submission = vi.fn(async () => ({ submission: { id: ESCROW } }));
+    const createOrder = vi.fn(async () => ({ workOrder: { id: ID } }));
+    const configureWebhook = vi.fn(async () => ({
+      webhookUrl: "https://example.test/hook",
+      secret: "webhook-secret",
+    }));
     const deployment = {
       configured: true,
       feeBp: 250,
@@ -425,18 +430,31 @@ describe("task wallet and route boundaries", () => {
       deployment: vi.fn(async () => deployment),
       propose: proposal,
       submit: submission,
+      createOrder,
+      configureWebhook,
+      sendMessage: vi.fn(async () => {
+        throw new TasksClientError("http", "Denied", 403, "insufficient_scope");
+      }),
       publicTask: vi.fn(async () => ({
         id: ID,
         title: "Write a report",
         briefFull: "Write a complete useful report.",
         durationSeconds: 3600,
-        amount: { gross: "0.10" },
+        amount: { gross: "100000" },
       })),
     } as unknown as TasksClient;
-    const factory = vi.fn<(options: TasksClientOptions) => TasksClient>(() => client);
+    let clock = Date.parse(NOW);
+    let advanceDuringClientSetup = false;
+    const factory = vi.fn<(options: TasksClientOptions) => TasksClient>(() => {
+      if (advanceDuringClientSetup) {
+        clock += 5 * 60 * 1_000;
+        advanceDuringClientSetup = false;
+      }
+      return client;
+    });
     const { server, store, secrets } = await watchServer({
       client: factory,
-      now: () => new Date(NOW),
+      now: () => new Date(clock),
     });
     await store.create("work", "");
     await store.setLink("work", {
@@ -462,7 +480,7 @@ describe("task wallet and route boundaries", () => {
         id: ID,
         wallet: "work",
         priceUsd: "0.10",
-        duration: "1h",
+        duration: "10m",
         note: "A complete proposal note.",
       },
     });
@@ -470,8 +488,48 @@ describe("task wallet and route boundaries", () => {
       name: "tasks.submit",
       arguments: { id: ID, wallet: "work", proofUrls: ["https://example.test/proof"] },
     });
+    advanceDuringClientSetup = true;
+    const posted = await server.callTool({
+      name: "tasks.post",
+      arguments: {
+        wallet: "work",
+        title: "Build an API",
+        brief: "Build a complete useful API.",
+        amountUsd: "12.50",
+        deadline: "10m",
+        intake: "submissions",
+        maxAwards: 3,
+        webhookUrl: "https://example.test/hook",
+      },
+    });
+    const insufficient = await server.callTool({
+      name: "tasks.message",
+      arguments: { id: ID, wallet: "work", text: "Hello" },
+    });
     expect(proposed.isError, JSON.stringify(proposed)).not.toBe(true);
     expect(submitted.isError, JSON.stringify(submitted)).not.toBe(true);
+    expect(posted.isError, JSON.stringify(posted)).not.toBe(true);
+    expect(createOrder).toHaveBeenCalledWith(
+      {
+        title: "Build an API",
+        description: "Build a complete useful API.",
+        policyFamily: "general-digital",
+        market: {
+          intake: "submissions",
+          maxAwards: 3,
+          audience: "anyone",
+          proofKinds: ["url", "file"],
+          budget: { network: "eip155:8453", asset: "USDC", amountBaseUnits: "12500000" },
+          deadlineAt: "2026-10-08T12:10:00.000Z",
+        },
+      },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(configureWebhook).toHaveBeenCalledWith(ID, { url: "https://example.test/hook" });
+    expect(JSON.parse(insufficient.content[0]!.text)).toEqual({
+      code: "insufficient_scope",
+      message: "This sign-in lacks Tasks access. Call auth.link again.",
+    });
     expect(payment.mock.calls).toEqual([["work"], ["work"]]);
     expect(signMessage).toHaveBeenCalledTimes(2);
     for (const [input] of signMessage.mock.calls) expect(typeof input.message).toBe("string");
@@ -698,7 +756,7 @@ describe("task MCP tools", () => {
           "tasks.post",
           { title: "A task", brief: "A sufficiently long brief", amountUsd: "0", deadline: "10m" },
         ],
-        ["tasks.propose", { id: ID, priceUsd: "1", duration: "59m", note: "Terms" }],
+        ["tasks.propose", { id: ID, priceUsd: "1", duration: "9m", note: "Terms" }],
         ["tasks.submit", { id: ID, proofUrls: ["http://example.test/proof"] }],
       ] as const;
       for (const [name, arguments_] of invalidCalls) {
@@ -867,7 +925,7 @@ describe("task MCP tools", () => {
         });
         expect(unauthorized).toMatchObject({ isError: true });
         expect(JSON.stringify(unauthorized)).toContain(
-          "message needs sign-in. This server does not accept bearer tokens on task routes yet; sign in in the console.",
+          "message needs sign-in. Call auth.link for the acting wallet.",
         );
         const ledgerBeforeRefusal = await readFile(ledgerPath);
         await mkdir(join(home, "agents"));

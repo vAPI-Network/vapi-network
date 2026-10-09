@@ -353,7 +353,7 @@ describe("tasks client events", () => {
     ).toBe(true);
   });
 
-  it.each([{ after: -1 }, { after: 1.5 }, { wait: -1 }, { wait: 26 }])(
+  it.each([{ after: -1 }, { after: 1.5 }, { wait: 0.5 }, { wait: Number.MAX_SAFE_INTEGER + 1 }])(
     "rejects invalid event query %# without fetching",
     async (input) => {
       const fetch = vi.fn();
@@ -422,7 +422,7 @@ describe("tasks client events", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("uses a fractional wait when calculating the timeout floor", async () => {
+  it("clamps wait before calculating the timeout floor", async () => {
     vi.useFakeTimers();
     const fetch = vi.fn(
       (_input: RequestInfo | URL, init?: RequestInit) =>
@@ -436,9 +436,9 @@ describe("tasks client events", () => {
       baseUrl: "https://tasks.example",
       fetch,
       timeoutMs: 1_000,
-    }).events(ID, { wait: 0.5 });
+    }).events(ID, { wait: 99 });
     const assertion = expect(pending).rejects.toMatchObject({ code: "timeout" });
-    await vi.advanceTimersByTimeAsync(10_499);
+    await vi.advanceTimersByTimeAsync(34_999);
     expect(fetch).toHaveBeenCalledOnce();
     await vi.advanceTimersByTimeAsync(1);
     await assertion;
