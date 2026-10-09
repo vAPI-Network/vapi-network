@@ -288,6 +288,9 @@ function operationFixture(amountBaseUnits = "100000000") {
     release: vi.fn(),
     refund: vi.fn(),
     dispute: vi.fn(),
+    disputeFee: vi.fn(),
+    counterEvidence: vi.fn(),
+    resolveUnmatched: vi.fn(),
     signScopeMessage: vi.fn(),
   };
   return {

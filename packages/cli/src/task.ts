@@ -14,11 +14,14 @@ import {
   awardTask,
   cachedMoneyClient,
   createTasksClient,
+  createScopeBindings,
   createPendingTransactions,
   createTasksChain,
   createTasksRpcFor,
   deliverTaskOperation,
   disputeTaskOperation,
+  counterEvidenceTaskOperation,
+  resolveUnmatchedTaskOperation,
   fundTaskOperation,
   formatBaseUnitsUsd,
   messageTask,
@@ -41,6 +44,7 @@ import {
   submitTask,
   taskEventState,
   taskMoney,
+  taskFeeReservationKey,
   taskMoneySnapshot,
   taskPolicyForWallet,
   taskRequest as coreTaskRequest,
@@ -94,15 +98,17 @@ export const TASK_HELP = `Usage:
   vapi task propose <id> --price <usd> --duration <duration> --note <text> [--account <name>] [--json]
   vapi task submit <id> --proof <https-url> [--proof <https-url>...] [--file <path>...] [--account <name>] [--json]
   vapi task award <id> <proposalId> [--account <name>] [--json]
-  vapi task sign <id> [--account <name>] [--json]
-  vapi task fund <id> [--yes] [--account <name>] [--json]
-  vapi task deliver <id> --files <path...> --note <text> [--account <name>] [--json]
-  vapi task release <id> [--account <name>] [--json]
-  vapi task refund <id> [--account <name>] [--json]
-  vapi task dispute <id> --evidence-hash <0x + 64 hex> [--account <name>] [--json]
+  vapi task sign <id> [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task fund <id> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task deliver <id> --files <path...> --note <text> [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task release <id> [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task refund <id> [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task dispute <id> --evidence-hash <0x + 64 hex> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task counter-evidence <id> --evidence-hash <0x + 64 hex> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task resolve-unmatched <id> [--counterparty <0x…>] [--account <name>] [--json]
   vapi task message <id> <text> [--account <name>] [--json]
   vapi task thread <id> [--after <cursor>] [--account <name>] [--json]
-  vapi task watch <id> [--until <state>] [--auto-release] [--timeout 7d] [--interval 5s] [--account <name>] [--json]
+  vapi task watch <id> [--until <state>] [--auto-release] [--timeout 7d] [--interval 5s] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task status <id> [--account <name>] [--json]
 
 Durations: 5s, 10m, 48h, 7d, or an ISO-8601 timestamp. Posting and proposal terms require at least 10 minutes.
@@ -118,7 +124,7 @@ Exit codes:
   2  policy refusal only (JSON ok:false with reason policy.perTask or policy.perDay)
   3  approval needed in non-interactive mode
 
-Fund, deliver, release, refund, dispute and watch auto-release sign with the local vault wallet. The CLI waits for two confirmations and records pending transactions for recovery. It never retries a chain mutation automatically.`;
+Fund, deliver, release, refund, dispute, counter-evidence, resolve-unmatched and watch auto-release sign with the local vault wallet. The CLI waits for two confirmations and records pending transactions for recovery. It never retries a chain mutation automatically.`;
 
 const IMPLEMENTED_VERBS = TASKS_CLIENT_VERBS;
 const USAGE = `Usage: vapi task <${IMPLEMENTED_VERBS.join("|")}>. Run vapi task --help.`;
@@ -182,8 +188,41 @@ function lazyTasksChain(
       if (error instanceof TasksChainError) throw error;
       throw safeTasksChainError(error, false, false);
     }));
+  async function feeChain(
+    action: "dispute" | "counter-evidence",
+    input: Parameters<TasksChain["dispute"]>[0],
+  ) {
+    let initialized: TasksChain;
+    try {
+      initialized = await get();
+    } catch (error) {
+      let exposed = true;
+      try {
+        exposed = await pending.exposure(taskFeeReservationKey(input.escrowId, action));
+      } catch {
+        /* A failed read cannot prove rollback is safe. */
+      }
+      throw safeTasksChainError(
+        error,
+        error instanceof TasksChainError && error.broadcast,
+        exposed,
+      );
+    }
+    return action === "dispute" ? initialized.dispute(input) : initialized.counterEvidence(input);
+  }
   return {
     available: true,
+    getSigningAddress: async () => {
+      const initialized = await get();
+      const address = initialized.signingAddress ?? (await initialized.getSigningAddress?.());
+      if (!address)
+        throw new TasksChainError(
+          "A local signing wallet is required for accepted scope recovery.",
+          false,
+          { authorizationExposed: false },
+        );
+      return address;
+    },
     createEscrow: async (input) => (await get()).createEscrow(input),
     fund: async (input) => {
       let initialized: TasksChain;
@@ -207,7 +246,11 @@ function lazyTasksChain(
     deliver: async (input) => (await get()).deliver(input),
     release: async (input) => (await get()).release(input),
     refund: async (input) => (await get()).refund(input),
-    dispute: async (input) => (await get()).dispute(input),
+    dispute: async (input) => feeChain("dispute", input),
+    disputeFee: async (input) => (await get()).disputeFee(input),
+    counterEvidence: async (input) => feeChain("counter-evidence", input),
+    resolveUnmatched: async (input) => (await get()).resolveUnmatched(input),
+    bindScope: async (binding) => (await get()).bindScope?.(binding),
     signScopeMessage: async (message) => (await get()).signScopeMessage(message),
   };
 }
@@ -270,6 +313,8 @@ export async function taskContext(
             client,
             account,
             trustedFactories: config.tasksEscrowFactoryOverrides,
+            trustedDurations: config.tasksEscrowDurationOverrides,
+            bindings: createScopeBindings(getVapiPaths().directory),
             rpcFor: createTasksRpcFor(config, {
               env,
               ...(dependencies.fetchImpl === undefined ? {} : { fetch: dependencies.fetchImpl }),
@@ -368,6 +413,19 @@ async function taskCommandInner(
   const parsed = parseArguments(commandArguments, {
     valueOptions: new Set([
       "--wallet",
+      ...([
+        "sign",
+        "fund",
+        "deliver",
+        "release",
+        "refund",
+        "dispute",
+        "counter-evidence",
+        "resolve-unmatched",
+        "watch",
+      ].includes(verb!)
+        ? ["--counterparty"]
+        : []),
       ...(verb === "search"
         ? ["--min", "--tab", "--limit"]
         : verb === "post"
@@ -388,7 +446,7 @@ async function taskCommandInner(
                 ? ["--after"]
                 : verb === "deliver"
                   ? ["--files", "--note"]
-                  : verb === "dispute"
+                  : ["dispute", "counter-evidence"].includes(verb!)
                     ? ["--evidence-hash"]
                     : verb === "watch"
                       ? ["--until", "--timeout", "--interval"]
@@ -396,7 +454,7 @@ async function taskCommandInner(
     ]),
     booleanOptions: new Set([
       ...(verb === "search" ? ["--open"] : []),
-      ...(verb === "fund" ? ["--yes"] : []),
+      ...(["fund", "dispute", "counter-evidence"].includes(verb!) ? ["--yes"] : []),
       ...(verb === "watch" ? ["--auto-release"] : []),
     ]),
     repeatableOptions: new Set([
@@ -410,7 +468,19 @@ async function taskCommandInner(
         : 1,
   });
   const id = ["search", "post"].includes(verb!) ? undefined : taskId(parsed.positionals[0]);
-  if (["sign", "fund", "deliver", "release", "refund", "dispute", "watch"].includes(verb!)) {
+  if (
+    [
+      "sign",
+      "fund",
+      "deliver",
+      "release",
+      "refund",
+      "dispute",
+      "counter-evidence",
+      "resolve-unmatched",
+      "watch",
+    ].includes(verb!)
+  ) {
     return await escrowTaskCommand(verb!, id!, parsed, json, io, dependencies, now);
   }
   if (verb === "search") {
@@ -625,8 +695,12 @@ async function escrowTaskCommand(
   dependencies: CliDependencies,
   now: Date,
 ): Promise<number | undefined> {
+  taskCounterparty(parsed);
   if (verb === "watch") return await watchTask(id, parsed, json, io, dependencies, now);
-  const disputeEvidenceHash = verb === "dispute" ? required(parsed, "--evidence-hash") : undefined;
+  const disputeEvidenceHash = ["dispute", "counter-evidence"].includes(verb)
+    ? required(parsed, "--evidence-hash")
+    : undefined;
+  const counterparty = taskCounterparty(parsed);
   if (
     disputeEvidenceHash !== undefined &&
     !TASK_LIMITS.disputeEvidenceHash.test(disputeEvidenceHash)
@@ -658,28 +732,30 @@ async function escrowTaskCommand(
   const target = signedIn(context);
 
   if (verb === "sign") {
+    const displayContext = { ...context };
+    delete displayContext.target;
     try {
       const result = await signTaskScope(context, {
         id,
+        ...(counterparty === undefined ? {} : { counterparty }),
+        bindings: createScopeBindings(getVapiPaths().directory),
+        onTerms: async (terms) => {
+          if (!json)
+            taskOutput(io, false, context, verb, {}, [await scopeTermsLine(context.client, terms)]);
+        },
         signMessage: async (message) => {
           const { account } = await unlockTarget(target, dependencies);
           return await account.signMessage({ message });
         },
       });
-      const termsLine = json ? undefined : await scopeTermsLine(context.client, result.terms);
-      taskOutput(io, json, context, verb, result, [
-        ...(termsLine ? [termsLine] : []),
+      taskOutput(io, json, displayContext, verb, result, [
         `Accepted scope for task ${id}.`,
         ...(result.escrowCreation ? ["Created the task escrow."] : []),
       ]);
       return;
     } catch (error) {
       if (!(error instanceof TasksScopeCreationError)) throw error;
-      const termsLine = json
-        ? undefined
-        : await scopeTermsLine(context.client, error.acceptance.terms);
-      taskOutput(io, json, context, verb, error.acceptance, [
-        ...(termsLine ? [termsLine] : []),
+      taskOutput(io, json, displayContext, verb, error.acceptance, [
         `Accepted scope for task ${id}.`,
       ]);
       return await taskRequest(verb, "createEscrow", async () => {
@@ -692,6 +768,7 @@ async function escrowTaskCommand(
     const outcome = await deliverTaskOperation(context, {
       id,
       ...delivery!,
+      ...(counterparty === undefined ? {} : { counterparty }),
       onPrepared: (manifestHash) => {
         if (!json)
           taskOutput(io, false, context, verb, {}, [`Prepared delivery manifest ${manifestHash}.`]);
@@ -706,7 +783,7 @@ async function escrowTaskCommand(
   });
   if (!json) io.stdout(snapshot.money.line);
 
-  if (verb === "fund") {
+  if (["fund", "dispute", "counter-evidence"].includes(verb)) {
     const policy = await taskPolicyForWallet({
       directory: getVapiPaths().directory,
       wallet: target.name,
@@ -722,7 +799,9 @@ async function escrowTaskCommand(
             ask: async ({ money }: { money: TaskMoney }) => {
               io.stdout("Policy: approval needed.");
               const answer = (
-                await getLinePrompt(dependencies)(`${money.line}. Approve funding? [y/N] `)
+                await getLinePrompt(dependencies)(
+                  `${verb === "fund" ? money.line : `dispute fee $${money.gross.usd} USDC`}. Approve ${verb === "fund" ? "funding" : "dispute fee"}? [y/N] `,
+                )
               )
                 .trim()
                 .toLowerCase();
@@ -730,7 +809,7 @@ async function escrowTaskCommand(
             },
           }
         : ({ granted: false } as const);
-    const outcome = await fundTaskOperation(context, {
+    const common = {
       id,
       snapshot,
       policy,
@@ -739,11 +818,27 @@ async function escrowTaskCommand(
       ledgerPath: getVapiPaths().ledger,
       now: dependencies.now ?? (() => new Date()),
       approval,
-      idempotencyKey: context.randomUUID,
-      beforeChainFund: () => {
-        if (!json) io.stdout("Policy: approved.");
-      },
-    });
+      ...(counterparty === undefined ? {} : { counterparty }),
+    };
+    const outcome =
+      verb === "fund"
+        ? await fundTaskOperation(context, {
+            ...common,
+            idempotencyKey: context.randomUUID,
+            beforeChainFund: () => {
+              if (!json) io.stdout("Policy: approved.");
+            },
+          })
+        : await (verb === "dispute" ? disputeTaskOperation : counterEvidenceTaskOperation)(
+            context,
+            {
+              ...common,
+              evidenceHash: disputeEvidenceHash!,
+              onFee: (fee) => {
+                if (!json) io.stdout(`dispute fee $${formatBaseUnitsUsd(fee)} USDC`);
+              },
+            },
+          );
     if (!outcome.ok && "reason" in outcome) {
       if (json) taskOutput(io, true, context, verb, outcome, []);
       else io.stderr(`Policy: refused (${outcome.reason}).`);
@@ -755,27 +850,20 @@ async function escrowTaskCommand(
     }
     if (!outcome.ok && "declined" in outcome)
       throw new TaskCommandError("not_approved", "Not approved; nothing was signed.");
-    taskOutput(io, json, context, verb, outcome, [`Funded task ${id}.`]);
+    taskOutput(io, json, context, verb, outcome, [
+      verb === "fund" ? `Funded task ${id}.` : `Completed task ${verb} for ${id}.`,
+    ]);
     return;
   }
 
-  let result:
-    | Awaited<ReturnType<typeof releaseTaskOperation>>
-    | Awaited<ReturnType<typeof disputeTaskOperation>>;
   if (!json) io.stdout("Policy: explicit user instruction.");
-  if (verb === "release") {
-    result = await releaseTaskOperation(context, { id, snapshot });
-  } else if (verb === "refund") {
-    result = await refundTaskOperation(context, { id, snapshot });
-  } else {
-    const disputeFeeNote = "The contract charges a dispute fee; the amount is unavailable.";
-    if (!json) io.stdout(disputeFeeNote);
-    result = await disputeTaskOperation(context, {
-      id,
-      snapshot,
-      evidenceHash: disputeEvidenceHash!,
-    });
-  }
+  const settlementInput = { id, snapshot, ...(counterparty === undefined ? {} : { counterparty }) };
+  const result =
+    verb === "release"
+      ? await releaseTaskOperation(context, settlementInput)
+      : verb === "refund"
+        ? await refundTaskOperation(context, settlementInput)
+        : await resolveUnmatchedTaskOperation(context, settlementInput);
   taskOutput(io, json, context, verb, result, [`Completed task ${verb} for ${id}.`]);
 }
 
@@ -800,7 +888,7 @@ async function scopeTermsLine(client: TasksClient, terms: SignedScopeTerms): Pro
   const amount = isUsdc
     ? `$${formatBaseUnitsUsd(terms.amountBaseUnits)} USDC`
     : `${terms.amountBaseUnits} base units (${terms.asset})`;
-  return `${terms.title} · ${amount} · deadline ${terms.deadline}`;
+  return `${terms.title} · ${amount} · deadline ${terms.deadline} · with ${terms.counterparty}`;
 }
 
 function taskInteractive(json: boolean, dependencies: CliDependencies): boolean {
@@ -936,6 +1024,9 @@ async function watchTask(
               chain: context.chain,
               orderId: id,
               escrowId: snapshot.escrowId,
+              ...(taskCounterparty(parsed) === undefined
+                ? {}
+                : { counterparty: taskCounterparty(parsed)! }),
               idempotencyKey: context.randomUUID,
             }),
           );
@@ -1033,4 +1124,11 @@ async function readProcessStdin(): Promise<string> {
   let input = "";
   for await (const chunk of process.stdin) input += String(chunk);
   return input;
+}
+
+function taskCounterparty(parsed: Parsed): string | undefined {
+  const value = parsed.one("--counterparty");
+  if (value !== undefined && !/^0x[0-9a-fA-F]{40}$/u.test(value))
+    throw new UsageError("--counterparty must be 0x followed by 40 hexadecimal characters.");
+  return value?.toLowerCase();
 }

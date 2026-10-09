@@ -7,6 +7,7 @@ import {
   encodeFunctionResult,
   keccak256,
   parseTransaction,
+  parseAbi,
   stringToHex,
   type Address,
   type Hex,
@@ -66,6 +67,30 @@ function createTasksChain(options: Parameters<typeof createRawTasksChain>[0]) {
   return createRawTasksChain({
     ...options,
     trustedFactories: { "84532": factory },
+    bindings: options.bindings ?? {
+      get: async (identity) => {
+        const workOrder = (await options.client.getOrder(identity.orderId)).workOrder;
+        const selected =
+          workOrder.version === "work-order-view-v1"
+            ? workOrder.milestones.find((item) => item.ordinal === identity.trancheOrdinal)
+            : undefined;
+        const created =
+          selected?.escrowState === null || selected?.chainOperation?.kind === "escrow-create";
+        const onchainBuyer = await options
+          .rpcFor(84532)
+          .readContract({ address: escrow, abi: TASKS_READ_ABI, functionName: "buyer" });
+        return {
+          ...identity,
+          role:
+            created || onchainBuyer.toLowerCase() !== options.account.address.toLowerCase()
+              ? ("provider" as const)
+              : ("client" as const),
+          counterparty: buyer,
+          signedAt: "2026-01-01T00:00:00.000Z",
+        };
+      },
+      put: async () => {},
+    },
   });
 }
 
@@ -381,6 +406,13 @@ function rpcHarness(
       state: number;
       offerDeadline: bigint;
       registered: boolean;
+      workDeadline: bigint;
+      reviewDeadline: bigint;
+      disputedAt: bigint;
+      counterEvidenceDeadline: bigint;
+      opener: Address;
+      counterEvidenceSubmitted: boolean;
+      disputeFee: bigint;
     }>;
     transaction?: { to: Address; data: Hex; from?: Address };
   } = {},
@@ -388,14 +420,37 @@ function rpcHarness(
   const methods: string[] = [];
   const raw: Hex[] = [];
   const client = createPublicClient({
+    pollingInterval: 1,
     transport: custom({
       async request({ method, params }) {
         methods.push(method);
         if (method === "eth_chainId") return "0x14a34";
-        if (method === "eth_getTransactionCount") return "0x0";
+        if (method === "eth_getTransactionCount")
+          return `0x${raw.length === 0 ? "0" : (Math.max(...raw.map((value) => Number(parseTransaction(value).nonce ?? 0))) + 1).toString(16)}`;
         if (method === "eth_estimateGas") return "0x186a0";
         if (method === "eth_gasPrice") return "0x3b9aca00";
         if (method === "eth_maxPriorityFeePerGas") return "0x1";
+        if (method === "eth_getStorageAt") {
+          const slot = BigInt((params as [Address, Hex])[1]);
+          const word =
+            slot === 0n
+              ? BigInt(options.clone?.state ?? 3) |
+                (BigInt(options.clone?.buyer ?? account.address) << 16n)
+              : slot === 6n
+                ? (options.clone?.offerDeadline ?? 1_893_456_000n) |
+                  ((options.clone?.workDeadline ?? 0n) << 64n) |
+                  ((options.clone?.reviewDeadline ?? 0n) << 128n) |
+                  ((options.clone?.disputedAt ?? 0n) << 192n)
+                : slot === 7n
+                  ? (options.clone?.counterEvidenceDeadline ?? 1_893_456_000n) |
+                    (3600n << 64n) |
+                    (600n << 128n)
+                  : slot === 8n
+                    ? BigInt(options.clone?.opener ?? buyer) |
+                      (BigInt(options.clone?.counterEvidenceSubmitted ? 1 : 0) << 160n)
+                    : 0n;
+          return `0x${word.toString(16).padStart(64, "0")}`;
+        }
         if (method === "eth_call") {
           const request = (params as [{ data: Hex }])[0];
           try {
@@ -412,6 +467,13 @@ function rpcHarness(
               termsHash: options.clone?.termsHash ?? termsHash,
               state: options.clone?.state ?? 3,
               offerDeadline: options.clone?.offerDeadline ?? 1_893_456_000n,
+              predictEscrow: escrow,
+              resolution: 0,
+              workDeadline: options.clone?.workDeadline ?? 0n,
+              reviewDeadline: options.clone?.reviewDeadline ?? 0n,
+              disputedAt: options.clone?.disputedAt ?? 0n,
+              counterEvidenceDeadline: options.clone?.counterEvidenceDeadline ?? 1_893_456_000n,
+              disputeFee: options.clone?.disputeFee ?? 20_000_000n,
             } as const;
             const result = results[decoded.functionName as keyof typeof results];
             return encodeFunctionResult({
@@ -1326,25 +1388,37 @@ describe("createTasksChain", () => {
     expect(api.recordTransaction).toHaveBeenCalledOnce();
   });
 
-  it("refuses a dispute before preparation when the fee allowance is too small", async () => {
-    const api = fakeClient();
-    const rpc = rpcHarness("success", [25_000n, 24_999n]);
+  it("refuses a new dispute signature when the fee allowance is too small", async () => {
+    const evidenceHash = `0x${"ab".repeat(32)}` as Hex;
+    const data = encodeFunctionData({
+      abi: TASKS_CHAIN_ABI,
+      functionName: "raiseDispute",
+      args: [evidenceHash],
+    });
+    const prepared = anyResponse(
+      operationFor({ step: "raise-dispute", data, kind: "escrow-dispute", state: "prepared" }),
+    );
+    const api = fakeClient({
+      disputeEscrow: vi.fn(async () => prepared),
+      recoverOperation: vi.fn(async () => ({ ...prepared, recovered: false, scanComplete: true })),
+    });
+    const rpc = rpcHarness("success", [19_999_999n]);
+    const signTransaction = vi.fn(account.signTransaction.bind(account));
     const chain = createTasksChain({
       client: api,
-      account,
+      account: { ...account, signTransaction },
       rpcFor: () => rpc.client,
       pending: memoryPending(),
     });
     await expect(
-      chain.dispute({
-        escrowId: milestoneId,
-        orderId,
-        evidenceHash: `0x${"ab".repeat(32)}`,
-        idempotencyKey: key,
-      }),
-    ).rejects.toMatchObject({ broadcast: false, authorizationExposed: false });
-    expect(api.disputeEscrow).not.toHaveBeenCalled();
-    expect(rpc.methods.filter((method) => method === "eth_call")).toHaveLength(13);
+      chain.dispute({ escrowId: milestoneId, orderId, evidenceHash, idempotencyKey: key }),
+    ).rejects.toMatchObject({
+      broadcast: false,
+      authorizationExposed: false,
+      message: "The task dispute fee allowance is below 20.00 USDC.",
+    });
+    expect(signTransaction).not.toHaveBeenCalled();
+    expect(rpc.raw).toHaveLength(0);
   });
 
   it("creates an escrow from the first uncreated milestone", async () => {
@@ -2112,5 +2186,306 @@ describe("createTasksChain", () => {
     expect(signTransaction).toHaveBeenCalledOnce();
     await expect(pending.get(operationId, "release-funds")).resolves.toEqual(saved);
     await expect(pending.get(secondOperationId, "release-funds")).resolves.toBeUndefined();
+  });
+});
+
+const V2_ABI = parseAbi([
+  "function submitCounterEvidence(bytes32 evidenceHash)",
+  "function resolveUnmatchedDispute()",
+]);
+
+function feeFlow(
+  action: "dispute" | "counterEvidence" | "resolveUnmatched",
+  sendError?: Error | ((raw: Hex) => Error),
+) {
+  const evidenceHash = `0x${"ab".repeat(32)}` as Hex;
+  const finalStep =
+    action === "dispute"
+      ? "raise-dispute"
+      : action === "counterEvidence"
+        ? "submit-counter-evidence"
+        : "resolve-unmatched-dispute";
+  const kind =
+    action === "dispute"
+      ? "escrow-dispute"
+      : action === "counterEvidence"
+        ? "escrow-counter-evidence"
+        : "escrow-unmatched-resolution";
+  const finalData =
+    action === "dispute"
+      ? encodeFunctionData({
+          abi: TASKS_CHAIN_ABI,
+          functionName: "raiseDispute",
+          args: [evidenceHash],
+        })
+      : action === "counterEvidence"
+        ? encodeFunctionData({
+            abi: V2_ABI,
+            functionName: "submitCounterEvidence",
+            args: [evidenceHash],
+          })
+        : encodeFunctionData({ abi: V2_ABI, functionName: "resolveUnmatchedDispute" });
+  const approveData = encodeFunctionData({
+    abi: TASKS_CHAIN_ABI,
+    functionName: "approve",
+    args: [escrow, 20_000_000n],
+  });
+  const make = (
+    step: Step,
+    state: "prepared" | "submitted" | "confirmed" = "prepared",
+    txHash?: Hex,
+  ) =>
+    operationFor({
+      step,
+      data: step === "approve-usdc" ? approveData : finalData,
+      to: step === "approve-usdc" ? usdc : escrow,
+      kind,
+      state,
+      txHash,
+    });
+  let currentStep: Step = action === "resolveUnmatched" ? finalStep : "approve-usdc";
+  const prepare = vi.fn(async () => anyResponse(make(currentStep)));
+  const api = fakeClient({
+    [action === "dispute"
+      ? "disputeEscrow"
+      : action === "counterEvidence"
+        ? "counterEvidenceEscrow"
+        : "resolveUnmatchedEscrow"]: prepare,
+    recoverOperation: vi.fn(async () => ({
+      ...anyResponse(make(currentStep)),
+      recovered: false,
+      scanComplete: true,
+    })),
+    recordTransaction: vi.fn(async (_id, input) =>
+      anyResponse(make(input.step, "submitted", input.transactionHash)),
+    ),
+    reconcileOperation: vi.fn(async (_id, input) => {
+      if (input.step === "approve-usdc") {
+        currentStep = finalStep;
+        return anyResponse(make(finalStep));
+      }
+      return anyResponse(make(finalStep, "confirmed", input.transactionHash));
+    }),
+  });
+  const rpc = rpcHarness("success", [20_000_000n, 20_000_000n], sendError, true, {
+    clone: { state: action === "dispute" ? 2 : 4 },
+  });
+  const pending = memoryPending();
+  const signTransaction = vi.fn(account.signTransaction.bind(account));
+  let currentTime = new Date(
+    action === "resolveUnmatched" ? "2031-01-01T00:00:00Z" : "2026-10-09T00:00:00Z",
+  );
+  const chain = createTasksChain({
+    client: api,
+    account: { ...account, signTransaction },
+    rpcFor: () => rpc.client,
+    pending,
+    now: () => currentTime,
+  });
+  return {
+    chain,
+    rpc,
+    pending,
+    api,
+    prepare,
+    signTransaction,
+    evidenceHash,
+    finalStep,
+    make,
+    setNow: (value: Date) => {
+      currentTime = value;
+    },
+  };
+}
+
+describe("V2 dispute executor", () => {
+  it("approves the verified fee then raises a dispute", async () => {
+    const x = feeFlow("dispute");
+    const result = await x.chain.dispute({
+      orderId,
+      escrowId: milestoneId,
+      idempotencyKey: key,
+      evidenceHash: x.evidenceHash,
+      feeBaseUnits: 20_000_000n,
+    });
+    expect(result.operation).toMatchObject({ state: "confirmed", step: "raise-dispute" });
+    expect(x.signTransaction).toHaveBeenCalledTimes(2);
+    expect(x.rpc.raw.map((raw) => parseTransaction(raw).to?.toLowerCase())).toEqual([usdc, escrow]);
+  });
+  it("refuses to report completion from an approval receipt alone", async () => {
+    const x = feeFlow("dispute");
+    vi.mocked(x.api.reconcileOperation).mockImplementation(async (_id, input) =>
+      anyResponse(x.make("approve-usdc", "confirmed", input.transactionHash as Hex)),
+    );
+    await expect(
+      x.chain.dispute({
+        orderId,
+        escrowId: milestoneId,
+        idempotencyKey: key,
+        evidenceHash: x.evidenceHash,
+        feeBaseUnits: 20_000_000n,
+      }),
+    ).rejects.toThrow("approval alone");
+    expect(x.signTransaction).toHaveBeenCalledOnce();
+  });
+  it("approves the verified fee then submits counter evidence", async () => {
+    const x = feeFlow("counterEvidence");
+    const result = await x.chain.counterEvidence({
+      orderId,
+      escrowId: milestoneId,
+      idempotencyKey: key,
+      evidenceHash: x.evidenceHash,
+      feeBaseUnits: 20_000_000n,
+    });
+    expect(result.operation).toMatchObject({ state: "confirmed", step: "submit-counter-evidence" });
+    expect(x.signTransaction).toHaveBeenCalledTimes(2);
+  });
+  it("refuses fee approval if counter-evidence expires while awaiting local policy approval", async () => {
+    const x = feeFlow("counterEvidence");
+    await expect(
+      x.chain.counterEvidence({
+        orderId,
+        escrowId: milestoneId,
+        idempotencyKey: key,
+        evidenceHash: x.evidenceHash,
+        feeBaseUnits: 20_000_000n,
+        beforeSign: async () => {
+          x.setNow(new Date("2031-01-01T00:00:00Z"));
+        },
+      }),
+    ).rejects.toThrow("counter-evidence deadline has passed");
+    expect(x.signTransaction).not.toHaveBeenCalled();
+    expect(x.rpc.raw).toHaveLength(0);
+  });
+  it("resolves an unmatched dispute after its counter-evidence deadline", async () => {
+    const x = feeFlow("resolveUnmatched");
+    const result = await x.chain.resolveUnmatched({
+      orderId,
+      escrowId: milestoneId,
+      idempotencyKey: key,
+    });
+    expect(result.operation).toMatchObject({
+      state: "confirmed",
+      step: "resolve-unmatched-dispute",
+    });
+    expect(x.signTransaction).toHaveBeenCalledOnce();
+  });
+  it("resumes a fresh submitted dispute step over a cached approval preparation without local approval bytes", async () => {
+    const evidenceHash = `0x${"ab".repeat(32)}` as Hex;
+    const data = encodeFunctionData({
+      abi: TASKS_CHAIN_ABI,
+      functionName: "raiseDispute",
+      args: [evidenceHash],
+    });
+    const submitted = operationFor({ step: "raise-dispute", data, kind: "escrow-dispute" });
+    const approval = operationFor({
+      step: "approve-usdc",
+      data: encodeFunctionData({
+        abi: TASKS_CHAIN_ABI,
+        functionName: "approve",
+        args: [escrow, 20_000_000n],
+      }),
+      kind: "escrow-dispute",
+      to: usdc,
+      state: "prepared",
+    });
+    const api = fakeClient({
+      getOrder: vi.fn(async () => ({
+        workOrder: { ...order, milestones: [{ ...milestone, chainOperation: submitted }] },
+      })),
+      disputeEscrow: vi.fn(async () => anyResponse(approval)),
+      recoverOperation: vi.fn(async () => {
+        throw new Error("Submitted step must reconcile directly");
+      }),
+      reconcileOperation: vi.fn(async (_id, input) =>
+        anyResponse(
+          operationFor({
+            step: "raise-dispute",
+            data,
+            kind: "escrow-dispute",
+            state: "confirmed",
+            txHash: input.transactionHash,
+          }),
+        ),
+      ),
+    });
+    const rpc = rpcHarness("success", [0n], undefined, true, {
+      clone: { state: 4 },
+      transaction: { to: escrow, data },
+    });
+    const signTransaction = vi.fn(account.signTransaction.bind(account));
+    const chain = createTasksChain({
+      client: api,
+      account: { ...account, signTransaction },
+      rpcFor: () => rpc.client,
+      pending: memoryPending(),
+    });
+    await expect(
+      chain.dispute({
+        orderId,
+        escrowId: milestoneId,
+        idempotencyKey: key,
+        evidenceHash,
+        feeBaseUnits: 20_000_000n,
+      }),
+    ).resolves.toMatchObject({ operation: { state: "confirmed", step: "raise-dispute" } });
+    expect(signTransaction).not.toHaveBeenCalled();
+    expect(api.recoverOperation).not.toHaveBeenCalled();
+  });
+  it("recovers a broadcast raise-dispute after its fee allowance is consumed without signing again", async () => {
+    const evidenceHash = `0x${"ab".repeat(32)}` as Hex;
+    const data = encodeFunctionData({
+      abi: TASKS_CHAIN_ABI,
+      functionName: "raiseDispute",
+      args: [evidenceHash],
+    });
+    const make = (state: "prepared" | "submitted" | "confirmed", txHash?: Hex) =>
+      operationFor({ step: "raise-dispute", data, kind: "escrow-dispute", state, txHash });
+    const api = fakeClient({
+      disputeEscrow: vi.fn(async () => anyResponse(make("prepared"))),
+      recoverOperation: vi.fn(async () => ({
+        ...anyResponse(make("prepared")),
+        recovered: false,
+        scanComplete: true,
+      })),
+      recordTransaction: vi.fn(async (_id, input) =>
+        anyResponse(make("submitted", input.transactionHash)),
+      ),
+      reconcileOperation: vi.fn(async (_id, input) =>
+        anyResponse(make("confirmed", input.transactionHash)),
+      ),
+    });
+    let shouldFail = true;
+    const rpc = rpcHarness(
+      "success",
+      [20_000_000n, 0n],
+      (_raw) => {
+        if (shouldFail) return new Error("RPC unavailable after broadcast");
+        return new Error("already known");
+      },
+      true,
+      { clone: { state: 2 } },
+    );
+    const pending = memoryPending();
+    const signTransaction = vi.fn(account.signTransaction.bind(account));
+    const chain = createTasksChain({
+      client: api,
+      account: { ...account, signTransaction },
+      rpcFor: () => rpc.client,
+      pending,
+    });
+    const input = {
+      orderId,
+      escrowId: milestoneId,
+      idempotencyKey: key,
+      evidenceHash,
+      feeBaseUnits: 20_000_000n,
+    };
+    await expect(chain.dispute(input)).rejects.toMatchObject({ broadcast: true });
+    shouldFail = false;
+    await expect(chain.dispute(input)).resolves.toMatchObject({
+      operation: { state: "confirmed" },
+    });
+    expect(signTransaction).toHaveBeenCalledOnce();
   });
 });

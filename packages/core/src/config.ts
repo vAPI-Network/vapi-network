@@ -84,6 +84,27 @@ export const configSchema = z
       )
       .optional(),
     allowPrivateNetwork: z.boolean().default(false).optional(),
+    tasksEscrowDurationOverrides: z
+      .record(
+        z.string().regex(/^\d+$/),
+        z
+          .object({
+            workDurationSeconds: z
+              .number()
+              .int()
+              .positive()
+              .max(Number.MAX_SAFE_INTEGER)
+              .optional(),
+            reviewWindowSeconds: z
+              .number()
+              .int()
+              .positive()
+              .max(Number.MAX_SAFE_INTEGER)
+              .optional(),
+          })
+          .strict(),
+      )
+      .optional(),
     tasksEscrowFactoryOverrides: z.record(z.string().regex(/^\d+$/), z.string()).optional(),
     networks: z.record(
       z.string().refine((network) => isSupportedPaymentNetwork(network), {
@@ -392,6 +413,7 @@ export function getDefaultConfig(
     registryFallbacks: DEFAULT_REGISTRY_FALLBACKS.map((fallback) => ({ ...fallback })),
     allowPrivateNetwork: false,
     tasksEscrowFactoryOverrides,
+    tasksEscrowDurationOverrides: tasksDurationOverridesFromEnv(source),
     networks,
     spendCaps: { ...DEFAULT_SPEND_CAPS },
   };
@@ -438,6 +460,13 @@ export async function loadConfig(
   const marketplaceDiscoveryUrl = source.VAPI_MARKETPLACE_DISCOVERY_URL?.trim();
   const registryUrl = source.VAPI_REGISTRY_URL?.trim();
   Object.assign(config.tasksEscrowFactoryOverrides, tasksFactoryOverridesFromEnv(source));
+  config.tasksEscrowDurationOverrides ??= {};
+  for (const [chainId, overrides] of Object.entries(tasksDurationOverridesFromEnv(source))) {
+    config.tasksEscrowDurationOverrides[chainId] = {
+      ...config.tasksEscrowDurationOverrides[chainId],
+      ...overrides,
+    };
+  }
   if (config.networks[BASE_MAINNET_CAIP2] && baseRpcUrl) {
     config.networks[BASE_MAINNET_CAIP2].rpcUrl = baseRpcUrl;
   }
@@ -477,6 +506,24 @@ export async function loadConfig(
     if (!configured.rpcUrl) delete config.networks[network];
   }
   return config;
+}
+
+function tasksDurationOverridesFromEnv(
+  source: NodeJS.ProcessEnv,
+): NonNullable<VapiConfig["tasksEscrowDurationOverrides"]> {
+  const result: NonNullable<VapiConfig["tasksEscrowDurationOverrides"]> = {};
+  for (const [name, raw] of Object.entries(source)) {
+    const match = /^VAPI_TASKS_(WORK_DURATION|REVIEW_WINDOW)_SECONDS_(\d+)$/.exec(name);
+    const value = raw?.trim();
+    if (!match || !value) continue;
+    const seconds = Number(value);
+    if (!/^\d+$/.test(value) || !Number.isSafeInteger(seconds) || seconds <= 0)
+      throw new Error(`Invalid trusted Tasks duration ${name}.`);
+    const entry = (result[match[2]!] ??= {});
+    if (match[1] === "WORK_DURATION") entry.workDurationSeconds = seconds;
+    else entry.reviewWindowSeconds = seconds;
+  }
+  return result;
 }
 
 function tasksFactoryOverridesFromEnv(source: NodeJS.ProcessEnv): Record<string, string> {

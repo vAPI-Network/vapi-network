@@ -13,6 +13,7 @@ import {
 import { agentSecretAccounts } from "@vapi-network/core/agent-link";
 import {
   freezeScopeTerms,
+  canonicalJson,
   TasksClientError,
   createPendingTransactions,
   createTasksClient,
@@ -130,6 +131,66 @@ async function watchServer(
   });
   return { server, store, secrets, home };
 }
+
+describe("V2 task fee interfaces", () => {
+  it.each(["dispute", "counter-evidence"])("refuses %s fee approval through MCP", async (verb) => {
+    const client = {
+      getOrder: vi.fn(async () => ({
+        workOrder: {
+          version: "work-order-view-v1",
+          id: ID,
+          milestones: [
+            {
+              id: ESCROW,
+              workOrderId: ID,
+              amountBaseUnits: "100000000",
+              escrowContract: "0x1111111111111111111111111111111111111111",
+            },
+          ],
+        },
+      })),
+      deployment: vi.fn(async () => ({ configured: true, feeBp: 500 })),
+    } as unknown as TasksClient;
+    const chain = {
+      ...missingTasksChain,
+      available: true,
+      disputeFee: vi.fn(async () => 20_000_000n),
+      dispute: vi.fn(),
+      counterEvidence: vi.fn(),
+      resolveUnmatched: vi.fn(),
+    };
+    const { server, home, store } = await watchServer({ client, chain, now: () => new Date(NOW) });
+    await store.setSpendCaps("main", { perCallAtomic: "100000000", perDayAtomic: "100000000" });
+    await mkdir(join(home, "agents"));
+    await writeFile(
+      join(home, "agents", "strict.json"),
+      JSON.stringify({
+        version: 1,
+        name: "strict",
+        wallet: "main",
+        model: "test",
+        instructions: "Require approval",
+        maxPerTaskUsd: 100,
+        approveAboveUsd: 10,
+        createdAt: NOW,
+      }),
+    );
+    const result = await server.callTool({
+      name: `tasks.${verb}`,
+      arguments: { id: ID, evidenceHash: TX },
+    });
+    expect(result, JSON.stringify(result)).toMatchObject({
+      isError: true,
+      structuredContent: {
+        ok: false,
+        approval: true,
+        disputeFee: { baseUnits: "20000000", usd: "20.00" },
+      },
+    });
+    expect(chain.dispute).not.toHaveBeenCalled();
+    expect(chain.counterEvidence).not.toHaveBeenCalled();
+  });
+});
 
 describe("bounded task watch", () => {
   it("polls until the window expires without polling at or beyond the deadline", async () => {
@@ -391,6 +452,10 @@ describe("task wallet and route boundaries", () => {
       brief,
       termsHash: frozen.termsHash,
       signingPayload: payload,
+      proposerAddress: privateKeyToAccount(`0x${"11".repeat(32)}`).address,
+      proposerSignature: await privateKeyToAccount(`0x${"11".repeat(32)}`).signMessage({
+        message: canonicalJson(payload),
+      }),
     };
     const milestone = {
       id: ESCROW,
@@ -430,6 +495,7 @@ describe("task wallet and route boundaries", () => {
       acceptance: {
         ...acceptance,
         terms: {
+          counterparty: privateKeyToAccount(`0x${"11".repeat(32)}`).address,
           amountBaseUnits: "1000000",
           asset: structuredTerms.budget.asset,
           network: "eip155:8453",
@@ -456,6 +522,99 @@ describe("task wallet and route boundaries", () => {
         title: "Write a report",
       },
     });
+  });
+
+  it("recovers accepted worker signing through the lazy wallet identity without a new scope signature", async () => {
+    const signer = privateKeyToAccount(PRIVATE_KEY);
+    const other = privateKeyToAccount(`0x${"11".repeat(32)}`);
+    const structuredTerms = {
+      version: "work-milestone-terms-v1" as const,
+      title: "Write a report",
+      description: "Write a complete useful report.",
+      deliverables: ["A report"],
+      acceptanceCriteria: ["Complete"],
+      revisionCount: 0,
+      deadline: NOW,
+      workDurationSeconds: 86400,
+      acceptanceWindowSeconds: 604800,
+      budget: {
+        network: "eip155:8453" as const,
+        asset: "eip155:8453/erc20:0x1111111111111111111111111111111111111111",
+        amountBaseUnits: "1000000",
+      },
+      escrow: {
+        protocol: "escrow-v1" as const,
+        contract: "0x2222222222222222222222222222222222222222",
+      },
+      evidenceRules: { acceptedInputs: ["text" as const], exactCommitRequired: false },
+    };
+    const brief = "The exact report.";
+    const frozen = freezeScopeTerms(structuredTerms, brief);
+    const signingPayload = {
+      version: "work-scope-signature-v1",
+      workOrderId: ID,
+      trancheOrdinal: 1,
+      scopeVersion: 1,
+      termsHash: frozen.termsHash,
+    };
+    const message = canonicalJson(signingPayload);
+    const scope = {
+      id: ESCROW,
+      workOrderId: ID,
+      version: 1,
+      trancheOrdinal: 1,
+      state: "accepted",
+      proposedByRole: "client",
+      structuredTerms,
+      brief,
+      termsHash: frozen.termsHash,
+      signingPayload,
+      milestoneId: ESCROW,
+      acceptedAt: NOW,
+      proposerAddress: other.address,
+      proposerSignature: await other.signMessage({ message }),
+      counterpartyAddress: signer.address,
+      counterpartySignature: await signer.signMessage({ message }),
+    };
+    const milestone = {
+      id: ESCROW,
+      workOrderId: ID,
+      ordinal: 1,
+      termsHash: frozen.termsHash,
+      termsFrozenAt: NOW,
+      escrowState: null,
+    };
+    const signMessage = vi.fn(signer.signMessage);
+    vi.spyOn(WalletSession.prototype, "payment").mockResolvedValue({
+      wallet: { name: "main" },
+      account: { ...signer, signMessage },
+    });
+    const client = {
+      getOrder: vi.fn(async () => ({
+        workOrder: {
+          id: ID,
+          version: "work-order-view-v1",
+          role: "provider",
+          milestones: [milestone],
+        },
+      })),
+      getScopes: vi.fn(async () => ({ scopes: [scope] })),
+      signScope: vi.fn(),
+      deployment: vi.fn(async () => ({ configured: false })),
+    } as unknown as TasksClient;
+    const { server, home } = await watchServer({ client, now: () => new Date(NOW) });
+    const result = await server.callTool({
+      name: "tasks.sign",
+      arguments: { id: ID, counterparty: other.address },
+    });
+    expect(JSON.parse(result.content[0]!.text)).toMatchObject({
+      acceptance: { scope: { state: "accepted" }, terms: { counterparty: other.address } },
+    });
+    expect(await readFile(join(home, "tasks", "scope-bindings.json"), "utf8")).toContain(
+      signer.address,
+    );
+    expect(client.signScope).not.toHaveBeenCalled();
+    expect(signMessage).not.toHaveBeenCalled();
   });
 
   it("signs proposals and submissions using the selected wallet without returning secrets", async () => {
@@ -761,6 +920,9 @@ describe("task MCP tools", () => {
       release: vi.fn(),
       refund: vi.fn(),
       dispute: vi.fn(),
+      disputeFee: vi.fn(),
+      counterEvidence: vi.fn(),
+      resolveUnmatched: vi.fn(),
       createEscrow: vi.fn(),
       signScopeMessage: vi.fn(),
     } satisfies TasksChain;
@@ -785,7 +947,14 @@ describe("task MCP tools", () => {
         const verb = tool.name.slice("tasks.".length);
         expect(readme).toContain(`\`${tool.name}\``);
         expect(tool.description).toContain(
-          ["fund", "release", "refund", "dispute"].includes(verb)
+          [
+            "fund",
+            "release",
+            "refund",
+            "dispute",
+            "counter-evidence",
+            "resolve-unmatched",
+          ].includes(verb)
             ? "Moves money"
             : "Does not move money",
         );
@@ -865,6 +1034,10 @@ describe("task MCP tools", () => {
         ["tasks.watch", { id: "11111111-1111-4111-8111-111111111111", waitSeconds: 26 }],
         ["tasks.fund", { id: "11111111-1111-4111-8111-111111111111", yes: true }],
         ["tasks.fund", { id: ID, approve: true }],
+        ["tasks.dispute", { id: ID, evidenceHash: TX, yes: true }],
+        ["tasks.counter-evidence", { id: ID, evidenceHash: TX, approve: true }],
+        ["tasks.resolve-unmatched", { id: ID, counterparty: "0x1234" }],
+        ["tasks.sign", { id: ID, counterparty: "0x1234" }],
         ["tasks.fund", { id: ID, confirm: true }],
         ["tasks.watch", { id: ID, autoRelease: true }],
         ["tasks.thread", { id: ID, after: 0 }],
@@ -985,11 +1158,15 @@ describe("task MCP tools", () => {
         release: vi.fn(async () => chainResult),
         refund: vi.fn(async () => chainResult),
         dispute: vi.fn(async () => chainResult),
+        disputeFee: vi.fn(async () => 20_000_000n),
+        counterEvidence: vi.fn(async () => chainResult),
+        resolveUnmatched: vi.fn(async () => chainResult),
         signScopeMessage: vi.fn(async (message: string) => {
           expect(typeof message).toBe("string");
           return `0x${"cd".repeat(65)}` as `0x${string}`;
         }),
       } satisfies TasksChain;
+      let sequence = 0;
       const behaviorServer = createVapiServer({
         account: privateKeyToAccount(PRIVATE_KEY),
         config: getDefaultConfig({}),
@@ -1006,7 +1183,7 @@ describe("task MCP tools", () => {
             return fakeClient;
           },
           chain: fakeChain,
-          randomUUID: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          randomUUID: () => `aaaaaaaa-aaaa-4aaa-8aaa-${String(++sequence).padStart(12, "0")}`,
           now: () => new Date("2026-10-08T12:00:00.000Z"),
           sleep: async () => await new Promise<void>(() => undefined),
         },
@@ -1175,17 +1352,35 @@ describe("task MCP tools", () => {
             },
           });
         }
+        await store.setSpendCaps("main", {
+          perCallAtomic: "1000000000",
+          perDayAtomic: "1000000000",
+        });
+        await writeFile(
+          join(home, "agents", "strict.json"),
+          JSON.stringify({
+            version: 1,
+            name: "strict",
+            wallet: "main",
+            model: "router/test",
+            instructions: "Permit verified fees",
+            maxPerTaskUsd: 100,
+            approveAboveUsd: 100,
+            createdAt: NOW,
+          }),
+        );
         const disputed = await behaviorServer.callTool({
           name: "tasks.dispute",
           arguments: { id: ID, evidenceHash: TX },
         });
         expect(disputed).toMatchObject({
           structuredContent: {
-            money: { gross: { baseUnits: "100000" }, fee: { baseUnits: "2500" } },
+            money: { gross: { baseUnits: "20000000" } },
+            disputeFee: { baseUnits: "20000000", usd: "20.00" },
             result: { txHash: TX },
           },
         });
-        expect(JSON.stringify(disputed)).toContain("disputeFeeNote");
+        expect(JSON.stringify(disputed)).not.toContain("disputeFeeNote");
 
         const deliveryFile = join(home, "delivery.txt");
         await writeFile(deliveryFile, "finished work");

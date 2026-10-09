@@ -326,6 +326,59 @@ describe("tasks client recorded HTTP contract", () => {
     ).resolves.toMatchObject({ workOrder: { milestones: [{ dispute: { id: CUID } }] } });
   });
 
+  it("supports V2 counter-evidence and unmatched-resolution routes and steps", async () => {
+    const responses = [
+      {
+        ...operation,
+        operation: {
+          ...operation.operation,
+          kind: "escrow-counter-evidence",
+          step: "submit-counter-evidence",
+          plan: { ...operation.operation.plan, step: "submit-counter-evidence" },
+        },
+      },
+      {
+        ...operation,
+        operation: {
+          ...operation.operation,
+          kind: "escrow-unmatched-resolution",
+          step: "resolve-unmatched-dispute",
+          plan: { ...operation.operation.plan, step: "resolve-unmatched-dispute" },
+        },
+      },
+    ];
+    const fetchImpl = vi.fn<typeof fetch>(async () => Response.json(responses.shift()));
+    const client = createTasksClient({
+      baseUrl: "https://tasks.example",
+      token: "secret",
+      fetch: fetchImpl,
+    });
+    await expect(
+      client.counterEvidenceEscrow(ID, { evidenceHash: HASH }, { idempotencyKey: KEY }),
+    ).resolves.toMatchObject({
+      operation: { kind: "escrow-counter-evidence", step: "submit-counter-evidence" },
+    });
+    await expect(client.resolveUnmatchedEscrow(ID, { idempotencyKey: KEY })).resolves.toMatchObject(
+      { operation: { kind: "escrow-unmatched-resolution", step: "resolve-unmatched-dispute" } },
+    );
+    expect(
+      fetchImpl.mock.calls.map(([url, init]) => [
+        String(url),
+        init?.method,
+        JSON.parse(String(init?.body)),
+        new Headers(init?.headers).get("Idempotency-Key"),
+      ]),
+    ).toEqual([
+      [
+        `https://tasks.example/v1/escrows/${ID}/counter-evidence`,
+        "POST",
+        { evidenceHash: HASH },
+        KEY,
+      ],
+      [`https://tasks.example/v1/escrows/${ID}/resolve-unmatched`, "POST", {}, KEY],
+    ]);
+  });
+
   it("records every JSON method's URL, verb, body, and headers", async () => {
     const orderPage = { workOrders: [publicOrder], page: { nextCursor: OTHER_ID } };
     const orderResponse = { workOrder: publicOrder };
@@ -762,6 +815,7 @@ describe("tasks client recorded HTTP contract", () => {
       "board",
       "chainState",
       "configureWebhook",
+      "counterEvidenceEscrow",
       "createEscrow",
       "createOrder",
       "createUpload",
@@ -788,6 +842,7 @@ describe("tasks client recorded HTTP contract", () => {
       "recoverOperation",
       "refundEscrow",
       "releaseEscrow",
+      "resolveUnmatchedEscrow",
       "sendMessage",
       "signScope",
       "submit",

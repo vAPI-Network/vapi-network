@@ -22,9 +22,12 @@ import {
   type TasksEscrowOperation,
 } from "./chain-port.js";
 import { TasksValidationError, safeTasksChainError } from "./chain-error.js";
+import type { ScopeBindings } from "./scope-bindings.js";
+import type { TasksDurationOverrides } from "./trusted-deployments.js";
 import { getTrustedTasksFactory } from "./trusted-deployments.js";
 import { TasksClientError, type TasksClient } from "./client.js";
 import { freezeDeliveryManifest, sha256Hex } from "./delivery-manifest.js";
+import { taskFeeReservationKey } from "./dispute-fee.js";
 import { formatBaseUnitsUsd } from "./money.js";
 import type { PendingTransactions } from "./pending-transactions.js";
 import { TASKS_CHAIN_ABI, verifyPlan } from "./plan-guard.js";
@@ -51,6 +54,8 @@ export type TasksChainOptions = {
   randomBytes?: (size: number) => Uint8Array;
   confirmations?: number;
   trustedFactories?: Record<string, string>;
+  trustedDurations?: TasksDurationOverrides;
+  bindings?: ScopeBindings;
 };
 
 // ReceiveWithAuthorization is defined by the server's eip3009-funding.ts.
@@ -149,8 +154,15 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
     ready: Deployment,
     verb: EscrowVerb,
     steps: readonly string[],
+    counterparty?: string,
   ): Promise<VerifiedContext> {
-    const verified = await verifyScope(client, account.address, selected, ready, verb, steps);
+    const verified = await verifyScope(client, account.address, selected, ready, verb, steps, {
+      bindings: options.bindings,
+      ...(counterparty ? { counterparty: getAddress(counterparty) } : {}),
+      rpc: rpcFor(ready.chainId),
+      now,
+      trustedDurations: options.trustedDurations,
+    });
     await verifyClone(rpcFor(ready.chainId), verified, false);
     return verified;
   }
@@ -265,23 +277,40 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
     expected: VerifiedContext,
     idempotencyKey: string,
     authorizationExposed = false,
+    beforeSign?: () => Promise<void>,
   ): Promise<TasksChainResult> {
     let current = initial;
     const live = expected.milestone.chainOperation;
     const rank = { prepared: 0, submitted: 1, confirmed: 2 };
+    const afterApproval =
+      expected.verb === "fund"
+        ? "deposit-funds"
+        : expected.verb === "dispute"
+          ? "raise-dispute"
+          : expected.verb === "counter-evidence"
+            ? "submit-counter-evidence"
+            : undefined;
     // A newer server hint selects the resume path; RPC still proves completion below.
     if (
       live?.id === initial.operation.id &&
-      live.step === initial.operation.step &&
+      (live.step === initial.operation.step ||
+        ((expected.verb === "dispute" || expected.verb === "counter-evidence") &&
+          initial.operation.step === "approve-usdc" &&
+          live.step === afterApproval)) &&
       rank[live.state] > rank[initial.operation.state]
     )
       current = { ...initial, operation: live };
     let broadcast = current.operation.state === "submitted";
     let txHash = current.operation.transactionHash ?? undefined;
     const operationId = initial.operation.id;
+    function checkTransition(previous: string, next: string) {
+      if (previous !== next && !(previous === "approve-usdc" && next === afterApproval))
+        throw new TasksValidationError("The task operation advanced to an unexpected step.");
+    }
     function checkResponse(response: Prepared) {
       if (
         response.operation.id !== operationId ||
+        !expected.steps.includes(response.operation.step) ||
         response.milestone.id !== expected.milestone.id ||
         response.milestone.workOrderId !== expected.milestone.workOrderId
       )
@@ -306,6 +335,10 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
         }
         if (operation.state === "confirmed") {
           broadcast = true;
+          if (operation.step === "approve-usdc")
+            throw new TasksValidationError(
+              "A fee or funding approval alone does not complete the task action.",
+            );
           if (!operation.transactionHash)
             throw new TasksValidationError("The confirmed task operation has no transaction hash.");
           if (!checkpoint) {
@@ -325,6 +358,7 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
           const reconciled = await pending.reconciled(operation.id, operation.step);
           if (reconciled) {
             checkResponse(reconciled);
+            checkTransition(operation.step, reconciled.operation.step);
             current = reconciled;
             continue;
           }
@@ -377,6 +411,7 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
             // Recovery may advance approval to deposit. Prove the departed step before deleting its bytes.
             const previousStep = original.step;
             if (current.operation.step !== previousStep) {
+              checkTransition(previousStep, current.operation.step);
               const previous = await pending.get(operationId, previousStep);
               if (!previous)
                 throw new TasksValidationError(
@@ -446,7 +481,24 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
                 throw new TasksValidationError(
                   "The RPC chain ID does not match the task deployment.",
                 );
+              await beforeSign?.();
+              expected.nowSeconds = BigInt(Math.floor(now().getTime() / 1000));
               await verifyClone(rpc, expected, true);
+              if (
+                operation.step === "raise-dispute" ||
+                operation.step === "submit-counter-evidence"
+              ) {
+                const allowance = await rpc.readContract({
+                  address: expected.deployment.usdc,
+                  abi: TASKS_CHAIN_ABI,
+                  functionName: "allowance",
+                  args: [account.address, expected.milestone.escrowContract],
+                });
+                if (allowance < expected.disputeFee!)
+                  throw new TasksValidationError(
+                    `The task dispute fee allowance is below ${formatBaseUnitsUsd(expected.disputeFee!)} USDC.`,
+                  );
+              }
               const nonce = Math.max(
                 await rpc.getTransactionCount({ address: account.address, blockTag: "pending" }),
                 await pending.nextNonce(plan.chainId, account.address),
@@ -460,6 +512,13 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
                 chainId: plan.chainId,
                 nonce,
               });
+              if (expected.verb === "dispute" || expected.verb === "counter-evidence") {
+                // Retain spend even if signing or persisting bytes fails ambiguously.
+                authorizationExposed = true;
+                await pending.markExposure(
+                  taskFeeReservationKey(expected.milestone.id, expected.verb),
+                );
+              }
               const raw = await account.signTransaction(request as TransactionSerializable);
               const entry = {
                 chainId: plan.chainId,
@@ -521,6 +580,14 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
           ),
         );
         checkResponse(reconciled);
+        checkTransition(operation.step, reconciled.operation.step);
+        if (
+          reconciled.operation.state === "confirmed" &&
+          reconciled.operation.step === "approve-usdc"
+        )
+          throw new TasksValidationError(
+            "A fee or funding approval alone does not complete the task action.",
+          );
         if (
           reconciled.operation.state === "confirmed" &&
           reconciled.operation.transactionHash !== operation.transactionHash
@@ -533,7 +600,7 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
           !(
             operation.step === "approve-usdc" &&
             reconciled.operation.state === "prepared" &&
-            reconciled.operation.step === "deposit-funds"
+            reconciled.operation.step === afterApproval
           )
         )
           throw new TasksValidationError("The task transaction was not reconciled.");
@@ -554,8 +621,63 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
     }
   }
 
+  async function feeOperation(
+    input: TasksEscrowOperation & {
+      evidenceHash: Hex;
+      feeBaseUnits?: bigint;
+      beforeSign?: () => Promise<void>;
+    },
+    verb: "dispute" | "counter-evidence",
+  ): Promise<TasksChainResult> {
+    let exposed = false;
+    try {
+      exposed = await pending.exposure(taskFeeReservationKey(input.escrowId, verb));
+      const { selected } = await milestone(input);
+      const ready = await deployment();
+      const finalStep = verb === "dispute" ? "raise-dispute" : "submit-counter-evidence";
+      const expected = await expectation(
+        selected,
+        ready,
+        verb,
+        ["approve-usdc", finalStep],
+        input.counterparty,
+      );
+      if (input.feeBaseUnits !== undefined && input.feeBaseUnits !== expected.disputeFee)
+        throw new TasksValidationError(
+          "The policy-checked dispute fee does not match the verified onchain fee.",
+        );
+      const prepareKey = await preparation(input, verb, { evidenceHash: input.evidenceHash });
+      const call =
+        verb === "dispute"
+          ? client.disputeEscrow.bind(client)
+          : client.counterEvidenceEscrow.bind(client);
+      return await execute(
+        await call(
+          input.escrowId,
+          { evidenceHash: input.evidenceHash },
+          { idempotencyKey: prepareKey },
+        ),
+        { ...expected, evidenceHash: input.evidenceHash },
+        prepareKey,
+        exposed,
+        input.beforeSign,
+      );
+    } catch (cause) {
+      throw chainError(cause, false, exposed);
+    }
+  }
+
   return {
     available: true,
+    signingAddress: account.address,
+    getSigningAddress: async () => account.address,
+    bindScope: async (binding) => {
+      if (!options.bindings)
+        throw new TasksValidationError(
+          "A durable local task party store is required before signing.",
+        );
+      await options.bindings.put(binding);
+    },
     createEscrow: (input) =>
       safe(async () => {
         const workOrder = await order(input.orderId);
@@ -574,7 +696,7 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
         );
         return await execute(
           prepared,
-          await expectation(selected, ready, "createEscrow", ["create-escrow"]),
+          await expectation(selected, ready, "createEscrow", ["create-escrow"], input.counterparty),
           prepareKey,
         );
       }),
@@ -589,10 +711,13 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
           throw new TasksValidationError(
             "The task funding amount does not match the frozen milestone amount.",
           );
-        const expected = await expectation(selected, ready, "fund", [
-          "approve-usdc",
-          "deposit-funds",
-        ]);
+        const expected = await expectation(
+          selected,
+          ready,
+          "fund",
+          ["approve-usdc", "deposit-funds"],
+          input.counterparty,
+        );
         if (BigInt(expected.milestone.amountBaseUnits) !== input.grossBaseUnits)
           throw new TasksValidationError(
             "The signed scope budget does not match the policy-checked funding amount.",
@@ -689,7 +814,13 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
           throw new TasksValidationError(
             "The local task delivery manifest does not match its hash and note.",
           );
-        const expected = await expectation(selected, ready, "deliver", ["submit-delivery"]);
+        const expected = await expectation(
+          selected,
+          ready,
+          "deliver",
+          ["submit-delivery"],
+          input.counterparty,
+        );
         const prepareKey = await preparation(input, "deliver", {
           manifestHash: frozen.manifestHash,
           manifest: frozen.manifest,
@@ -717,7 +848,13 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
       safe(async () => {
         const { selected } = await milestone(input);
         const ready = await deployment();
-        const expected = await expectation(selected, ready, "release", ["release-funds"]);
+        const expected = await expectation(
+          selected,
+          ready,
+          "release",
+          ["release-funds"],
+          input.counterparty,
+        );
         const prepareKey = await preparation(input, "release");
         return await execute(
           await client.releaseEscrow(input.escrowId, { idempotencyKey: prepareKey }),
@@ -729,7 +866,13 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
       safe(async () => {
         const { selected } = await milestone(input);
         const ready = await deployment();
-        const expected = await expectation(selected, ready, "refund", ["refund-buyer"]);
+        const expected = await expectation(
+          selected,
+          ready,
+          "refund",
+          ["refund-buyer"],
+          input.counterparty,
+        );
         const prepareKey = await preparation(input, "refund");
         return await execute(
           await client.refundEscrow(input.escrowId, { idempotencyKey: prepareKey }),
@@ -737,40 +880,36 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
           prepareKey,
         );
       }),
-    dispute: (input) =>
+    disputeFee: (input) =>
       safe(async () => {
         const { selected } = await milestone(input);
         const ready = await deployment();
-        const expected = await expectation(selected, ready, "dispute", ["raise-dispute"]);
-        const prepareKey = await preparation(input, "dispute", {
-          evidenceHash: input.evidenceHash,
-        });
-        const rpc = rpcFor(ready.chainId);
-        const fee = await rpc.readContract({
-          address: selected.escrowContract,
-          abi: TASKS_CHAIN_ABI,
-          functionName: "disputeFee",
-        });
-        const allowance = await rpc.readContract({
-          address: ready.usdc,
-          abi: TASKS_CHAIN_ABI,
-          functionName: "allowance",
-          args: [account.address, selected.escrowContract],
-        });
-        if (allowance < fee)
-          throw new TasksValidationError(
-            `dispute needs a ${formatBaseUnitsUsd(fee)} USDC fee approval, which this release does not send yet`,
-          );
-        return await execute(
-          await client.disputeEscrow(
-            input.escrowId,
-            { evidenceHash: input.evidenceHash },
-            { idempotencyKey: prepareKey },
-          ),
-          {
-            ...expected,
-            evidenceHash: input.evidenceHash,
-          },
+        const expected = await expectation(
+          selected,
+          ready,
+          "dispute",
+          ["approve-usdc", "raise-dispute"],
+          input.counterparty,
+        );
+        return expected.disputeFee!;
+      }),
+    dispute: (input) => feeOperation(input, "dispute"),
+    counterEvidence: (input) => feeOperation(input, "counter-evidence"),
+    resolveUnmatched: (input) =>
+      safe(async () => {
+        const { selected } = await milestone(input);
+        const ready = await deployment();
+        const expected = await expectation(
+          selected,
+          ready,
+          "resolve-unmatched",
+          ["resolve-unmatched-dispute"],
+          input.counterparty,
+        );
+        const prepareKey = await preparation(input, "resolve-unmatched");
+        return execute(
+          await client.resolveUnmatchedEscrow(input.escrowId, { idempotencyKey: prepareKey }),
+          expected,
           prepareKey,
         );
       }),

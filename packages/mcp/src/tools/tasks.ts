@@ -19,9 +19,13 @@ import {
   createPendingTransactions,
   createTasksChain,
   createTasksClient,
+  createScopeBindings,
   createTasksRpcFor,
   deliverTaskOperation,
   disputeTaskOperation,
+  counterEvidenceTaskOperation,
+  resolveUnmatchedTaskOperation,
+  taskFeeReservationKey,
   fundTaskOperation,
   messageTask,
   missingTasksChain,
@@ -60,6 +64,13 @@ import type { WalletSession } from "../wallet-session.js";
 
 const id = z.uuid().toLowerCase();
 const participant = { id, ...walletArgument };
+const moneyParticipant = {
+  ...participant,
+  counterparty: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{40}$/u)
+    .optional(),
+};
 const cursor = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 function usdWithinEscrow(value: string, positive = false): boolean {
   try {
@@ -142,16 +153,16 @@ export const tasksAwardTool = descriptor(
 );
 export const tasksSignTool = descriptor(
   "Does not move money. Sign the current counterparty scope locally; a worker may also create the unfunded escrow with the local vault wallet.",
-  participant,
+  moneyParticipant,
 );
 export const tasksFundTool = descriptor(
   "Moves money: locks the task amount in USDC escrow subject to the acting wallet's policy and daily cap. MCP cannot grant human approval; amounts above the approval threshold are refused with approval:true.",
-  participant,
+  moneyParticipant,
 );
 export const tasksDeliverTool = descriptor(
   "Does not move money. Upload local delivery files, freeze the manifest and record delivery with the local vault wallet.",
   {
-    ...participant,
+    ...moneyParticipant,
     files: z.array(localPath).min(TASK_LIMITS.deliveryFilesMin).max(TASK_LIMITS.deliveryFilesMax),
     note: z
       .string()
@@ -161,18 +172,26 @@ export const tasksDeliverTool = descriptor(
 );
 export const tasksReleaseTool = descriptor(
   "Moves money: pays the worker from escrow with the local vault wallet. Returns gross · fee · net using the deployed fee.",
-  participant,
+  moneyParticipant,
 );
 export const tasksRefundTool = descriptor(
   "Moves money: returns escrowed USDC to the poster with the local vault wallet. Returns gross · fee · net using the deployed fee.",
-  participant,
+  moneyParticipant,
 );
 export const tasksDisputeTool = descriptor(
-  "Moves money: raises a dispute with the local vault wallet. This release refuses when the contract needs a fee approval. Accepts only a precomputed evidence hash and returns gross · fee · net using the deployed fee.",
+  "Moves money: approves the verified dispute fee and raises a dispute with the local vault wallet. Applies task and daily caps; MCP refuses human approval with approval:true. Accepts a precomputed evidence hash.",
   {
-    ...participant,
+    ...moneyParticipant,
     evidenceHash: z.string().regex(TASK_LIMITS.disputeEvidenceHash),
   },
+);
+export const tasksCounterEvidenceTool = descriptor(
+  "Moves money: approves the verified dispute fee and submits counter-evidence as the non-opener before the onchain deadline. Applies task and daily caps; MCP refuses human approval with approval:true.",
+  { ...moneyParticipant, evidenceHash: z.string().regex(TASK_LIMITS.disputeEvidenceHash) },
+);
+export const tasksResolveUnmatchedTool = descriptor(
+  "Moves money: resolves an unmatched dispute after the onchain counter-evidence deadline when no counter-evidence was submitted.",
+  moneyParticipant,
 );
 export const tasksMessageTool = descriptor(
   "Does not move money. Send task thread text as the acting wallet.",
@@ -231,8 +250,41 @@ function lazyTasksChain(
       if (error instanceof TasksChainError) throw error;
       throw safeTasksChainError(error, false, false);
     }));
+  async function feeChain(
+    action: "dispute" | "counter-evidence",
+    input: Parameters<TasksChain["dispute"]>[0],
+  ) {
+    let initialized: TasksChain;
+    try {
+      initialized = await get();
+    } catch (error) {
+      let exposed = true;
+      try {
+        exposed = await pending.exposure(taskFeeReservationKey(input.escrowId, action));
+      } catch {
+        /* A failed read cannot prove rollback is safe. */
+      }
+      throw safeTasksChainError(
+        error,
+        error instanceof TasksChainError && error.broadcast,
+        exposed,
+      );
+    }
+    return action === "dispute" ? initialized.dispute(input) : initialized.counterEvidence(input);
+  }
   return {
     available: true,
+    getSigningAddress: async () => {
+      const initialized = await get();
+      const address = initialized.signingAddress ?? (await initialized.getSigningAddress?.());
+      if (!address)
+        throw new TasksChainError(
+          "A local signing wallet is required for accepted scope recovery.",
+          false,
+          { authorizationExposed: false },
+        );
+      return address;
+    },
     createEscrow: async (input) => (await get()).createEscrow(input),
     fund: async (input) => {
       let initialized: TasksChain;
@@ -256,7 +308,11 @@ function lazyTasksChain(
     deliver: async (input) => (await get()).deliver(input),
     release: async (input) => (await get()).release(input),
     refund: async (input) => (await get()).refund(input),
-    dispute: async (input) => (await get()).dispute(input),
+    dispute: async (input) => feeChain("dispute", input),
+    disputeFee: async (input) => (await get()).disputeFee(input),
+    counterEvidence: async (input) => feeChain("counter-evidence", input),
+    resolveUnmatched: async (input) => (await get()).resolveUnmatched(input),
+    bindScope: async (binding) => (await get()).bindScope?.(binding),
     signScopeMessage: async (message) => (await get()).signScopeMessage(message),
   };
 }
@@ -311,6 +367,8 @@ export function createTasksTools(options: TasksToolsOptions) {
                 client,
                 account,
                 trustedFactories: config.tasksEscrowFactoryOverrides,
+                trustedDurations: config.tasksEscrowDurationOverrides,
+                bindings: createScopeBindings(home),
                 rpcFor: createTasksRpcFor(config, { fetch: guardedFetch }),
                 pending,
                 now,
@@ -344,6 +402,32 @@ export function createTasksTools(options: TasksToolsOptions) {
         signMessage: (message: string) => account.signMessage({ message }),
       };
     };
+  }
+
+  async function feeAction(
+    verb: "dispute" | "counter-evidence",
+    input: Input<typeof tasksDisputeTool>,
+  ) {
+    const ctx = await acting(input.wallet);
+    const policy = await taskPolicyForWallet({
+      directory: home,
+      wallet: ctx.selected.name,
+      schema: registeredAgentProfileSchema,
+    });
+    const outcome = await (
+      verb === "dispute" ? disputeTaskOperation : counterEvidenceTaskOperation
+    )(ctx, {
+      id: input.id,
+      evidenceHash: input.evidenceHash,
+      ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
+      policy,
+      caps: await spendCapsForWallet(options.wallets!, ctx.selected.name),
+      wallet: ctx.selected.name,
+      ledgerPath: options.ledgerPath ?? getVapiPaths(home).ledger,
+      now,
+      approval: { granted: false },
+    });
+    return taskResult(outcome, !outcome.ok);
   }
 
   return {
@@ -429,6 +513,8 @@ export function createTasksTools(options: TasksToolsOptions) {
         return taskResult(
           await signTaskScope(ctx, {
             id: input.id,
+            ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
+            bindings: createScopeBindings(home),
             signMessage: async (message) =>
               (await unlock(ctx.selected.name)()).signMessage(message),
           }),
@@ -459,6 +545,7 @@ export function createTasksTools(options: TasksToolsOptions) {
       });
       const outcome = await fundTaskOperation(ctx, {
         id: input.id,
+        ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
         policy,
         caps: await spendCapsForWallet(options.wallets!, ctx.selected.name),
         wallet: ctx.selected.name,
@@ -476,22 +563,39 @@ export function createTasksTools(options: TasksToolsOptions) {
       return taskResult(
         await deliverTaskOperation(await acting(input.wallet), {
           id: input.id,
+          ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
           files,
           note: input.note,
         }),
       );
     },
     async release(input: Input<typeof tasksReleaseTool>) {
-      return taskResult(await releaseTaskOperation(await acting(input.wallet), { id: input.id }));
+      return taskResult(
+        await releaseTaskOperation(await acting(input.wallet), {
+          id: input.id,
+          ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
+        }),
+      );
     },
     async refund(input: Input<typeof tasksRefundTool>) {
-      return taskResult(await refundTaskOperation(await acting(input.wallet), { id: input.id }));
+      return taskResult(
+        await refundTaskOperation(await acting(input.wallet), {
+          id: input.id,
+          ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
+        }),
+      );
     },
     async dispute(input: Input<typeof tasksDisputeTool>) {
+      return feeAction("dispute", input);
+    },
+    async counterEvidence(input: Input<typeof tasksCounterEvidenceTool>) {
+      return feeAction("counter-evidence", input);
+    },
+    async resolveUnmatched(input: Input<typeof tasksResolveUnmatchedTool>) {
       return taskResult(
-        await disputeTaskOperation(await acting(input.wallet), {
+        await resolveUnmatchedTaskOperation(await acting(input.wallet), {
           id: input.id,
-          evidenceHash: input.evidenceHash,
+          ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
         }),
       );
     },

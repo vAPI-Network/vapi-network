@@ -10,8 +10,30 @@ const PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef012345678
 
 describe("task interface parity", () => {
   it("keeps CLI help and MCP registration aligned with the canonical task verbs", async () => {
-    const helpVerbs = [...TASK_HELP.matchAll(/^ {2}vapi task (\w+)/gmu)].map((match) => match[1]);
-    expect(new Set(helpVerbs)).toEqual(new Set(TASKS_CLIENT_VERBS));
+    const helpVerbs = [...TASK_HELP.matchAll(/^ {2}vapi task ([\w-]+)/gmu)].map(
+      (match) => match[1],
+    );
+    expect(TASKS_CLIENT_VERBS).toEqual([
+      "search",
+      "show",
+      "post",
+      "propose",
+      "submit",
+      "award",
+      "sign",
+      "fund",
+      "deliver",
+      "release",
+      "refund",
+      "dispute",
+      "counter-evidence",
+      "resolve-unmatched",
+      "message",
+      "thread",
+      "watch",
+      "status",
+    ]);
+    expect(helpVerbs).toEqual(TASKS_CLIENT_VERBS);
 
     const server = createVapiServer({
       account: privateKeyToAccount(PRIVATE_KEY),
@@ -24,7 +46,7 @@ describe("task interface parity", () => {
         .map(({ name }) => name)
         .filter((name) => name.startsWith("tasks."))
         .map((name) => name.slice("tasks.".length));
-      expect(new Set(mcpVerbs)).toEqual(new Set(TASKS_CLIENT_VERBS));
+      expect(mcpVerbs).toEqual(TASKS_CLIENT_VERBS);
     } finally {
       await server.close();
     }

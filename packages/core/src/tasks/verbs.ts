@@ -12,6 +12,8 @@ export const TASKS_CLIENT_VERBS = [
   "release",
   "refund",
   "dispute",
+  "counter-evidence",
+  "resolve-unmatched",
   "message",
   "thread",
   "watch",

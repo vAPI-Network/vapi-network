@@ -56,6 +56,8 @@ describe("Agent Cash MCP marketplace tools", () => {
       "tasks.release",
       "tasks.refund",
       "tasks.dispute",
+      "tasks.counter-evidence",
+      "tasks.resolve-unmatched",
       "tasks.message",
       "tasks.thread",
       "tasks.watch",

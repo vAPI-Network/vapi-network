@@ -15,6 +15,7 @@ import {
 import type {
   AcceptProposalInput,
   BoardQuery,
+  CounterEvidenceEscrowInput,
   ConfigureWebhookInput,
   CreateOrderInput,
   CreateUploadInput,
@@ -428,6 +429,26 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         { ...call, body: input },
       );
     },
+    counterEvidenceEscrow(
+      id: string,
+      input: CounterEvidenceEscrowInput,
+      call: TasksMutationOptions,
+    ) {
+      return request(
+        `/v1/escrows/${segment(id)}/counter-evidence`,
+        "POST",
+        tasksResponseSchemas.counterEvidenceEscrow,
+        { ...call, body: input },
+      );
+    },
+    resolveUnmatchedEscrow(id: string, call: TasksMutationOptions) {
+      return request(
+        `/v1/escrows/${segment(id)}/resolve-unmatched`,
+        "POST",
+        tasksResponseSchemas.resolveUnmatchedEscrow,
+        { ...call, body: {} },
+      );
+    },
     chainState(id: string, call: TasksRequestOptions = {}) {
       return request(
         `/v1/work-orders/${segment(id)}/chain-state`,
@@ -667,6 +688,15 @@ export type TasksClient = {
     input: DisputeEscrowInput,
     call: TasksMutationOptions,
   ): Promise<TaskResponse<"disputeEscrow">>;
+  counterEvidenceEscrow(
+    id: string,
+    input: CounterEvidenceEscrowInput,
+    call: TasksMutationOptions,
+  ): Promise<TaskResponse<"counterEvidenceEscrow">>;
+  resolveUnmatchedEscrow(
+    id: string,
+    call: TasksMutationOptions,
+  ): Promise<TaskResponse<"resolveUnmatchedEscrow">>;
   chainState(id: string, call?: TasksRequestOptions): Promise<TaskResponse<"chainState">>;
   createUpload(
     input: CreateUploadInput,

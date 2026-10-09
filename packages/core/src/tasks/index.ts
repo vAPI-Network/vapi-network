@@ -1,5 +1,6 @@
 export * from "./canonical-json.js";
 export * from "./scope-terms.js";
+export * from "./scope-bindings.js";
 export * from "./delivery-manifest.js";
 export * from "./verbs.js";
 export * from "./chain-port.js";
@@ -42,3 +43,5 @@ export type * from "./types.js";
 
 export * from "./trusted-deployments.js";
 export { safeTasksChainError } from "./chain-error.js";
+
+export * from "./dispute-fee.js";

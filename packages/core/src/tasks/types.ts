@@ -195,6 +195,7 @@ export const deliverEscrowInputSchema = z.object({
     .refine((value) => value.trim().length > 0, "Delivery note is required"),
 });
 export const disputeEscrowInputSchema = z.object({ evidenceHash: bytes32Schema });
+export const counterEvidenceEscrowInputSchema = z.object({ evidenceHash: bytes32Schema });
 
 export const workFileMimeTypeSchema = z.enum([
   "image/png",
@@ -271,6 +272,8 @@ export const operationMutationInputSchema = z
         "release-funds",
         "refund-buyer",
         "raise-dispute",
+        "submit-counter-evidence",
+        "resolve-unmatched-dispute",
         "timeout-refund",
         "finalize",
         "vote-dispute",
@@ -324,6 +327,8 @@ const chainPlanSchema = z
       "release-funds",
       "refund-buyer",
       "raise-dispute",
+      "submit-counter-evidence",
+      "resolve-unmatched-dispute",
       "timeout-refund",
       "finalize",
       "vote-dispute",
@@ -356,6 +361,8 @@ const chainOperationSchema = z
       "escrow-delivery",
       "escrow-release",
       "escrow-dispute",
+      "escrow-counter-evidence",
+      "escrow-unmatched-resolution",
       "escrow-vote",
       "escrow-finalize",
       "vendor-credential-mint",
@@ -370,6 +377,8 @@ const chainOperationSchema = z
       "release-funds",
       "refund-buyer",
       "raise-dispute",
+      "submit-counter-evidence",
+      "resolve-unmatched-dispute",
       "timeout-refund",
       "finalize",
       "vote-dispute",
@@ -979,6 +988,8 @@ export const tasksResponseSchemas = {
   releaseEscrow: escrowActionResponseSchema,
   refundEscrow: escrowActionResponseSchema,
   disputeEscrow: escrowActionResponseSchema,
+  counterEvidenceEscrow: escrowActionResponseSchema,
+  resolveUnmatchedEscrow: escrowActionResponseSchema,
   chainState: z.looseObject({
     workOrderId: uuidSchema,
     milestones: z.array(
@@ -1066,6 +1077,7 @@ export type ProposeScopeInput = z.input<typeof proposeScopeInputSchema>;
 export type SignScopeInput = z.input<typeof signScopeInputSchema>;
 export type FundEscrowInput = z.input<typeof fundEscrowInputSchema>;
 export type DeliverEscrowInput = z.input<typeof deliverEscrowInputSchema>;
+export type CounterEvidenceEscrowInput = z.input<typeof counterEvidenceEscrowInputSchema>;
 export type DisputeEscrowInput = z.input<typeof disputeEscrowInputSchema>;
 export type CreateUploadInput = z.input<typeof createUploadInputSchema>;
 export type UploadFileInput = {
@@ -1103,6 +1115,12 @@ export type FundEscrowResponse = z.infer<typeof tasksResponseSchemas.fundEscrow>
 export type DeliverEscrowResponse = z.infer<typeof tasksResponseSchemas.deliverEscrow>;
 export type ReleaseEscrowResponse = z.infer<typeof tasksResponseSchemas.releaseEscrow>;
 export type RefundEscrowResponse = z.infer<typeof tasksResponseSchemas.refundEscrow>;
+export type CounterEvidenceEscrowResponse = z.infer<
+  typeof tasksResponseSchemas.counterEvidenceEscrow
+>;
+export type ResolveUnmatchedEscrowResponse = z.infer<
+  typeof tasksResponseSchemas.resolveUnmatchedEscrow
+>;
 export type DisputeEscrowResponse = z.infer<typeof tasksResponseSchemas.disputeEscrow>;
 export type ChainStateResponse = z.infer<typeof tasksResponseSchemas.chainState>;
 export type CreateUploadResponse = z.infer<typeof tasksResponseSchemas.createUpload>;

@@ -1,3 +1,5 @@
+import type { Address } from "viem";
+import type { ScopeBinding } from "./scope-bindings.js";
 import type { FrozenDeliveryManifest } from "./delivery-manifest.js";
 import type { CreateEscrowResponse, GetOrderResponse } from "./types.js";
 
@@ -17,6 +19,7 @@ export type TasksEscrowOperation = {
   idempotencyKey: string;
   /** Avoid listing private orders when the caller already knows the parent. */
   orderId?: string;
+  counterparty?: string;
 };
 
 /**
@@ -30,7 +33,15 @@ export type TasksEscrowOperation = {
  */
 export interface TasksChain {
   readonly available: boolean;
-  createEscrow(input: { orderId: string; idempotencyKey: string }): Promise<TasksChainResult>;
+  readonly signingAddress?: Address;
+  /** Resolve the trusted local wallet identity without signing. */
+  getSigningAddress?(): Promise<Address>;
+  bindScope?(binding: ScopeBinding): Promise<void>;
+  createEscrow(input: {
+    orderId: string;
+    idempotencyKey: string;
+    counterparty?: string;
+  }): Promise<TasksChainResult>;
   /**
    * Sign EIP-3009 ReceiveWithAuthorization locally BEFORE preparing funding.
    * Once the authorization may have left the machine, failures must retain the
@@ -44,7 +55,22 @@ export interface TasksChain {
   ): Promise<TasksChainResult>;
   release(input: TasksEscrowOperation): Promise<TasksChainResult>;
   refund(input: TasksEscrowOperation): Promise<TasksChainResult>;
-  dispute(input: TasksEscrowOperation & { evidenceHash: `0x${string}` }): Promise<TasksChainResult>;
+  disputeFee(input: TasksEscrowOperation): Promise<bigint>;
+  dispute(
+    input: TasksEscrowOperation & {
+      evidenceHash: `0x${string}`;
+      feeBaseUnits?: bigint;
+      beforeSign?: () => Promise<void>;
+    },
+  ): Promise<TasksChainResult>;
+  counterEvidence(
+    input: TasksEscrowOperation & {
+      evidenceHash: `0x${string}`;
+      feeBaseUnits?: bigint;
+      beforeSign?: () => Promise<void>;
+    },
+  ): Promise<TasksChainResult>;
+  resolveUnmatched(input: TasksEscrowOperation): Promise<TasksChainResult>;
   /** EIP-191 personal_sign over canonicalJson(scope.signingPayload), passed as a string. */
   signScopeMessage(message: string): Promise<`0x${string}`>;
 }
@@ -91,5 +117,8 @@ export const missingTasksChain: TasksChain = {
   release: unavailable,
   refund: unavailable,
   dispute: unavailable,
+  disputeFee: unavailable,
+  counterEvidence: unavailable,
+  resolveUnmatched: unavailable,
   signScopeMessage: unavailable,
 };
