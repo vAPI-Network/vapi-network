@@ -1,5 +1,19 @@
 import { z } from "zod";
 
+import {
+  milestoneTermsSchema,
+  scopeBriefSchema,
+  scopeSigningPayloadSchema,
+  scopeStructuredTermsSchema,
+} from "./scope-terms.js";
+
+export {
+  milestoneTermsSchema,
+  scopeBriefSchema,
+  scopeSigningPayloadSchema,
+  scopeStructuredTermsSchema,
+} from "./scope-terms.js";
+
 const uuidSchema = z.uuid();
 const isoDateTimeSchema = z.iso.datetime();
 const addressSchema = z
@@ -15,15 +29,14 @@ const signatureSchema = z
   .regex(/^0x(?:[0-9a-fA-F]{2})+$/)
   .max(32_770);
 const unsignedDecimalSchema = z.string().regex(/^(0|[1-9][0-9]*)$/);
-const positiveDecimalSchema = unsignedDecimalSchema.pipe(
+const positiveDecimalBoundarySchema = unsignedDecimalSchema.pipe(
   z.string().refine((value) => BigInt(value) > 0n, "Amount must be greater than zero"),
 );
 const networkSchema = z
   .string()
   .regex(/^eip155:[1-9][0-9]*$/)
   .transform((value) => value as `eip155:${string}`);
-// Tasks milestone terms permit CAIP-2 chain id zero; transaction plans and
-// deployment responses use the positive-chain schema above.
+// Milestone response records allow the same CAIP-2 chain ids as frozen terms.
 const milestoneNetworkSchema = z
   .string()
   .regex(/^eip155:(0|[1-9][0-9]*)$/)
@@ -41,46 +54,16 @@ export const workPolicyFamilySchema = z.enum([
   "design-content",
 ]);
 
-export const milestoneTermsSchema = z
-  .object({
-    version: z.literal("work-milestone-terms-v1"),
-    title: z.string().trim().min(3).max(120),
-    description: z.string().trim().min(10).max(8_000),
-    acceptanceCriteria: z.array(z.string().trim().min(3).max(500)).min(1).max(20),
-    workDurationSeconds: z.number().int().min(600).max(7_776_000).optional(),
-    acceptanceWindowSeconds: z.number().int().min(60).max(2_592_000).default(604_800),
-    budget: z.object({
-      network: milestoneNetworkSchema,
-      asset: assetSchema,
-      amountBaseUnits: positiveDecimalSchema,
-    }),
-    escrow: z.object({ protocol: z.literal("escrow-v1"), contract: addressSchema }),
-    evidenceRules: z.object({
-      acceptedInputs: z
-        .array(z.enum(["text", "private-file", "git-commit"]))
-        .min(1)
-        .max(3)
-        .refine(
-          (values) => new Set(values).size === values.length,
-          "Evidence inputs must be unique",
-        ),
-      exactCommitRequired: z.boolean(),
-    }),
-  })
-  .superRefine((terms, context) => {
-    if (terms.budget.asset.split("/")[0] !== terms.budget.network) {
-      context.addIssue({
-        code: "custom",
-        path: ["budget", "asset"],
-        message: "Asset and escrow must use the same network",
-      });
-    }
-  });
-
-const scopeStructuredTermsSchema = milestoneTermsSchema.safeExtend({
-  deliverables: z.array(z.string().trim().min(3).max(500)).min(1).max(50),
-  revisionCount: z.number().int().min(0).max(100),
-  deadline: isoDateTimeSchema,
+// Guard malformed transport values before the server-equivalent BigInt refinement runs.
+const milestoneTermsBoundarySchema = milestoneTermsSchema.safeExtend({
+  budget: milestoneTermsSchema.shape.budget.safeExtend({
+    amountBaseUnits: positiveDecimalBoundarySchema,
+  }),
+});
+const scopeStructuredTermsBoundarySchema = scopeStructuredTermsSchema.safeExtend({
+  budget: scopeStructuredTermsSchema.shape.budget.safeExtend({
+    amountBaseUnits: positiveDecimalBoundarySchema,
+  }),
 });
 
 export const submissionProofSchema = z.discriminatedUnion("kind", [
@@ -102,7 +85,7 @@ export const proposalSigningPayloadSchema = z
     workOrderId: uuidSchema,
     providerAddress: addressSchema,
     pricingModel: z.literal("fixed"),
-    milestones: z.array(milestoneTermsSchema).length(1),
+    milestones: z.array(milestoneTermsBoundarySchema).length(1),
     kind: z.enum(["proposal", "submission"]).optional(),
     proof: z.array(submissionProofSchema).optional(),
   })
@@ -115,14 +98,6 @@ export const proposalSigningPayloadSchema = z
       });
     }
   });
-
-export const scopeSigningPayloadSchema = z.object({
-  version: z.literal("work-scope-signature-v1"),
-  workOrderId: uuidSchema,
-  trancheOrdinal: z.number().int().positive(),
-  scopeVersion: z.number().int().positive(),
-  termsHash: bytes32Schema,
-});
 
 export const createOrderInputSchema = z
   .object({
@@ -145,7 +120,7 @@ export const createOrderInputSchema = z
           .object({
             network: milestoneNetworkSchema,
             asset: z.literal("USDC"),
-            amountBaseUnits: positiveDecimalSchema,
+            amountBaseUnits: positiveDecimalBoundarySchema,
           })
           .strict()
           .optional(),
@@ -172,11 +147,8 @@ export const submitInputSchema = z.object({
 export const acceptProposalInputSchema = z.object({ proposalId: uuidSchema });
 
 export const proposeScopeInputSchema = z.object({
-  structuredTerms: scopeStructuredTermsSchema,
-  brief: z
-    .string()
-    .max(32_000)
-    .refine((value) => value.trim().length > 0, "Scope brief is required"),
+  structuredTerms: scopeStructuredTermsBoundarySchema,
+  brief: scopeBriefSchema,
   signedPayload: scopeSigningPayloadSchema,
   signature: signatureSchema,
 });
@@ -333,7 +305,7 @@ const proposalResponseSchema = z.looseObject({
   signedPayload: proposalSigningPayloadSchema.loose(),
   signature: signatureSchema,
   signatureHash: bytes32Schema,
-  proposedMilestones: z.array(milestoneTermsSchema).length(1),
+  proposedMilestones: z.array(milestoneTermsBoundarySchema).length(1),
   acceptedAt: isoDateTimeSchema.nullable(),
   createdAt: isoDateTimeSchema,
   updatedAt: isoDateTimeSchema,
@@ -538,7 +510,7 @@ const milestoneResponseSchema = z
       "released",
       "refunded",
     ]),
-    terms: milestoneTermsSchema,
+    terms: milestoneTermsBoundarySchema,
     termsHash: bytes32Schema,
     termsFrozenAt: isoDateTimeSchema,
     network: milestoneNetworkSchema,
@@ -644,7 +616,7 @@ const scopeResponseSchema = z.looseObject({
   trancheOrdinal: z.number().int().positive(),
   version: z.number().int().positive(),
   state: z.enum(["proposed", "accepted", "superseded", "withdrawn"]),
-  structuredTerms: scopeStructuredTermsSchema,
+  structuredTerms: scopeStructuredTermsBoundarySchema,
   brief: z.string(),
   termsHash: bytes32Schema,
   proposedByRole: z.enum(["client", "provider"]),

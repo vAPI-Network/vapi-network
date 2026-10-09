@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 
 import {
   createPublicFetch,
+  getCanonicalX402Usdc,
   getVapiPaths,
   KeystoreError,
   loadConfig,
@@ -16,6 +17,7 @@ import {
   deliverTaskOperation,
   disputeTaskOperation,
   fundTaskOperation,
+  formatBaseUnitsUsd,
   messageTask,
   missingTasksChain,
   nextTaskEvents,
@@ -54,6 +56,7 @@ import {
   type UploadFileInput,
   type CreateOrderInput,
   type TaskMoney,
+  type SignedScopeTerms,
   validTaskBrief,
 } from "@vapi-network/core/tasks";
 import { registeredAgentProfileSchema } from "@vapi-network/mcp";
@@ -594,14 +597,22 @@ async function escrowTaskCommand(
           return await account.signMessage({ message });
         },
       });
+      const termsLine = json ? undefined : await scopeTermsLine(context.client, result.terms);
       taskOutput(io, json, context, verb, result, [
+        ...(termsLine ? [termsLine] : []),
         `Accepted scope for task ${id}.`,
         ...(result.escrowCreation ? ["Created the task escrow."] : []),
       ]);
       return;
     } catch (error) {
       if (!(error instanceof TasksScopeCreationError)) throw error;
-      taskOutput(io, json, context, verb, error.acceptance, [`Accepted scope for task ${id}.`]);
+      const termsLine = json
+        ? undefined
+        : await scopeTermsLine(context.client, error.acceptance.terms);
+      taskOutput(io, json, context, verb, error.acceptance, [
+        ...(termsLine ? [termsLine] : []),
+        `Accepted scope for task ${id}.`,
+      ]);
       return await taskRequest(verb, "createEscrow", async () => {
         throw error.cause;
       });
@@ -697,6 +708,30 @@ async function escrowTaskCommand(
     });
   }
   taskOutput(io, json, context, verb, result, [`Completed task ${verb} for ${id}.`]);
+}
+
+async function scopeTermsLine(client: TasksClient, terms: SignedScopeTerms): Promise<string> {
+  const token = terms.asset.split("/erc20:")[1];
+  const canonical = getCanonicalX402Usdc(terms.network);
+  let isUsdc =
+    token !== undefined &&
+    canonical !== undefined &&
+    token.toLowerCase() === canonical.usdc.toLowerCase();
+  if (!isUsdc && token !== undefined) {
+    try {
+      const deployment = await client.deployment();
+      isUsdc =
+        deployment.configured &&
+        deployment.network === terms.network &&
+        deployment.usdc.toLowerCase() === token.toLowerCase();
+    } catch {
+      // A display-only token lookup must not turn a completed signature into an error.
+    }
+  }
+  const amount = isUsdc
+    ? `$${formatBaseUnitsUsd(terms.amountBaseUnits)} USDC`
+    : `${terms.amountBaseUnits} base units (${terms.asset})`;
+  return `${terms.title} · ${amount} · deadline ${terms.deadline}`;
 }
 
 function taskInteractive(json: boolean, dependencies: CliDependencies): boolean {

@@ -12,6 +12,7 @@ import {
 } from "@vapi-network/core";
 import { agentSecretAccounts } from "@vapi-network/core/agent-link";
 import {
+  freezeScopeTerms,
   TasksClientError,
   createTasksClient,
   missingTasksChain,
@@ -347,12 +348,35 @@ describe("task wallet and route boundaries", () => {
   );
 
   it("reports missing chain after signing a worker scope and preserves the acceptance", async () => {
+    const structuredTerms = {
+      version: "work-milestone-terms-v1" as const,
+      title: "Write a report",
+      description: "Write a complete useful report.",
+      acceptanceCriteria: ["Report is complete"],
+      workDurationSeconds: 86_400,
+      acceptanceWindowSeconds: 604_800,
+      budget: {
+        network: "eip155:8453" as const,
+        asset: "eip155:8453/erc20:0x1111111111111111111111111111111111111111",
+        amountBaseUnits: "1000000",
+      },
+      escrow: {
+        protocol: "escrow-v1" as const,
+        contract: "0x2222222222222222222222222222222222222222",
+      },
+      evidenceRules: { acceptedInputs: ["text" as const], exactCommitRequired: false },
+      deliverables: ["A written report"],
+      revisionCount: 0,
+      deadline: NOW,
+    };
+    const brief = "Write and deliver the agreed report.";
+    const frozen = freezeScopeTerms(structuredTerms, brief);
     const payload = {
       version: "work-scope-signature-v1",
       workOrderId: ID,
       trancheOrdinal: 1,
       scopeVersion: 1,
-      termsHash: TX,
+      termsHash: frozen.termsHash,
     };
     const scope = {
       id: ESCROW,
@@ -361,10 +385,18 @@ describe("task wallet and route boundaries", () => {
       trancheOrdinal: 1,
       state: "proposed",
       proposedByRole: "client",
-      termsHash: TX,
+      structuredTerms,
+      brief,
+      termsHash: frozen.termsHash,
       signingPayload: payload,
     };
-    const milestone = { id: ESCROW, workOrderId: ID, ordinal: 1, termsHash: TX, escrowState: null };
+    const milestone = {
+      id: ESCROW,
+      workOrderId: ID,
+      ordinal: 1,
+      termsHash: frozen.termsHash,
+      escrowState: null as null | "locked",
+    };
     const acceptance = { scope: { ...scope, state: "accepted", milestoneId: ESCROW }, milestone };
     const client = {
       getOrder: vi.fn(async () => ({
@@ -392,11 +424,35 @@ describe("task wallet and route boundaries", () => {
     expect(JSON.parse(result.content[0]!.text)).toEqual({
       code: "chain_unavailable",
       message: "chain operations need C2",
-      acceptance,
+      acceptance: {
+        ...acceptance,
+        terms: {
+          amountBaseUnits: "1000000",
+          asset: structuredTerms.budget.asset,
+          network: "eip155:8453",
+          deadline: NOW,
+          deliverables: ["A written report"],
+          title: "Write a report",
+        },
+      },
     });
     expect(payment).toHaveBeenCalledWith("main");
     expect(client.signScope).toHaveBeenCalledOnce();
     expect(JSON.stringify(result)).not.toContain(PRIVATE_KEY);
+
+    milestone.escrowState = "locked";
+    const succeeded = await server.callTool({ name: "tasks.sign", arguments: { id: ID } });
+    expect(succeeded.isError).toBeFalsy();
+    expect(succeeded.structuredContent).toMatchObject({
+      terms: {
+        amountBaseUnits: "1000000",
+        asset: structuredTerms.budget.asset,
+        network: "eip155:8453",
+        deadline: NOW,
+        deliverables: ["A written report"],
+        title: "Write a report",
+      },
+    });
   });
 
   it("signs proposals and submissions using the selected wallet without returning secrets", async () => {

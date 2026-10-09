@@ -1,4 +1,5 @@
 export * from "./canonical-json.js";
+export * from "./scope-terms.js";
 export * from "./delivery-manifest.js";
 export * from "./verbs.js";
 export * from "./chain-port.js";

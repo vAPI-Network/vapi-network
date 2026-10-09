@@ -24,6 +24,7 @@ import {
 } from "./chain-port.js";
 import { createTasksClient } from "./client.js";
 import { prepareDeliveryManifest } from "./delivery-manifest.js";
+import { freezeScopeTerms } from "./scope-terms.js";
 import { tasksResponseSchemas } from "./types.js";
 
 const ORDER = "11111111-1111-4111-8111-111111111111";
@@ -51,6 +52,15 @@ const terms = {
   escrow: { protocol: "escrow-v1", contract: ADDRESS },
   evidenceRules: { acceptedInputs: ["text"], exactCommitRequired: false },
 };
+
+const structuredTerms = {
+  ...terms,
+  deliverables: ["A report"],
+  revisionCount: 0,
+  deadline: NOW,
+};
+const brief = "Report";
+const frozenScope = freezeScopeTerms(structuredTerms, brief);
 
 function orderResponse(
   amountBaseUnits = "100000000",
@@ -86,7 +96,7 @@ function orderResponse(
           ordinal: 1,
           state: "agreed",
           terms,
-          termsHash: HASH,
+          termsHash: frozenScope.termsHash,
           termsFrozenAt: NOW,
           network: "eip155:84532",
           asset: `eip155:84532/erc20:${ADDRESS}`,
@@ -124,9 +134,9 @@ function scope(proposedByRole: "client" | "provider" = "client", version = 1) {
         trancheOrdinal: 1,
         version,
         state: "proposed",
-        structuredTerms: { ...terms, deliverables: ["A report"], revisionCount: 0, deadline: NOW },
-        brief: "Report",
-        termsHash: HASH,
+        structuredTerms,
+        brief,
+        termsHash: frozenScope.termsHash,
         proposedByRole,
         proposerAddress: ADDRESS,
         proposerSignature: SIGNATURE,
@@ -140,7 +150,7 @@ function scope(proposedByRole: "client" | "provider" = "client", version = 1) {
           workOrderId: ORDER,
           trancheOrdinal: 1,
           scopeVersion: version,
-          termsHash: HASH,
+          termsHash: frozenScope.termsHash,
         },
       },
     ],
@@ -199,7 +209,7 @@ function dependencies(amount = "100000000") {
         id: ESCROW,
         workOrderId: ORDER,
         ordinal: 1,
-        termsHash: HASH,
+        termsHash: frozenScope.termsHash,
         termsFrozenAt: NOW,
       },
     }),
@@ -600,6 +610,37 @@ describe("scope acceptance", () => {
     expect(args.chain.createEscrow).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["brief", { ...scope(), brief: "Tampered report brief" }],
+    ["malformed brief", { ...scope(), brief: " \n" }],
+    [
+      "structured terms",
+      {
+        ...scope(),
+        structuredTerms: { ...scope().structuredTerms, title: "Tampered report" },
+      },
+    ],
+    [
+      "malformed terms",
+      {
+        ...scope(),
+        structuredTerms: { ...scope().structuredTerms, title: "x" },
+      },
+    ],
+  ])("refuses tampered %s before invoking either signer", async (_name, tampered) => {
+    const args = dependencies();
+    args.client.getOrder.mockResolvedValue(orderResponse("100000000", "provider", null));
+    args.client.getScopes.mockResolvedValueOnce({ scopes: [tampered] });
+    const signMessage = vi.fn().mockResolvedValue(SIGNATURE);
+
+    await expect(signScope({ ...args, role: "worker", signMessage })).rejects.toMatchObject({
+      message: "The scope terms do not match their hash; refusing to sign.",
+    });
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(args.chain.signScopeMessage).not.toHaveBeenCalled();
+    expect(args.client.signScope).not.toHaveBeenCalled();
+  });
+
   it("signs canonical payload bytes and reports worker escrow creation separately", async () => {
     const args = dependencies();
     args.client.getOrder.mockResolvedValue(orderResponse("100000000", "provider", null));
@@ -618,6 +659,14 @@ describe("scope acceptance", () => {
       idempotencyKey: CREATE_KEY,
     });
     expect(result.escrowCreation).toEqual(chainResult());
+    expect(result.terms).toEqual({
+      amountBaseUnits: "100000000",
+      asset: `eip155:84532/erc20:${ADDRESS}`,
+      network: "eip155:84532",
+      deadline: NOW,
+      deliverables: ["A report"],
+      title: "Prepare a report",
+    });
   });
 
   it("does not create an escrow for a poster or one already created", async () => {
@@ -670,7 +719,7 @@ describe("scope acceptance", () => {
         id: ESCROW,
         workOrderId: ORDER,
         ordinal: 1,
-        termsHash: HASH,
+        termsHash: frozenScope.termsHash,
         termsFrozenAt: NOW,
       },
     });
@@ -690,7 +739,13 @@ describe("scope acceptance", () => {
     args.client.getOrder.mockResolvedValue(orderResponse("100000000", "provider", null));
     args.client.signScope.mockResolvedValueOnce({
       scope: { ...scope(), state: "accepted", milestoneId: ESCROW },
-      milestone: { id: ESCROW, workOrderId: FILE, ordinal: 1, termsHash: HASH, termsFrozenAt: NOW },
+      milestone: {
+        id: ESCROW,
+        workOrderId: FILE,
+        ordinal: 1,
+        termsHash: frozenScope.termsHash,
+        termsFrozenAt: NOW,
+      },
     });
     await expect(signScope({ ...args, role: "worker" })).rejects.toThrow("accepted scope");
     expect(args.chain.createEscrow).not.toHaveBeenCalled();
@@ -725,7 +780,7 @@ describe("scope acceptance", () => {
         id: ESCROW,
         workOrderId: ORDER,
         ordinal: 2,
-        termsHash: HASH,
+        termsHash: frozenScope.termsHash,
         termsFrozenAt: NOW,
       },
     });
