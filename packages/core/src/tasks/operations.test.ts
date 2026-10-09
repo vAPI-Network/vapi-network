@@ -45,7 +45,7 @@ describe("taskRequest", () => {
     ).rejects.toMatchObject({
       name: "TaskOperationError",
       code: "chain_unavailable",
-      message: "chain operations need C2",
+      message: "An acting wallet is required for task chain operations.",
       manifestHash,
     });
     await expect(

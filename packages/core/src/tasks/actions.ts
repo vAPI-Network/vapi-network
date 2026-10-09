@@ -16,7 +16,13 @@ import {
   type TasksChainResult,
 } from "./chain-port.js";
 import type { TasksClient } from "./client.js";
-import { prepareDeliveryManifest, type FrozenDeliveryManifest } from "./delivery-manifest.js";
+import type { PendingTransactions } from "./pending-transactions.js";
+import {
+  freezeDeliveryManifest,
+  prepareDeliveryManifest,
+  sha256Hex,
+  type FrozenDeliveryManifest,
+} from "./delivery-manifest.js";
 import { formatBaseUnitsUsd, parseFeeBp, taskMoney, type TaskMoney } from "./money.js";
 import { freezeScopeTerms } from "./scope-terms.js";
 import {
@@ -42,6 +48,7 @@ export type TaskFundingApproval =
   { granted: true } | { granted: false } | { ask: (summary: FundingSummary) => Promise<boolean> };
 
 export type FundTaskInput = TaskActionInput & {
+  pending?: PendingTransactions;
   policy: { maxPerTaskUsd: number; approveAboveUsd: number };
   caps: SpendCaps;
   wallet: WalletName;
@@ -60,6 +67,13 @@ export async function fundTask(input: FundTaskInput): Promise<FundTaskOutcome> {
   const milestone = await resolveMilestone(input);
   const money = await milestoneMoney(input.client, milestone);
   const grossAtomic = BigInt(money.gross.baseUnits);
+  const existingReservationId = input.pending?.existingReservationId
+    ? await input.pending.existingReservationId(milestone.id)
+    : undefined;
+  const retainedReservation = input.pending?.retainedReservation
+    ? await input.pending.retainedReservation(milestone.id)
+    : undefined;
+  const today = input.now().toISOString().slice(0, 10);
   const maxPerTaskAtomic = policyAtomic(input.policy.maxPerTaskUsd);
   const approveAboveAtomic = policyAtomic(input.policy.approveAboveUsd);
   const dayRemainingAtomic = await escrowFundingDayRemainingAtomic({
@@ -67,18 +81,24 @@ export async function fundTask(input: FundTaskInput): Promise<FundTaskOutcome> {
     ledgerPath: input.ledgerPath,
     wallet: input.wallet,
     now: input.now(),
+    ...(existingReservationId ? { reservationId: existingReservationId } : {}),
   });
   const dayRemainingUsd = Number(formatBaseUnitsUsd(dayRemainingAtomic));
+  const resumedFromPriorDay =
+    retainedReservation?.date !== undefined &&
+    retainedReservation.date !== today &&
+    retainedReservation.exposed === true &&
+    retainedReservation.invalidated !== true;
   const decision = decideFunding({
     amountUsd: Number(money.gross.usd),
     ...input.policy,
-    dayRemainingUsd,
+    dayRemainingUsd: resumedFromPriorDay ? Number(money.gross.usd) : dayRemainingUsd,
   });
   // The policy API uses numbers. Compare atomic units too, so floating-point
   // precision cannot bypass a cap or approval at large or fractional amounts.
   if (grossAtomic > maxPerTaskAtomic)
     return { outcome: "refused", reason: "policy.perTask", money };
-  if (grossAtomic > dayRemainingAtomic)
+  if (grossAtomic > dayRemainingAtomic && !resumedFromPriorDay)
     return { outcome: "refused", reason: "policy.perDay", money };
   if ("ok" in decision && !decision.ok)
     return { outcome: "refused", reason: decision.reason, money };
@@ -91,44 +111,75 @@ export async function fundTask(input: FundTaskInput): Promise<FundTaskOutcome> {
     }
   }
   requireChain(input.chain);
-  const idempotencyKey = operationKey(input);
-  // Reserve only after policy, approval, and chain availability. A raced cap
-  // failure propagates as SpendCapError; refusal outcomes above stay read-only.
-  const reservation = await reserveSpend(grossAtomic, input.caps, {
-    kind: "escrow-funding",
-    maxPerTaskAtomic,
-    wallet: input.wallet,
-    ledgerPath: input.ledgerPath,
-    now: input.now(),
-    reservationId: idempotencyKey,
-  });
-  try {
-    const result = await input.chain.fund({
-      escrowId: milestone.id,
-      grossBaseUnits: grossAtomic,
-      idempotencyKey,
+  const performFunding = async (): Promise<FundTaskOutcome> => {
+    const currentReservation = input.pending?.retainedReservation
+      ? await input.pending.retainedReservation(milestone.id)
+      : retainedReservation;
+    const idempotencyKey = input.pending
+      ? await input.pending.reservationId(milestone.id, () => operationKey(input))
+      : operationKey(input);
+    // Reserve only after policy, approval, and chain availability. A raced cap
+    // failure propagates as SpendCapError; refusal outcomes above stay read-only.
+    const reservation = await reserveSpend(grossAtomic, input.caps, {
+      kind: "escrow-funding",
+      maxPerTaskAtomic,
+      wallet: input.wallet,
+      ledgerPath: input.ledgerPath,
+      now: input.now(),
+      reservationId: idempotencyKey,
+      reuseExistingEscrowReservation: input.pending !== undefined,
+      ...(currentReservation?.exposed === true && currentReservation.invalidated !== true
+        ? { resumeEscrowReservation: currentReservation }
+        : {}),
     });
-    return { outcome: "done", money, result };
-  } catch (error) {
-    if (error instanceof TasksChainError && !error.broadcast && !error.authorizationExposed) {
-      try {
-        await releaseSpend(grossAtomic, {
-          ledgerPath: input.ledgerPath,
-          wallet: input.wallet,
-          now: input.now(),
-          reservedOn: reservation.date,
-          reservationId: idempotencyKey,
-        });
-      } catch (rollbackError) {
-        throw new AggregateError(
-          [error, rollbackError],
-          "Task funding failed and its spend reservation could not be released.",
-          { cause: error },
-        );
+    await input.pending?.bindReservation?.(milestone.id, {
+      id: idempotencyKey,
+      wallet: input.wallet,
+      amountAtomic: grossAtomic.toString(),
+      date: reservation.date,
+    });
+    try {
+      const fundingOperation = {
+        orderId: milestone.workOrderId,
+        escrowId: milestone.id,
+        grossBaseUnits: grossAtomic,
+        idempotencyKey,
+      };
+      const result = await input.chain.fund(fundingOperation);
+      return { outcome: "done", money, result };
+    } catch (error) {
+      const exposed = input.pending ? await input.pending.exposure(milestone.id) : false;
+      if (
+        !reservation.reservationReused &&
+        !exposed &&
+        error instanceof TasksChainError &&
+        !error.broadcast &&
+        !error.authorizationExposed
+      ) {
+        try {
+          await input.pending?.invalidateReservation?.(milestone.id);
+          await releaseSpend(grossAtomic, {
+            ledgerPath: input.ledgerPath,
+            wallet: input.wallet,
+            now: input.now(),
+            reservedOn: reservation.date,
+            reservationId: idempotencyKey,
+          });
+          await input.pending?.clearReservation?.(milestone.id);
+        } catch (rollbackError) {
+          throw new AggregateError(
+            [error, rollbackError],
+            "Task funding failed and its spend reservation could not be released.",
+            { cause: error },
+          );
+        }
       }
+      throw error;
     }
-    throw error;
-  }
+  };
+  return input.pending
+    ? input.pending.withFundingLock(milestone.id, performFunding)
+    : performFunding();
 }
 
 export type TaskDeliveryFile = ({ path: string; name?: never } | { name: string; path?: never }) & {
@@ -138,11 +189,13 @@ export type TaskDeliveryFile = ({ path: string; name?: never } | { name: string;
 
 export type PrepareDeliveryInput = TaskTarget & {
   client: TasksClient;
+  pending?: PendingTransactions;
   files: TaskDeliveryFile[];
   note: string;
 };
 
 export type PreparedTaskDelivery = {
+  orderId: string;
   escrowId: string;
   manifest: FrozenDeliveryManifest;
   note: string;
@@ -154,6 +207,34 @@ export async function prepareDelivery(input: PrepareDeliveryInput): Promise<Prep
   if (input.files.length < 1 || input.files.length > 20)
     throw new Error("Upload between one and twenty delivery files.");
   const milestone = await resolveMilestone(input);
+  const saved = await input.pending?.preparation(milestone.id, "deliver");
+  if (saved) {
+    const inputs = z
+      .object({
+        manifestHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+        manifest: z.unknown(),
+        note: z.string(),
+      })
+      .strict()
+      .parse(saved.inputs);
+    const manifest = freezeDeliveryManifest(inputs.manifest);
+    if (manifest.manifestHash !== inputs.manifestHash || input.note !== inputs.note)
+      throw new Error("The saved delivery preparation does not match the local delivery.");
+    const localFiles = await Promise.all(
+      input.files.map(async (file) => ({
+        fileName: file.name ?? basename(file.path!),
+        sha256: await sha256Hex(file.bytes),
+        sizeBytes: file.bytes.byteLength,
+      })),
+    );
+    const identity = (file: { fileName: string; sha256: string; sizeBytes: number }) =>
+      `${file.fileName}\0${file.sha256.toLowerCase()}\0${file.sizeBytes}`;
+    const localIdentities = localFiles.map(identity).sort();
+    const savedIdentities = manifest.manifest.files.map(identity).sort();
+    if (canonicalJson(localIdentities) !== canonicalJson(savedIdentities))
+      throw new Error("The saved delivery preparation does not match the local delivery files.");
+    return { orderId: milestone.workOrderId, escrowId: milestone.id, manifest, note: input.note };
+  }
   const metadata = [];
   for (const file of input.files) {
     const uploaded = await input.client.uploadFile({
@@ -170,6 +251,7 @@ export async function prepareDelivery(input: PrepareDeliveryInput): Promise<Prep
     });
   }
   return {
+    orderId: milestone.workOrderId,
     escrowId: milestone.id,
     manifest: await prepareDeliveryManifest(metadata, input.note),
     note: input.note,
@@ -203,6 +285,7 @@ export async function releaseTask(input: TaskActionInput): Promise<TaskMoneyResu
   const money = await milestoneMoney(input.client, milestone);
   requireChain(input.chain);
   const result = await input.chain.release({
+    orderId: milestone.workOrderId,
     escrowId: milestone.id,
     idempotencyKey: operationKey(input),
   });
@@ -214,6 +297,7 @@ export async function refundTask(input: TaskActionInput): Promise<TaskMoneyResul
   const money = await milestoneMoney(input.client, milestone);
   requireChain(input.chain);
   const result = await input.chain.refund({
+    orderId: milestone.workOrderId,
     escrowId: milestone.id,
     idempotencyKey: operationKey(input),
   });
@@ -229,6 +313,7 @@ export async function disputeTask(input: DisputeTaskInput): Promise<DisputeTaskR
   const money = await milestoneMoney(input.client, milestone);
   requireChain(input.chain);
   const result = await input.chain.dispute({
+    orderId: milestone.workOrderId,
     escrowId: milestone.id,
     evidenceHash,
     idempotencyKey: operationKey(input),

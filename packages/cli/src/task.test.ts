@@ -7,13 +7,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { WalletStore, type SecretStore } from "@vapi-network/core";
 import { agentSecretAccounts } from "@vapi-network/core/agent-link";
+import { TasksClientError } from "@vapi-network/core/tasks";
 import {
   canonicalJson,
+  createPendingTransactions,
   freezeScopeTerms,
+  missingTasksChain,
   prepareDeliveryManifest,
+  safeTasksChainError,
   TasksChainError,
   TasksChainUnavailableError,
-  TasksClientError,
   type TasksClient,
   type TasksChain,
   type TasksChainResult,
@@ -619,13 +622,15 @@ describe("vapi task", () => {
   });
 
   it("uses authenticated show, and public status even when signed in", async () => {
-    const { client, dependencies } = await fixture();
+    const { client, dependencies, store } = await fixture();
+    const unlock = vi.spyOn(store, "unlock");
     expect((await invoke(["show", ID], dependencies)).code).toBe(0);
     expect(client.getOrder).toHaveBeenCalledWith(ID);
     const result = await invoke(["status", ID], dependencies);
     expect(result.code).toBe(0);
     expect(result.value!.task).toEqual(card());
     expect(client.publicTask).toHaveBeenCalledWith(ID);
+    expect(unlock).not.toHaveBeenCalled();
   });
 
   it("prints the server receipt URL for a settled public task", async () => {
@@ -861,15 +866,21 @@ describe("vapi task", () => {
     const unavailable = await invoke(["message", ID, "Hello"], dependencies);
     expect(unavailable.value).toEqual({
       ok: false,
-      error: { code: "chain_unavailable", message: "chain operations need C2" },
+      error: {
+        code: "chain_unavailable",
+        message: "An acting wallet is required for task chain operations.",
+      },
     });
   });
 
   it("preserves the unavailable code from a separately bundled chain error", async () => {
-    const error = Object.assign(new Error("chain operations need C2"), {
-      name: "TasksChainUnavailableError",
-      code: "chain_unavailable",
-    });
+    const error = Object.assign(
+      new Error("An acting wallet is required for task chain operations."),
+      {
+        name: "TasksChainUnavailableError",
+        code: "chain_unavailable",
+      },
+    );
     const { dependencies } = await fixture(
       true,
       fakeClient({
@@ -881,7 +892,10 @@ describe("vapi task", () => {
     const result = await invoke(["message", ID, "Hello"], dependencies);
     expect(result.value).toEqual({
       ok: false,
-      error: { code: "chain_unavailable", message: "chain operations need C2" },
+      error: {
+        code: "chain_unavailable",
+        message: "An acting wallet is required for task chain operations.",
+      },
     });
   });
 
@@ -1335,10 +1349,12 @@ describe("vapi task", () => {
         }
         return { ...deployed, feeBp };
       });
-      const { home, dependencies } = await fixture(true, client);
+      const { home, dependencies, store } = await fixture(true, client);
+      dependencies.tasks!.chain = missingTasksChain;
       await writeProfile(home);
       const chain = fakeChain();
       dependencies.tasks!.chain = chain;
+      const unlock = vi.spyOn(store, "unlock");
       const result = await invoke(["fund", ID, "--yes"], dependencies);
       expect(result.code).toBe(0);
       expect(result.value).toMatchObject({
@@ -1351,6 +1367,7 @@ describe("vapi task", () => {
         result: expect.any(Object),
       });
       expect(chain.fund).toHaveBeenCalledOnce();
+      expect(unlock).not.toHaveBeenCalled();
     });
 
     it("uses defaults without a matching profile and fails closed on ambiguous or invalid profiles", async () => {
@@ -1391,8 +1408,7 @@ describe("vapi task", () => {
               })
             : "missing";
         if (setup === "perDay") await writeFile(ledger, before);
-        const chain = fakeChain();
-        dependencies.tasks!.chain = chain;
+        const unlock = vi.spyOn(store, "unlock");
         const result = await invoke(["fund", ID, "--yes"], dependencies);
         expect(result.code).toBe(2);
         expect(result.value).toMatchObject({
@@ -1400,7 +1416,7 @@ describe("vapi task", () => {
           reason: `policy.${setup}`,
           policyDecision: `policy.${setup}`,
         });
-        expect(chain.fund).not.toHaveBeenCalled();
+        expect(unlock).not.toHaveBeenCalled();
         expect(await readFile(ledger, "utf8").catch(() => "missing")).toBe(before);
       }
     });
@@ -1413,17 +1429,16 @@ describe("vapi task", () => {
       "requires approval without prompting or funding in mode %j",
       async ({ json, interactive, env }) => {
         const client = fakeClient({ getOrder: async () => milestoneOrder() });
-        const { home, dependencies } = await fixture(true, client);
+        const { home, dependencies, store } = await fixture(true, client);
         await writeProfile(home, { approveAboveUsd: 10 });
-        const chain = fakeChain();
-        dependencies.tasks!.chain = chain;
+        const unlock = vi.spyOn(store, "unlock");
         dependencies.env = env;
         dependencies.interactive = interactive;
         const line = vi.fn(async () => "yes");
         dependencies.prompts = { secret: async () => "test-passphrase", line };
         const result = await invoke(["fund", ID], dependencies, json);
         expect(result.code).toBe(3);
-        expect(chain.fund).not.toHaveBeenCalled();
+        expect(unlock).not.toHaveBeenCalled();
         expect(line).not.toHaveBeenCalled();
         expect(await readFile(join(home, "spend-ledger.json"), "utf8").catch(() => "missing")).toBe(
           "missing",
@@ -1491,10 +1506,14 @@ describe("vapi task", () => {
       const client = fakeClient({ getOrder: async () => milestoneOrder() });
       const { home, dependencies } = await fixture(true, client);
       await writeProfile(home);
+      dependencies.tasks!.chain = missingTasksChain;
       const missing = await invoke(["fund", ID, "--yes"], dependencies);
       expect(missing.value).toEqual({
         ok: false,
-        error: { code: "chain_unavailable", message: "chain operations need C2" },
+        error: {
+          code: "chain_unavailable",
+          message: "An acting wallet is required for task chain operations.",
+        },
       });
       expect(await readFile(join(home, "spend-ledger.json"), "utf8").catch(() => "missing")).toBe(
         "missing",
@@ -1508,6 +1527,69 @@ describe("vapi task", () => {
       dependencies.tasks!.chain = chain;
       expect((await invoke(["fund", ID, "--yes"], dependencies)).code).toBe(1);
       expect(chain.fund).toHaveBeenCalledOnce();
+    });
+
+    it("releases a funding reservation when lazy chain initialization fails", async () => {
+      const client = fakeClient({ getOrder: async () => milestoneOrder() });
+      const { home, dependencies } = await fixture(true, client);
+      await writeProfile(home);
+      const unlock = vi
+        .spyOn(WalletStore.prototype, "unlock")
+        .mockRejectedValue(new Error("vault unavailable"));
+
+      const result = await invoke(["fund", ID, "--yes"], dependencies);
+      unlock.mockRestore();
+
+      expect(result).toMatchObject({
+        code: 1,
+        value: {
+          error: {
+            code: "task_error",
+            message: "Error: Task chain operation failed.",
+          },
+        },
+      });
+      expect(JSON.parse(await readFile(join(home, "spend-ledger.json"), "utf8"))).toEqual({
+        version: 1,
+        rows: [{ date: "2026-10-08", spentAtomic: "0", wallet: "worker" }],
+      });
+    });
+
+    it("retains a funding reservation when persisted exposure predates lazy initialization failure", async () => {
+      const client = fakeClient({ getOrder: async () => milestoneOrder() });
+      const { home, dependencies } = await fixture(true, client);
+      await writeProfile(home);
+      await createPendingTransactions(home).markExposure(PROPOSAL_ID);
+      const unlock = vi
+        .spyOn(WalletStore.prototype, "unlock")
+        .mockRejectedValue(new Error("vault unavailable"));
+
+      const result = await invoke(["fund", ID, "--yes"], dependencies);
+      unlock.mockRestore();
+
+      expect(result.code).toBe(1);
+      expect(JSON.parse(await readFile(join(home, "spend-ledger.json"), "utf8"))).toMatchObject({
+        version: 1,
+        rows: [{ date: "2026-10-08", spentAtomic: "100000000", wallet: "worker" }],
+      });
+    });
+
+    it("rejects funding when the local signer does not match the task party", async () => {
+      const client = fakeClient({ getOrder: async () => milestoneOrder() });
+      const { home, dependencies } = await fixture(true, client);
+      await writeProfile(home);
+
+      const result = await invoke(["fund", ID, "--yes"], dependencies);
+
+      expect(result).toMatchObject({
+        code: 1,
+        value: {
+          error: {
+            code: "task_error",
+            message: "The local signer does not match the authenticated task party.",
+          },
+        },
+      });
     });
 
     it("records the escrow-funding reservation before a --yes chain call", async () => {
@@ -1540,6 +1622,7 @@ describe("vapi task", () => {
     it("emits one canonical error when delivery preparation succeeds but C2 is unavailable", async () => {
       const client = fakeClient({ getOrder: async () => milestoneOrder({ role: "provider" }) });
       const { home, dependencies } = await fixture(true, client);
+      dependencies.tasks!.chain = missingTasksChain;
       const path = join(home, "result.txt");
       await writeFile(path, "result");
       const unavailable = await invoke(
@@ -1549,7 +1632,10 @@ describe("vapi task", () => {
       );
       expect(unavailable.value).toEqual({
         ok: false,
-        error: { code: "chain_unavailable", message: "chain operations need C2" },
+        error: {
+          code: "chain_unavailable",
+          message: "An acting wallet is required for task chain operations.",
+        },
       });
       expect(client.uploadFile).toHaveBeenCalledOnce();
     });
@@ -1608,6 +1694,44 @@ describe("vapi task", () => {
         ok: false,
         error: { code: "task_error", message: "delivery failed" },
       });
+    });
+
+    it("does not serialize raw RPC transaction or authorization data", async () => {
+      const rawTransaction = `0x${"12".repeat(96)}`;
+      const authorizationSignature = `0x${"34".repeat(65)}`;
+      const source = Object.assign(
+        new Error(`RPC 503 included ${rawTransaction} and ${authorizationSignature}`),
+        {
+          name: "HttpRequestError",
+          shortMessage: `RPC request failed with status 503: ${rawTransaction} ${authorizationSignature}`,
+          details: { rawTransaction, authorizationSignature },
+          cause: { status: 503, rawTransaction, authorizationSignature },
+        },
+      );
+      const client = fakeClient({ getOrder: async () => milestoneOrder({ role: "provider" }) });
+      const { home, dependencies } = await fixture(true, client);
+      const path = join(home, "result.txt");
+      await writeFile(path, "result");
+      dependencies.tasks!.chain = fakeChain({
+        deliver: vi.fn(async () => {
+          throw safeTasksChainError(source, false, true);
+        }),
+      });
+
+      const result = await invoke(
+        ["deliver", ID, "--files", path, "--note", "Finished"],
+        dependencies,
+      );
+      const serialized = JSON.stringify(result.value);
+
+      expect(result.value).toMatchObject({
+        ok: false,
+        error: { code: "task_error", message: expect.stringContaining("HttpRequestError") },
+      });
+      expect(serialized).not.toContain(rawTransaction);
+      expect(serialized).not.toContain(authorizationSignature);
+      expect(serialized).not.toContain("details");
+      expect(serialized).not.toContain("cause");
     });
 
     it("signs the canonical scope then accepts it, maps roles, and reports a partial create failure", async () => {
@@ -1704,6 +1828,7 @@ describe("vapi task", () => {
         signScope: vi.fn(async () => accepted),
       });
       const { dependencies } = await fixture(true, client);
+      dependencies.tasks!.chain = missingTasksChain;
 
       const result = await invoke(["sign", ID], dependencies, false);
 
@@ -1796,11 +1921,15 @@ describe("vapi task", () => {
       });
       client.signScope = vi.fn(async () => accepted);
       const { dependencies } = await fixture(true, client);
+      dependencies.tasks!.chain = missingTasksChain;
       const result = await invoke(["sign", ID], dependencies, true, true);
       expect(result.values[0]).toMatchObject({ scope: { state: "accepted" } });
       expect(result.value).toEqual({
         ok: false,
-        error: { code: "chain_unavailable", message: "chain operations need C2" },
+        error: {
+          code: "chain_unavailable",
+          message: "An acting wallet is required for task chain operations.",
+        },
       });
     });
 

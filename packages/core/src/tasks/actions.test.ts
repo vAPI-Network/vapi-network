@@ -23,7 +23,8 @@ import {
   type TasksChainResult,
 } from "./chain-port.js";
 import { createTasksClient } from "./client.js";
-import { prepareDeliveryManifest } from "./delivery-manifest.js";
+import { prepareDeliveryManifest, sha256Hex } from "./delivery-manifest.js";
+import { createPendingTransactions, type PendingTransactions } from "./pending-transactions.js";
 import { freezeScopeTerms } from "./scope-terms.js";
 import { tasksResponseSchemas } from "./types.js";
 
@@ -289,9 +290,156 @@ describe("task funding", () => {
       outcome: "done",
     });
     expect(args.chain.fund).toHaveBeenCalledExactlyOnceWith({
+      orderId: ORDER,
       escrowId: ESCROW,
       grossBaseUnits: 100000000n,
       idempotencyKey: KEY,
+    });
+  });
+
+  it("reuses the durable reservation id for funding reruns", async () => {
+    const args = await funding();
+    const pending = {
+      existingReservationId: vi.fn().mockResolvedValue(undefined),
+      reservationId: vi.fn().mockResolvedValue(CREATE_KEY),
+      withFundingLock: vi.fn(async (_id, action) => action()),
+    } as unknown as import("./pending-transactions.js").PendingTransactions;
+    await fundTask({ ...args, pending, approval: { granted: true } });
+    expect(pending.reservationId).toHaveBeenCalledExactlyOnceWith(ESCROW, expect.any(Function));
+    expect(args.chain.fund).toHaveBeenCalledWith(
+      expect.objectContaining({ idempotencyKey: CREATE_KEY }),
+    );
+  });
+
+  it("retries an exposed funding reservation with the same key and no double count", async () => {
+    const args = await funding();
+    const pending = createPendingTransactions(join(args.ledgerPath, ".."));
+    args.chain.fund
+      .mockImplementationOnce(async () => {
+        await pending.markExposure(ESCROW);
+        throw new TasksChainError("Submission uncertain", true);
+      })
+      .mockResolvedValueOnce(chainResult());
+    await expect(fundTask({ ...args, pending, approval: { granted: true } })).rejects.toThrow(
+      "Submission uncertain",
+    );
+    expect(await readSpendLedger(args.ledgerPath, new Date(NOW))).toMatchObject({
+      spentAtomic: "100000000",
+    });
+    await expect(
+      fundTask({ ...args, pending, approval: { granted: true } }),
+    ).resolves.toMatchObject({
+      outcome: "done",
+    });
+    expect(await readSpendLedger(args.ledgerPath, new Date(NOW))).toMatchObject({
+      spentAtomic: "100000000",
+    });
+    expect(args.chain.fund.mock.calls[0]![0].idempotencyKey).toBe(
+      args.chain.fund.mock.calls[1]![0].idempotencyKey,
+    );
+  });
+
+  it("serializes concurrent funding across independent pending store instances", async () => {
+    const args = await funding();
+    const home = join(args.ledgerPath, "..");
+    const firstPending = createPendingTransactions(home);
+    const secondPending = createPendingTransactions(home);
+    let active = 0;
+    let highest = 0;
+    args.chain.fund.mockImplementation(async () => {
+      active += 1;
+      highest = Math.max(highest, active);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      active -= 1;
+      return chainResult();
+    });
+    await Promise.all([
+      fundTask({ ...args, pending: firstPending, approval: { granted: true } }),
+      fundTask({ ...args, pending: secondPending, approval: { granted: true } }),
+    ]);
+    expect(highest).toBe(1);
+    expect(args.chain.fund).toHaveBeenCalledTimes(2);
+    expect(await readSpendLedger(args.ledgerPath, new Date(NOW))).toMatchObject({
+      spentAtomic: "100000000",
+    });
+  });
+
+  it("can reserve the same durable id again after a proven-safe rollback", async () => {
+    const args = await funding();
+    const pending = createPendingTransactions(join(args.ledgerPath, ".."));
+    args.chain.fund
+      .mockRejectedValueOnce(
+        new TasksChainError("Signing refused", false, { authorizationExposed: false }),
+      )
+      .mockResolvedValueOnce(chainResult());
+    await expect(fundTask({ ...args, pending, approval: { granted: true } })).rejects.toThrow(
+      "Signing refused",
+    );
+    expect(await readSpendLedger(args.ledgerPath, new Date(NOW))).toMatchObject({
+      spentAtomic: "0",
+    });
+    await expect(
+      fundTask({ ...args, pending, approval: { granted: true } }),
+    ).resolves.toMatchObject({
+      outcome: "done",
+    });
+    expect(await readSpendLedger(args.ledgerPath, new Date(NOW))).toMatchObject({
+      spentAtomic: "100000000",
+    });
+  });
+
+  it("retains spend when execution stops immediately after reservation invalidation", async () => {
+    const args = await funding();
+    const stored = createPendingTransactions(join(args.ledgerPath, ".."));
+    const pending: PendingTransactions = {
+      ...stored,
+      async invalidateReservation(escrowId) {
+        await stored.invalidateReservation?.(escrowId);
+        throw new Error("Simulated crash after invalidation");
+      },
+    };
+    args.chain.fund.mockRejectedValueOnce(
+      new TasksChainError("Signing refused", false, { authorizationExposed: false }),
+    );
+    await expect(fundTask({ ...args, pending, approval: { granted: true } })).rejects.toMatchObject(
+      {
+        name: "AggregateError",
+        message: "Task funding failed and its spend reservation could not be released.",
+      },
+    );
+    expect(await readSpendLedger(args.ledgerPath, new Date(NOW))).toMatchObject({
+      spentAtomic: "100000000",
+    });
+    expect(await stored.retainedReservation?.(ESCROW)).toMatchObject({ invalidated: true });
+  });
+
+  it("persists reservation metadata before the chain call and resumes it across UTC days", async () => {
+    const args = await funding();
+    const home = join(args.ledgerPath, "..");
+    const pending = createPendingTransactions(home);
+    args.chain.fund.mockImplementationOnce(async () => {
+      expect(await pending.retainedReservation?.(ESCROW)).toMatchObject({
+        wallet: "main",
+        amountAtomic: "100000000",
+        date: "2026-10-08",
+      });
+      await pending.markExposure(ESCROW);
+      throw new TasksChainError("Submission uncertain", true);
+    });
+    await expect(fundTask({ ...args, pending, approval: { granted: true } })).rejects.toThrow(
+      "Submission uncertain",
+    );
+    const nextDay = new Date("2026-10-09T12:00:00.000Z");
+    await writeFile(
+      args.ledgerPath,
+      JSON.stringify({ date: "2026-10-09", spentAtomic: "200000000" }),
+    );
+    args.chain.fund.mockResolvedValueOnce(chainResult());
+    await expect(
+      fundTask({ ...args, pending, now: () => nextDay, approval: { granted: true } }),
+    ).resolves.toMatchObject({ outcome: "done" });
+    expect(await readSpendLedger(args.ledgerPath, nextDay)).toMatchObject({
+      spentAtomic: "200000000",
     });
   });
 
@@ -299,13 +447,13 @@ describe("task funding", () => {
     const args = await funding();
     await expect(
       fundTask({ ...args, chain: missingTasksChain, approval: { granted: true } }),
-    ).rejects.toThrow("chain operations need C2");
+    ).rejects.toThrow("An acting wallet is required for task chain operations.");
     await expect(stat(args.ledgerPath)).rejects.toMatchObject({ code: "ENOENT" });
     const raw = JSON.stringify({ date: "2026-10-08", spentAtomic: "1000" });
     await writeFile(args.ledgerPath, raw);
     await expect(
       fundTask({ ...args, chain: missingTasksChain, approval: { granted: true } }),
-    ).rejects.toThrow("chain operations need C2");
+    ).rejects.toThrow("An acting wallet is required for task chain operations.");
     expect(await readFile(args.ledgerPath, "utf8")).toBe(raw);
   });
 
@@ -485,11 +633,52 @@ describe("task delivery", () => {
       purpose: "delivery",
     });
     expect(args.chain.deliver).toHaveBeenCalledExactlyOnceWith({
+      orderId: ORDER,
       escrowId: ESCROW,
       manifest,
       note: "Exact note ",
       idempotencyKey: KEY,
     });
+  });
+
+  it("reuses saved delivery file IDs only when note and local file content match", async () => {
+    const args = dependencies();
+    const home = await mkdtemp(join(tmpdir(), "vapi-delivery-"));
+    directories.push(home);
+    const pending = createPendingTransactions(home);
+    const note = "Exact note";
+    const manifest = await prepareDeliveryManifest(
+      [
+        {
+          fileId: FILE,
+          fileName: "local.md",
+          sha256: await sha256Hex(files[0]!.bytes),
+          sizeBytes: files[0]!.bytes.byteLength,
+        },
+      ],
+      note,
+    );
+    await pending.putPreparation(ESCROW, "deliver", {
+      idempotencyKey: KEY,
+      inputs: { manifestHash: manifest.manifestHash, manifest: manifest.manifest, note },
+    });
+    await expect(deliverTask({ ...args, pending, files, note })).resolves.toMatchObject({
+      manifestHash: manifest.manifestHash,
+    });
+    expect(args.client.uploadFile).not.toHaveBeenCalled();
+    expect(args.chain.deliver).toHaveBeenCalledWith(expect.objectContaining({ manifest, note }));
+    await expect(deliverTask({ ...args, pending, files, note: `${note}!` })).rejects.toThrow(
+      "does not match",
+    );
+    await expect(
+      deliverTask({
+        ...args,
+        pending,
+        files: [{ ...files[0]!, bytes: new Uint8Array([1, 3]) }],
+        note,
+      }),
+    ).rejects.toThrow("does not match");
+    expect(args.client.uploadFile).not.toHaveBeenCalled();
   });
 
   it("exposes the computed hash even when the chain is unavailable", async () => {
@@ -522,10 +711,12 @@ describe("explicit settlement and dispute", () => {
     });
     expect(await refundTask(args)).toMatchObject({ money: { feeBp: 500 } });
     expect(args.chain.release).toHaveBeenCalledExactlyOnceWith({
+      orderId: ORDER,
       escrowId: ESCROW,
       idempotencyKey: KEY,
     });
     expect(args.chain.refund).toHaveBeenCalledExactlyOnceWith({
+      orderId: ORDER,
       escrowId: ESCROW,
       idempotencyKey: KEY,
     });
@@ -538,6 +729,7 @@ describe("explicit settlement and dispute", () => {
       disputeFeeNote: "The contract charges a dispute fee; the amount is unavailable.",
     });
     expect(args.chain.dispute).toHaveBeenCalledExactlyOnceWith({
+      orderId: ORDER,
       escrowId: ESCROW,
       evidenceHash: HASH,
       idempotencyKey: KEY,
@@ -573,7 +765,7 @@ describe("scope acceptance", () => {
     expect(args.chain.signScopeMessage).not.toHaveBeenCalled();
   });
 
-  it("preserves worker acceptance when local signing succeeds but escrow creation needs C2", async () => {
+  it("preserves worker acceptance when local signing succeeds but escrow creation has no acting chain wallet", async () => {
     const args = dependencies();
     args.client.getOrder.mockResolvedValue(orderResponse("100000000", "provider", null));
     const signMessage = vi.fn().mockResolvedValue(SIGNATURE);
@@ -581,7 +773,10 @@ describe("scope acceptance", () => {
       signScope({ ...args, chain: missingTasksChain, role: "worker", signMessage }),
     ).rejects.toMatchObject({
       acceptance: { scope: { state: "accepted" } },
-      cause: { code: "chain_unavailable", message: "chain operations need C2" },
+      cause: {
+        code: "chain_unavailable",
+        message: "An acting wallet is required for task chain operations.",
+      },
     });
     expect(args.client.signScope).toHaveBeenCalledTimes(1);
   });

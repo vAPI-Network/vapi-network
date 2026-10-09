@@ -14,6 +14,9 @@ import {
   awardTask,
   cachedMoneyClient,
   createTasksClient,
+  createPendingTransactions,
+  createTasksChain,
+  createTasksRpcFor,
   deliverTaskOperation,
   disputeTaskOperation,
   fundTaskOperation,
@@ -30,6 +33,7 @@ import {
   refundTaskOperation,
   releaseTask,
   releaseTaskOperation,
+  safeTasksChainError,
   resolveTaskBearer,
   searchTasks,
   showTask,
@@ -49,9 +53,11 @@ import {
   TaskInputError,
   TaskOperationError,
   TasksScopeCreationError,
+  TasksChainError,
   type TasksChain,
   type TasksClient,
   type TasksClientOptions,
+  type PendingTransactions,
   type SubmissionProof,
   type UploadFileInput,
   type CreateOrderInput,
@@ -108,11 +114,11 @@ Every command accepts --json. Watch and a partially completed sign may write mor
 
 Exit codes:
   0  ok
-  1  error, including invalid usage, unavailable routes and 'chain operations need C2'
+  1  error, including invalid usage, unavailable routes and chain failures
   2  policy refusal only (JSON ok:false with reason policy.perTask or policy.perDay)
   3  approval needed in non-interactive mode
 
-Fund, deliver, release, refund, dispute and watch auto-release need the chain adapter, which is not in this release. The CLI never retries a chain mutation automatically.`;
+Fund, deliver, release, refund, dispute and watch auto-release sign with the local vault wallet. The CLI waits for two confirmations and records pending transactions for recovery. It never retries a chain mutation automatically.`;
 
 const IMPLEMENTED_VERBS = TASKS_CLIENT_VERBS;
 const USAGE = `Usage: vapi task <${IMPLEMENTED_VERBS.join("|")}>. Run vapi task --help.`;
@@ -157,6 +163,7 @@ export function parseTaskDuration(text: string, now: Date): number {
 export type TaskContext = {
   client: TasksClient;
   chain: TasksChain;
+  pending?: PendingTransactions;
   baseUrl: string;
   target?: WalletTarget;
   token?: string;
@@ -164,6 +171,46 @@ export type TaskContext = {
   sleep: (milliseconds: number) => Promise<void>;
   signInHint: string;
 };
+
+function lazyTasksChain(
+  factory: () => Promise<TasksChain>,
+  pending: PendingTransactions,
+): TasksChain {
+  let chain: Promise<TasksChain> | undefined;
+  const get = () =>
+    (chain ??= factory().catch((error: unknown) => {
+      if (error instanceof TasksChainError) throw error;
+      throw safeTasksChainError(error, false, false);
+    }));
+  return {
+    available: true,
+    createEscrow: async (input) => (await get()).createEscrow(input),
+    fund: async (input) => {
+      let initialized: TasksChain;
+      try {
+        initialized = await get();
+      } catch (error) {
+        let exposed = true;
+        try {
+          exposed = await pending.exposure(input.escrowId);
+        } catch {
+          // A failed exposure read cannot prove rollback is safe.
+        }
+        throw safeTasksChainError(
+          error,
+          error instanceof TasksChainError && error.broadcast,
+          exposed,
+        );
+      }
+      return initialized.fund(input);
+    },
+    deliver: async (input) => (await get()).deliver(input),
+    release: async (input) => (await get()).release(input),
+    refund: async (input) => (await get()).refund(input),
+    dispute: async (input) => (await get()).dispute(input),
+    signScopeMessage: async (message) => (await get()).signScopeMessage(message),
+  };
+}
 
 /** Reuses wallet selection, registry configuration and device-link credentials. */
 export async function taskContext(
@@ -210,13 +257,35 @@ export async function taskContext(
     ),
   };
   const injected = dependencies.tasks?.client;
+  const client =
+    typeof injected === "function" ? injected(options) : (injected ?? createTasksClient(options));
+  const pending = createPendingTransactions(getVapiPaths().directory);
+  const chain =
+    dependencies.tasks?.chain ??
+    (publicOnly || target === undefined
+      ? missingTasksChain
+      : lazyTasksChain(async () => {
+          const { account } = await unlockTarget(target, dependencies);
+          return createTasksChain({
+            client,
+            account,
+            trustedFactories: config.tasksEscrowFactoryOverrides,
+            rpcFor: createTasksRpcFor(config, {
+              env,
+              ...(dependencies.fetchImpl === undefined ? {} : { fetch: dependencies.fetchImpl }),
+            }),
+            pending,
+            ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
+            ...(dependencies.tasks?.sleep === undefined ? {} : { sleep: dependencies.tasks.sleep }),
+          });
+        }, pending));
   return {
-    client:
-      typeof injected === "function" ? injected(options) : (injected ?? createTasksClient(options)),
+    client,
     baseUrl,
     ...(target === undefined ? {} : { target }),
     ...(token === undefined ? {} : { token }),
-    chain: dependencies.tasks?.chain ?? missingTasksChain,
+    chain,
+    pending,
     randomUUID: dependencies.tasks?.randomUUID ?? randomUUID,
     signInHint: "Run vapi login for the acting wallet.",
     sleep:

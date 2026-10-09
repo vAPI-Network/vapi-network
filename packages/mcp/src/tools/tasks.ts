@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import {
   getVapiPaths,
+  loadConfig,
   spendCapsForWallet,
   type SecretStore,
   type WalletStore,
@@ -12,9 +13,13 @@ import {
   TASK_WATCH_STATES,
   TaskInputError,
   TaskOperationError,
+  TasksChainError,
   TasksScopeCreationError,
   awardTask,
+  createPendingTransactions,
+  createTasksChain,
   createTasksClient,
+  createTasksRpcFor,
   deliverTaskOperation,
   disputeTaskOperation,
   fundTaskOperation,
@@ -29,6 +34,7 @@ import {
   readTaskFile,
   refundTaskOperation,
   releaseTaskOperation,
+  safeTasksChainError,
   resolveTaskBearer,
   searchTasks,
   showTask,
@@ -40,6 +46,7 @@ import {
   taskStateMatches,
   taskStatus,
   threadTask,
+  type PendingTransactions,
   type TaskOperationContext,
   type TasksChain,
   type TasksClient,
@@ -134,7 +141,7 @@ export const tasksAwardTool = descriptor(
   { ...participant, proposalId: id },
 );
 export const tasksSignTool = descriptor(
-  "Does not move money. Sign the current counterparty scope locally; a worker may also create the unfunded escrow through the chain adapter.",
+  "Does not move money. Sign the current counterparty scope locally; a worker may also create the unfunded escrow with the local vault wallet.",
   participant,
 );
 export const tasksFundTool = descriptor(
@@ -142,7 +149,7 @@ export const tasksFundTool = descriptor(
   participant,
 );
 export const tasksDeliverTool = descriptor(
-  "Does not move money. Upload local delivery files, freeze the manifest and record delivery through the chain adapter.",
+  "Does not move money. Upload local delivery files, freeze the manifest and record delivery with the local vault wallet.",
   {
     ...participant,
     files: z.array(localPath).min(TASK_LIMITS.deliveryFilesMin).max(TASK_LIMITS.deliveryFilesMax),
@@ -153,15 +160,15 @@ export const tasksDeliverTool = descriptor(
   },
 );
 export const tasksReleaseTool = descriptor(
-  "Moves money: pays the worker from escrow through the chain adapter. Returns gross · fee · net using the deployed fee.",
+  "Moves money: pays the worker from escrow with the local vault wallet. Returns gross · fee · net using the deployed fee.",
   participant,
 );
 export const tasksRefundTool = descriptor(
-  "Moves money: returns escrowed USDC to the poster through the chain adapter. Returns gross · fee · net using the deployed fee.",
+  "Moves money: returns escrowed USDC to the poster with the local vault wallet. Returns gross · fee · net using the deployed fee.",
   participant,
 );
 export const tasksDisputeTool = descriptor(
-  "Moves money: raises a dispute and the contract charges a dispute fee through the chain adapter. Accepts only a precomputed evidence hash and returns gross · fee · net using the deployed fee.",
+  "Moves money: raises a dispute with the local vault wallet. This release refuses when the contract needs a fee approval. Accepts only a precomputed evidence hash and returns gross · fee · net using the deployed fee.",
   {
     ...participant,
     evidenceHash: z.string().regex(TASK_LIMITS.disputeEvidenceHash),
@@ -214,8 +221,50 @@ type TasksToolsOptions = TasksOverrides & {
 type Input<T extends { inputSchema: z.ZodRawShape }> = z.infer<z.ZodObject<T["inputSchema"]>>;
 const signInHint = "Call auth.link for the acting wallet.";
 
+function lazyTasksChain(
+  factory: () => Promise<TasksChain>,
+  pending: PendingTransactions,
+): TasksChain {
+  let chain: Promise<TasksChain> | undefined;
+  const get = () =>
+    (chain ??= factory().catch((error: unknown) => {
+      if (error instanceof TasksChainError) throw error;
+      throw safeTasksChainError(error, false, false);
+    }));
+  return {
+    available: true,
+    createEscrow: async (input) => (await get()).createEscrow(input),
+    fund: async (input) => {
+      let initialized: TasksChain;
+      try {
+        initialized = await get();
+      } catch (error) {
+        let exposed = true;
+        try {
+          exposed = await pending.exposure(input.escrowId);
+        } catch {
+          // A failed exposure read cannot prove rollback is safe.
+        }
+        throw safeTasksChainError(
+          error,
+          error instanceof TasksChainError && error.broadcast,
+          exposed,
+        );
+      }
+      return initialized.fund(input);
+    },
+    deliver: async (input) => (await get()).deliver(input),
+    release: async (input) => (await get()).release(input),
+    refund: async (input) => (await get()).refund(input),
+    dispute: async (input) => (await get()).dispute(input),
+    signScopeMessage: async (message) => (await get()).signScopeMessage(message),
+  };
+}
+
 export function createTasksTools(options: TasksToolsOptions) {
   const now = options.now ?? (() => new Date());
+  const home = getVapiPaths(options.session.home).directory;
+  const pending = createPendingTransactions(home);
   const sleep = (ms: number, signal: AbortSignal) =>
     options.sleep ? options.sleep(ms) : delay(ms, undefined, { signal });
 
@@ -245,12 +294,30 @@ export function createTasksTools(options: TasksToolsOptions) {
       ...(token === undefined ? {} : { token }),
     };
     const injected = options.client;
+    const client =
+      typeof injected === "function"
+        ? injected(clientOptions)
+        : (injected ?? createTasksClient(clientOptions));
     return {
-      client:
-        typeof injected === "function"
-          ? injected(clientOptions)
-          : (injected ?? createTasksClient(clientOptions)),
-      chain: options.chain ?? missingTasksChain,
+      client,
+      chain:
+        options.chain ??
+        (selected === undefined
+          ? missingTasksChain
+          : lazyTasksChain(async () => {
+              const { account } = await options.session.payment(selected.name);
+              const config = await loadConfig(getVapiPaths(home).config);
+              return createTasksChain({
+                client,
+                account,
+                trustedFactories: config.tasksEscrowFactoryOverrides,
+                rpcFor: createTasksRpcFor(config, { fetch: guardedFetch }),
+                pending,
+                now,
+                ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+              });
+            }, pending)),
+      pending,
       baseUrl: options.apiBase,
       randomUUID: options.randomUUID ?? randomUUID,
       signInHint,

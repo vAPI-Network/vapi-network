@@ -84,6 +84,7 @@ export const configSchema = z
       )
       .optional(),
     allowPrivateNetwork: z.boolean().default(false).optional(),
+    tasksEscrowFactoryOverrides: z.record(z.string().regex(/^\d+$/), z.string()).optional(),
     networks: z.record(
       z.string().refine((network) => isSupportedPaymentNetwork(network), {
         message: "Expected a supported eip155:<chainId> or Solana network identifier.",
@@ -108,6 +109,17 @@ export const configSchema = z
       .optional(),
   })
   .superRefine((config, context) => {
+    for (const [chainId, factory] of Object.entries(config.tasksEscrowFactoryOverrides ?? {})) {
+      try {
+        getAddress(factory);
+      } catch {
+        context.addIssue({
+          code: "custom",
+          path: ["tasksEscrowFactoryOverrides", chainId],
+          message: "Expected a valid EVM escrow factory address.",
+        });
+      }
+    }
     for (const [network, configured] of Object.entries(config.networks)) {
       if (isSolanaNetwork(network)) {
         if (configured.usdc !== NETWORKS[SOLANA_MAINNET_CAIP2].usdc) {
@@ -340,6 +352,7 @@ export function getDefaultConfig(
   const registry = registryEndpoints(source.VAPI_REGISTRY_URL?.trim() || DEFAULT_REGISTRY_URL);
   const requested = new Set(options.networks ?? ["base"]);
   const networks: VapiConfig["networks"] = {};
+  const tasksEscrowFactoryOverrides = tasksFactoryOverridesFromEnv(source);
   if (requested.has("base") || requested.has(BASE_MAINNET_CAIP2)) {
     networks[BASE_MAINNET_CAIP2] = {
       rpcUrl: source.BASE_RPC_URL?.trim() || NETWORKS[BASE_MAINNET_CAIP2].publicRpcUrl,
@@ -378,6 +391,7 @@ export function getDefaultConfig(
       source.VAPI_MARKETPLACE_DISCOVERY_URL?.trim() || registry.marketplaceDiscoveryUrl,
     registryFallbacks: DEFAULT_REGISTRY_FALLBACKS.map((fallback) => ({ ...fallback })),
     allowPrivateNetwork: false,
+    tasksEscrowFactoryOverrides,
     networks,
     spendCaps: { ...DEFAULT_SPEND_CAPS },
   };
@@ -406,9 +420,11 @@ export async function loadConfig(
 
   const parsed: VapiConfig = configSchema.parse(JSON.parse(raw));
   parsed.registryFallbacks ??= DEFAULT_REGISTRY_FALLBACKS.map((fallback) => ({ ...fallback }));
+  parsed.tasksEscrowFactoryOverrides ??= {};
   // Retired hosts are repaired in memory only; `vapi init` owns the file.
   const migrated = rewriteLegacyRegistryUrls(parsed);
   const config = migrated.config;
+  config.tasksEscrowFactoryOverrides ??= {};
   if (migrated.changes.length > 0 && options.notice) {
     options.notice(
       `${formatLegacyRegistryRewrites(migrated.changes)}\nRun vapi init to write the new URLs to ${path}.`,
@@ -421,6 +437,7 @@ export async function loadConfig(
   const discoveryUrl = source.VAPI_DISCOVERY_URL?.trim();
   const marketplaceDiscoveryUrl = source.VAPI_MARKETPLACE_DISCOVERY_URL?.trim();
   const registryUrl = source.VAPI_REGISTRY_URL?.trim();
+  Object.assign(config.tasksEscrowFactoryOverrides, tasksFactoryOverridesFromEnv(source));
   if (config.networks[BASE_MAINNET_CAIP2] && baseRpcUrl) {
     config.networks[BASE_MAINNET_CAIP2].rpcUrl = baseRpcUrl;
   }
@@ -460,6 +477,17 @@ export async function loadConfig(
     if (!configured.rpcUrl) delete config.networks[network];
   }
   return config;
+}
+
+function tasksFactoryOverridesFromEnv(source: NodeJS.ProcessEnv): Record<string, string> {
+  const overrides: Record<string, string> = {};
+  for (const [name, raw] of Object.entries(source)) {
+    const match = /^VAPI_TASKS_ESCROW_FACTORY_(\d+)$/.exec(name);
+    const value = raw?.trim();
+    if (!match || !value) continue;
+    overrides[match[1]!] = getAddress(value);
+  }
+  return overrides;
 }
 
 function registryEndpoints(baseUrl: string): {

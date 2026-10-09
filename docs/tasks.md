@@ -59,11 +59,15 @@ Show uses the authenticated task route when a bearer exists; otherwise it reads 
 
 Public search, status, submissions, events and participant routes are available. OAuth reads require `tasks:read`; writes require `tasks:write`, which also grants read access. Proposals and submissions locally sign the exact canonical JSON payload.
 
-Scope acceptance is signed by the local vault account and requires `tasks:write`. Poster acceptance needs no chain adapter. Worker acceptance may need the chain adapter to create an escrow. Fund, deliver, release, refund, dispute and watch auto-release need the chain adapter, which is not in this release. Without it they exit `1` with the message `chain operations need C2`. The CLI does not retry chain mutations automatically. The chain adapter handles durable recovery and reconciliation. A money verb rejects a task with more than one possible milestone instead of guessing; watch may use an event's `milestoneId` for auto-release.
+Scope acceptance is signed by the local vault account and requires `tasks:write`. Worker acceptance may create an unfunded escrow with the same local signer. Fund, deliver, release, refund, dispute and watch auto-release submit their transactions from the selected local vault wallet. Base Sepolia reads `BASE_SEPOLIA_RPC_URL` and defaults to `https://sepolia.base.org`. It trusts escrow factory `0x6Ba83621eb386B3E093032096251cA504F6ee033`. Configure another chain, or override that pin, with `VAPI_TASKS_ESCROW_FACTORY_<chainId>`. Chains without a trusted factory are rejected before signing.
+
+Before signing a chain action, the client reads the factory payment token and the token's EIP-712 name and version through the trusted RPC. It verifies that each escrow clone belongs to that factory and matches the buyer, seller, token, amount, terms hash, state and deadline. It also recomputes the accepted scope hash locally and verifies both party signatures. A money verb rejects a task with more than one possible milestone instead of guessing; watch may use an event's `milestoneId` for auto-release. Dispute is refused when the clone allowance cannot cover its fee because this release sends no fee approval transaction.
+
+Recovery stores prepare keys and inputs, then reuses the exact saved bytes only for the same operation and step. Per-signer nonce locks serialize signing across processes and are released when an attempt finishes. Funding reservations are isolated per milestone and remain recorded when an error might have exposed an authorization or transaction. A known pre-broadcast failure invalidates its reservation proof before releasing the reservation. Server confirmation requires a successful RPC receipt and a valid confirmation envelope. Errors omit raw transactions and authorization signatures. Transaction recording and reconciliation retry temporary server conflicts for up to 30 seconds.
 
 Funding applies policy before any authorization is reserved or signed. It selects the agent profile whose wallet matches the acting wallet, or schema defaults when none matches; JSON reports `policySource: "agent-profile"` or `policySource: "defaults"`. The per-task cap comes from that profile, while the daily cap combines the wallet's `perDayAtomic` with local spend recorded in `VAPI_HOME/spend-ledger.json`. Once an authorization may have left the machine, a failed operation keeps its reservation; rollback is limited to a typed pre-broadcast failure that confirms the authorization was not exposed. `--yes` grants approval only and never bypasses a cap. A cap refusal exits `2` as `{ok:false,reason:"policy.perTask"|"policy.perDay",money}`. When approval is needed outside an interactive terminal, funding exits `3` as `{ok:false,approval:true,money}`. In an interactive non-JSON terminal outside CI it asks `[y/N]`; declining exits `1` with `Not approved; nothing was signed.`
 
-Fund, release, refund and dispute print gross · fee · net from the deployed `feeBp`; if the fee cannot be read they print `fee unavailable`. A dispute also charges a separate contract dispute fee whose amount is not currently available to the CLI. Explicit release and refund follow the requested action without an automatic-release policy gate.
+Fund, release, refund and dispute print gross · fee · net from the deployed `feeBp`; if the fee cannot be read they print `fee unavailable`. A dispute also charges a separate contract fee. The CLI refuses the operation when the existing clone allowance cannot cover that fee. Explicit release and refund follow the requested action without an automatic-release policy gate.
 
 Delivery accepts 1 to 20 regular files. `--files` may name several paths and may be repeated; directories and other non-regular paths are invalid usage. After upload finalization supplies each file's ID, name, SHA-256 and size, the CLI hashes the note and canonical manifest with the shared manifest algorithm before chain execution. Dispute accepts only an already prepared `0x`-prefixed 64-hex-character evidence hash. The evidence-file hashing format has not been decided, so the CLI does not infer one.
 
@@ -71,12 +75,12 @@ Watch polls `events(id, { after: cursor, wait: 0 })`, advances its cursor and ig
 
 A route this server does not offer reports `<verb> is not available on this server yet.` with code `not_available` and exit `1`. A `403` with `insufficient_scope` asks you to run `vapi login` again. An explicit missing task remains a missing-task error.
 
-| Exit code | Meaning                                                                           |
-| --------- | --------------------------------------------------------------------------------- |
-| `0`       | Ok                                                                                |
-| `1`       | Error, including invalid usage, unavailable routes and `chain operations need C2` |
-| `2`       | Policy refusal                                                                    |
-| `3`       | Approval needed in non-interactive mode                                           |
+| Exit code | Meaning                                                               |
+| --------- | --------------------------------------------------------------------- |
+| `0`       | Ok                                                                    |
+| `1`       | Error, including invalid usage, unavailable routes and chain failures |
+| `2`       | Policy refusal                                                        |
+| `3`       | Approval needed in non-interactive mode                               |
 
 At exit `1`, invalid usage has JSON `{ok:false,error:{code:"usage_error",message}}`. At exit `2`, policy refusal JSON has `ok:false`, `reason: "policy.perTask"` or `reason: "policy.perDay"`, and `money`. Other thrown task errors use the same nested error object with their specific code. Approval exits use `{ok:false,approval:true,money}`.
 

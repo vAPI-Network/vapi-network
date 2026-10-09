@@ -3,6 +3,9 @@ export * from "./scope-terms.js";
 export * from "./delivery-manifest.js";
 export * from "./verbs.js";
 export * from "./chain-port.js";
+export * from "./chain.js";
+export * from "./rpc.js";
+export * from "./pending-transactions.js";
 export * from "./money.js";
 export * from "./actions.js";
 export * from "./operations.js";
@@ -36,3 +39,6 @@ export {
   submitInputSchema,
 } from "./types.js";
 export type * from "./types.js";
+
+export * from "./trusted-deployments.js";
+export { safeTasksChainError } from "./chain-error.js";

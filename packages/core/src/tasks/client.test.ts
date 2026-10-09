@@ -818,6 +818,28 @@ describe("tasks client recorded HTTP contract", () => {
 });
 
 describe("tasks client errors and transport safety", () => {
+  it("preserves Retry-After on retryable operation conflicts", async () => {
+    const recorder = recordedFetch(
+      json(
+        { error: "Transaction not visible" },
+        {
+          status: 409,
+          headers: { "Retry-After": "2" },
+        },
+      ),
+    );
+    await expect(
+      createTasksClient({
+        baseUrl: "https://tasks.example",
+        fetch: recorder.fetch,
+      }).recordTransaction(
+        ID,
+        { step: "release-funds", transactionHash: HASH },
+        { idempotencyKey: KEY },
+      ),
+    ).rejects.toMatchObject({ status: 409, retryAfter: "2" });
+  });
+
   it.each([undefined, "unexpected"])(
     "reports an invalid response discriminator",
     async (configured) => {

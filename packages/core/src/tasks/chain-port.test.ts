@@ -33,7 +33,7 @@ describe("missing task chain", () => {
     for (const call of calls) {
       await expect(call()).rejects.toMatchObject({
         code: "chain_unavailable",
-        message: "chain operations need C2",
+        message: "An acting wallet is required for task chain operations.",
         broadcast: false,
         authorizationExposed: false,
       });
