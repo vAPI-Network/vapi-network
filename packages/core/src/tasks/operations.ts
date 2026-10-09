@@ -44,6 +44,7 @@ import {
 import { canonicalJson } from "./canonical-json.js";
 import { TasksChainUnavailableError, type TasksChain } from "./chain-port.js";
 import type { TasksClient } from "./client.js";
+import type { PendingTransactions } from "./pending-transactions.js";
 import { parseFeeBp, taskMoney, type TaskMoney } from "./money.js";
 import {
   TASK_LIMITS,
@@ -481,6 +482,7 @@ export async function deliverTaskOperation(
     () =>
       prepareDelivery({
         client: context.client,
+        ...(context.pending ? { pending: context.pending } : {}),
         orderId: input.id,
         files: input.files,
         note: input.note,
@@ -501,7 +503,7 @@ export async function deliverTaskOperation(
   return { ok: true as const, manifestHash, result };
 }
 export async function fundTaskOperation(
-  context: TaskOperationContext,
+  context: TaskOperationContext & { pending?: PendingTransactions },
   input: {
     id: string;
     snapshot?: MoneySnapshot;
@@ -544,6 +546,7 @@ export async function fundTaskOperation(
           wallet: input.wallet,
           ledgerPath: input.ledgerPath,
           now: input.now,
+          ...(context.pending === undefined ? {} : { pending: context.pending }),
           ...(input.approval ? { approval: input.approval } : {}),
           idempotencyKey: input.idempotencyKey ?? context.randomUUID,
         }),

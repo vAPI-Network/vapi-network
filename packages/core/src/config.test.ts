@@ -86,6 +86,25 @@ describe("vAPI config", () => {
     );
   });
 
+  it("loads and validates Tasks escrow factory overrides", async () => {
+    expect(
+      getDefaultConfig({
+        VAPI_TASKS_ESCROW_FACTORY_84532: " 0x1111111111111111111111111111111111111111 ",
+      }).tasksEscrowFactoryOverrides,
+    ).toEqual({ "84532": "0x1111111111111111111111111111111111111111" });
+
+    expect(() => getDefaultConfig({ VAPI_TASKS_ESCROW_FACTORY_84532: "not-an-address" })).toThrow(
+      /is invalid/i,
+    );
+
+    expect(() =>
+      configSchema.parse({
+        ...getDefaultConfig({}),
+        tasksEscrowFactoryOverrides: { "84532": "not-an-address" },
+      }),
+    ).toThrow(/valid EVM escrow factory address/);
+  });
+
   it("adds the documented Solana mainnet RPC and USDC when selected", () => {
     expect(getDefaultConfig({}, { networks: ["base", "solana"] }).networks).toMatchObject({
       [BASE_MAINNET_CAIP2]: {

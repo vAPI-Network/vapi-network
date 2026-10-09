@@ -56,6 +56,8 @@ export class TasksClientError extends Error {
     message: string,
     readonly status?: number,
     readonly serverCode?: string,
+    /** Raw Retry-After header; only hinted HTTP 409 responses are retryable. */
+    readonly retryAfter?: string,
   ) {
     super(message);
     this.name = "TasksClientError";
@@ -192,7 +194,13 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
           server?.message ||
           response.statusText ||
           `HTTP ${response.status}`;
-        throw new TasksClientError("http", message, response.status, nested?.code ?? server?.code);
+        throw new TasksClientError(
+          "http",
+          message,
+          response.status,
+          nested?.code ?? server?.code,
+          response.headers.get("Retry-After") ?? undefined,
+        );
       }
       let json: unknown;
       if (notFound) {

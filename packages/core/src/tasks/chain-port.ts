@@ -12,13 +12,18 @@ export type TasksChainResult = {
   milestone: Pick<TaskMilestone, "id" | "workOrderId" | "state" | "escrowState" | "resolution">;
 };
 
-export type TasksEscrowOperation = { escrowId: string; idempotencyKey: string };
+export type TasksEscrowOperation = {
+  escrowId: string;
+  idempotencyKey: string;
+  /** Avoid listing private orders when the caller already knows the parent. */
+  orderId?: string;
+};
 
 /**
- * C2 owns local signing, server preparation, exact plan broadcast, transaction
+ * The adapter owns local signing, server preparation, exact plan broadcast, transaction
  * recording, receipt waiting, and reconciliation. escrowId is the milestone ID,
- * not the clone address. Reuse the supplied key throughout one logical operation
- * (including prepare/transactions/reconcile); do not generate keys inside it.
+ * not the clone address. Use the supplied key to prepare one logical operation.
+ * Derive stable keys for subsequent requests from that key, the operation and step.
  * A resolved result contains reconciled state, never a simulated transaction.
  * The adapter validates the active signer against the authenticated party,
  * plan.from, and operation.expectedActor, and checks the frozen funding amount.
@@ -48,16 +53,18 @@ export interface TasksChain {
 export class TasksChainError extends Error {
   /** False only when the adapter proves no redeemable funding authorization left the machine. */
   readonly authorizationExposed: boolean;
+  readonly transactionHash?: `0x${string}`;
 
   constructor(
     message: string,
     readonly broadcast: boolean,
-    options?: ErrorOptions & { authorizationExposed?: boolean },
+    options?: ErrorOptions & { authorizationExposed?: boolean; transactionHash?: `0x${string}` },
   ) {
     super(message, options);
     this.name = "TasksChainError";
     // Unspecified exposure is uncertain, so funding keeps its reservation.
     this.authorizationExposed = options?.authorizationExposed ?? true;
+    this.transactionHash = options?.transactionHash;
   }
 }
 
@@ -65,7 +72,9 @@ export class TasksChainUnavailableError extends TasksChainError {
   readonly code = "chain_unavailable";
 
   constructor(readonly manifestHash?: `0x${string}`) {
-    super("chain operations need C2", false, { authorizationExposed: false });
+    super("An acting wallet is required for task chain operations.", false, {
+      authorizationExposed: false,
+    });
     this.name = "TasksChainUnavailableError";
   }
 }

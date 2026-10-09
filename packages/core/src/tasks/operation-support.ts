@@ -14,6 +14,7 @@ import type { WalletName } from "../wallet-name.js";
 import type { WalletStore } from "../wallet-store.js";
 import { TasksChainUnavailableError, type TasksChain } from "./chain-port.js";
 import { TasksClientError, type TasksClient } from "./client.js";
+import type { PendingTransactions } from "./pending-transactions.js";
 import { parseFeeBp, taskMoney, type TaskMoney } from "./money.js";
 import {
   type EventsResponse,
@@ -114,7 +115,11 @@ export async function taskRequest<T>(
         typeof error.manifestHash === "string"
           ? (error.manifestHash as `0x${string}`)
           : undefined;
-      throw new TaskOperationError("chain_unavailable", "chain operations need C2", hash);
+      throw new TaskOperationError(
+        "chain_unavailable",
+        "An acting wallet is required for task chain operations.",
+        hash,
+      );
     }
     if (error instanceof TasksClientError) {
       if (error.code === "invalid_input") throw new TaskInputError(error.message);
@@ -514,6 +519,7 @@ export function fundingRefusalReason(
 }
 
 export type TaskOperationContext = {
+  pending?: PendingTransactions;
   client: TasksClient;
   chain: TasksChain;
   baseUrl: string;

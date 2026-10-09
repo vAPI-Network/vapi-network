@@ -77,10 +77,16 @@ export async function escrowFundingDayRemainingAtomic(input: {
   ledgerPath: string;
   now: Date;
   wallet: WalletName;
+  reservationId?: string;
 }): Promise<bigint> {
   const perDayAtomic = parseAtomicCap(input.caps.perDayAtomic, "per-day");
-  const ledger = await readSpendLedger(input.ledgerPath, input.now, input.wallet);
-  const remaining = perDayAtomic - BigInt(ledger.spentAtomic);
+  const rows = await readStoredSpendLedgerRows(input.ledgerPath, input.now);
+  const row = rows.find((candidate) => candidate.wallet === input.wallet);
+  const reserved = input.reservationId
+    ? row?.reservations?.find((candidate) => candidate.id === input.reservationId)
+    : undefined;
+  const remaining =
+    perDayAtomic - BigInt(row?.spentAtomic ?? "0") + BigInt(reserved?.amountAtomic ?? "0");
   return remaining > 0n ? remaining : 0n;
 }
 
@@ -132,8 +138,17 @@ export async function reserveSpend(
     reservationId?: string;
     kind?: SpendKind;
     maxPerTaskAtomic?: bigint;
+    reuseExistingEscrowReservation?: boolean;
+    resumeEscrowReservation?: {
+      id: string;
+      wallet: WalletName;
+      amountAtomic: string;
+      date: string;
+      exposed?: boolean;
+      invalidated?: boolean;
+    };
   },
-): Promise<SpendLedger> {
+): Promise<SpendLedger & { reservationReused?: boolean }> {
   if (amountAtomic < 0n) {
     throw new Error("Spend amount cannot be negative.");
   }
@@ -170,8 +185,46 @@ export async function reserveSpend(
     const rows = await readStoredSpendLedgerRows(ledgerPath, now);
     const current = rows.find((row) => row.wallet === wallet);
     if (options?.reservationId !== undefined) {
-      if (current?.reservations?.some((reservation) => reservation.id === options.reservationId)) {
+      const existing = current?.reservations?.find(
+        (reservation) => reservation.id === options.reservationId,
+      );
+      if (existing && options.reuseExistingEscrowReservation) {
+        if (
+          kind !== "escrow-funding" ||
+          existing.kind !== "escrow-funding" ||
+          existing.amountAtomic !== amountAtomic.toString()
+        )
+          throw new Error(
+            `Spend reservation ${options.reservationId} does not match this funding.`,
+          );
+        return {
+          date: current!.date,
+          spentAtomic: current!.spentAtomic,
+          reservationReused: true,
+        };
+      }
+      if (existing) {
         throw new Error(`Spend reservation ${options.reservationId} already exists.`);
+      }
+      if (options.resumeEscrowReservation) {
+        const resumed = options.resumeEscrowReservation;
+        if (
+          kind !== "escrow-funding" ||
+          resumed.id !== options.reservationId ||
+          resumed.wallet !== wallet ||
+          resumed.amountAtomic !== amountAtomic.toString() ||
+          resumed.date >= utcDateKey(now) ||
+          resumed.exposed !== true ||
+          resumed.invalidated === true
+        )
+          throw new Error(
+            `Spend reservation ${options.reservationId} does not match this funding.`,
+          );
+        return {
+          date: resumed.date,
+          spentAtomic: current?.spentAtomic ?? "0",
+          reservationReused: true,
+        };
       }
     }
     const spentAtomic = current?.spentAtomic ?? "0";

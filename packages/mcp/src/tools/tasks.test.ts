@@ -14,6 +14,7 @@ import { agentSecretAccounts } from "@vapi-network/core/agent-link";
 import {
   freezeScopeTerms,
   TasksClientError,
+  createPendingTransactions,
   createTasksClient,
   missingTasksChain,
   type GetOrderResponse,
@@ -21,6 +22,7 @@ import {
   type TasksClient,
   type TasksClientOptions,
 } from "@vapi-network/core/tasks";
+import { safeTasksChainError } from "../../../core/src/tasks/index.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -126,7 +128,7 @@ async function watchServer(
     await server.close();
     await rm(home, { recursive: true, force: true });
   });
-  return { server, store, secrets };
+  return { server, store, secrets, home };
 }
 
 describe("bounded task watch", () => {
@@ -416,6 +418,7 @@ describe("task wallet and route boundaries", () => {
       .mockResolvedValue({ wallet: { name: "main" }, account: signer });
     const { server } = await watchServer({
       client,
+      chain: missingTasksChain,
       now: () => new Date(NOW),
       randomUUID: () => ID,
     });
@@ -423,7 +426,7 @@ describe("task wallet and route boundaries", () => {
     expect(result.isError).toBe(true);
     expect(JSON.parse(result.content[0]!.text)).toEqual({
       code: "chain_unavailable",
-      message: "chain operations need C2",
+      message: "An acting wallet is required for task chain operations.",
       acceptance: {
         ...acceptance,
         terms: {
@@ -653,6 +656,7 @@ describe("task wallet and route boundaries", () => {
   );
 
   it("uses the public settled card and the signed-in order with receipts", async () => {
+    const payment = vi.spyOn(WalletSession.prototype, "payment");
     const receiptUrl = `${API_BASE}/receipts/settled`;
     const order = {
       workOrder: {
@@ -679,10 +683,66 @@ describe("task wallet and route boundaries", () => {
     });
     expect(client.publicTask).toHaveBeenCalledOnce();
     expect(client.getOrder).toHaveBeenCalledOnce();
+    expect(payment).not.toHaveBeenCalled();
   });
 });
 
 describe("task MCP tools", () => {
+  it("retains funding when persisted exposure predates lazy wallet initialization failure", async () => {
+    const client = {
+      getOrder: vi.fn(async () => ({
+        workOrder: {
+          version: "work-order-view-v1",
+          id: ID,
+          role: "client",
+          milestones: [
+            {
+              id: ESCROW,
+              workOrderId: ID,
+              amountBaseUnits: "100000",
+              state: "agreed",
+              escrowState: "created",
+              resolution: null,
+              escrowContract: "0x1111111111111111111111111111111111111111",
+            },
+          ],
+        },
+      })),
+      deployment: vi.fn(async () => ({
+        configured: true,
+        network: "eip155:8453",
+        escrowContract: "0x2222222222222222222222222222222222222222",
+        usdc: "0x3333333333333333333333333333333333333333",
+        feeBp: 250,
+      })),
+    } as unknown as TasksClient;
+    const payment = vi
+      .spyOn(WalletSession.prototype, "payment")
+      .mockRejectedValue(new Error("vault unavailable"));
+    const { server, home } = await watchServer({
+      client,
+      randomUUID: () => "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      now: () => new Date(NOW),
+    });
+    await createPendingTransactions(home).markExposure(ESCROW);
+
+    const result = await server.callTool({ name: "tasks.fund", arguments: { id: ID } });
+
+    expect(result.isError).toBe(true);
+    expect(payment).toHaveBeenCalledOnce();
+    expect(JSON.parse(await readFile(join(home, "spend-ledger.json"), "utf8"))).toMatchObject({
+      date: "2026-10-08",
+      spentAtomic: "100000",
+      reservations: [
+        {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          amountAtomic: "100000",
+          kind: "escrow-funding",
+        },
+      ],
+    });
+  });
+
   it("registers the complete documented task surface in canonical order with safe schemas", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () => {
       throw new Error("No network in task tests.");
@@ -975,6 +1035,29 @@ describe("task MCP tools", () => {
         expect(funded.isError).not.toBe(true);
         expect(fakeChain.fund).toHaveBeenCalledOnce();
         expect(calls).toContain("main-token");
+        const rawTransaction = `0x${"12".repeat(96)}`;
+        const authorizationSignature = `0x${"34".repeat(65)}`;
+        const source = Object.assign(
+          new Error(`RPC 503 included ${rawTransaction} and ${authorizationSignature}`),
+          {
+            name: "HttpRequestError",
+            shortMessage: `RPC request failed with status 503: ${rawTransaction} ${authorizationSignature}`,
+            details: { rawTransaction, authorizationSignature },
+            cause: { status: 503, rawTransaction, authorizationSignature },
+          },
+        );
+        fakeChain.release.mockRejectedValueOnce(safeTasksChainError(source, false, true));
+        const failedRelease = await behaviorServer.callTool({
+          name: "tasks.release",
+          arguments: { id: ID },
+        });
+        const serializedFailure = JSON.stringify(failedRelease);
+        expect(failedRelease).toMatchObject({ isError: true });
+        expect(serializedFailure).toContain("HttpRequestError");
+        expect(serializedFailure).not.toContain(rawTransaction);
+        expect(serializedFailure).not.toContain(authorizationSignature);
+        expect(serializedFailure).not.toContain("details");
+        expect(serializedFailure).not.toContain("cause");
         const unauthorized = await behaviorServer.callTool({
           name: "tasks.message",
           arguments: { id: ID, text: "hello" },
@@ -1057,7 +1140,7 @@ describe("task MCP tools", () => {
             createdAt: "2026-10-08T00:00:00.000Z",
           }),
         );
-        await store.setSpendCaps("main", { perCallAtomic: "1000000", perDayAtomic: "100000" });
+        await store.setSpendCaps("main", { perCallAtomic: "1000000", perDayAtomic: "99999" });
         const perDay = await behaviorServer.callTool({
           name: "tasks.fund",
           arguments: { id: ID },
@@ -1125,7 +1208,11 @@ describe("task MCP tools", () => {
           agentLink: { apiBase: API_BASE },
           fetchImpl: () => Promise.reject(new Error("delivery used injected client")),
           ledgerPath: join(home, "missing-chain-ledger.json"),
-          tasks: { client: fakeClient, now: () => new Date("2026-10-08T12:00:00Z") },
+          tasks: {
+            client: fakeClient,
+            chain: missingTasksChain,
+            now: () => new Date("2026-10-08T12:00:00Z"),
+          },
         });
         try {
           const missingFund = await noChainServer.callTool({
@@ -1135,7 +1222,7 @@ describe("task MCP tools", () => {
           expect(missingFund).toMatchObject({ isError: true });
           expect(JSON.parse(missingFund.content[0]!.text)).toEqual({
             code: "chain_unavailable",
-            message: "chain operations need C2",
+            message: "An acting wallet is required for task chain operations.",
           });
           await expect(readFile(join(home, "missing-chain-ledger.json"))).rejects.toMatchObject({
             code: "ENOENT",
@@ -1146,7 +1233,9 @@ describe("task MCP tools", () => {
           });
           expect(noChain).toMatchObject({ isError: true });
           expect(JSON.stringify(noChain)).toContain("chain_unavailable");
-          expect(JSON.stringify(noChain)).toContain("chain operations need C2");
+          expect(JSON.stringify(noChain)).toContain(
+            "An acting wallet is required for task chain operations.",
+          );
           expect(JSON.stringify(noChain)).toMatch(/manifestHash.*0x[0-9a-f]{64}/u);
         } finally {
           await noChainServer.close();
