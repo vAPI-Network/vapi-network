@@ -189,7 +189,7 @@ export function createAuthTools(options: AuthToolsOptions): {
               apiBase: options.apiBase,
               account: selected.account,
               label,
-              scopes: [...DEFAULT_AGENT_SCOPES],
+              scopes: [...DEFAULT_AGENT_SCOPES, "tasks:read", "tasks:write"],
               fetchImpl: options.fetchImpl,
             });
           } catch (error) {

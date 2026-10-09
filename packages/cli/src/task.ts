@@ -20,7 +20,6 @@ import {
   missingTasksChain,
   nextTaskEvents,
   parseTaskDuration as parseCoreTaskDuration,
-  parseFeeBp,
   parseUsdToBaseUnits,
   postTask,
   proposeTask,
@@ -97,12 +96,11 @@ export const TASK_HELP = `Usage:
   vapi task watch <id> [--until <state>] [--auto-release] [--timeout 7d] [--interval 5s] [--account <name>] [--json]
   vapi task status <id> [--account <name>] [--json]
 
-Durations: 5s, 10m, 48h, 7d, or an ISO-8601 timestamp. Posting requires at least 10 minutes; proposal terms require at least one hour under the current contract.
+Durations: 5s, 10m, 48h, 7d, or an ISO-8601 timestamp. Posting and proposal terms require at least 10 minutes.
 Dispute accepts a precomputed evidence hash only; evidence-file hashing is still undecided upstream.
 Watch requires an interval of at least 1s and a positive timeout. Auto-release uses the acting wallet's agent profile, or defaults, and releases only amounts strictly below the threshold.
-Posting a task moves no money. The current create-order contract stores the title and brief; amount, deadline, intake, max awards and webhook are validated but not stored yet. JSON lists these as unsupportedFields.
+Posting a task moves no money. Task reads require tasks:read and writes require tasks:write; write access includes reads.
 The thread cursor is the previous page's nextBeforeSeq; --after reads older messages using beforeSeq.
-Public board, status and submissions need a server release that supports them. Participant actions with a bearer token need a server release that accepts tokens on task routes; until then they return 401 or 403 and you need to sign in in the console.
 Every command accepts --json. Watch and a partially completed sign may write more than one JSON value. Human diagnostics go to stderr.
 
 Exit codes:
@@ -362,7 +360,7 @@ async function taskCommandInner(
       ...(pinned ? [`Pinned task: ${pinned.id} · ${pinned.title}`] : []),
       ...cards.map(
         (task) =>
-          `${task.id} · ${task.title} · ${taskMoney(parseUsdToBaseUnits(task.amount.gross), parseFeeBp(board.numbers)).line} · ${task.state}`,
+          `${task.id} · ${task.title} · ${task.amount === null ? "amount unavailable" : taskMoney(task.amount.gross, task.amount.feeBp).line} · ${task.state}`,
       ),
       ...(cards.length || pinned ? [] : ["No tasks found."]),
     ]);
@@ -400,14 +398,12 @@ async function taskCommandInner(
     const outcome = await postTask(context, {
       order: input,
       amount,
+      deadlineAt: new Date(now.getTime() + duration).toISOString(),
       ...(intake === undefined ? {} : { intake: intake as "proposals" | "submissions" }),
       ...(maxAwards === undefined ? {} : { maxAwards }),
       ...(parsed.one("--webhook") === undefined ? {} : { webhook: parsed.one("--webhook")! }),
       onFeeUnavailable: () => io.stderr("The deployed fee is unavailable."),
     });
-    io.stderr(
-      "The current create-order contract does not store amount, deadline, intake, max awards or webhook yet.",
-    );
     taskOutput(
       io,
       json,
@@ -435,9 +431,7 @@ async function taskCommandInner(
       duration > TASK_LIMITS.proposalDurationMaxMs ||
       duration % TASK_LIMITS.proposalDurationUnitMs !== 0
     )
-      throw new UsageError(
-        "--duration must be whole seconds between one hour and 90 days under the current contract.",
-      );
+      throw new UsageError("--duration must be whole seconds between 10 minutes and 90 days.");
     const note = required(parsed, "--note").trim();
     if (!note || note.length > TASK_LIMITS.proposalNoteMax)
       throw new UsageError("--note must be between 1 and 8000 characters.");

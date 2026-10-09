@@ -1,7 +1,4 @@
-/**
- * Canonical task client verbs. docs/tasks.md carries the same table. Plan 032
- * Lane B8 will copy this list to the vapi-app docs/PUBLIC-API.md reference.
- */
+/** Canonical local task verbs. Hosted signing and chain continuation use `tasks.confirm`. */
 export const TASKS_CLIENT_VERBS = [
   "search",
   "show",

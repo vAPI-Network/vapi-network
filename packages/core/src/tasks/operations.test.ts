@@ -12,6 +12,7 @@ import {
   TaskInputError,
   TaskOperationError,
   nextTaskEvents,
+  postTask,
   taskPolicyForWallet,
   taskRequest,
 } from "./operations.js";
@@ -74,8 +75,7 @@ describe("taskRequest", () => {
       invoke("getOrder", new TasksClientError("http", "denied", 401)),
     ).rejects.toMatchObject({
       code: "not_signed_in",
-      message:
-        "verb needs sign-in. This server does not accept bearer tokens on task routes yet; sign in in the console.",
+      message: "verb needs sign-in. Sign in here.",
     });
     await expect(
       invoke("createOrder", new TasksClientError("http", "denied", 403)),
@@ -88,6 +88,24 @@ describe("taskRequest", () => {
     await expect(
       invoke("propose", new TasksClientError("invalid_input", "bad input", 400)),
     ).rejects.toBeInstanceOf(TaskInputError);
+    await expect(
+      invoke("getOrder", new TasksClientError("http", "missing scope", 403, "insufficient_scope")),
+    ).rejects.toMatchObject({
+      code: "insufficient_scope",
+      message: "This sign-in lacks Tasks access. Run vapi login again.",
+    });
+    await expect(
+      taskRequest(
+        "verb",
+        "getOrder",
+        async () => {
+          throw new TasksClientError("http", "missing scope", 403, "insufficient_scope");
+        },
+        { signInHint: "Call auth.link for the acting wallet." },
+      ),
+    ).rejects.toMatchObject({
+      message: "This sign-in lacks Tasks access. Call auth.link again.",
+    });
   });
 });
 
@@ -115,6 +133,46 @@ describe("nextTaskEvents", () => {
     expect(() => nextTaskEvents({ events: [event(-1)], nextAfter: 2 }, 1)).toThrow(
       "A task event sequence is malformed.",
     );
+  });
+});
+
+describe("postTask", () => {
+  it("reports the created order when webhook configuration fails without replaying creation", async () => {
+    const createOrder = vi.fn().mockResolvedValue({ workOrder: { id: ORDER } });
+    const configureWebhook = vi
+      .fn()
+      .mockRejectedValue(new TasksClientError("http", "webhook rejected", 400, "invalid_request"));
+    const client = {
+      deployment: vi.fn().mockResolvedValue({ network: "eip155:8453", feeBp: null }),
+      createOrder,
+      configureWebhook,
+    } as unknown as TasksClient;
+    await expect(
+      postTask(
+        {
+          client,
+          chain: missingTasksChain,
+          baseUrl: "https://tasks.example",
+          randomUUID: () => KEY,
+          signInHint: "Run vapi login.",
+        },
+        {
+          order: {
+            title: "Build an API",
+            description: "Build the complete public API.",
+            policyFamily: "software-api",
+          },
+          amount: 1_000_000n,
+          deadlineAt: "2026-10-10T12:00:00.000Z",
+          webhook: "https://example.com/hook",
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: "invalid_request",
+      message: expect.stringContaining(`Task ${ORDER} was created`),
+    });
+    expect(createOrder).toHaveBeenCalledOnce();
+    expect(configureWebhook).toHaveBeenCalledOnce();
   });
 });
 

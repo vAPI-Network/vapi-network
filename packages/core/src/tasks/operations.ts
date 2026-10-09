@@ -44,7 +44,7 @@ import {
 import { canonicalJson } from "./canonical-json.js";
 import { TasksChainUnavailableError, type TasksChain } from "./chain-port.js";
 import type { TasksClient } from "./client.js";
-import { parseFeeBp, parseUsdToBaseUnits, taskMoney, type TaskMoney } from "./money.js";
+import { parseFeeBp, taskMoney, type TaskMoney } from "./money.js";
 import {
   TASK_LIMITS,
   TaskInputError,
@@ -90,7 +90,7 @@ export async function searchTasks(
   );
   const accepts = (task: (typeof board.cards)[number]) =>
     (!input.open || task.state === "open") &&
-    (input.min === undefined || parseUsdToBaseUnits(task.amount.gross) >= input.min);
+    (input.min === undefined || (task.amount !== null && BigInt(task.amount.gross) >= input.min));
   return {
     ...board,
     cards: board.cards.filter(accepts),
@@ -104,42 +104,80 @@ export async function postTask(
     amount: bigint;
     intake?: "proposals" | "submissions";
     maxAwards?: number;
+    deadlineAt: string;
     webhook?: string;
     onFeeUnavailable?: () => void;
   },
 ): Promise<{
-  result: CreateOrderResponse;
+  result: CreateOrderResponse & { webhook?: Awaited<ReturnType<TasksClient["configureWebhook"]>> };
   money: TaskMoney;
   feeUnavailable: boolean;
   unsupportedFields: string[];
   postingMovesMoney: false;
 }> {
-  let feeBp: number | null = null,
-    feeUnavailable = false;
+  let deployment: Awaited<ReturnType<TasksClient["deployment"]>>;
   try {
-    feeBp = parseFeeBp(await context.client.deployment());
+    deployment = await context.client.deployment();
   } catch {
-    feeUnavailable = true;
     input.onFeeUnavailable?.();
+    throw new TaskOperationError(
+      "deployment_unavailable",
+      "The Tasks deployment is unavailable, so the market network cannot be selected.",
+    );
   }
+  const feeBp = parseFeeBp(deployment);
+  const feeUnavailable = feeBp === null;
+  if (feeUnavailable) input.onFeeUnavailable?.();
   const money = taskMoney(input.amount, feeBp);
   const result = await taskRequest(
     "post",
     "createOrder",
-    () => context.client.createOrder(input.order, { idempotencyKey: context.randomUUID() }),
+    () =>
+      context.client.createOrder(
+        {
+          ...input.order,
+          market: {
+            intake: input.intake ?? "proposals",
+            maxAwards: input.maxAwards ?? 1,
+            audience: "anyone",
+            proofKinds: input.intake === "submissions" ? ["url", "file"] : [],
+            budget: {
+              network: deployment.network,
+              asset: "USDC",
+              amountBaseUnits: input.amount.toString(),
+            },
+            deadlineAt: input.deadlineAt,
+          },
+        },
+        { idempotencyKey: context.randomUUID() },
+      ),
     context,
   );
+  let webhook: Awaited<ReturnType<TasksClient["configureWebhook"]>> | undefined;
+  if (input.webhook !== undefined) {
+    try {
+      webhook = await taskRequest(
+        "post",
+        "configureWebhook",
+        () => context.client.configureWebhook(result.workOrder.id, { url: input.webhook! }),
+        context,
+      );
+    } catch (error) {
+      if (error instanceof TaskOperationError) {
+        throw new TaskOperationError(
+          error.code,
+          `Task ${result.workOrder.id} was created, but its webhook was not configured: ${error.message}`,
+          error.manifestHash,
+        );
+      }
+      throw error;
+    }
+  }
   return {
-    result,
+    result: webhook === undefined ? result : { ...result, webhook },
     money,
     feeUnavailable,
-    unsupportedFields: [
-      "amount",
-      "deadline",
-      ...(input.intake ? ["intake"] : []),
-      ...(input.maxAwards === undefined ? [] : ["maxAwards"]),
-      ...(input.webhook === undefined ? [] : ["webhook"]),
-    ],
+    unsupportedFields: [],
     postingMovesMoney: false,
   };
 }
@@ -211,7 +249,7 @@ export async function submitTask(
   )
     throw new TaskOperationError(
       "not_available",
-      "The task needs a duration between one hour and 90 days for signed submission terms.",
+      "The task needs a duration between 10 minutes and 90 days for signed submission terms.",
     );
   const deployment = await taskRequest(
     "submit",
@@ -221,17 +259,18 @@ export async function submitTask(
   );
   if (!deployment.configured)
     throw new TaskOperationError("not_available", "Task escrow deployment is unavailable.");
-  const account = await input.unlock();
+  if (task.amount === null) {
+    throw new TaskInputError("Task amount is unavailable.");
+  }
   let amount: bigint;
   try {
-    amount = parseUsdToBaseUnits(task.amount.gross);
+    amount = BigInt(task.amount.gross);
   } catch {
-    throw new TaskInputError(
-      "Task amount must be a decimal USD amount with at most six decimal places.",
-    );
+    throw new TaskInputError("Task amount must be valid base units.");
   }
   if (amount === 0n || amount >= 1n << 256n)
     throw new TaskInputError("Task amount must be positive and fit an escrow amount.");
+  const account = await input.unlock();
   const signedPayload = proposalTerms(input.id, account.address, deployment, {
     title: task.title,
     description: task.briefFull,

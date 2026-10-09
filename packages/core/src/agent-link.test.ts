@@ -9,6 +9,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import {
   AGENT_LINK_REVOKED_MESSAGE,
   AGENT_LINK_STATEMENT,
+  DEFAULT_AGENT_SCOPES,
   AgentLinkError,
   agentAccessToken,
   agentFetch,
@@ -302,6 +303,36 @@ describe("startDeviceLink", () => {
       }),
     ).rejects.toMatchObject({ code: "invalid_scope" });
     expect(called).toBe(false);
+  });
+
+  it("allows both Tasks scopes without changing the default scopes", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (url, init) => {
+      if (String(url).includes("siwe-nonce")) return Response.json({ nonce: "n".repeat(108) });
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json({
+        device_code: "dc",
+        user_code: "BCDF-GHJK",
+        client_id: `agent_${account.address.toLowerCase()}`,
+        verification_uri: `${API_BASE}/link`,
+        verification_uri_complete: `${API_BASE}/link?code=BCDF-GHJK`,
+        expires_in: 600,
+        interval: 5,
+        auto_approved: false,
+      });
+    });
+
+    expect(DEFAULT_AGENT_SCOPES).toEqual(["mcp:call", "router.use"]);
+    await expect(
+      startDeviceLink({
+        apiBase: API_BASE,
+        account,
+        label: "tasks-agent",
+        scopes: [...DEFAULT_AGENT_SCOPES, "tasks:read", "tasks:write"],
+        fetchImpl,
+      }),
+    ).resolves.toMatchObject({ userCode: "BCDF-GHJK" });
+    expect(bodies[0]?.scope).toBe("mcp:call router.use tasks:read tasks:write");
   });
 });
 
