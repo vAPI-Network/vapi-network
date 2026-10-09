@@ -802,7 +802,7 @@ describe("task MCP tools", () => {
         available: true,
         createEscrow: vi.fn(async () => chainResult),
         fund: vi.fn(async () => {
-          const ledger = await readSpendLedger(ledgerPath);
+          const ledger = await readSpendLedger(ledgerPath, new Date(NOW));
           expect(ledger.spentAtomic).toBe("100000");
           expect(JSON.parse(await readFile(ledgerPath, "utf8")).reservations).toHaveLength(1);
           return chainResult;
