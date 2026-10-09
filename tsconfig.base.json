@@ -12,6 +12,7 @@
       "@vapi-network/core/api-key": ["./packages/core/src/api-key.ts"],
       "@vapi-network/core/agent-link": ["./packages/core/src/agent-link.ts"],
       "@vapi-network/core/router-client": ["./packages/core/src/router-client.ts"],
+      "@vapi-network/core/tasks": ["./packages/core/src/tasks/index.ts"],
       "@vapi-network/core": ["./packages/core/src/index.ts"],
       "@vapi-network/sources": ["./packages/sources/src/index.ts"],
       "@vapi-network/mcp": ["./packages/mcp/src/index.ts"],
