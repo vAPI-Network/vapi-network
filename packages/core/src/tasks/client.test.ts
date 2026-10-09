@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createTasksClient, TasksClientError } from "./client.js";
+import { freezeScopeTerms } from "./scope-terms.js";
 import { tasksResponseSchemas } from "./types.js";
 import type {
   CreateOrderInput,
@@ -152,32 +153,36 @@ const operation = {
   milestone: { id: ID, workOrderId: ID },
 } as const;
 
+const structuredScopeTerms = {
+  version: "work-milestone-terms-v1",
+  title: "Ship the integration",
+  description: "Implement and document it.",
+  deliverables: ["Source code"],
+  acceptanceCriteria: ["Tests pass"],
+  revisionCount: 1,
+  deadline: "2026-09-01T12:00:00.000Z",
+  workDurationSeconds: 604_800,
+  acceptanceWindowSeconds: 86_400,
+  budget: {
+    network: "eip155:84532",
+    asset: `eip155:84532/erc20:${OTHER_ADDRESS}`,
+    amountBaseUnits: "2500000",
+  },
+  escrow: { protocol: "escrow-v1", contract: OTHER_ADDRESS },
+  evidenceRules: { acceptedInputs: ["text"], exactCommitRequired: true },
+} as const;
+const scopeBrief = "Ship the exact agreed integration.";
+const frozenScope = freezeScopeTerms(structuredScopeTerms, scopeBrief);
+
 const scope = {
   id: ID,
   workOrderId: ID,
   trancheOrdinal: 1,
   version: 1,
   state: "proposed",
-  structuredTerms: {
-    version: "work-milestone-terms-v1",
-    title: "Ship the integration",
-    description: "Implement and document it.",
-    deliverables: ["Source code"],
-    acceptanceCriteria: ["Tests pass"],
-    revisionCount: 1,
-    deadline: "2026-09-01T12:00:00.000Z",
-    workDurationSeconds: 604_800,
-    acceptanceWindowSeconds: 86_400,
-    budget: {
-      network: "eip155:84532",
-      asset: `eip155:84532/erc20:${OTHER_ADDRESS}`,
-      amountBaseUnits: "2500000",
-    },
-    escrow: { protocol: "escrow-v1", contract: OTHER_ADDRESS },
-    evidenceRules: { acceptedInputs: ["text"], exactCommitRequired: true },
-  },
-  brief: "Ship the exact agreed integration.",
-  termsHash: HASH,
+  structuredTerms: structuredScopeTerms,
+  brief: scopeBrief,
+  termsHash: frozenScope.termsHash,
   proposedByRole: "client",
   proposerAddress: ADDRESS,
   proposerSignature: SIGNATURE,
@@ -191,7 +196,7 @@ const scope = {
     workOrderId: ID,
     trancheOrdinal: 1,
     scopeVersion: 1,
-    termsHash: HASH,
+    termsHash: frozenScope.termsHash,
   },
 } as const;
 
@@ -341,7 +346,7 @@ describe("tasks client recorded HTTP contract", () => {
         id: OTHER_ID,
         workOrderId: scope.workOrderId,
         ordinal: 1,
-        termsHash: HASH,
+        termsHash: scope.termsHash,
         termsFrozenAt: NOW,
       },
     };
@@ -463,7 +468,7 @@ describe("tasks client recorded HTTP contract", () => {
         workOrderId: ID,
         trancheOrdinal: 1,
         scopeVersion: 1,
-        termsHash: HASH,
+        termsHash: scope.termsHash,
       },
       signature: SIGNATURE,
     } satisfies ProposeScopeInput;

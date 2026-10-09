@@ -9,6 +9,7 @@ import { WalletStore, type SecretStore } from "@vapi-network/core";
 import { agentSecretAccounts } from "@vapi-network/core/agent-link";
 import {
   canonicalJson,
+  freezeScopeTerms,
   prepareDeliveryManifest,
   TasksChainError,
   TasksChainUnavailableError,
@@ -273,7 +274,7 @@ function milestoneOrder(
             escrow: { protocol: "escrow-v1", contract: ESCROW },
             evidenceRules: { acceptedInputs: ["text"], exactCommitRequired: false },
           },
-          termsHash: `0x${"ab".repeat(32)}`,
+          termsHash: scopeFixture().termsHash,
           termsFrozenAt: NOW.toISOString(),
           network: "eip155:8453",
           asset: `eip155:8453/erc20:${ADDRESS}`,
@@ -383,6 +384,25 @@ async function writeProfile(
 function scopeFixture(
   proposedByRole: "client" | "provider" = "client",
 ): Awaited<ReturnType<TasksClient["getScopes"]>>["scopes"][number] {
+  const structuredTerms = {
+    version: "work-milestone-terms-v1" as const,
+    title: "Build a page",
+    description: BRIEF,
+    acceptanceCriteria: ["Contact form works"],
+    workDurationSeconds: 172800,
+    acceptanceWindowSeconds: 604800,
+    budget: {
+      network: "eip155:8453" as const,
+      asset: `eip155:8453/erc20:${ADDRESS}`,
+      amountBaseUnits: "100000000",
+    },
+    escrow: { protocol: "escrow-v1" as const, contract: ESCROW },
+    evidenceRules: { acceptedInputs: ["text" as const], exactCommitRequired: false },
+    deliverables: ["A working page"],
+    revisionCount: 0,
+    deadline: NOW.toISOString(),
+  };
+  const frozen = freezeScopeTerms(structuredTerms, BRIEF);
   return tasksResponseSchemas.getScopes.parse({
     scopes: [
       {
@@ -391,26 +411,9 @@ function scopeFixture(
         trancheOrdinal: 1,
         version: 1,
         state: "proposed",
-        structuredTerms: {
-          version: "work-milestone-terms-v1",
-          title: "Build a page",
-          description: BRIEF,
-          acceptanceCriteria: ["Contact form works"],
-          workDurationSeconds: 172800,
-          acceptanceWindowSeconds: 604800,
-          budget: {
-            network: "eip155:8453",
-            asset: `eip155:8453/erc20:${ADDRESS}`,
-            amountBaseUnits: "100000000",
-          },
-          escrow: { protocol: "escrow-v1", contract: ESCROW },
-          evidenceRules: { acceptedInputs: ["text"], exactCommitRequired: false },
-          deliverables: ["A working page"],
-          revisionCount: 0,
-          deadline: NOW.toISOString(),
-        },
+        structuredTerms,
         brief: BRIEF,
-        termsHash: `0x${"ab".repeat(32)}`,
+        termsHash: frozen.termsHash,
         proposedByRole,
         proposerAddress: ADDRESS,
         proposerSignature: `0x${"cd".repeat(65)}`,
@@ -424,7 +427,7 @@ function scopeFixture(
           workOrderId: ID,
           trancheOrdinal: 1,
           scopeVersion: 1,
-          termsHash: `0x${"ab".repeat(32)}`,
+          termsHash: frozen.termsHash,
         },
       },
     ],
@@ -1659,6 +1662,14 @@ describe("vapi task", () => {
         scope: expect.any(Object),
         milestone: expect.any(Object),
         escrowCreation: expect.any(Object),
+        terms: {
+          amountBaseUnits: "100000000",
+          asset: `eip155:8453/erc20:${ADDRESS}`,
+          network: "eip155:8453",
+          deadline: NOW.toISOString(),
+          deliverables: ["A working page"],
+          title: "Build a page",
+        },
       });
 
       chain.createEscrow = vi.fn(async () => {
@@ -1673,6 +1684,74 @@ describe("vapi task", () => {
       expect(failed.value).toMatchObject({
         error: { message: expect.stringContaining("create failed") },
       });
+    });
+
+    it("prints verified scope terms before the signed confirmation", async () => {
+      const scope = scopeFixture("provider");
+      const accepted = tasksResponseSchemas.signScope.parse({
+        scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
+        milestone: {
+          id: PROPOSAL_ID,
+          workOrderId: ID,
+          ordinal: 1,
+          termsHash: scope.termsHash,
+          termsFrozenAt: NOW.toISOString(),
+        },
+      });
+      const client = fakeClient({
+        getOrder: vi.fn(async () => milestoneOrder({ role: "client", escrowState: null })),
+        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+        signScope: vi.fn(async () => accepted),
+      });
+      const { dependencies } = await fixture(true, client);
+
+      const result = await invoke(["sign", ID], dependencies, false);
+
+      expect(result.code).toBe(0);
+      expect(result.stdout.slice(-2)).toEqual([
+        `Build a page · $100.00 USDC · deadline ${NOW.toISOString()}`,
+        `Accepted scope for task ${ID}.`,
+      ]);
+    });
+
+    it("prints raw base units and the asset identifier for an unknown token", async () => {
+      const original = scopeFixture("provider");
+      const structuredTerms = {
+        ...original.structuredTerms,
+        budget: {
+          ...original.structuredTerms.budget,
+          asset: `eip155:8453/erc20:${ESCROW}`,
+        },
+      };
+      const frozen = freezeScopeTerms(structuredTerms, original.brief);
+      const scope = {
+        ...original,
+        structuredTerms,
+        termsHash: frozen.termsHash,
+        signingPayload: { ...original.signingPayload, termsHash: frozen.termsHash },
+      };
+      const accepted = tasksResponseSchemas.signScope.parse({
+        scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
+        milestone: {
+          id: PROPOSAL_ID,
+          workOrderId: ID,
+          ordinal: 1,
+          termsHash: frozen.termsHash,
+          termsFrozenAt: NOW.toISOString(),
+        },
+      });
+      const client = fakeClient({
+        getOrder: vi.fn(async () => milestoneOrder({ role: "client", escrowState: null })),
+        getScopes: vi.fn(async () => ({ scopes: [scope] })),
+        signScope: vi.fn(async () => accepted),
+      });
+      const { dependencies } = await fixture(true, client);
+
+      const result = await invoke(["sign", ID], dependencies, false);
+
+      expect(result.stdout.at(-2)).toBe(
+        `Build a page · 100000000 base units (eip155:8453/erc20:${ESCROW}) · deadline ${NOW.toISOString()}`,
+      );
     });
 
     it("lets the poster accept a scope with a local vault signature without C2", async () => {

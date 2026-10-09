@@ -18,6 +18,7 @@ import {
 import type { TasksClient } from "./client.js";
 import { prepareDeliveryManifest, type FrozenDeliveryManifest } from "./delivery-manifest.js";
 import { formatBaseUnitsUsd, parseFeeBp, taskMoney, type TaskMoney } from "./money.js";
+import { freezeScopeTerms } from "./scope-terms.js";
 import {
   deliverEscrowInputSchema,
   disputeEscrowInputSchema,
@@ -256,14 +257,25 @@ export type SignScopeActionInput = {
   signMessage?: (message: string) => Promise<`0x${string}`>;
   idempotencyKey?: () => string;
 };
-export type SignScopeActionResult = SignScopeResponse & { escrowCreation: TasksChainResult | null };
+export type SignedScopeTerms = {
+  amountBaseUnits: string;
+  asset: string;
+  network: `eip155:${number}`;
+  deadline: string;
+  deliverables: string[];
+  title: string;
+};
+export type SignScopeAcceptance = SignScopeResponse & { terms: SignedScopeTerms };
+export type SignScopeActionResult = SignScopeAcceptance & {
+  escrowCreation: TasksChainResult | null;
+};
 
 /** The acceptance response arrived; inspect it before retrying a follow-up separately. */
 export class TasksScopeCreationError extends Error {
   readonly broadcast: boolean;
 
   constructor(
-    readonly acceptance: SignScopeResponse,
+    readonly acceptance: SignScopeAcceptance,
     cause: unknown,
   ) {
     super("The accepted scope follow-up failed.", { cause });
@@ -301,6 +313,22 @@ export async function signScope(input: SignScopeActionInput): Promise<SignScopeA
   ) {
     throw new Error("The scope signing payload does not match the current task scope.");
   }
+  let frozen;
+  try {
+    frozen = freezeScopeTerms(scope.structuredTerms, scope.brief);
+    const expectedTermsHash = payload.termsHash ?? scope.termsHash;
+    if (frozen.termsHash !== expectedTermsHash) throw new Error("Scope terms hash mismatch");
+  } catch {
+    throw new Error("The scope terms do not match their hash; refusing to sign.");
+  }
+  const terms: SignedScopeTerms = {
+    amountBaseUnits: frozen.structured.budget.amountBaseUnits,
+    asset: frozen.structured.budget.asset,
+    network: frozen.structured.budget.network,
+    deadline: frozen.structured.deadline,
+    deliverables: frozen.structured.deliverables,
+    title: frozen.structured.title,
+  };
   const idempotencyKey = operationKey(input);
   const message = canonicalJson(payload);
   let signature: `0x${string}`;
@@ -314,6 +342,7 @@ export async function signScope(input: SignScopeActionInput): Promise<SignScopeA
     { signedPayload: payload, signature },
     { idempotencyKey },
   );
+  const accepted = { ...acceptance, terms };
   try {
     if (
       acceptance.scope.id !== scope.id ||
@@ -327,7 +356,7 @@ export async function signScope(input: SignScopeActionInput): Promise<SignScopeA
     ) {
       throw new Error("The accepted scope response does not match the task.");
     }
-    if (input.role === "poster") return { ...acceptance, escrowCreation: null };
+    if (input.role === "poster") return { ...accepted, escrowCreation: null };
     const fresh = await privateOrder(input.client, input.orderId);
     const milestone = fresh.milestones.find(
       (candidate) => candidate.id === acceptance.milestone.id,
@@ -339,7 +368,7 @@ export async function signScope(input: SignScopeActionInput): Promise<SignScopeA
       milestone.termsHash !== payload.termsHash
     )
       throw new Error("The accepted scope milestone is unavailable.");
-    if (milestone.escrowState !== null) return { ...acceptance, escrowCreation: null };
+    if (milestone.escrowState !== null) return { ...accepted, escrowCreation: null };
     // The prepare route chooses the earliest uncreated milestone. Do not create
     // a different tranche accidentally if older scope work is still pending.
     const earliest = fresh.milestones
@@ -352,9 +381,9 @@ export async function signScope(input: SignScopeActionInput): Promise<SignScopeA
       orderId: input.orderId,
       idempotencyKey: operationKey(input),
     });
-    return { ...acceptance, escrowCreation };
+    return { ...accepted, escrowCreation };
   } catch (error) {
-    throw new TasksScopeCreationError(acceptance, error);
+    throw new TasksScopeCreationError(accepted, error);
   }
 }
 
