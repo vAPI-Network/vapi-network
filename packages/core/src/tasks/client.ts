@@ -195,9 +195,10 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
           server?.message ||
           response.statusText ||
           `HTTP ${response.status}`;
+        const debugBody = process.env.VAPI_DEBUG_HTTP ? ` [body: ${raw.slice(0, 600)}]` : "";
         throw new TasksClientError(
           "http",
-          message,
+          message + debugBody,
           response.status,
           nested?.code ?? server?.code,
           response.headers.get("Retry-After") ?? undefined,

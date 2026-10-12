@@ -346,6 +346,17 @@ type ListedTool = {
 };
 
 /** Minimal MCP server implementation for stdio and deterministic in-memory tests. */
+
+/**
+ * MCP hosts (Claude Desktop) validate `outputSchema.type === "object"`; a union
+ * output (oneOf/anyOf) is legal JSON Schema but is rejected, so it is omitted.
+ */
+function objectOutputSchema(schema: z.ZodType | undefined): { outputSchema?: unknown } {
+  if (!schema) return {};
+  const json = z.toJSONSchema(schema) as { type?: unknown };
+  return json.type === "object" ? { outputSchema: json } : {};
+}
+
 export class VapiMcpServer {
   readonly #tools = new Map<string, StoredTool>();
   readonly #onClose: (() => void) | undefined;
@@ -380,7 +391,7 @@ export class VapiMcpServer {
         name,
         ...(tool.description ? { description: tool.description } : {}),
         inputSchema: z.toJSONSchema(tool.inputSchema),
-        ...(tool.outputSchema ? { outputSchema: z.toJSONSchema(tool.outputSchema) } : {}),
+        ...objectOutputSchema(tool.outputSchema),
       })),
     };
   }
