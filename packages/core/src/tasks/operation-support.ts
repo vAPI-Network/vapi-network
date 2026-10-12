@@ -308,7 +308,8 @@ export function proposalTerms(
   return {
     version: "work-proposal-v1",
     workOrderId: id,
-    providerAddress: address,
+    // The server lowercases addresses before canonicalizing the signed payload.
+    providerAddress: address.toLowerCase() as `0x${string}`,
     pricingModel: "fixed",
     milestones: [
       {

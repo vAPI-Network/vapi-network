@@ -131,6 +131,13 @@ export const tasksPostTool = descriptor(
       .max(TASK_LIMITS.maxAwardsMax)
       .optional(),
     webhookUrl: httpsUrl.optional(),
+    vendor: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{40}$/u)
+      .describe(
+        "Optional 0x address of a vendor to invite directly; the task is addressed to that wallet and shows up for them. Anyone may still propose.",
+      )
+      .optional(),
   },
 );
 export const tasksProposeTool = descriptor(
@@ -459,7 +466,12 @@ export function createTasksTools(options: TasksToolsOptions) {
         throw new TaskInputError("deadline must be at least 10 minutes from now.");
       const ctx = await acting(input.wallet);
       const outcome = await postTask(ctx, {
-        order: { title: input.title, description: input.brief, policyFamily: "general-digital" },
+        order: {
+          title: input.title,
+          description: input.brief,
+          policyFamily: "general-digital",
+          ...(input.vendor === undefined ? {} : { invitedProviderAddress: input.vendor }),
+        },
         amount: parseUsdToBaseUnits(input.amountUsd),
         deadlineAt: new Date(postedAt.getTime() + deadlineDuration).toISOString(),
         ...(input.intake === undefined ? {} : { intake: input.intake }),
