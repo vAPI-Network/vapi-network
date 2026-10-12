@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { readSpendLedger } from "../spend-policy.js";
@@ -13,11 +14,14 @@ import {
   TaskOperationError,
   nextTaskEvents,
   postTask,
+  signTaskScope,
   taskPolicyForWallet,
   taskRequest,
 } from "./operations.js";
 import { missingTasksChain, TasksChainUnavailableError, type TasksChain } from "./chain-port.js";
 import { TasksClientError, type TasksClient } from "./client.js";
+import { canonicalJson } from "./canonical-json.js";
+import { freezeScopeTerms } from "./scope-terms.js";
 
 const directories: string[] = [];
 const ORDER = "11111111-1111-4111-8111-111111111111";
@@ -25,6 +29,10 @@ const ESCROW = "22222222-2222-4222-8222-222222222222";
 const KEY = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const HASH = `0x${"ab".repeat(32)}` as const;
 const NOW = new Date("2026-10-08T12:00:00.000Z");
+const poster = privateKeyToAccount(`0x${"11".repeat(32)}`);
+const worker = privateKeyToAccount(`0x${"22".repeat(32)}`);
+const outsider = privateKeyToAccount(`0x${"33".repeat(32)}`);
+const proposerOnly = privateKeyToAccount(`0x${"44".repeat(32)}`);
 afterEach(async () => {
   await Promise.all(
     directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
@@ -427,5 +435,243 @@ describe("deliverTaskOperation", () => {
       manifestHash: expect.stringMatching(/^0x[0-9a-f]{64}$/u),
     });
     expect(onPrepared).toHaveBeenCalledOnce();
+  });
+});
+
+const scopeTerms = {
+  version: "work-milestone-terms-v1",
+  title: "Prepare a report",
+  description: "Write a useful report.",
+  deliverables: ["A report"],
+  revisionCount: 0,
+  deadline: NOW.toISOString(),
+  acceptanceCriteria: ["Report complete"],
+  acceptanceWindowSeconds: 3600,
+  budget: {
+    network: "eip155:84532" as const,
+    asset: "eip155:84532/erc20:0x1111111111111111111111111111111111111111",
+    amountBaseUnits: "100000000",
+  },
+  escrow: { protocol: "escrow-v1", contract: "0x1111111111111111111111111111111111111111" },
+  evidenceRules: { acceptedInputs: ["text"], exactCommitRequired: false },
+};
+
+async function scopeOperationFixture(input: {
+  serverRole: "client" | "provider" | "proposer";
+  clientAddress: `0x${string}`;
+  providerAddress: `0x${string}`;
+  signingAddress?: `0x${string}`;
+}) {
+  const frozen = freezeScopeTerms(scopeTerms, "Report");
+  const proposedByRole = input.serverRole === "client" ? "provider" : "client";
+  const proposer =
+    input.signingAddress?.toLowerCase() === worker.address.toLowerCase() ? poster : worker;
+  const payload = {
+    version: "work-scope-signature-v1",
+    workOrderId: ORDER,
+    trancheOrdinal: 1,
+    scopeVersion: 1,
+    termsHash: frozen.termsHash,
+  };
+  const scope = {
+    id: KEY,
+    workOrderId: ORDER,
+    trancheOrdinal: 1,
+    version: 1,
+    state: "proposed",
+    structuredTerms: scopeTerms,
+    brief: "Report",
+    termsHash: frozen.termsHash,
+    proposedByRole,
+    proposerAddress: proposer.address,
+    proposerSignature: await proposer.signMessage({ message: canonicalJson(payload) }),
+    counterpartyAddress: null,
+    counterpartySignature: null,
+    acceptedAt: null,
+    milestoneId: null,
+    createdAt: NOW.toISOString(),
+    signingPayload: payload,
+  };
+  const order = {
+    workOrder: {
+      version: "work-order-view-v1",
+      id: ORDER,
+      role: input.serverRole,
+      clientAddress: input.clientAddress,
+      acceptedProposalId: KEY,
+      proposals: [
+        { id: KEY, providerAddress: input.providerAddress },
+        { id: ESCROW, providerAddress: proposerOnly.address },
+      ],
+      milestones: [
+        {
+          id: ESCROW,
+          workOrderId: ORDER,
+          ordinal: 1,
+          termsHash: frozen.termsHash,
+          termsFrozenAt: NOW.toISOString(),
+          escrowState: "created",
+        },
+      ],
+    },
+  };
+  const client = {
+    getOrder: vi.fn().mockResolvedValue(order),
+    getScopes: vi.fn().mockResolvedValue({ scopes: [scope] }),
+    signScope: vi.fn().mockResolvedValue({
+      scope: { ...scope, state: "accepted", milestoneId: ESCROW },
+      milestone: {
+        id: ESCROW,
+        workOrderId: ORDER,
+        ordinal: 1,
+        termsHash: frozen.termsHash,
+        termsFrozenAt: NOW.toISOString(),
+      },
+    }),
+  } as unknown as TasksClient;
+  const signScopeMessage = vi.fn(async (message: string) =>
+    (input.signingAddress?.toLowerCase() === poster.address.toLowerCase()
+      ? poster
+      : worker
+    ).signMessage({ message }),
+  );
+  const chain = {
+    ...missingTasksChain,
+    available: true,
+    signScopeMessage,
+    bindScope: vi.fn().mockResolvedValue(undefined),
+    ...(input.signingAddress ? { signingAddress: input.signingAddress } : {}),
+  } as TasksChain;
+  return {
+    context: {
+      client,
+      chain,
+      baseUrl: "https://tasks.example",
+      randomUUID: () => KEY,
+      signInHint: "Run vapi login.",
+    },
+    signScopeMessage,
+  };
+}
+
+describe("signTaskScope local role derivation", () => {
+  it.each([
+    ["client", worker.address, worker.address, "provider"],
+    ["provider", poster.address, worker.address, "client"],
+  ] as const)(
+    "rejects a hostile %s label for the wallet's actual role",
+    async (serverRole, signingAddress, providerAddress, _actualRole) => {
+      const fixture = await scopeOperationFixture({
+        serverRole,
+        signingAddress,
+        clientAddress: poster.address,
+        providerAddress,
+      });
+      await expect(
+        signTaskScope(fixture.context, { id: ORDER, signMessage: fixture.signScopeMessage }),
+      ).rejects.toMatchObject({ name: "TaskOperationError", code: "wrong_role" });
+      expect(fixture.signScopeMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["client", poster.address, worker.address, "you fund escrow for the worker"],
+    ["provider", worker.address, worker.address, "you deliver work to the poster"],
+  ] as const)(
+    "derives and previews the valid %s role before signing",
+    async (serverRole, signingAddress, providerAddress, direction) => {
+      const fixture = await scopeOperationFixture({
+        serverRole,
+        signingAddress,
+        clientAddress: poster.address,
+        providerAddress,
+      });
+      const order: string[] = [];
+      fixture.signScopeMessage.mockImplementationOnce(async (message: string) => {
+        order.push("sign");
+        return (serverRole === "client" ? poster : worker).signMessage({ message });
+      });
+      await signTaskScope(fixture.context, {
+        id: ORDER,
+        signMessage: fixture.signScopeMessage,
+        onTerms: (terms) => {
+          expect(terms).toMatchObject({
+            role: serverRole,
+            self: signingAddress,
+            direction,
+          });
+          order.push("terms");
+        },
+      });
+      expect(order).toEqual(["terms", "sign"]);
+    },
+  );
+
+  it("requires a local signing address before invoking the signer", async () => {
+    const fixture = await scopeOperationFixture({
+      serverRole: "client",
+      clientAddress: poster.address,
+      providerAddress: worker.address,
+    });
+    await expect(
+      signTaskScope(fixture.context, { id: ORDER, signMessage: fixture.signScopeMessage }),
+    ).rejects.toMatchObject({ code: "wrong_role" });
+    expect(fixture.signScopeMessage).not.toHaveBeenCalled();
+  });
+
+  it("uses an explicit signer address and still cross-checks the server role", async () => {
+    const valid = await scopeOperationFixture({
+      serverRole: "client",
+      clientAddress: poster.address,
+      providerAddress: worker.address,
+    });
+    await signTaskScope(valid.context, {
+      id: ORDER,
+      signerAddress: poster.address,
+      signMessage: async (message) => poster.signMessage({ message }),
+    });
+    const hostile = await scopeOperationFixture({
+      serverRole: "provider",
+      clientAddress: poster.address,
+      providerAddress: worker.address,
+    });
+    await expect(
+      signTaskScope(hostile.context, {
+        id: ORDER,
+        signerAddress: poster.address,
+        signMessage: async (message) => poster.signMessage({ message }),
+      }),
+    ).rejects.toMatchObject({ code: "wrong_role" });
+  });
+
+  it.each([outsider.address, proposerOnly.address])(
+    "refuses an unrelated or merely proposing wallet %s",
+    async (signingAddress) => {
+      const fixture = await scopeOperationFixture({
+        serverRole: "provider",
+        signingAddress: signingAddress as `0x${string}`,
+        clientAddress: poster.address,
+        providerAddress: worker.address,
+      });
+      await expect(
+        signTaskScope(fixture.context, { id: ORDER, signMessage: fixture.signScopeMessage }),
+      ).rejects.toMatchObject({ code: "wrong_role" });
+      expect(fixture.signScopeMessage).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retains the proposer refusal", async () => {
+    const fixture = await scopeOperationFixture({
+      serverRole: "proposer",
+      signingAddress: worker.address,
+      clientAddress: poster.address,
+      providerAddress: worker.address,
+    });
+    await expect(
+      signTaskScope(fixture.context, { id: ORDER, signMessage: fixture.signScopeMessage }),
+    ).rejects.toMatchObject({
+      code: "wrong_role",
+      message: "A proposer cannot sign this task scope.",
+    });
   });
 });

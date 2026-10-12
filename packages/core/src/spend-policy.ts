@@ -17,6 +17,7 @@ const spendReservationSchema = z.object({
   id: z.string().min(1),
   amountAtomic: z.string().regex(/^\d+$/),
   kind: z.enum(["payment", "escrow-funding", "dispute-fee"]).optional(),
+  taskKey: z.string().optional(),
 });
 
 /**
@@ -29,9 +30,8 @@ const ledgerRowSchema = ledgerSchema.extend({
 });
 
 /**
- * The file holds either a single legacy row, or the multi-wallet form. A home
- * with only `main` keeps being written in the legacy shape, so a 0.2.x client
- * can still read its own ledger.
+ * The file holds either a single legacy row, or rows for multiple wallets and
+ * days. A single row for `main` keeps being written in the legacy shape.
  */
 const ledgerFileSchema = z.union([
   z.object({ version: z.literal(1), rows: z.array(ledgerRowSchema) }),
@@ -90,6 +90,35 @@ export async function escrowFundingDayRemainingAtomic(input: {
   return remaining > 0n ? remaining : 0n;
 }
 
+/** Read-only task spend across all stored days, excluding a reservation being retried. */
+export async function taskReservedAtomic(input: {
+  ledgerPath: string;
+  wallet: WalletName;
+  taskKey: string;
+  now: Date;
+  excludeReservationId?: string;
+}): Promise<bigint> {
+  const rows = await readStoredSpendLedgerRows(input.ledgerPath, input.now, true);
+  return sumTaskReservations(rows, input.wallet, input.taskKey, input.excludeReservationId);
+}
+
+function sumTaskReservations(
+  rows: readonly StoredSpendLedgerRow[],
+  wallet: WalletName,
+  taskKey: string,
+  excludeReservationId?: string,
+): bigint {
+  let total = 0n;
+  for (const row of rows) {
+    if (row.wallet !== wallet) continue;
+    for (const reservation of row.reservations ?? []) {
+      if (reservation.taskKey === taskKey && reservation.id !== excludeReservationId)
+        total += BigInt(reservation.amountAtomic);
+    }
+  }
+  return total;
+}
+
 /** Today's spend of every wallet that has spent today. */
 export async function readSpendLedgerRows(
   path = getAgentCashPaths().ledger,
@@ -102,7 +131,11 @@ export async function readSpendLedgerRows(
   }));
 }
 
-async function readStoredSpendLedgerRows(path: string, now: Date): Promise<StoredSpendLedgerRow[]> {
+async function readStoredSpendLedgerRows(
+  path: string,
+  now: Date,
+  allDays = false,
+): Promise<StoredSpendLedgerRow[]> {
   let raw: string;
   try {
     raw = await readFile(path, "utf8");
@@ -114,7 +147,7 @@ async function readStoredSpendLedgerRows(path: string, now: Date): Promise<Store
   const rows = "rows" in parsed ? parsed.rows : [parsed];
   const today = utcDateKey(now);
   return rows
-    .filter((row) => row.date === today)
+    .filter((row) => allDays || row.date === today)
     .map((row) => ({
       date: row.date,
       spentAtomic: row.spentAtomic,
@@ -127,6 +160,7 @@ async function readStoredSpendLedgerRows(path: string, now: Date): Promise<Store
  * Reserves one payment or escrow funding against the caps of one wallet.
  * Per-day totals are kept per wallet, so an agent wallet cannot spend the
  * owner's daily allowance.
+ * Task-linked calls without a reservation id return a generated id for rollback.
  */
 export async function reserveSpend(
   amountAtomic: bigint,
@@ -137,6 +171,7 @@ export async function reserveSpend(
     wallet?: WalletName;
     reservationId?: string;
     kind?: SpendKind;
+    taskKey?: string;
     maxPerTaskAtomic?: bigint;
     reuseExistingEscrowReservation?: boolean;
     resumeEscrowReservation?: {
@@ -148,7 +183,7 @@ export async function reserveSpend(
       invalidated?: boolean;
     };
   },
-): Promise<SpendLedger & { reservationReused?: boolean }> {
+): Promise<SpendLedger & { reservationReused?: boolean; reservationId?: string }> {
   if (amountAtomic < 0n) {
     throw new Error("Spend amount cannot be negative.");
   }
@@ -182,8 +217,25 @@ export async function reserveSpend(
   const now = options?.now ?? new Date();
   const wallet = options?.wallet ?? DEFAULT_WALLET_NAME;
   return await withLedgerLock(ledgerPath, async () => {
-    const rows = await readStoredSpendLedgerRows(ledgerPath, now);
-    const current = rows.find((row) => row.wallet === wallet);
+    const rows = await readStoredSpendLedgerRows(ledgerPath, now, true);
+    const today = utcDateKey(now);
+    const current = rows.find((row) => row.wallet === wallet && row.date === today);
+    if ((kind === "escrow-funding" || kind === "dispute-fee") && options?.taskKey !== undefined) {
+      const taskTotal =
+        sumTaskReservations(
+          rows,
+          wallet,
+          options.taskKey,
+          options.reuseExistingEscrowReservation || options.resumeEscrowReservation
+            ? options.reservationId
+            : undefined,
+        ) + amountAtomic;
+      if (taskTotal > options.maxPerTaskAtomic!)
+        throw new SpendCapError(
+          "per_task_cap_exceeded",
+          `New spend ${amountAtomic} atomic USDC would raise the running total for task ${options.taskKey} and wallet ${wallet} to ${taskTotal}, above the per-task cap ${options.maxPerTaskAtomic}. Refusing to sign.`,
+        );
+    }
     if (options?.reservationId !== undefined) {
       const existing = current?.reservations?.find(
         (reservation) => reservation.id === options.reservationId,
@@ -192,11 +244,16 @@ export async function reserveSpend(
         if (
           (kind !== "escrow-funding" && kind !== "dispute-fee") ||
           existing.kind !== kind ||
-          existing.amountAtomic !== amountAtomic.toString()
+          existing.amountAtomic !== amountAtomic.toString() ||
+          (existing.taskKey !== undefined && existing.taskKey !== options.taskKey)
         )
           throw new Error(
             `Spend reservation ${options.reservationId} does not match this funding.`,
           );
+        if (existing.taskKey === undefined && options.taskKey !== undefined) {
+          existing.taskKey = options.taskKey;
+          await writeLedgerAtomically(ledgerPath, rows);
+        }
         return {
           date: current!.date,
           spentAtomic: current!.spentAtomic,
@@ -208,6 +265,10 @@ export async function reserveSpend(
       }
       if (options.resumeEscrowReservation) {
         const resumed = options.resumeEscrowReservation;
+        const historical = rows.find((row) => row.wallet === wallet && row.date === resumed.date);
+        const stored = historical?.reservations?.find(
+          (reservation) => reservation.id === resumed.id,
+        );
         if (
           (kind !== "escrow-funding" && kind !== "dispute-fee") ||
           resumed.id !== options.reservationId ||
@@ -215,11 +276,36 @@ export async function reserveSpend(
           resumed.amountAtomic !== amountAtomic.toString() ||
           resumed.date >= utcDateKey(now) ||
           resumed.exposed !== true ||
-          resumed.invalidated === true
+          resumed.invalidated === true ||
+          (stored !== undefined &&
+            (stored.kind !== kind ||
+              stored.amountAtomic !== amountAtomic.toString() ||
+              (stored.taskKey !== undefined && stored.taskKey !== options.taskKey)))
         )
           throw new Error(
             `Spend reservation ${options.reservationId} does not match this funding.`,
           );
+        if (stored?.taskKey === undefined && options.taskKey !== undefined) {
+          if (stored) stored.taskKey = options.taskKey;
+          else {
+            const reservation = {
+              id: resumed.id,
+              amountAtomic: resumed.amountAtomic,
+              kind,
+              taskKey: options.taskKey,
+            };
+            if (historical)
+              historical.reservations = [...(historical.reservations ?? []), reservation];
+            else
+              rows.push({
+                date: resumed.date,
+                spentAtomic: resumed.amountAtomic,
+                wallet,
+                reservations: [reservation],
+              });
+          }
+          await writeLedgerAtomically(ledgerPath, rows);
+        }
         return {
           date: resumed.date,
           spentAtomic: current?.spentAtomic ?? "0",
@@ -235,38 +321,79 @@ export async function reserveSpend(
         `${kind === "escrow-funding" ? "Escrow funding" : "Payment quote"} ${amountAtomic} atomic USDC would raise today's spend to ${nextSpent} for wallet ${wallet}, above the per-day cap ${perDayAtomic}. Refusing to sign.`,
       );
     }
+    const reservationId =
+      options?.reservationId ??
+      (options?.taskKey === undefined ? undefined : randomBytes(16).toString("hex"));
     const nextRow: StoredSpendLedgerRow = {
       date: utcDateKey(now),
       spentAtomic: nextSpent.toString(),
       wallet,
-      ...((current?.reservations?.length ?? 0) === 0 && options?.reservationId === undefined
+      ...((current?.reservations?.length ?? 0) === 0 && reservationId === undefined
         ? {}
         : {
             reservations: [
               ...(current?.reservations ?? []),
-              ...(options?.reservationId === undefined
+              ...(reservationId === undefined
                 ? []
                 : [
                     {
-                      id: options.reservationId,
+                      id: reservationId,
                       amountAtomic: amountAtomic.toString(),
                       ...(kind !== "payment" ? { kind } : {}),
+                      ...(options?.taskKey === undefined ? {} : { taskKey: options.taskKey }),
                     },
                   ]),
             ],
           }),
     };
-    const nextRows = [...rows.filter((row) => row.wallet !== wallet), nextRow].sort((a, b) =>
-      a.wallet.localeCompare(b.wallet),
+    const otherRows = rows
+      .filter((row) => row.wallet !== wallet || row.date !== today)
+      .map((row) => {
+        if (
+          row.wallet !== wallet ||
+          !options?.reuseExistingEscrowReservation ||
+          options.reservationId === undefined
+        )
+          return row;
+        const previous = row.reservations?.find(
+          (reservation) => reservation.id === options.reservationId,
+        );
+        if (!previous) return row;
+        if (
+          (kind !== "escrow-funding" && kind !== "dispute-fee") ||
+          previous.kind !== kind ||
+          previous.amountAtomic !== amountAtomic.toString() ||
+          (previous.taskKey !== undefined && previous.taskKey !== options.taskKey)
+        )
+          throw new Error(
+            `Spend reservation ${options.reservationId} does not match this funding.`,
+          );
+        // An unexposed prior-day reservation is booked today before a new
+        // signature. Move its record so the task total counts the intent once.
+        return {
+          ...row,
+          reservations: row.reservations!.filter(
+            (reservation) => reservation.id !== options.reservationId,
+          ),
+        };
+      });
+    const nextRows = [...otherRows, nextRow].sort(
+      (a, b) => a.wallet.localeCompare(b.wallet) || a.date.localeCompare(b.date),
     );
     await writeLedgerAtomically(ledgerPath, nextRows);
-    return { date: nextRow.date, spentAtomic: nextRow.spentAtomic };
+    return {
+      date: nextRow.date,
+      spentAtomic: nextRow.spentAtomic,
+      ...(options?.reservationId === undefined && reservationId !== undefined
+        ? { reservationId }
+        : {}),
+    };
   });
 }
 
 /**
- * Releases a reservation made earlier on the same UTC day. A reservation from
- * a prior day has already rolled out of the active ledger and is left alone.
+ * Releases an identified reservation on its original UTC day, including task
+ * accounting. Unidentified releases only affect today's daily budget.
  */
 export async function releaseSpend(
   amountAtomic: bigint,
@@ -287,16 +414,17 @@ export async function releaseSpend(
   const wallet = options.wallet ?? DEFAULT_WALLET_NAME;
   return await withLedgerLock(ledgerPath, async () => {
     const today = utcDateKey(now);
-    const rows = await readStoredSpendLedgerRows(ledgerPath, now);
-    const current = rows.find((row) => row.wallet === wallet);
-    if (options.reservedOn !== today) {
+    const rows = await readStoredSpendLedgerRows(ledgerPath, now, true);
+    const current = rows.find((row) => row.wallet === wallet && row.date === today);
+    if (options.reservedOn !== today && options.reservationId === undefined) {
       return { date: today, spentAtomic: current?.spentAtomic ?? "0" };
     }
+    const reserved = rows.find((row) => row.wallet === wallet && row.date === options.reservedOn);
 
     const reservation =
       options.reservationId === undefined
         ? undefined
-        : current?.reservations?.find((candidate) => candidate.id === options.reservationId);
+        : reserved?.reservations?.find((candidate) => candidate.id === options.reservationId);
     if (options.reservationId !== undefined && reservation === undefined) {
       return { date: today, spentAtomic: current?.spentAtomic ?? "0" };
     }
@@ -304,26 +432,31 @@ export async function releaseSpend(
       throw new Error(`Spend reservation ${options.reservationId} has a different amount.`);
     }
 
-    const spentAtomic = BigInt(current?.spentAtomic ?? "0");
+    const spentAtomic = BigInt(reserved?.spentAtomic ?? "0");
     const releasedAmount =
       reservation === undefined ? amountAtomic : BigInt(reservation.amountAtomic);
     const nextSpent = spentAtomic > releasedAmount ? spentAtomic - releasedAmount : 0n;
-    const remainingReservations = current?.reservations?.filter(
+    const remainingReservations = reserved?.reservations?.filter(
       (candidate) => candidate.id !== options.reservationId,
     );
     const nextRow: StoredSpendLedgerRow = {
-      date: today,
+      date: options.reservedOn,
       spentAtomic: nextSpent.toString(),
       wallet,
       ...(remainingReservations === undefined || remainingReservations.length === 0
         ? {}
         : { reservations: remainingReservations }),
     };
-    const nextRows = [...rows.filter((row) => row.wallet !== wallet), nextRow].sort((a, b) =>
-      a.wallet.localeCompare(b.wallet),
-    );
+    const nextRows = [
+      ...rows.filter((row) => row.wallet !== wallet || row.date !== options.reservedOn),
+      nextRow,
+    ].sort((a, b) => a.wallet.localeCompare(b.wallet) || a.date.localeCompare(b.date));
     await writeLedgerAtomically(ledgerPath, nextRows);
-    return { date: nextRow.date, spentAtomic: nextRow.spentAtomic };
+    return {
+      date: today,
+      spentAtomic:
+        options.reservedOn === today ? nextRow.spentAtomic : (current?.spentAtomic ?? "0"),
+    };
   });
 }
 

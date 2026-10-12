@@ -45,6 +45,15 @@ export type VerifiedContext = PlanExpectation & {
   nowSeconds?: bigint;
 };
 
+export class TasksPartiesNotBoundError extends TasksValidationError {
+  constructor() {
+    super(
+      "The task parties are not bound on this machine. Sign the scope with `vapi task sign` on this machine first; an explicit --counterparty only confirms an existing binding.",
+    );
+    this.name = "TasksPartiesNotBoundError";
+  }
+}
+
 export async function verifyDeployment(
   ready: Deployment,
   rpc: PublicClient,
@@ -105,8 +114,6 @@ export async function verifyScope(
   options: {
     bindings?: ScopeBindings;
     counterparty?: Address;
-    role?: "client" | "provider";
-    rpc?: PublicClient;
     now?: () => Date;
     trustedDurations?: TasksDurationOverrides;
   } = {},
@@ -179,62 +186,12 @@ export async function verifyScope(
     termsHash: frozen.termsHash,
     self: getAddress(signer),
   };
-  let binding = await options.bindings?.get(identity);
-  if (
-    binding &&
-    options.counterparty &&
-    !isAddressEqual(binding.counterparty, options.counterparty)
-  )
+  const binding = await options.bindings?.get(identity);
+  if (!binding) throw new TasksPartiesNotBoundError();
+  if (options.counterparty && !isAddressEqual(binding.counterparty, options.counterparty))
     throw new TasksValidationError(
       "The confirmed counterparty differs from the locally bound parties.",
     );
-  if (!binding) {
-    if (!options.counterparty)
-      throw new TasksValidationError(
-        "The task parties are not bound on this machine. Re-run with --counterparty <address> to confirm who you are working with.",
-      );
-    const counterparty = getAddress(options.counterparty);
-    if (
-      isAddressEqual(counterparty, signer) ||
-      ![scope.proposerAddress, scope.counterpartyAddress].some((address) =>
-        isAddressEqual(counterparty, address),
-      )
-    )
-      throw new TasksValidationError(
-        "The confirmed counterparty did not produce a valid accepted scope signature.",
-      );
-    let role = options.role;
-    // Role comes from explicit createEscrow intent or trusted RPC, never the server's role labels.
-    if (!role && verb === "createEscrow") role = "provider";
-    if (!role && options.rpc) {
-      const [buyer, seller] = await Promise.all([
-        options.rpc.readContract({
-          address: selected.escrowContract,
-          abi: TASKS_READ_ABI,
-          functionName: "buyer",
-        }),
-        options.rpc.readContract({
-          address: selected.escrowContract,
-          abi: TASKS_READ_ABI,
-          functionName: "seller",
-        }),
-      ]);
-      if (isAddressEqual(signer, buyer) && isAddressEqual(counterparty, seller)) role = "client";
-      else if (isAddressEqual(signer, seller) && isAddressEqual(counterparty, buyer))
-        role = "provider";
-    }
-    if (!role || !options.bindings)
-      throw new TasksValidationError(
-        "The task parties cannot be bound without a trusted local role and durable store.",
-      );
-    binding = {
-      ...identity,
-      role,
-      counterparty,
-      signedAt: (options.now ?? (() => new Date()))().toISOString(),
-    };
-    await options.bindings.put(binding);
-  }
   if (
     !isAddressEqual(binding.self, signer) ||
     binding.orderId !== identity.orderId ||

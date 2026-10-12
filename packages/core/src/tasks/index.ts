@@ -43,5 +43,6 @@ export type * from "./types.js";
 
 export * from "./trusted-deployments.js";
 export { safeTasksChainError } from "./chain-error.js";
+export { TasksPartiesNotBoundError } from "./chain-verification.js";
 
 export * from "./dispute-fee.js";

@@ -14,6 +14,7 @@ import { agentSecretAccounts } from "@vapi-network/core/agent-link";
 import {
   freezeScopeTerms,
   canonicalJson,
+  TasksPartiesNotBoundError,
   TasksClientError,
   createPendingTransactions,
   createTasksClient,
@@ -410,6 +411,74 @@ describe("task wallet and route boundaries", () => {
     },
   );
 
+  it("refuses scope signing without the human-confirmed counterparty before signing or persistence", async () => {
+    const signer = privateKeyToAccount(PRIVATE_KEY);
+    const signMessage = vi.fn(signer.signMessage);
+    const payment = vi
+      .spyOn(WalletSession.prototype, "payment")
+      .mockResolvedValue({ wallet: { name: "main" }, account: { ...signer, signMessage } });
+    const client = { getOrder: vi.fn() } as unknown as TasksClient;
+    const { server, home } = await watchServer({ client });
+
+    const result = await server.callTool({ name: "tasks.sign", arguments: { id: ID } });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0]!.text)).toEqual({
+      code: "counterparty_required",
+      message:
+        "Supply counterparty from tasks.show to confirm the task's money direction before signing.",
+    });
+    expect(payment).not.toHaveBeenCalled();
+    expect(client.getOrder).not.toHaveBeenCalled();
+    expect(signMessage).not.toHaveBeenCalled();
+    await expect(
+      readFile(join(home, "tasks", "scope-bindings.json"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("preserves the missing local party-binding message through tasks.fund", async () => {
+    const message =
+      "The task parties are not bound on this machine. Sign the scope with `vapi task sign` on this machine first; an explicit --counterparty only confirms an existing binding.";
+    const client = {
+      getOrder: vi.fn(async () => ({
+        workOrder: {
+          version: "work-order-view-v1",
+          id: ID,
+          role: "client",
+          milestones: [
+            {
+              id: ESCROW,
+              workOrderId: ID,
+              amountBaseUnits: "100000",
+              state: "agreed",
+              escrowState: "created",
+              resolution: null,
+              escrowContract: "0x1111111111111111111111111111111111111111",
+            },
+          ],
+        },
+      })),
+      deployment: vi.fn(async () => ({ configured: true, feeBp: 250 })),
+    } as unknown as TasksClient;
+    const chain = {
+      ...missingTasksChain,
+      available: true,
+      fund: vi.fn(async () => {
+        throw new TasksPartiesNotBoundError();
+      }),
+    };
+    const { server, home } = await watchServer({ client, chain, now: () => new Date(NOW) });
+
+    const result = await server.callTool({ name: "tasks.fund", arguments: { id: ID } });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0]!.text)).toEqual({ code: "task_error", message });
+    expect(chain.fund).toHaveBeenCalledOnce();
+    await expect(
+      readFile(join(home, "tasks", "scope-bindings.json"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("reports missing chain after signing a worker scope and preserves the acceptance", async () => {
     const structuredTerms = {
       version: "work-milestone-terms-v1" as const,
@@ -465,29 +534,39 @@ describe("task wallet and route boundaries", () => {
       escrowState: null as null | "locked",
     };
     const acceptance = { scope: { ...scope, state: "accepted", milestoneId: ESCROW }, milestone };
+    const signer = privateKeyToAccount(PRIVATE_KEY);
     const client = {
       getOrder: vi.fn(async () => ({
         workOrder: {
           id: ID,
           version: "work-order-view-v1",
           role: "provider",
+          clientAddress: scope.proposerAddress,
+          acceptedProposalId: ESCROW,
+          proposals: [{ id: ESCROW, providerAddress: signer.address }],
           milestones: [milestone],
         },
       })),
       getScopes: vi.fn(async () => ({ scopes: [scope] })),
       signScope: vi.fn(async () => acceptance),
     } as unknown as TasksClient;
-    const signer = privateKeyToAccount(PRIVATE_KEY);
     const payment = vi
       .spyOn(WalletSession.prototype, "payment")
       .mockResolvedValue({ wallet: { name: "main" }, account: signer });
+    vi.spyOn(WalletSession.prototype, "addressesFor").mockResolvedValue({
+      wallet: { name: "main" },
+      address: signer.address,
+    });
     const { server } = await watchServer({
       client,
-      chain: missingTasksChain,
+      chain: { ...missingTasksChain, signingAddress: signer.address },
       now: () => new Date(NOW),
       randomUUID: () => ID,
     });
-    const result = await server.callTool({ name: "tasks.sign", arguments: { id: ID } });
+    const result = await server.callTool({
+      name: "tasks.sign",
+      arguments: { id: ID, counterparty: scope.proposerAddress },
+    });
     expect(result.isError).toBe(true);
     expect(JSON.parse(result.content[0]!.text)).toEqual({
       code: "chain_unavailable",
@@ -495,6 +574,9 @@ describe("task wallet and route boundaries", () => {
       acceptance: {
         ...acceptance,
         terms: {
+          role: "provider",
+          self: signer.address,
+          direction: "you deliver work to the poster",
           counterparty: privateKeyToAccount(`0x${"11".repeat(32)}`).address,
           amountBaseUnits: "1000000",
           asset: structuredTerms.budget.asset,
@@ -510,7 +592,10 @@ describe("task wallet and route boundaries", () => {
     expect(JSON.stringify(result)).not.toContain(PRIVATE_KEY);
 
     milestone.escrowState = "locked";
-    const succeeded = await server.callTool({ name: "tasks.sign", arguments: { id: ID } });
+    const succeeded = await server.callTool({
+      name: "tasks.sign",
+      arguments: { id: ID, counterparty: scope.proposerAddress },
+    });
     expect(succeeded.isError).toBeFalsy();
     expect(succeeded.structuredContent).toMatchObject({
       terms: {
@@ -589,12 +674,19 @@ describe("task wallet and route boundaries", () => {
       wallet: { name: "main" },
       account: { ...signer, signMessage },
     });
+    vi.spyOn(WalletSession.prototype, "addressesFor").mockResolvedValue({
+      wallet: { name: "main" },
+      address: signer.address,
+    });
     const client = {
       getOrder: vi.fn(async () => ({
         workOrder: {
           id: ID,
           version: "work-order-view-v1",
           role: "provider",
+          clientAddress: other.address,
+          acceptedProposalId: ESCROW,
+          proposals: [{ id: ESCROW, providerAddress: signer.address }],
           milestones: [milestone],
         },
       })),
@@ -978,6 +1070,17 @@ describe("task MCP tools", () => {
       });
       expect(byVerb.deliver?.inputSchema).toMatchObject({
         properties: { files: { minItems: 1, maxItems: 20 } },
+      });
+      expect(byVerb.sign?.description).toContain(
+        "the human confirms the money direction via counterparty",
+      );
+      expect(byVerb.sign?.inputSchema).toMatchObject({
+        properties: {
+          counterparty: {
+            description:
+              "Checksummed 0x address of the other party, taken from tasks.show (the poster's clientAddress when you are the worker; the accepted proposal's providerAddress when you are the poster). The human must supply it; it is compared with the signed scope and stored as local consent. Without it tasks.sign refuses and no local party binding is created, so tasks.fund/deliver/release cannot run from this machine.",
+          },
+        },
       });
       expect(byVerb.watch?.inputSchema).toMatchObject({
         properties: {

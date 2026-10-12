@@ -98,7 +98,7 @@ export const TASK_HELP = `Usage:
   vapi task propose <id> --price <usd> --duration <duration> --note <text> [--account <name>] [--json]
   vapi task submit <id> --proof <https-url> [--proof <https-url>...] [--file <path>...] [--account <name>] [--json]
   vapi task award <id> <proposalId> [--account <name>] [--json]
-  vapi task sign <id> [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task sign <id> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task fund <id> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task deliver <id> --files <path...> --note <text> [--counterparty <0x…>] [--account <name>] [--json]
   vapi task release <id> [--counterparty <0x…>] [--account <name>] [--json]
@@ -181,6 +181,7 @@ export type TaskContext = {
 function lazyTasksChain(
   factory: () => Promise<TasksChain>,
   pending: PendingTransactions,
+  signingAddress?: SignedScopeTerms["self"],
 ): TasksChain {
   let chain: Promise<TasksChain> | undefined;
   const get = () =>
@@ -212,6 +213,7 @@ function lazyTasksChain(
   }
   return {
     available: true,
+    ...(signingAddress === undefined ? {} : { signingAddress }),
     getSigningAddress: async () => {
       const initialized = await get();
       const address = initialized.signingAddress ?? (await initialized.getSigningAddress?.());
@@ -307,23 +309,29 @@ export async function taskContext(
     dependencies.tasks?.chain ??
     (publicOnly || target === undefined
       ? missingTasksChain
-      : lazyTasksChain(async () => {
-          const { account } = await unlockTarget(target, dependencies);
-          return createTasksChain({
-            client,
-            account,
-            trustedFactories: config.tasksEscrowFactoryOverrides,
-            trustedDurations: config.tasksEscrowDurationOverrides,
-            bindings: createScopeBindings(getVapiPaths().directory),
-            rpcFor: createTasksRpcFor(config, {
-              env,
-              ...(dependencies.fetchImpl === undefined ? {} : { fetch: dependencies.fetchImpl }),
-            }),
-            pending,
-            ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
-            ...(dependencies.tasks?.sleep === undefined ? {} : { sleep: dependencies.tasks.sleep }),
-          });
-        }, pending));
+      : lazyTasksChain(
+          async () => {
+            const { account } = await unlockTarget(target, dependencies);
+            return createTasksChain({
+              client,
+              account,
+              trustedFactories: config.tasksEscrowFactoryOverrides,
+              trustedDurations: config.tasksEscrowDurationOverrides,
+              bindings: createScopeBindings(getVapiPaths().directory),
+              rpcFor: createTasksRpcFor(config, {
+                env,
+                ...(dependencies.fetchImpl === undefined ? {} : { fetch: dependencies.fetchImpl }),
+              }),
+              pending,
+              ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
+              ...(dependencies.tasks?.sleep === undefined
+                ? {}
+                : { sleep: dependencies.tasks.sleep }),
+            });
+          },
+          pending,
+          target.address as SignedScopeTerms["self"],
+        ));
   return {
     client,
     baseUrl,
@@ -454,7 +462,7 @@ async function taskCommandInner(
     ]),
     booleanOptions: new Set([
       ...(verb === "search" ? ["--open"] : []),
-      ...(["fund", "dispute", "counter-evidence"].includes(verb!) ? ["--yes"] : []),
+      ...(["sign", "fund", "dispute", "counter-evidence"].includes(verb!) ? ["--yes"] : []),
       ...(verb === "watch" ? ["--auto-release"] : []),
     ]),
     repeatableOptions: new Set([
@@ -738,10 +746,27 @@ async function escrowTaskCommand(
       const result = await signTaskScope(context, {
         id,
         ...(counterparty === undefined ? {} : { counterparty }),
+        ...(target.address === undefined ? {} : { signerAddress: target.address as `0x${string}` }),
         bindings: createScopeBindings(getVapiPaths().directory),
         onTerms: async (terms) => {
-          if (!json)
-            taskOutput(io, false, context, verb, {}, [await scopeTermsLine(context.client, terms)]);
+          if (!json) {
+            const amount = await scopeTermsAmount(context.client, terms);
+            io.stdout("Scope confirmation:");
+            io.stdout(
+              terms.role === "client"
+                ? `You are the poster: you will fund ${amount} into escrow for worker ${terms.counterparty}`
+                : `You are the worker: you will deliver to poster ${terms.counterparty} and be paid ${amount}`,
+            );
+            io.stdout(`Deadline: ${terms.deadline}`);
+            io.stdout(`Local signer: ${terms.self}`);
+          }
+          if (parsed.has("--yes")) return;
+          if (!taskInteractive(json, dependencies)) throw new ScopeApprovalNeeded(terms);
+          const answer = (await getLinePrompt(dependencies)("Sign this scope? [y/N] "))
+            .trim()
+            .toLowerCase();
+          if (answer !== "y" && answer !== "yes")
+            throw new TaskCommandError("not_approved", "Not approved; nothing was signed.");
         },
         signMessage: async (message) => {
           const { account } = await unlockTarget(target, dependencies);
@@ -754,6 +779,17 @@ async function escrowTaskCommand(
       ]);
       return;
     } catch (error) {
+      if (error instanceof ScopeApprovalNeeded) {
+        taskOutput(
+          io,
+          json,
+          context,
+          verb,
+          { ok: false, approval: true, reason: "approval_needed", terms: error.terms },
+          ["Approval is needed before signing this scope."],
+        );
+        return 3;
+      }
       if (!(error instanceof TasksScopeCreationError)) throw error;
       taskOutput(io, json, displayContext, verb, error.acceptance, [
         `Accepted scope for task ${id}.`,
@@ -867,7 +903,14 @@ async function escrowTaskCommand(
   taskOutput(io, json, context, verb, result, [`Completed task ${verb} for ${id}.`]);
 }
 
-async function scopeTermsLine(client: TasksClient, terms: SignedScopeTerms): Promise<string> {
+class ScopeApprovalNeeded extends Error {
+  constructor(readonly terms: SignedScopeTerms) {
+    super("Approval is needed before signing this scope.");
+    this.name = "ScopeApprovalNeeded";
+  }
+}
+
+async function scopeTermsAmount(client: TasksClient, terms: SignedScopeTerms): Promise<string> {
   const token = terms.asset.split("/erc20:")[1];
   const canonical = getCanonicalX402Usdc(terms.network);
   let isUsdc =
@@ -882,13 +925,12 @@ async function scopeTermsLine(client: TasksClient, terms: SignedScopeTerms): Pro
         deployment.network === terms.network &&
         deployment.usdc.toLowerCase() === token.toLowerCase();
     } catch {
-      // A display-only token lookup must not turn a completed signature into an error.
+      // A failed display-only token lookup leaves the amount in base units.
     }
   }
-  const amount = isUsdc
+  return isUsdc
     ? `$${formatBaseUnitsUsd(terms.amountBaseUnits)} USDC`
     : `${terms.amountBaseUnits} base units (${terms.asset})`;
-  return `${terms.title} · ${amount} · deadline ${terms.deadline} · with ${terms.counterparty}`;
 }
 
 function taskInteractive(json: boolean, dependencies: CliDependencies): boolean {

@@ -69,6 +69,9 @@ const moneyParticipant = {
   counterparty: z
     .string()
     .regex(/^0x[0-9a-fA-F]{40}$/u)
+    .describe(
+      "Checksummed 0x address of the other party, taken from tasks.show (the poster's clientAddress when you are the worker; the accepted proposal's providerAddress when you are the poster). The human must supply it; it is compared with the signed scope and stored as local consent. Without it tasks.sign refuses and no local party binding is created, so tasks.fund/deliver/release cannot run from this machine.",
+    )
     .optional(),
 };
 const cursor = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -152,7 +155,7 @@ export const tasksAwardTool = descriptor(
   { ...participant, proposalId: id },
 );
 export const tasksSignTool = descriptor(
-  "Does not move money. Sign the current counterparty scope locally; a worker may also create the unfunded escrow with the local vault wallet.",
+  "Does not move money. Sign the current counterparty scope locally after the human confirms the money direction via counterparty; a worker may also create the unfunded escrow with the local vault wallet.",
   moneyParticipant,
 );
 export const tasksFundTool = descriptor(
@@ -508,12 +511,21 @@ export function createTasksTools(options: TasksToolsOptions) {
       );
     },
     async sign(input: Input<typeof tasksSignTool>) {
+      if (input.counterparty === undefined)
+        return tasksErrorResult(
+          new TaskOperationError(
+            "counterparty_required",
+            "Supply counterparty from tasks.show to confirm the task's money direction before signing.",
+          ),
+        );
       const ctx = await acting(input.wallet);
+      const signerAddress = (await options.session.addressesFor(ctx.selected.name)).address;
       try {
         return taskResult(
           await signTaskScope(ctx, {
             id: input.id,
-            ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
+            counterparty: input.counterparty,
+            signerAddress,
             bindings: createScopeBindings(home),
             signMessage: async (message) =>
               (await unlock(ctx.selected.name)()).signMessage(message),

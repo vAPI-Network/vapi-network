@@ -72,6 +72,34 @@ async function setup(overrides: Record<string, unknown> = {}) {
 }
 
 describe("dispute fee spend policy", () => {
+  it("refuses a dispute fee when prior funding has consumed the task cap", async () => {
+    const x = await setup({ caps: { perCallAtomic: "1", perDayAtomic: "200000000" } });
+    await reserveSpend(
+      100_000_000n,
+      { perCallAtomic: "1", perDayAtomic: "200000000" },
+      {
+        kind: "escrow-funding",
+        maxPerTaskAtomic: 100_000_000n,
+        ledgerPath: x.ledgerPath,
+        now: date,
+        wallet: "main",
+        reservationId: "10000000-0000-4000-8000-000000000004",
+        taskKey: orderId,
+      },
+    );
+    const before = await readFile(x.ledgerPath, "utf8");
+
+    expect(await disputeTask(x.input)).toMatchObject({
+      outcome: "refused",
+      reason: "policy.perTask",
+    });
+    expect(x.dispute).not.toHaveBeenCalled();
+    expect(await readFile(x.ledgerPath, "utf8")).toBe(before);
+    expect(
+      await x.pending.existingReservationId!(taskFeeReservationKey(milestoneId, "dispute")),
+    ).toBeUndefined();
+  });
+
   it("refuses a fee above the per-task cap before signing", async () => {
     const x = await setup({ policy: { maxPerTaskUsd: 19, approveAboveUsd: 100 } });
     expect(await disputeTask(x.input)).toMatchObject({
@@ -190,6 +218,21 @@ describe("dispute fee spend policy", () => {
       outcome: "done",
     });
     expect((await readSpendLedger(x.ledgerPath, nextDay)).spentAtomic).toBe("20000000");
+    await expect(
+      reserveSpend(
+        80_000_000n,
+        { perCallAtomic: "1", perDayAtomic: "100000000" },
+        {
+          kind: "escrow-funding",
+          maxPerTaskAtomic: 100_000_000n,
+          ledgerPath: x.ledgerPath,
+          now: nextDay,
+          wallet: "main",
+          reservationId: "10000000-0000-4000-8000-000000000005",
+          taskKey: orderId,
+        },
+      ),
+    ).resolves.toMatchObject({ spentAtomic: "100000000" });
   });
   it("dispute-fee reservations enforce per-task rather than per-call cap", async () => {
     const x = await setup();

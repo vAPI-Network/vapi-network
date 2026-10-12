@@ -36,7 +36,7 @@ vapi task post --title <text> --brief <file|-> --amount <usd> --deadline <durati
 vapi task propose <id> --price <usd> --duration <duration> --note <text> [--account <name>]
 vapi task submit <id> --proof <https-url> [--proof <https-url>...] [--file <path>...] [--account <name>]
 vapi task award <id> <proposalId> [--account <name>]
-vapi task sign <id> [--counterparty <0x…>] [--account <name>] [--json]
+vapi task sign <id> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
 vapi task fund <id> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
 vapi task deliver <id> --files <path...> --note <text> [--counterparty <0x…>] [--account <name>] [--json]
 vapi task release <id> [--counterparty <0x…>] [--account <name>] [--json]
@@ -67,16 +67,11 @@ Scope acceptance is signed by the local vault account and requires `tasks:write`
 
 Before signing a chain action, the client reads the factory payment token and the token's EIP-712 name and version through the trusted RPC. It verifies that each escrow clone belongs to that factory and matches the buyer, seller, token, amount, terms hash, state and deadline. It also recomputes the accepted scope hash locally and verifies both party signatures. A money verb rejects a task with more than one possible milestone instead of guessing; watch may use an event's `milestoneId` for auto-release. Clone addresses must match the trusted factory prediction for the bound seller and the milestone salt. Review windows match signed acceptance terms; work durations match signed terms or a locally trusted default. Storage reads are checked against public getters; an unsupported layout is refused.
 
-Scope acceptance first verifies the other party's existing signature and displays their address. It persists the accepted scope identity, role, local signer and counterparty under the local tasks directory before submitting the signature. Money actions derive buyer and seller from this binding and compare them with onchain parties. Server-returned addresses cannot replace the binding.
+Scope acceptance derives the local role from the order: the poster is the client at `clientAddress`, while the worker is the provider at the accepted proposal's `providerAddress`. It does not trust a server role label. The client verifies the other party's existing signature, then stores the accepted scope identity, derived role, local signer and counterparty under the local tasks directory before submitting the local signature. Money actions derive buyer and seller from this binding and compare them with onchain parties. Server-returned addresses cannot replace the binding.
 
-A scope accepted in the console or on another machine has no local binding. Supply the other party explicitly; the client verifies their accepted scope signature and the local signer's other signature before saving the binding:
+Before signing, the CLI shows the direction, counterparty, amount, deadline and local signer. Signing requires `--yes` or, in an interactive non-JSON terminal outside CI, the prompt `Sign this scope? [y/N]`. Without consent in non-interactive mode it exits `3` with approval needed and does not sign or create the local binding.
 
-```sh
-vapi task fund <id> --counterparty <0x…>
-vapi task counter-evidence <id> --evidence-hash <0x + 64 hex> --counterparty <0x…>
-```
-
-Every money verb accepts this option, including worker scope signing. JSON and MCP scope results expose the verified address as `terms.counterparty`. The current scope payload does not contain parties. A follow-up in vapi-app must introduce `work-scope-signature-v2` with buyer and seller inside the signed payload.
+Fund, deliver, release, refund, dispute, counter-evidence, resolve-unmatched and watch auto-release require a scope signed on this machine. `--counterparty` only confirms the counterparty already stored in that local binding; it cannot import or recover a scope accepted in the console or on another machine. JSON and MCP scope results expose the verified address as `terms.counterparty`. The current scope payload does not contain parties. A follow-up in vapi-app must introduce `work-scope-signature-v2` with buyer and seller inside the signed payload.
 
 Base Sepolia pins default work and review durations to 604800 seconds. Locally configured defaults use `tasksEscrowDurationOverrides`, alongside `tasksEscrowFactoryOverrides`. Environment overrides are `VAPI_TASKS_WORK_DURATION_SECONDS_<chainId>` and `VAPI_TASKS_REVIEW_WINDOW_SECONDS_<chainId>`. A missing signed work duration requires a trusted local default; server readiness defaults are never used to authorize a duration.
 
@@ -84,7 +79,9 @@ Dispute runs fee approval followed by raise-dispute. Counter-evidence runs fee a
 
 Recovery stores prepare keys and inputs, then reuses the exact saved bytes only for the same operation and step. Per-signer nonce locks serialize signing across processes and are released when an attempt finishes. Funding reservations are isolated per milestone and remain recorded when an error might have exposed an authorization or transaction. A known pre-broadcast failure invalidates its reservation proof before releasing the reservation. Server confirmation requires a successful RPC receipt and a valid confirmation envelope. Errors omit raw transactions and authorization signatures. Transaction recording and reconciliation retry temporary server conflicts for up to 30 seconds.
 
-Funding, dispute and counter-evidence apply policy before any payment authorization or fee transaction is reserved or signed. It selects the agent profile whose wallet matches the acting wallet, or schema defaults when none matches; JSON reports `policySource: "agent-profile"` or `policySource: "defaults"`. The per-task cap comes from that profile, while the daily cap combines the wallet's `perDayAtomic` with local spend recorded in `VAPI_HOME/spend-ledger.json`. Once an authorization may have left the machine, a failed operation keeps its reservation; rollback is limited to a typed pre-broadcast failure that confirms the authorization was not exposed. `--yes` grants approval only and never bypasses a cap. A cap refusal exits `2` as `{ok:false,reason:"policy.perTask"|"policy.perDay",money}`. When approval is needed outside an interactive terminal, funding and fee actions exit `3` as `{ok:false,approval:true,money}`. In an interactive non-JSON terminal outside CI it asks `[y/N]`; declining exits `1` with `Not approved; nothing was signed.`
+Funding, dispute and counter-evidence apply policy before any payment authorization or fee transaction is reserved or signed. It selects the agent profile whose wallet matches the acting wallet, or schema defaults when none matches; JSON reports `policySource: "agent-profile"` or `policySource: "defaults"`. The per-task cap comes from that profile, while the daily cap combines the wallet's `perDayAtomic` with local spend recorded in `VAPI_HOME/spend-ledger.json`. Once an authorization may have left the machine, a failed operation keeps its reservation; rollback is limited to a typed pre-broadcast failure that confirms the authorization was not exposed. `--yes` grants approval only and never bypasses a cap. A cap refusal exits `2` as `{ok:false,reason:"policy.perTask"|"policy.perDay",money}`. When approval is needed outside an interactive terminal, funding and fee actions exit `3` as `{ok:false,approval:true,money}`. In an interactive non-JSON terminal outside CI it asks `[y/N]`; declining exits `1` with code `not_approved` and message `Not approved; nothing was signed.`
+
+The per-task cap is the running total of all escrow funding and dispute fees reserved for one task.
 
 Fund, release, refund and resolve-unmatched print gross · fee · net from the deployed `feeBp`; if the fee cannot be read they print `fee unavailable`. Dispute and counter-evidence print the verified dispute fee before acting. The fee is 10% of the onchain escrow amount, floored to base units and clamped between 20 and 500 USDC. Fee reservations count toward the daily cap and stay reserved after an approval may have left the machine. Explicit release and refund follow the requested action without an automatic-release policy gate.
 
@@ -101,7 +98,7 @@ A route this server does not offer reports `<verb> is not available on this serv
 | `2`       | Policy refusal                                                        |
 | `3`       | Approval needed in non-interactive mode                               |
 
-At exit `1`, invalid usage has JSON `{ok:false,error:{code:"usage_error",message}}`. At exit `2`, policy refusal JSON has `ok:false`, `reason: "policy.perTask"` or `reason: "policy.perDay"`, and `money`. Other thrown task errors use the same nested error object with their specific code. Approval exits use `{ok:false,approval:true,money}`.
+At exit `1`, invalid usage has JSON `{ok:false,error:{code:"usage_error",message}}`. At exit `2`, policy refusal JSON has `ok:false`, `reason: "policy.perTask"` or `reason: "policy.perDay"`, and `money`. Other thrown task errors use the same nested error object with their specific code. Funding and fee approval exits use `{ok:false,approval:true,money}`. Scope signing without non-interactive consent exits `3` as `{ok:false,approval:true,reason:"approval_needed",terms}` plus the standard task output metadata.
 
 ## MCP
 
