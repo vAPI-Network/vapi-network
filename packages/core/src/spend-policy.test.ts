@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -10,6 +10,7 @@ import {
   releaseSpend,
   reserveSpend,
   SpendCapError,
+  taskReservedAtomic,
 } from "./spend-policy.js";
 
 const temporaryDirectories: string[] = [];
@@ -55,6 +56,80 @@ describe("read-only escrow funding headroom", () => {
         wallet: "main",
       }),
     ).toBe(10n);
+    await expect(stat(dirname(ledgerPath))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+describe("read-only task reservation totals", () => {
+  it("sums every stored day by wallet and task without writing or taking the lock", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-task-total-"));
+    temporaryDirectories.push(directory);
+    const ledgerPath = join(directory, "spend-ledger.json");
+    const raw = JSON.stringify({
+      version: 1,
+      rows: [
+        {
+          date: "2026-10-07",
+          wallet: "main",
+          spentAtomic: "11",
+          reservations: [
+            { id: "old-T", amountAtomic: "7", kind: "escrow-funding", taskKey: "task:T" },
+            { id: "old-U", amountAtomic: "4", kind: "escrow-funding", taskKey: "task:U" },
+          ],
+        },
+        {
+          date: "2026-10-08",
+          wallet: "main",
+          spentAtomic: "5",
+          reservations: [
+            { id: "today-T", amountAtomic: "5", kind: "dispute-fee", taskKey: "task:T" },
+          ],
+        },
+        {
+          date: "2026-10-06",
+          wallet: "worker",
+          spentAtomic: "13",
+          reservations: [
+            { id: "worker-T", amountAtomic: "13", kind: "escrow-funding", taskKey: "task:T" },
+          ],
+        },
+        {
+          date: "2026-10-05",
+          wallet: "main",
+          spentAtomic: "3",
+          reservations: [{ id: "legacy", amountAtomic: "3", kind: "escrow-funding" }],
+        },
+      ],
+    });
+    await writeFile(ledgerPath, raw);
+    await writeFile(`${ledgerPath}.lock`, "held");
+    const input = {
+      ledgerPath,
+      wallet: "main" as const,
+      taskKey: "task:T",
+      now: new Date("2026-10-08T12:00:00Z"),
+    };
+
+    await expect(taskReservedAtomic(input)).resolves.toBe(12n);
+    await expect(taskReservedAtomic({ ...input, excludeReservationId: "old-T" })).resolves.toBe(5n);
+    await expect(taskReservedAtomic({ ...input, wallet: "worker" })).resolves.toBe(13n);
+    await expect(taskReservedAtomic({ ...input, taskKey: "task:missing" })).resolves.toBe(0n);
+    expect(await readFile(ledgerPath, "utf8")).toBe(raw);
+    expect(await readFile(`${ledgerPath}.lock`, "utf8")).toBe("held");
+  });
+
+  it("returns zero without creating an absent ledger or directory", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-task-total-"));
+    temporaryDirectories.push(directory);
+    const ledgerPath = join(directory, "absent", "spend-ledger.json");
+    await expect(
+      taskReservedAtomic({
+        ledgerPath,
+        wallet: "main",
+        taskKey: "task:T",
+        now: new Date("2026-10-08T12:00:00Z"),
+      }),
+    ).resolves.toBe(0n);
     await expect(stat(dirname(ledgerPath))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
@@ -508,5 +583,768 @@ describe("escrow funding spend caps", () => {
     });
     await expect(readSpendLedger(path, now)).resolves.toMatchObject({ spentAtomic: "60" });
     expect(JSON.parse(await readFile(path, "utf8")).reservations).toHaveLength(1);
+  });
+
+  it("caps one task cumulatively across funding and dispute fees without rewriting the ledger", async () => {
+    const path = await ledgerPath();
+    const taskOptions = { taskKey: "work-order:T" };
+    await reserveSpend(
+      100_000_000n,
+      { perCallAtomic: "1", perDayAtomic: "500000000" },
+      {
+        ledgerPath: path,
+        now,
+        kind: "escrow-funding",
+        maxPerTaskAtomic: 100_000_000n,
+        reservationId: "fund-T",
+        ...taskOptions,
+      },
+    );
+    const before = await readFile(path, "utf8");
+
+    await expect(
+      reserveSpend(
+        20_000_000n,
+        { perCallAtomic: "1", perDayAtomic: "500000000" },
+        {
+          ledgerPath: path,
+          now,
+          kind: "dispute-fee",
+          maxPerTaskAtomic: 100_000_000n,
+          reservationId: "dispute-T",
+          ...taskOptions,
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: "per_task_cap_exceeded",
+      message:
+        "New spend 20000000 atomic USDC would raise the running total for task work-order:T and wallet main to 120000000, above the per-task cap 100000000. Refusing to sign.",
+    });
+    expect(await readFile(path, "utf8")).toBe(before);
+
+    await expect(
+      reserveSpend(
+        20_000_000n,
+        { perCallAtomic: "1", perDayAtomic: "500000000" },
+        {
+          ledgerPath: path,
+          now,
+          kind: "dispute-fee",
+          maxPerTaskAtomic: 100_000_000n,
+          reservationId: "dispute-U",
+          taskKey: "work-order:U",
+        },
+      ),
+    ).resolves.toMatchObject({ spentAtomic: "120000000" });
+  });
+
+  it("counts task reservations across UTC days, while isolating wallets and legacy rows", async () => {
+    const path = await ledgerPath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        rows: [
+          {
+            date: "2026-08-04",
+            wallet: "main",
+            spentAtomic: "90000000",
+            reservations: [
+              {
+                id: "prior-T",
+                amountAtomic: "90000000",
+                kind: "escrow-funding",
+                taskKey: "work-order:T",
+              },
+            ],
+          },
+          {
+            date: "2026-08-04",
+            wallet: "research",
+            spentAtomic: "100000000",
+            reservations: [
+              {
+                id: "other-wallet-T",
+                amountAtomic: "100000000",
+                kind: "escrow-funding",
+                taskKey: "work-order:T",
+              },
+            ],
+          },
+          {
+            date: "2026-08-03",
+            wallet: "main",
+            spentAtomic: "7",
+            reservations: [{ id: "legacy", amountAtomic: "7", kind: "escrow-funding" }],
+          },
+        ],
+      }),
+    );
+    const before = await readFile(path, "utf8");
+    await expect(
+      reserveSpend(
+        20_000_000n,
+        { perCallAtomic: "1", perDayAtomic: "500000000" },
+        {
+          ledgerPath: path,
+          now,
+          wallet: "main",
+          kind: "dispute-fee",
+          maxPerTaskAtomic: 100_000_000n,
+          reservationId: "today-T",
+          taskKey: "work-order:T",
+        },
+      ),
+    ).rejects.toMatchObject({ code: "per_task_cap_exceeded" });
+    expect(await readFile(path, "utf8")).toBe(before);
+
+    await expect(
+      reserveSpend(
+        20_000_000n,
+        { perCallAtomic: "1", perDayAtomic: "500000000" },
+        {
+          ledgerPath: path,
+          now,
+          wallet: "writer",
+          kind: "dispute-fee",
+          maxPerTaskAtomic: 100_000_000n,
+          reservationId: "writer-T",
+          taskKey: "work-order:T",
+        },
+      ),
+    ).resolves.toMatchObject({ spentAtomic: "20000000" });
+    expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({
+      rows: expect.arrayContaining([
+        expect.objectContaining({
+          date: "2026-08-04",
+          wallet: "main",
+          reservations: [expect.objectContaining({ id: "prior-T", taskKey: "work-order:T" })],
+        }),
+      ]),
+    });
+  });
+
+  it("reuses an exposed prior-day reservation without counting its task amount twice", async () => {
+    const path = await ledgerPath();
+    await mkdir(dirname(path), { recursive: true });
+    const raw = JSON.stringify({
+      date: "2026-08-04",
+      spentAtomic: "100000000",
+      reservations: [
+        {
+          id: "prior-T",
+          amountAtomic: "100000000",
+          kind: "escrow-funding",
+          taskKey: "work-order:T",
+        },
+      ],
+    });
+    await writeFile(path, raw);
+    await expect(
+      reserveSpend(
+        100_000_000n,
+        { perCallAtomic: "1", perDayAtomic: "500000000" },
+        {
+          ledgerPath: path,
+          now,
+          kind: "escrow-funding",
+          maxPerTaskAtomic: 100_000_000n,
+          reservationId: "prior-T",
+          taskKey: "work-order:T",
+          resumeEscrowReservation: {
+            id: "prior-T",
+            wallet: "main",
+            amountAtomic: "100000000",
+            date: "2026-08-04",
+            exposed: true,
+          },
+        },
+      ),
+    ).resolves.toMatchObject({ reservationReused: true, date: "2026-08-04" });
+    expect(await readFile(path, "utf8")).toBe(raw);
+  });
+
+  it.each([
+    { label: "same-day reuse", priorDate: "2026-08-05", resume: false },
+    { label: "exposed prior-day resume", priorDate: "2026-08-04", resume: true },
+  ])("binds a legacy reservation to its supplied task on $label", async ({ priorDate, resume }) => {
+    const path = await ledgerPath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(
+      path,
+      JSON.stringify({
+        date: priorDate,
+        spentAtomic: "100",
+        reservations: [{ id: "legacy-fund", amountAtomic: "100", kind: "escrow-funding" }],
+      }),
+    );
+    const reuseOptions = {
+      ledgerPath: path,
+      now,
+      kind: "escrow-funding" as const,
+      maxPerTaskAtomic: 100n,
+      reservationId: "legacy-fund",
+      taskKey: "work-order:T",
+      ...(resume
+        ? {
+            resumeEscrowReservation: {
+              id: "legacy-fund",
+              wallet: "main" as const,
+              amountAtomic: "100",
+              date: priorDate,
+              exposed: true,
+            },
+          }
+        : { reuseExistingEscrowReservation: true }),
+    };
+
+    await expect(
+      reserveSpend(100n, { perCallAtomic: "1", perDayAtomic: "500" }, reuseOptions),
+    ).resolves.toMatchObject({ reservationReused: true });
+    await expect(
+      taskReservedAtomic({
+        ledgerPath: path,
+        wallet: "main",
+        taskKey: "work-order:T",
+        now,
+      }),
+    ).resolves.toBe(100n);
+    expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({
+      reservations: [expect.objectContaining({ id: "legacy-fund", taskKey: "work-order:T" })],
+    });
+
+    const beforeRefusal = await readFile(path, "utf8");
+    await expect(
+      reserveSpend(
+        20n,
+        { perCallAtomic: "1", perDayAtomic: "500" },
+        {
+          ledgerPath: path,
+          now,
+          kind: "dispute-fee",
+          maxPerTaskAtomic: 100n,
+          reservationId: "dispute-T",
+          taskKey: "work-order:T",
+        },
+      ),
+    ).rejects.toMatchObject({ code: "per_task_cap_exceeded" });
+    expect(await readFile(path, "utf8")).toBe(beforeRefusal);
+  });
+
+  it("persists task accounting for an exposed prior-day proof with no stored row", async () => {
+    const path = await ledgerPath();
+    await reserveSpend(
+      10n,
+      { perCallAtomic: "10", perDayAtomic: "500" },
+      {
+        ledgerPath: path,
+        now,
+        reservationId: "today-payment",
+      },
+    );
+
+    await expect(
+      reserveSpend(
+        100n,
+        { perCallAtomic: "1", perDayAtomic: "500" },
+        {
+          ledgerPath: path,
+          now,
+          kind: "escrow-funding",
+          maxPerTaskAtomic: 100n,
+          reservationId: "proof-only-fund",
+          taskKey: "work-order:T",
+          resumeEscrowReservation: {
+            id: "proof-only-fund",
+            wallet: "main",
+            amountAtomic: "100",
+            date: "2026-08-04",
+            exposed: true,
+          },
+        },
+      ),
+    ).resolves.toMatchObject({
+      reservationReused: true,
+      date: "2026-08-04",
+      spentAtomic: "10",
+    });
+    await expect(readSpendLedger(path, now)).resolves.toEqual({
+      date: "2026-08-05",
+      spentAtomic: "10",
+    });
+    await expect(
+      taskReservedAtomic({
+        ledgerPath: path,
+        wallet: "main",
+        taskKey: "work-order:T",
+        now,
+      }),
+    ).resolves.toBe(100n);
+
+    const beforeRefusal = await readFile(path, "utf8");
+    await expect(
+      reserveSpend(
+        20n,
+        { perCallAtomic: "1", perDayAtomic: "500" },
+        {
+          ledgerPath: path,
+          now,
+          kind: "dispute-fee",
+          maxPerTaskAtomic: 100n,
+          reservationId: "dispute-T",
+          taskKey: "work-order:T",
+        },
+      ),
+    ).rejects.toMatchObject({ code: "per_task_cap_exceeded" });
+    expect(await readFile(path, "utf8")).toBe(beforeRefusal);
+  });
+
+  it("refuses to reuse a reservation for a different task without rewriting the ledger", async () => {
+    const path = await ledgerPath();
+    const caps = { perCallAtomic: "1", perDayAtomic: "500000000" };
+    await reserveSpend(20n, caps, {
+      ledgerPath: path,
+      now,
+      kind: "escrow-funding",
+      maxPerTaskAtomic: 100n,
+      reservationId: "fund-T",
+      taskKey: "work-order:T",
+    });
+    const before = await readFile(path, "utf8");
+
+    await expect(
+      reserveSpend(20n, caps, {
+        ledgerPath: path,
+        now,
+        kind: "escrow-funding",
+        maxPerTaskAtomic: 100n,
+        reservationId: "fund-T",
+        taskKey: "work-order:U",
+        reuseExistingEscrowReservation: true,
+      }),
+    ).rejects.toThrow("does not match");
+    expect(await readFile(path, "utf8")).toBe(before);
+  });
+
+  it("refuses a prior-day resume whose stored reservation belongs to another task", async () => {
+    const path = await ledgerPath();
+    await mkdir(dirname(path), { recursive: true });
+    const raw = JSON.stringify({
+      date: "2026-08-04",
+      spentAtomic: "20",
+      reservations: [
+        {
+          id: "prior-T",
+          amountAtomic: "20",
+          kind: "escrow-funding",
+          taskKey: "work-order:T",
+        },
+      ],
+    });
+    await writeFile(path, raw);
+    await expect(
+      reserveSpend(
+        20n,
+        { perCallAtomic: "1", perDayAtomic: "500000000" },
+        {
+          ledgerPath: path,
+          now,
+          kind: "escrow-funding",
+          maxPerTaskAtomic: 100n,
+          reservationId: "prior-T",
+          taskKey: "work-order:U",
+          resumeEscrowReservation: {
+            id: "prior-T",
+            wallet: "main",
+            amountAtomic: "20",
+            date: "2026-08-04",
+            exposed: true,
+          },
+        },
+      ),
+    ).rejects.toThrow("does not match");
+    expect(await readFile(path, "utf8")).toBe(raw);
+  });
+
+  it("does not double count a reused task reservation and stops counting it after release", async () => {
+    const path = await ledgerPath();
+    const options = {
+      ledgerPath: path,
+      now,
+      kind: "escrow-funding" as const,
+      maxPerTaskAtomic: 100_000_000n,
+      reservationId: "fund-T",
+      taskKey: "work-order:T",
+    };
+    await reserveSpend(100_000_000n, { perCallAtomic: "1", perDayAtomic: "500000000" }, options);
+    await expect(
+      reserveSpend(
+        100_000_000n,
+        { perCallAtomic: "1", perDayAtomic: "500000000" },
+        {
+          ...options,
+          reuseExistingEscrowReservation: true,
+        },
+      ),
+    ).resolves.toMatchObject({ reservationReused: true, spentAtomic: "100000000" });
+
+    await releaseSpend(100_000_000n, {
+      ledgerPath: path,
+      now,
+      reservedOn: "2026-08-05",
+      reservationId: "fund-T",
+    });
+    await expect(
+      reserveSpend(
+        20_000_000n,
+        { perCallAtomic: "1", perDayAtomic: "500000000" },
+        {
+          ledgerPath: path,
+          now,
+          kind: "dispute-fee",
+          maxPerTaskAtomic: 100_000_000n,
+          reservationId: "dispute-T",
+          taskKey: "work-order:T",
+        },
+      ),
+    ).resolves.toMatchObject({ spentAtomic: "20000000" });
+  });
+
+  it("serializes simultaneous reservations against the same task cap", async () => {
+    const path = await ledgerPath();
+    const results = await Promise.allSettled(
+      ["one", "two"].map((reservationId) =>
+        reserveSpend(
+          60_000_000n,
+          { perCallAtomic: "1", perDayAtomic: "500000000" },
+          {
+            ledgerPath: path,
+            now,
+            kind: "escrow-funding",
+            maxPerTaskAtomic: 100_000_000n,
+            reservationId,
+            taskKey: "work-order:T",
+          },
+        ),
+      ),
+    );
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(results.find(({ status }) => status === "rejected")).toMatchObject({
+      reason: { code: "per_task_cap_exceeded" },
+    });
+  });
+
+  it("accounts for sequential task reservations without optional reservation ids", async () => {
+    const path = await ledgerPath();
+    const options = {
+      ledgerPath: path,
+      now,
+      kind: "escrow-funding" as const,
+      maxPerTaskAtomic: 100n,
+      taskKey: "work-order:T",
+    };
+    const reservation = await reserveSpend(
+      60n,
+      { perCallAtomic: "1", perDayAtomic: "500" },
+      options,
+    );
+    expect(reservation).toMatchObject({
+      date: "2026-08-05",
+      spentAtomic: "60",
+      reservationId: expect.any(String),
+    });
+    await expect(
+      taskReservedAtomic({
+        ledgerPath: path,
+        wallet: "main",
+        taskKey: "work-order:T",
+        now,
+      }),
+    ).resolves.toBe(60n);
+    const beforeRefusal = await readFile(path, "utf8");
+
+    await expect(
+      reserveSpend(60n, { perCallAtomic: "1", perDayAtomic: "500" }, options),
+    ).rejects.toMatchObject({ code: "per_task_cap_exceeded" });
+    expect(await readFile(path, "utf8")).toBe(beforeRefusal);
+
+    const reservationId = "reservationId" in reservation ? reservation.reservationId : undefined;
+    if (typeof reservationId !== "string") throw new Error("Expected a generated reservation id.");
+    await releaseSpend(60n, {
+      ledgerPath: path,
+      now,
+      reservedOn: reservation.date,
+      reservationId,
+    });
+    await expect(
+      taskReservedAtomic({
+        ledgerPath: path,
+        wallet: "main",
+        taskKey: "work-order:T",
+        now,
+      }),
+    ).resolves.toBe(0n);
+  });
+
+  it("serializes task reservations without optional reservation ids", async () => {
+    const path = await ledgerPath();
+    const results = await Promise.allSettled(
+      Array.from({ length: 2 }, () =>
+        reserveSpend(
+          60n,
+          { perCallAtomic: "1", perDayAtomic: "500" },
+          {
+            ledgerPath: path,
+            now,
+            kind: "escrow-funding",
+            maxPerTaskAtomic: 100n,
+            taskKey: "work-order:T",
+          },
+        ),
+      ),
+    );
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(results.find(({ status }) => status === "rejected")).toMatchObject({
+      reason: { code: "per_task_cap_exceeded" },
+    });
+    await expect(
+      taskReservedAtomic({
+        ledgerPath: path,
+        wallet: "main",
+        taskKey: "work-order:T",
+        now,
+      }),
+    ).resolves.toBe(60n);
+  });
+
+  it("releases a matching historical task reservation once and preserves every other row", async () => {
+    const path = await ledgerPath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        rows: [
+          {
+            date: "2026-08-04",
+            wallet: "main",
+            spentAtomic: "100",
+            reservations: [
+              {
+                id: "failed-fund-T",
+                amountAtomic: "60",
+                kind: "escrow-funding",
+                taskKey: "work-order:T",
+              },
+              {
+                id: "unrelated-T",
+                amountAtomic: "40",
+                kind: "escrow-funding",
+                taskKey: "work-order:T",
+              },
+            ],
+          },
+          {
+            date: "2026-08-04",
+            wallet: "research",
+            spentAtomic: "70",
+            reservations: [
+              {
+                id: "other-wallet",
+                amountAtomic: "70",
+                kind: "escrow-funding",
+                taskKey: "work-order:T",
+              },
+            ],
+          },
+          {
+            date: "2026-08-05",
+            wallet: "main",
+            spentAtomic: "10",
+            reservations: [{ id: "today", amountAtomic: "10" }],
+          },
+        ],
+      }),
+    );
+    const releaseOptions = {
+      ledgerPath: path,
+      now,
+      wallet: "main" as const,
+      reservedOn: "2026-08-04",
+      reservationId: "failed-fund-T",
+    };
+
+    await expect(releaseSpend(60n, releaseOptions)).resolves.toEqual({
+      date: "2026-08-05",
+      spentAtomic: "10",
+    });
+    await expect(
+      taskReservedAtomic({
+        ledgerPath: path,
+        wallet: "main",
+        taskKey: "work-order:T",
+        now,
+      }),
+    ).resolves.toBe(40n);
+    const afterRelease = await readFile(path, "utf8");
+    expect(JSON.parse(afterRelease)).toEqual({
+      version: 1,
+      rows: [
+        {
+          date: "2026-08-04",
+          wallet: "main",
+          spentAtomic: "40",
+          reservations: [
+            {
+              id: "unrelated-T",
+              amountAtomic: "40",
+              kind: "escrow-funding",
+              taskKey: "work-order:T",
+            },
+          ],
+        },
+        {
+          date: "2026-08-05",
+          spentAtomic: "10",
+          wallet: "main",
+          reservations: [{ id: "today", amountAtomic: "10" }],
+        },
+        {
+          date: "2026-08-04",
+          spentAtomic: "70",
+          wallet: "research",
+          reservations: [
+            {
+              id: "other-wallet",
+              amountAtomic: "70",
+              kind: "escrow-funding",
+              taskKey: "work-order:T",
+            },
+          ],
+        },
+      ],
+    });
+
+    await releaseSpend(60n, releaseOptions);
+    expect(await readFile(path, "utf8")).toBe(afterRelease);
+
+    await expect(
+      reserveSpend(
+        60n,
+        { perCallAtomic: "1", perDayAtomic: "500" },
+        {
+          ledgerPath: path,
+          now,
+          kind: "escrow-funding",
+          maxPerTaskAtomic: 100n,
+          reservationId: "next-milestone-T",
+          taskKey: "work-order:T",
+        },
+      ),
+    ).resolves.toMatchObject({ date: "2026-08-05", spentAtomic: "70" });
+    await expect(
+      taskReservedAtomic({
+        ledgerPath: path,
+        wallet: "main",
+        taskKey: "work-order:T",
+        now,
+      }),
+    ).resolves.toBe(100n);
+  });
+
+  it("refuses a mismatched historical release without rewriting the ledger", async () => {
+    const path = await ledgerPath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(
+      path,
+      JSON.stringify({
+        date: "2026-08-04",
+        spentAtomic: "60",
+        reservations: [
+          {
+            id: "failed-fund-T",
+            amountAtomic: "60",
+            kind: "escrow-funding",
+            taskKey: "work-order:T",
+          },
+        ],
+      }),
+    );
+    const before = await readFile(path, "utf8");
+
+    await expect(
+      releaseSpend(59n, {
+        ledgerPath: path,
+        now,
+        reservedOn: "2026-08-04",
+        reservationId: "failed-fund-T",
+      }),
+    ).rejects.toThrow("different amount");
+    expect(await readFile(path, "utf8")).toBe(before);
+  });
+
+  it("preserves prior-day task reservations when releasing today's different task", async () => {
+    const path = await ledgerPath();
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        rows: [
+          {
+            date: "2026-08-04",
+            wallet: "main",
+            spentAtomic: "40",
+            reservations: [
+              {
+                id: "prior-T",
+                amountAtomic: "40",
+                kind: "escrow-funding",
+                taskKey: "work-order:T",
+              },
+            ],
+          },
+          {
+            date: "2026-08-05",
+            wallet: "main",
+            spentAtomic: "20",
+            reservations: [
+              {
+                id: "today-U",
+                amountAtomic: "20",
+                kind: "dispute-fee",
+                taskKey: "work-order:U",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    await releaseSpend(20n, {
+      ledgerPath: path,
+      now,
+      wallet: "main",
+      reservedOn: "2026-08-05",
+      reservationId: "today-U",
+    });
+
+    await expect(
+      taskReservedAtomic({
+        ledgerPath: path,
+        wallet: "main",
+        taskKey: "work-order:T",
+        now,
+      }),
+    ).resolves.toBe(40n);
+    expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({
+      rows: expect.arrayContaining([
+        expect.objectContaining({
+          date: "2026-08-04",
+          reservations: [expect.objectContaining({ id: "prior-T", taskKey: "work-order:T" })],
+        }),
+      ]),
+    });
   });
 });

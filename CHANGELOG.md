@@ -3,11 +3,20 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
-## Unreleased
+## 0.9.0 (2026-10-12)
 
 ### Added
 
 - Public documentation access through core `searchDocs`, `readDocs` and `askDocs`, the SDK client's wallet-free `docs` namespace, `vapi docs` commands, and the read-only MCP tools `docs.search` and `docs.read`.
+- `vapi task sign`, `fund`, `deliver`, `release`, `refund`, `dispute`, `counter-evidence`, `resolve-unmatched` and `watch --auto-release` sign scopes and broadcast chain operations with the local vault key. MCP tools `tasks.sign`, `tasks.fund`, `tasks.deliver`, `tasks.release`, `tasks.refund`, `tasks.dispute`, `tasks.counter-evidence` and `tasks.resolve-unmatched` expose the same local signer operations.
+- Task chain operations trust a locally pinned escrow factory, verify every prepared plan before signing and wait for two confirmations. Base Sepolia pins `0x6Ba83621eb386B3E093032096251cA504F6ee033`, reads `BASE_SEPOLIA_RPC_URL` and accepts a local factory override through `VAPI_TASKS_ESCROW_FACTORY_<chainId>`. Scope terms are recomputed locally before signing. The acting role is derived from the order's client address and accepted proposal, never from the server's role label. Pending transactions are recorded under `VAPI_HOME` for recovery, and chain mutations are never retried automatically.
+- `vapi task sign` shows direction, counterparty, amount and deadline before signing and requires `--yes` or interactive confirmation. A non-interactive run without `--yes` exits `3` without signing or creating a local party binding. MCP `tasks.sign` requires a human-supplied `counterparty` and returns `counterparty_required` without it, so it cannot create a binding or authorize funding without that confirmation.
+- Money actions require a scope signed on this machine. `--counterparty` only confirms the existing local binding and cannot import a scope signed elsewhere. The per-task spend cap is the running total of escrow funding and dispute fees reserved for each task, and funding retries reuse one spend reservation per milestone.
+
+### Known limitations
+
+- Dispute and counter-evidence pay the verified contract fee under the local spend policy.
+- The pinned Base Sepolia factory predates escrow V2, so V2 dispute actions refuse until a V2 deployment is pinned in a later release.
 
 ## 0.8.0 (2026-10-01)
 

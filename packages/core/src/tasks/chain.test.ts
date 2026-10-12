@@ -1858,6 +1858,44 @@ describe("createTasksChain", () => {
     expect(rpc.raw).toHaveLength(0);
   });
 
+  it.each([undefined, buyer])(
+    "preserves the local binding instruction without preparing or signing (counterparty %s)",
+    async (counterparty) => {
+      const api = fakeClient();
+      const rpc = rpcHarness();
+      const bindings = {
+        get: vi.fn().mockResolvedValue(undefined),
+        put: vi.fn().mockResolvedValue(undefined),
+      };
+      const signTransaction = vi.fn(account.signTransaction.bind(account));
+      const chain = createTasksChain({
+        client: api,
+        account: { ...account, signTransaction },
+        rpcFor: () => rpc.client,
+        pending: memoryPending(),
+        bindings,
+      });
+
+      await expect(
+        chain.release({
+          escrowId: milestoneId,
+          orderId,
+          idempotencyKey: key,
+          ...(counterparty === undefined ? {} : { counterparty }),
+        }),
+      ).rejects.toMatchObject({
+        message:
+          "The task parties are not bound on this machine. Sign the scope with `vapi task sign` on this machine first; an explicit --counterparty only confirms an existing binding.",
+        broadcast: false,
+        authorizationExposed: false,
+      });
+      expect(bindings.put).not.toHaveBeenCalled();
+      expect(api.releaseEscrow).not.toHaveBeenCalled();
+      expect(signTransaction).not.toHaveBeenCalled();
+      expect(rpc.raw).toHaveLength(0);
+    },
+  );
+
   it("refuses an unpinned chain before resolving RPC or signing", async () => {
     const api = fakeClient({
       deployment: vi.fn(async () => ({ ...deployment, chainId: 8453, network: "eip155:8453" })),

@@ -25,6 +25,7 @@ import {
 } from "./chain-port.js";
 import { createTasksClient } from "./client.js";
 import { prepareDeliveryManifest, sha256Hex } from "./delivery-manifest.js";
+import { taskFeeReservationKey } from "./dispute-fee.js";
 import { createPendingTransactions, type PendingTransactions } from "./pending-transactions.js";
 import { freezeScopeTerms } from "./scope-terms.js";
 import { tasksResponseSchemas } from "./types.js";
@@ -38,6 +39,7 @@ const ADDRESS = "0x1111111111111111111111111111111111111111";
 const HASH = `0x${"ab".repeat(32)}` as const;
 const signingAccount = privateKeyToAccount(`0x${"11".repeat(32)}`);
 const proposingAccount = privateKeyToAccount(`0x${"22".repeat(32)}`);
+const foreignAccount = privateKeyToAccount(`0x${"33".repeat(32)}`);
 const NOW = "2026-10-08T12:00:00.000Z";
 const directories: string[] = [];
 
@@ -82,7 +84,7 @@ function orderResponse(
   role = "client",
   escrowState: "created" | null = "created",
 ) {
-  return tasksResponseSchemas.getOrder.parse({
+  const response = tasksResponseSchemas.getOrder.parse({
     workOrder: {
       version: "work-order-view-v1",
       id: ORDER,
@@ -91,7 +93,7 @@ function orderResponse(
       description: "Write a useful report.",
       policyFamily: "research-data",
       listingDeliveryTimeSeconds: null,
-      clientAddress: ADDRESS,
+      clientAddress: role === "client" ? signingAccount.address : proposingAccount.address,
       invitedProviderAddress: null,
       acceptedProposalId: FILE,
       threadId: FILE,
@@ -138,6 +140,14 @@ function orderResponse(
       ],
     },
   });
+  if (response.workOrder.version !== "work-order-view-v1") throw new Error("Fixture is private");
+  response.workOrder.proposals = [
+    {
+      id: FILE,
+      providerAddress: role === "provider" ? signingAccount.address : proposingAccount.address,
+    } as (typeof response.workOrder.proposals)[number],
+  ];
+  return { ...response, workOrder: response.workOrder };
 }
 
 function scope(proposedByRole: "client" | "provider" = "client", version = 1) {
@@ -265,6 +275,7 @@ async function funding(amount = "100000000") {
 }
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(
     directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
   );
@@ -360,6 +371,96 @@ describe("task funding", () => {
     expect(args.chain.fund.mock.calls[0]![0].idempotencyKey).toBe(
       args.chain.fund.mock.calls[1]![0].idempotencyKey,
     );
+  });
+
+  it("reuses one real pending reservation after authorization exposure without double counting", async () => {
+    const args = await funding();
+    const home = join(args.ledgerPath, "..");
+    vi.stubEnv("VAPI_HOME", home);
+    const pending = createPendingTransactions(home);
+    const generatedKeys = vi.fn().mockReturnValueOnce(KEY).mockReturnValueOnce(CREATE_KEY);
+    args.chain.fund
+      .mockRejectedValueOnce(
+        new TasksChainError("Authorization exposed before broadcast", false, {
+          authorizationExposed: true,
+        }),
+      )
+      .mockResolvedValueOnce(chainResult());
+
+    await expect(
+      fundTask({ ...args, pending, idempotencyKey: generatedKeys, approval: { granted: true } }),
+    ).rejects.toMatchObject({
+      message: "Authorization exposed before broadcast",
+      authorizationExposed: true,
+      broadcast: false,
+    });
+    const firstLedger = JSON.parse(await readFile(args.ledgerPath, "utf8"));
+    expect(firstLedger.spentAtomic).toBe("100000000");
+    expect(firstLedger.reservations).toHaveLength(1);
+    expect(firstLedger.reservations[0]).toMatchObject({
+      id: KEY,
+      amountAtomic: "100000000",
+      kind: "escrow-funding",
+    });
+    expect(await pending.existingReservationId!(ESCROW)).toBe(KEY);
+
+    const reopenedPending = createPendingTransactions(home);
+    await expect(
+      fundTask({
+        ...args,
+        pending: reopenedPending,
+        idempotencyKey: generatedKeys,
+        approval: { granted: true },
+      }),
+    ).resolves.toMatchObject({ outcome: "done" });
+    const secondLedger = JSON.parse(await readFile(args.ledgerPath, "utf8"));
+    expect(secondLedger.spentAtomic).toBe("100000000");
+    expect(secondLedger.reservations).toHaveLength(1);
+    expect(secondLedger.reservations[0].id).toBe(firstLedger.reservations[0].id);
+    expect(await reopenedPending.existingReservationId!(ESCROW)).toBe(KEY);
+    expect(args.chain.fund.mock.calls[1]![0].idempotencyKey).toBe(
+      args.chain.fund.mock.calls[0]![0].idempotencyKey,
+    );
+    expect(generatedKeys).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a second milestone when earlier funding consumed the order task cap", async () => {
+    const args = await funding();
+    const home = join(args.ledgerPath, "..");
+    const pending = createPendingTransactions(home);
+    const generatedKeys = vi.fn().mockReturnValueOnce(KEY).mockReturnValue(CREATE_KEY);
+    const response = orderResponse();
+    if (response.workOrder.version !== "work-order-view-v1") throw new Error("Fixture is private");
+    response.workOrder.milestones.push({
+      ...response.workOrder.milestones[0]!,
+      id: FILE,
+      ordinal: 2,
+      amountBaseUnits: "20000000",
+    });
+    args.client.getOrder.mockResolvedValue(response);
+
+    await expect(
+      fundTask({
+        ...args,
+        pending,
+        idempotencyKey: generatedKeys,
+        escrowId: ESCROW,
+        approval: { granted: true },
+      }),
+    ).resolves.toMatchObject({ outcome: "done" });
+    const before = await readFile(args.ledgerPath, "utf8");
+    await expect(
+      fundTask({
+        ...args,
+        pending,
+        idempotencyKey: generatedKeys,
+        escrowId: FILE,
+        approval: { granted: true },
+      }),
+    ).resolves.toMatchObject({ outcome: "refused", reason: "policy.perTask" });
+    expect(args.chain.fund).toHaveBeenCalledTimes(1);
+    expect(await readFile(args.ledgerPath, "utf8")).toBe(before);
+    expect(await pending.existingReservationId!(FILE)).toBeUndefined();
   });
 
   it("serializes concurrent funding across independent pending store instances", async () => {
@@ -513,6 +614,7 @@ describe("task funding", () => {
       await fundTask({
         ...args,
         caps: { ...args.caps, perDayAtomic: "199999999" },
+        policy: { ...args.policy, maxPerTaskUsd: 200 },
         approval: { granted: true },
         idempotencyKey: () => CREATE_KEY,
       }),
@@ -626,9 +728,10 @@ describe("task funding", () => {
 
   it("refuses duplicate reservations without broadcasting a retry", async () => {
     const args = await funding();
-    await fundTask({ ...args, approval: { granted: true } });
+    const policy = { ...args.policy, maxPerTaskUsd: 200 };
+    await fundTask({ ...args, policy, approval: { granted: true } });
     const bytes = await readFile(args.ledgerPath, "utf8");
-    await expect(fundTask({ ...args, approval: { granted: true } })).rejects.toThrow(
+    await expect(fundTask({ ...args, policy, approval: { granted: true } })).rejects.toThrow(
       "already exists",
     );
     expect(args.chain.fund).toHaveBeenCalledTimes(1);
@@ -726,6 +829,32 @@ describe("task delivery", () => {
 });
 
 describe("explicit settlement and dispute", () => {
+  it("refuses a dispute fee after fundTask consumes the work order task cap", async () => {
+    const args = await funding();
+    const pending = createPendingTransactions(join(args.ledgerPath, ".."));
+    const generatedKeys = vi.fn().mockReturnValueOnce(KEY).mockReturnValue(CREATE_KEY);
+    const shared = {
+      ...args,
+      pending,
+      caps: { perCallAtomic: "1", perDayAtomic: "200000000" },
+      idempotencyKey: generatedKeys,
+    };
+    await expect(fundTask({ ...shared, approval: { granted: true } })).resolves.toMatchObject({
+      outcome: "done",
+    });
+    const before = await readFile(args.ledgerPath, "utf8");
+
+    await expect(disputeTask({ ...shared, evidenceHash: HASH })).resolves.toMatchObject({
+      outcome: "refused",
+      reason: "policy.perTask",
+    });
+    expect(args.chain.dispute).not.toHaveBeenCalled();
+    expect(await readFile(args.ledgerPath, "utf8")).toBe(before);
+    expect(
+      await pending.existingReservationId!(taskFeeReservationKey(ESCROW, "dispute")),
+    ).toBeUndefined();
+  });
+
   it("computes money then releases or refunds without a policy gate", async () => {
     const args = dependencies();
     expect(await releaseTask(args)).toMatchObject({
@@ -774,6 +903,52 @@ describe("explicit settlement and dispute", () => {
 });
 
 describe("scope acceptance", () => {
+  it.each(["poster", "worker"] as const)(
+    "refuses a valid %s signature from a wallet other than the locally derived party",
+    async (role) => {
+      const args = dependencies();
+      args.client.getOrder.mockResolvedValue(
+        orderResponse("100000000", role === "poster" ? "client" : "provider", null),
+      );
+      args.client.getScopes.mockResolvedValueOnce({
+        scopes: [scope(role === "poster" ? "provider" : "client")],
+      });
+      const signMessage = vi.fn((message: string) => foreignAccount.signMessage({ message }));
+      const chain = { ...args.chain, signingAddress: foreignAccount.address };
+      await expect(signScope({ ...args, chain, role, signMessage })).rejects.toThrow(
+        /local.*signature|task party|signing wallet/i,
+      );
+      expect(signMessage).toHaveBeenCalledOnce();
+      expect(args.bindings.put).not.toHaveBeenCalled();
+      expect(args.client.signScope).not.toHaveBeenCalled();
+    },
+  );
+
+  it("refuses accepted worker recovery when local self is not the accepted provider", async () => {
+    const args = dependencies();
+    const response = orderResponse("100000000", "provider", null);
+    response.workOrder.proposals[0]!.providerAddress = foreignAccount.address;
+    args.client.getOrder.mockResolvedValue(response);
+    args.client.getScopes.mockResolvedValueOnce({
+      scopes: [
+        {
+          ...scope(),
+          state: "accepted",
+          counterpartyAddress: signingAccount.address,
+          counterpartySignature: SIGNATURE,
+          acceptedAt: NOW,
+          milestoneId: ESCROW,
+        },
+      ],
+    });
+    await expect(
+      signScope({ ...args, role: "worker", counterparty: proposingAccount.address }),
+    ).rejects.toThrow(/accepted provider|task party|signing wallet/i);
+    expect(args.bindings.put).not.toHaveBeenCalled();
+    expect(args.chain.createEscrow).not.toHaveBeenCalled();
+    expect(args.client.signScope).not.toHaveBeenCalled();
+  });
+
   it("recovers accepted worker scope using the asynchronous local signer address", async () => {
     const args = dependencies();
     args.client.getOrder.mockResolvedValue(orderResponse("100000000", "provider", null));
@@ -1117,6 +1292,9 @@ describe("scope acceptance", () => {
     });
     expect(result.escrowCreation).toEqual(chainResult());
     expect(result.terms).toEqual({
+      role: "provider",
+      self: signingAccount.address,
+      direction: "you deliver work to the poster",
       counterparty: proposingAccount.address,
       amountBaseUnits: "100000000",
       asset: `eip155:84532/erc20:${ADDRESS}`,

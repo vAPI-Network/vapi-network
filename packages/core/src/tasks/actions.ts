@@ -18,6 +18,7 @@ import {
   releaseSpend,
   reserveSpend,
   SpendCapError,
+  taskReservedAtomic,
 } from "../spend-policy.js";
 import type { WalletName } from "../wallet-name.js";
 import { canonicalJson } from "./canonical-json.js";
@@ -99,6 +100,13 @@ export async function fundTask(input: FundTaskInput): Promise<FundTaskOutcome> {
     ...(existingReservationId ? { reservationId: existingReservationId } : {}),
   });
   const dayRemainingUsd = Number(formatBaseUnitsUsd(dayRemainingAtomic));
+  const taskReserved = await taskReservedAtomic({
+    ledgerPath: input.ledgerPath,
+    wallet: input.wallet,
+    taskKey: milestone.workOrderId,
+    now: input.now(),
+    ...(existingReservationId ? { excludeReservationId: existingReservationId } : {}),
+  });
   const resumedFromPriorDay =
     retainedReservation?.date !== undefined &&
     retainedReservation.date !== today &&
@@ -111,7 +119,7 @@ export async function fundTask(input: FundTaskInput): Promise<FundTaskOutcome> {
   });
   // The policy API uses numbers. Compare atomic units too, so floating-point
   // precision cannot bypass a cap or approval at large or fractional amounts.
-  if (grossAtomic > maxPerTaskAtomic)
+  if (grossAtomic > maxPerTaskAtomic || taskReserved + grossAtomic > maxPerTaskAtomic)
     return { outcome: "refused", reason: "policy.perTask", money };
   if (grossAtomic > dayRemainingAtomic && !resumedFromPriorDay)
     return { outcome: "refused", reason: "policy.perDay", money };
@@ -137,6 +145,7 @@ export async function fundTask(input: FundTaskInput): Promise<FundTaskOutcome> {
     // failure propagates as SpendCapError; refusal outcomes above stay read-only.
     const reservation = await reserveSpend(grossAtomic, input.caps, {
       kind: "escrow-funding",
+      taskKey: milestone.workOrderId,
       maxPerTaskAtomic,
       wallet: input.wallet,
       ledgerPath: input.ledgerPath,
@@ -391,7 +400,15 @@ async function feeTask(
         now: input.now(),
         ...(reservationId ? { reservationId } : {}),
       });
-      if (feeAtomic > policyAtomic(input.policy.maxPerTaskUsd))
+      const taskReserved = await taskReservedAtomic({
+        ledgerPath: input.ledgerPath,
+        wallet: input.wallet,
+        taskKey: milestone.workOrderId,
+        now: input.now(),
+        ...(reservationId ? { excludeReservationId: reservationId } : {}),
+      });
+      const maxPerTaskAtomic = policyAtomic(input.policy.maxPerTaskUsd);
+      if (feeAtomic > maxPerTaskAtomic || taskReserved + feeAtomic > maxPerTaskAtomic)
         return { outcome: "refused", reason: "policy.perTask", money, disputeFee: fee };
       if (feeAtomic > remaining)
         return { outcome: "refused", reason: "policy.perDay", money, disputeFee: fee };
@@ -425,6 +442,7 @@ async function feeTask(
       await input.pending?.reservationId(reservationKey, () => idempotencyKey);
       reservation = await reserveSpend(feeAtomic, input.caps, {
         kind: "dispute-fee",
+        taskKey: milestone.workOrderId,
         maxPerTaskAtomic: policyAtomic(input.policy.maxPerTaskUsd),
         wallet: input.wallet,
         ledgerPath: input.ledgerPath,
@@ -532,6 +550,9 @@ export type SignScopeActionInput = {
   idempotencyKey?: () => string;
 };
 export type SignedScopeTerms = {
+  role: "client" | "provider";
+  self: Address;
+  direction: "you fund escrow for the worker" | "you deliver work to the poster";
   counterparty: Address;
   amountBaseUnits: string;
   asset: string;
@@ -563,6 +584,13 @@ export async function signScope(input: SignScopeActionInput): Promise<SignScopeA
   const order = await privateOrder(input.client, input.orderId);
   const actingRole = input.role === "poster" ? "client" : "provider";
   if (order.role !== actingRole) throw new Error("The acting party does not match the task role.");
+  const partyAddress =
+    actingRole === "client"
+      ? order.clientAddress
+      : order.proposals.find((proposal) => proposal.id === order.acceptedProposalId)
+          ?.providerAddress;
+  if (!partyAddress) throw new Error("The accepted task party is unavailable.");
+  const expectedSelf = getAddress(partyAddress);
   const { scopes } = await input.client.getScopes(input.orderId);
   const current = new Map<number, (typeof scopes)[number]>();
   for (const scope of scopes) {
@@ -614,6 +642,8 @@ export async function signScope(input: SignScopeActionInput): Promise<SignScopeA
     recoverySelf = input.chain.signingAddress ?? (await input.chain.getSigningAddress?.());
     if (!recoverySelf)
       throw new Error("A local signing wallet is required for accepted scope recovery.");
+    if (!isAddressEqual(recoverySelf, expectedSelf))
+      throw new Error("The local signing wallet does not match the accepted provider.");
     recoveryBinding = await (input.bindings ?? createScopeBindings(getVapiPaths().directory)).get({
       orderId: input.orderId,
       trancheOrdinal: scope.trancheOrdinal,
@@ -699,6 +729,10 @@ export async function signScope(input: SignScopeActionInput): Promise<SignScopeA
   if (input.chain.signingAddress && isAddressEqual(input.chain.signingAddress, counterparty))
     throw new Error("The scope counterparty must differ from the local signing wallet.");
   const terms: SignedScopeTerms = {
+    role: actingRole,
+    self: expectedSelf,
+    direction:
+      actingRole === "client" ? "you fund escrow for the worker" : "you deliver work to the poster",
     counterparty,
     amountBaseUnits: frozen.structured.budget.amountBaseUnits,
     asset: frozen.structured.budget.asset,
@@ -765,6 +799,7 @@ export async function signScope(input: SignScopeActionInput): Promise<SignScopeA
   }
   const self = getAddress(await recoverMessageAddress({ message, signature }));
   if (
+    !isAddressEqual(self, expectedSelf) ||
     isAddressEqual(self, counterparty) ||
     (input.chain.signingAddress && !isAddressEqual(self, input.chain.signingAddress))
   )

@@ -30,6 +30,8 @@ export type {
   TaskUnlock,
 } from "./operation-support.js";
 
+import { isAddressEqual, type Address } from "viem";
+
 import {
   disputeTask,
   counterEvidenceTask,
@@ -442,6 +444,7 @@ export async function signTaskScope(
   input: {
     id: string;
     counterparty?: string;
+    signerAddress?: Address;
     signMessage: (message: string) => Promise<`0x${string}`>;
     bindings?: Parameters<typeof signScope>[0]["bindings"];
     onTerms?: Parameters<typeof signScope>[0]["onTerms"];
@@ -460,7 +463,28 @@ export async function signTaskScope(
     );
   if (order.workOrder.role === "proposer")
     throw new TaskOperationError("wrong_role", "A proposer cannot sign this task scope.");
-  const role = order.workOrder.role === "provider" ? "worker" : "poster";
+  const self = context.chain.signingAddress ?? input.signerAddress;
+  if (!self)
+    throw new TaskOperationError(
+      "wrong_role",
+      "A local signing wallet address is required to sign this task scope.",
+    );
+  const acceptedWorker = order.workOrder.proposals.find(
+    (proposal) => proposal.id === order.workOrder.acceptedProposalId,
+  )?.providerAddress;
+  let role: "poster" | "worker";
+  if (isAddressEqual(self, order.workOrder.clientAddress)) role = "poster";
+  else if (acceptedWorker && isAddressEqual(self, acceptedWorker)) role = "worker";
+  else
+    throw new TaskOperationError(
+      "wrong_role",
+      "This wallet is neither the task poster nor its accepted worker.",
+    );
+  if (order.workOrder.role !== (role === "poster" ? "client" : "provider"))
+    throw new TaskOperationError(
+      "wrong_role",
+      "The server task role does not match this wallet's locally derived role.",
+    );
   return await taskRequest(
     "sign",
     "signScope",

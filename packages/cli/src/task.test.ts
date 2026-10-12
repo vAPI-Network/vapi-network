@@ -45,6 +45,7 @@ beforeAll(async () => {
 const homes: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
   await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true })));
 });
@@ -310,6 +311,54 @@ function milestoneOrder(
           updatedAt: NOW.toISOString(),
         },
       ],
+    },
+  });
+}
+
+function signingOrder(role: "client" | "provider", self: string) {
+  const current = milestoneOrder({ role, escrowState: null });
+  const terms = scopeFixture().structuredTerms;
+  const proposalTerms = {
+    version: terms.version,
+    title: terms.title,
+    description: terms.description,
+    acceptanceCriteria: terms.acceptanceCriteria,
+    workDurationSeconds: terms.workDurationSeconds,
+    acceptanceWindowSeconds: terms.acceptanceWindowSeconds,
+    budget: terms.budget,
+    escrow: terms.escrow,
+    evidenceRules: terms.evidenceRules,
+  };
+  const proposedMilestones = [proposalTerms];
+  return tasksResponseSchemas.getOrder.parse({
+    workOrder: {
+      ...current.workOrder,
+      clientAddress: role === "client" ? self : ADDRESS,
+      acceptedProposalId: role === "provider" ? PROPOSAL_ID : null,
+      proposals:
+        role === "provider"
+          ? [
+              {
+                id: PROPOSAL_ID,
+                workOrderId: ID,
+                providerAddress: self,
+                state: "accepted",
+                signedPayload: {
+                  version: "work-proposal-v1",
+                  workOrderId: ID,
+                  providerAddress: self,
+                  pricingModel: "fixed",
+                  milestones: proposedMilestones,
+                },
+                signature: hex("ab".repeat(65)),
+                signatureHash: hex("ab".repeat(32)),
+                proposedMilestones,
+                acceptedAt: NOW.toISOString(),
+                createdAt: NOW.toISOString(),
+                updatedAt: NOW.toISOString(),
+              },
+            ]
+          : [],
     },
   });
 }
@@ -1839,6 +1888,236 @@ describe("vapi task", () => {
       expect(serialized).not.toContain("cause");
     });
 
+    it("requires approval before signing a scope in non-interactive mode", async () => {
+      const scope = scopeFixture("provider");
+      const client = fakeClient({
+        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+      });
+      const { dependencies, store } = await fixture(true, client);
+      const self = (await store.list()).find((wallet) => wallet.name === "worker")!.address!;
+      client.getOrder = vi.fn(async () => signingOrder("client", self));
+      const signScope = vi.fn();
+      client.signScope = signScope;
+      const signer = await store.unlock("worker", "test-passphrase");
+      const signerCall = vi.spyOn(signer, "signMessage");
+      const unlock = vi.spyOn(WalletStore.prototype, "unlock").mockResolvedValue(signer);
+
+      const result = await invoke(["sign", ID], dependencies, false);
+
+      expect(result.code).toBe(3);
+      expect(unlock).not.toHaveBeenCalled();
+      expect(signerCall).not.toHaveBeenCalled();
+      expect(signScope).not.toHaveBeenCalled();
+      expect(result.stdout).toContain("Approval is needed before signing this scope.");
+    });
+
+    it("declines an interactive scope confirmation before signing or posting", async () => {
+      const scope = scopeFixture("provider");
+      const client = fakeClient({
+        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+      });
+      const { dependencies, store } = await fixture(true, client);
+      const self = (await store.list()).find((wallet) => wallet.name === "worker")!.address!;
+      client.getOrder = vi.fn(async () => signingOrder("client", self));
+      client.signScope = vi.fn();
+      dependencies.interactive = true;
+      dependencies.prompts = {
+        secret: async () => "test-passphrase",
+        line: vi.fn(async () => "n"),
+      };
+      const signer = await store.unlock("worker", "test-passphrase");
+      const signerCall = vi.spyOn(signer, "signMessage");
+      const unlock = vi.spyOn(WalletStore.prototype, "unlock").mockResolvedValue(signer);
+
+      const result = await invoke(["sign", ID], dependencies, false);
+
+      expect(result.code).toBe(1);
+      expect(dependencies.prompts.line).toHaveBeenCalledWith("Sign this scope? [y/N] ");
+      expect(unlock).not.toHaveBeenCalled();
+      expect(signerCall).not.toHaveBeenCalled();
+      expect(client.signScope).not.toHaveBeenCalled();
+    });
+
+    it("prints the poster direction, terms, and local signer before --yes signs", async () => {
+      const scope = scopeFixture("provider");
+      const stdout: string[] = [];
+      const accepted = tasksResponseSchemas.signScope.parse({
+        scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
+        milestone: {
+          id: PROPOSAL_ID,
+          workOrderId: ID,
+          ordinal: 1,
+          termsHash: scope.termsHash,
+          termsFrozenAt: NOW.toISOString(),
+        },
+      });
+      const client = fakeClient({
+        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+        signScope: vi.fn(async () => {
+          expect(stdout).toContain(
+            `You are the poster: you will fund $100.00 USDC into escrow for worker ${scopeProposer.address}`,
+          );
+          return accepted;
+        }),
+      });
+      const { dependencies, store } = await fixture(true, client);
+      const self = (await store.list()).find((wallet) => wallet.name === "worker")!.address!;
+      client.getOrder = vi.fn(async () => signingOrder("client", self));
+      const originalUnlock = WalletStore.prototype.unlock;
+      const signMessage = vi.fn();
+      vi.spyOn(WalletStore.prototype, "unlock").mockImplementation(async function (
+        this: WalletStore,
+        ...args
+      ) {
+        const unlocked = await originalUnlock.apply(this, args);
+        const originalSignMessage = unlocked.signMessage.bind(unlocked);
+        return {
+          ...unlocked,
+          signMessage: async (input) => {
+            expect(stdout).toContain(
+              `You are the poster: you will fund $100.00 USDC into escrow for worker ${scopeProposer.address}`,
+            );
+            signMessage();
+            return await originalSignMessage(input);
+          },
+        };
+      });
+
+      const stderr: string[] = [];
+      const code = await runCli(
+        ["task", "sign", ID, "--yes"],
+        { stdout: (line) => stdout.push(line), stderr: (line) => stderr.push(line) },
+        dependencies,
+      );
+
+      expect(code).toBe(0);
+      expect(stdout).toContain(
+        `You are the poster: you will fund $100.00 USDC into escrow for worker ${scopeProposer.address}`,
+      );
+      expect(stdout).toContain(`Deadline: ${NOW.toISOString()}`);
+      expect(stdout).toContain(`Local signer: ${self}`);
+      expect(signMessage).toHaveBeenCalledOnce();
+      expect(client.signScope).toHaveBeenCalledOnce();
+    });
+
+    it.each(["y", "yes"])(
+      "accepts interactive %s and prints the worker direction before signing",
+      async (answer) => {
+        const scope = scopeFixture();
+        const accepted = tasksResponseSchemas.signScope.parse({
+          scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
+          milestone: {
+            id: PROPOSAL_ID,
+            workOrderId: ID,
+            ordinal: 1,
+            termsHash: scope.termsHash,
+            termsFrozenAt: NOW.toISOString(),
+          },
+        });
+        const client = fakeClient({
+          getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+          signScope: vi.fn(async () => accepted),
+        });
+        const { dependencies, store } = await fixture(true, client);
+        const self = (await store.list()).find((wallet) => wallet.name === "worker")!.address!;
+        client.getOrder = vi.fn(async () => signingOrder("provider", self));
+        dependencies.tasks!.chain = fakeChain();
+        dependencies.interactive = true;
+        dependencies.prompts = {
+          secret: async () => "test-passphrase",
+          line: vi.fn(async () => answer),
+        };
+
+        const result = await invoke(["sign", ID], dependencies, false);
+
+        expect(result.code).toBe(0);
+        expect(result.stdout).toContain(
+          `You are the worker: you will deliver to poster ${scopeProposer.address} and be paid $100.00 USDC`,
+        );
+        expect(dependencies.prompts.line).toHaveBeenCalledWith("Sign this scope? [y/N] ");
+        expect(client.signScope).toHaveBeenCalledOnce();
+      },
+    );
+
+    it("returns approval_needed JSON without signing when --yes is absent", async () => {
+      const scope = scopeFixture("provider");
+      const client = fakeClient({
+        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+      });
+      const { dependencies, store } = await fixture(true, client);
+      const self = (await store.list()).find((wallet) => wallet.name === "worker")!.address!;
+      client.getOrder = vi.fn(async () => signingOrder("client", self));
+      client.signScope = vi.fn();
+      const signer = await store.unlock("worker", "test-passphrase");
+      const signerCall = vi.spyOn(signer, "signMessage");
+      const unlock = vi.spyOn(WalletStore.prototype, "unlock").mockResolvedValue(signer);
+      const line = vi.fn(async () => "yes");
+      dependencies.interactive = true;
+      dependencies.prompts = { secret: async () => "test-passphrase", line };
+
+      const result = await invoke(["sign", ID], dependencies);
+
+      expect(result.code).toBe(3);
+      expect(result.value).toMatchObject({
+        command: "task sign",
+        wallet: "worker",
+        ok: false,
+        approval: true,
+        reason: "approval_needed",
+      });
+      expect(unlock).not.toHaveBeenCalled();
+      expect(signerCall).not.toHaveBeenCalled();
+      expect(client.signScope).not.toHaveBeenCalled();
+      expect(line).not.toHaveBeenCalled();
+    });
+
+    it("requires approval before accepted-worker recovery unlocks or writes a binding", async () => {
+      const proposed = scopeFixture();
+      const client = fakeClient();
+      const { dependencies, home, store } = await fixture(true, client);
+      const signer = await store.unlock("worker", "test-passphrase");
+      const self = signer.address;
+      const localSignature = await signer.signMessage({
+        message: canonicalJson(proposed.signingPayload),
+      });
+      const acceptedScope = tasksResponseSchemas.getScopes.parse({
+        scopes: [
+          {
+            ...proposed,
+            state: "accepted",
+            counterpartyAddress: self,
+            counterpartySignature: localSignature,
+            acceptedAt: NOW.toISOString(),
+            milestoneId: PROPOSAL_ID,
+          },
+        ],
+      }).scopes[0]!;
+      client.getOrder = vi.fn(async () => signingOrder("provider", self));
+      client.getScopes = vi.fn(async () =>
+        tasksResponseSchemas.getScopes.parse({ scopes: [acceptedScope] }),
+      );
+      client.signScope = vi.fn();
+      const signerCall = vi.spyOn(signer, "signMessage");
+      const unlock = vi.spyOn(WalletStore.prototype, "unlock").mockResolvedValue(signer);
+      const line = vi.fn(async () => "yes");
+      dependencies.prompts = { secret: async () => "test-passphrase", line };
+
+      const result = await invoke(
+        ["sign", ID, "--counterparty", scopeProposer.address],
+        dependencies,
+        false,
+      );
+
+      expect(result.code).toBe(3);
+      expect(unlock).not.toHaveBeenCalled();
+      expect(signerCall).not.toHaveBeenCalled();
+      expect(line).not.toHaveBeenCalled();
+      expect(client.signScope).not.toHaveBeenCalled();
+      await expect(
+        readFile(join(home, "tasks", "scope-bindings.json"), "utf8"),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
     it("signs the canonical scope then accepts it, maps roles, and reports a partial create failure", async () => {
       const scope = scopeFixture();
       const accepted = tasksResponseSchemas.signScope.parse({
@@ -1871,8 +2150,10 @@ describe("vapi task", () => {
         }),
       });
       const { dependencies, store } = await fixture(true, client);
+      const self = (await store.list()).find((wallet) => wallet.name === "worker")!.address!;
+      client.getOrder = vi.fn(async () => signingOrder("provider", self));
       dependencies.tasks!.chain = chain;
-      const result = await invoke(["sign", ID], dependencies);
+      const result = await invoke(["sign", ID, "--yes"], dependencies);
       expect(chain.signScopeMessage).not.toHaveBeenCalled();
       expect(client.signScope).toHaveBeenCalled();
       expect(chain.createEscrow).toHaveBeenCalledOnce();
@@ -1904,7 +2185,7 @@ describe("vapi task", () => {
       chain.createEscrow = vi.fn(async () => {
         throw new TasksChainError("create failed", false);
       });
-      const failed = await invoke(["sign", ID], dependencies, true, true);
+      const failed = await invoke(["sign", ID, "--yes"], dependencies, true, true);
       expect(failed.code).toBe(1);
       expect(failed.values[0]).toMatchObject({
         scope: expect.any(Object),
@@ -1932,14 +2213,19 @@ describe("vapi task", () => {
         getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
         signScope: vi.fn(async () => accepted),
       });
-      const { dependencies } = await fixture(true, client);
+      const { dependencies, store } = await fixture(true, client);
+      const self = (await store.list()).find((wallet) => wallet.name === "worker")!.address!;
+      client.getOrder = vi.fn(async () => signingOrder("client", self));
       dependencies.tasks!.chain = missingTasksChain;
 
-      const result = await invoke(["sign", ID], dependencies, false);
+      const result = await invoke(["sign", ID, "--yes"], dependencies, false);
 
       expect(result.code).toBe(0);
-      expect(result.stdout.slice(-2)).toEqual([
-        `Build a page · $100.00 USDC · deadline ${NOW.toISOString()} · with ${scopeProposer.address}`,
+      expect(result.stdout.slice(-5)).toEqual([
+        "Scope confirmation:",
+        `You are the poster: you will fund $100.00 USDC into escrow for worker ${scopeProposer.address}`,
+        `Deadline: ${NOW.toISOString()}`,
+        `Local signer: ${self}`,
         `Accepted scope for task ${ID}.`,
       ]);
     });
@@ -1978,12 +2264,14 @@ describe("vapi task", () => {
         getScopes: vi.fn(async () => ({ scopes: [scope] })),
         signScope: vi.fn(async () => accepted),
       });
-      const { dependencies } = await fixture(true, client);
+      const { dependencies, store } = await fixture(true, client);
+      const self = (await store.list()).find((wallet) => wallet.name === "worker")!.address!;
+      client.getOrder = vi.fn(async () => signingOrder("client", self));
 
-      const result = await invoke(["sign", ID], dependencies, false);
+      const result = await invoke(["sign", ID, "--yes"], dependencies, false);
 
-      expect(result.stdout.at(-2)).toBe(
-        `Build a page · 100000000 base units (eip155:8453/erc20:${ESCROW}) · deadline ${NOW.toISOString()} · with ${scopeProposer.address}`,
+      expect(result.stdout).toContain(
+        `You are the poster: you will fund 100000000 base units (eip155:8453/erc20:${ESCROW}) into escrow for worker ${scopeProposer.address}`,
       );
     });
 
@@ -2004,8 +2292,10 @@ describe("vapi task", () => {
         getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
         signScope: vi.fn(async () => accepted),
       });
-      const { dependencies } = await fixture(true, client);
-      const result = await invoke(["sign", ID], dependencies);
+      const { dependencies, store } = await fixture(true, client);
+      const self = (await store.list()).find((wallet) => wallet.name === "worker")!.address!;
+      client.getOrder = vi.fn(async () => signingOrder("client", self));
+      const result = await invoke(["sign", ID, "--yes"], dependencies);
       expect(result.code).toBe(0);
       expect(result.value).toMatchObject({ escrowCreation: null });
       expect(client.signScope).toHaveBeenCalledOnce();
@@ -2028,9 +2318,11 @@ describe("vapi task", () => {
         },
       });
       client.signScope = vi.fn(async () => accepted);
-      const { dependencies } = await fixture(true, client);
+      const { dependencies, store } = await fixture(true, client);
+      const self = (await store.list()).find((wallet) => wallet.name === "worker")!.address!;
+      client.getOrder = vi.fn(async () => signingOrder("provider", self));
       dependencies.tasks!.chain = missingTasksChain;
-      const result = await invoke(["sign", ID], dependencies, true, true);
+      const result = await invoke(["sign", ID, "--yes"], dependencies, true, true);
       expect(result.values[0]).toMatchObject({ scope: { state: "accepted" } });
       expect(result.value).toEqual({
         ok: false,

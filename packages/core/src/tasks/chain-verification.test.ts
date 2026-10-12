@@ -3,9 +3,11 @@ import { privateKeyToAccount } from "viem/accounts";
 import { describe, expect, it, vi } from "vitest";
 
 import { canonicalJson } from "./canonical-json.js";
+import { safeTasksChainError, TasksValidationError } from "./chain-error.js";
 import { verifyClone, verifyScope, type VerifiedContext } from "./chain-verification.js";
 import type { TasksClient } from "./client.js";
 import type { TaskMilestone } from "./chain-port.js";
+import { TasksPartiesNotBoundError } from "./index.js";
 import { freezeScopeTerms } from "./scope-terms.js";
 import type { DeploymentResponse } from "./types.js";
 
@@ -97,16 +99,12 @@ async function setup(counterparty = other) {
   };
   return { client, bindings };
 }
-function scopeVerification(client: TasksClient, options: unknown = {}) {
-  return (verifyScope as (...args: unknown[]) => Promise<VerifiedContext>)(
-    client,
-    self.address,
-    milestone,
-    ready,
-    "fund",
-    ["deposit-funds"],
-    options,
-  );
+// Include obsolete RPC input at runtime to prove it cannot restore role inference or binding writes.
+function scopeVerification(
+  client: TasksClient,
+  options: Parameters<typeof verifyScope>[6] & { rpc?: PublicClient } = {},
+) {
+  return verifyScope(client, self.address, milestone, ready, "fund", ["deposit-funds"], options);
 }
 function context(): VerifiedContext {
   return {
@@ -171,10 +169,26 @@ function rpcFixture(
 }
 
 describe("locally bound scope parties", () => {
-  it("refuses a scope with no local party binding before a money signature", async () => {
-    const { client } = await setup();
-    await expect(scopeVerification(client)).rejects.toThrow(
-      "The task parties are not bound on this machine. Re-run with --counterparty <address> to confirm who you are working with.",
+  const notBoundMessage =
+    "The task parties are not bound on this machine. Sign the scope with `vapi task sign` on this machine first; an explicit --counterparty only confirms an existing binding.";
+
+  it("refuses no binding and no explicit counterparty with the typed remediation", async () => {
+    const { client, bindings } = await setup();
+    bindings.get.mockResolvedValue(undefined);
+    const rpc = rpcFixture();
+    const verification = scopeVerification(client, { bindings, rpc });
+    await expect(verification).rejects.toBeInstanceOf(TasksPartiesNotBoundError);
+    await expect(verification).rejects.toMatchObject({
+      name: "TasksPartiesNotBoundError",
+      message: notBoundMessage,
+    });
+    await expect(scopeVerification(client)).rejects.toBeInstanceOf(TasksPartiesNotBoundError);
+    expect(bindings.put).not.toHaveBeenCalled();
+    expect(rpc.readContract).not.toHaveBeenCalledWith(
+      expect.objectContaining({ functionName: "buyer" }),
+    );
+    expect(rpc.readContract).not.toHaveBeenCalledWith(
+      expect.objectContaining({ functionName: "seller" }),
     );
   });
   it("refuses an attacker-signed scope paired with the local signature", async () => {
@@ -187,30 +201,75 @@ describe("locally bound scope parties", () => {
       buyer: self.address,
       seller: other.address,
     });
+    expect(bindings.put).not.toHaveBeenCalled();
   });
-  it("verifies explicit counterparty signatures and records the binding", async () => {
+  it("refuses an explicit counterparty when no local binding exists", async () => {
     const { client, bindings } = await setup();
     bindings.get.mockResolvedValue(undefined);
-    await scopeVerification(client, {
+    const rpc = rpcFixture();
+    const verification = scopeVerification(client, {
       bindings,
       counterparty: other.address,
-      rpc: rpcFixture(),
+      rpc,
       now: () => new Date(binding.signedAt),
     });
-    expect(bindings.put).toHaveBeenCalledWith(binding);
+    await expect(verification).rejects.toBeInstanceOf(TasksPartiesNotBoundError);
+    await expect(verification).rejects.toMatchObject({
+      name: "TasksPartiesNotBoundError",
+      message: notBoundMessage,
+    });
+    expect(bindings.put).not.toHaveBeenCalled();
+    expect(rpc.readContract).not.toHaveBeenCalledWith(
+      expect.objectContaining({ functionName: "buyer" }),
+    );
+    expect(rpc.readContract).not.toHaveBeenCalledWith(
+      expect.objectContaining({ functionName: "seller" }),
+    );
   });
   it("refuses explicit counterparty confirmation that did not sign the scope", async () => {
     const { client, bindings } = await setup();
     bindings.get.mockResolvedValue(undefined);
     await expect(
       scopeVerification(client, { bindings, counterparty: attacker.address, rpc: rpcFixture() }),
-    ).rejects.toThrow(/counterparty.*signature/);
+    ).rejects.toMatchObject({ name: "TasksPartiesNotBoundError", message: notBoundMessage });
     expect(bindings.put).not.toHaveBeenCalled();
+  });
+  it("refuses an explicit counterparty that conflicts with an existing binding", async () => {
+    const { client, bindings } = await setup();
+    await expect(
+      scopeVerification(client, { bindings, counterparty: attacker.address }),
+    ).rejects.toThrow("The confirmed counterparty differs from the locally bound parties.");
+    expect(bindings.put).not.toHaveBeenCalled();
+  });
+  it("never creates a binding from consistent server signatures and RPC parties", async () => {
+    const { client, bindings } = await setup();
+    bindings.get.mockResolvedValue(undefined);
+    const rpc = rpcFixture();
+    await expect(
+      scopeVerification(client, { bindings, counterparty: other.address, rpc }),
+    ).rejects.toMatchObject({ name: "TasksPartiesNotBoundError", message: notBoundMessage });
+    expect(bindings.put).not.toHaveBeenCalled();
+    expect(rpc.readContract).not.toHaveBeenCalledWith(
+      expect.objectContaining({ functionName: "buyer" }),
+    );
+    expect(rpc.readContract).not.toHaveBeenCalledWith(
+      expect.objectContaining({ functionName: "seller" }),
+    );
   });
   it("refuses a clone whose buyer and seller swap the locally bound roles", async () => {
     await expect(
       verifyClone(rpcFixture({ buyer: other.address, seller: self.address }), context(), false),
     ).rejects.toThrow(/parties/);
+  });
+});
+
+describe("safe chain errors", () => {
+  it("preserves the exact local not-bound remediation", () => {
+    const message =
+      "The task parties are not bound on this machine. Sign the scope with `vapi task sign` on this machine first; an explicit --counterparty only confirms an existing binding.";
+    const error = new TasksPartiesNotBoundError();
+    expect(error).toBeInstanceOf(TasksValidationError);
+    expect(safeTasksChainError(error, false, false).message).toBe(message);
   });
 });
 

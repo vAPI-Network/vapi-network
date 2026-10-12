@@ -159,7 +159,6 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
     const verified = await verifyScope(client, account.address, selected, ready, verb, steps, {
       bindings: options.bindings,
       ...(counterparty ? { counterparty: getAddress(counterparty) } : {}),
-      rpc: rpcFor(ready.chainId),
       now,
       trustedDurations: options.trustedDurations,
     });
