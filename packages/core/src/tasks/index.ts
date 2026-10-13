@@ -5,6 +5,7 @@ export * from "./delivery-manifest.js";
 export * from "./verbs.js";
 export * from "./chain-port.js";
 export * from "./chain.js";
+export * from "./wait.js";
 export * from "./rpc.js";
 export * from "./pending-transactions.js";
 export * from "./money.js";

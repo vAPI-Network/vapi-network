@@ -157,7 +157,7 @@ import { routerCommand } from "./router.js";
 import { sendCommand } from "./send.js";
 import { setupCommand } from "./setup.js";
 import { stakeCommand } from "./stake.js";
-import { taskCommand, type TasksCommandDependencies } from "./task.js";
+import { TaskCommandError, taskCommand, type TasksCommandDependencies } from "./task.js";
 import { statusCommand } from "./status.js";
 import { swarmCommand } from "./swarm.js";
 import { resolveRuntime, type RuntimeRequest } from "./runtime-local.js";
@@ -958,7 +958,15 @@ export async function runCli(
         );
       }
     } else {
-      runIo.stderr(message);
+      const errorCode =
+        taskInvocation && error instanceof TaskCommandError && error.prefixCode
+          ? errorCodeOf(error)
+          : undefined;
+      runIo.stderr(
+        errorCode !== undefined && !message.startsWith(`${errorCode}: `)
+          ? `${errorCode}: ${message}`
+          : message,
+      );
     }
     if (shouldAutoUploadAfterFailure(argv.filter((argument) => argument !== "--json"))) {
       await autoUploadBackup(io, json, dependencies);

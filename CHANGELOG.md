@@ -3,6 +3,29 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## 0.9.1 (2026-10-13)
+
+### Fixed
+
+- MCP `tools/list` omits non-object `outputSchema`s, including those on `auth.status` and `swarm.run`. Claude Desktop rejects their union schemas.
+- MCP `tasks.post` accepts an optional `vendor` address and sends it as `invitedProviderAddress`.
+- Proposal and bounty submission payloads sign the lowercased `providerAddress` to match server canonicalization for `vapi task propose` and `vapi task submit`.
+- Task errors surface JSON `code`/`message` or normalized plain-text bodies capped at 300 characters as `code: message`. `VAPI_DEBUG_HTTP` is removed, and `401`/`403` response bodies stay hidden.
+- Signed-in `vapi task status` and `tasks.status` read `GET /v1/work-orders/:id/chain-state` and `GET /v1/work-orders/:id/events`. Either missing route is named in the error.
+- Worker escrow creation through `sign`, plus `fund`, `deliver` and `release`, waits for vAPI to index chain results and reports the confirming `blockNumber` when available. CLI `--no-wait` and `--timeout` control the default 120-second polling limit; MCP `wait` controls a 60-second polling limit.
+- Indexing waits require the projected escrow state to advance; transaction hashes and delivery records alone do not finish a wait. Each poll is bounded by the remaining deadline, and polling failures preserve server error codes in CLI and MCP output.
+- After an HTTP, network or timeout prepare failure, escrow creation, funding, delivery, release, refund, dispute, counter-evidence and unmatched resolution resume a matching server operation in `prepared`, `submitted` or `confirmed` state. Delivery recovery checks the recorded manifest, existing plan and receipt checks still apply, and the chain executor never calls `abandonOperation`. Ambiguous escrow creation recovery refuses to select a milestone.
+
+### Changed
+
+- MCP task money-tool descriptions describe executing the user's own instruction with the user's vault wallet. Funding copy keeps the configured spend policy and approval-threshold refusal; dispute and counter-evidence copy keeps task and daily caps and `approval:true`.
+
+### Known limitations
+
+- A participant-masked `/events` response of `Work order not found` returns `events: null` and `nextAfter: null` while preserving the available chain state.
+- A polling error still fails the command or tool after a confirmed transaction; it never repeats the chain mutation.
+- Authentication errors may include sign-in or scope guidance, and chain errors include the HTTP status beside the code.
+
 ## 0.9.0 (2026-10-12)
 
 ### Added

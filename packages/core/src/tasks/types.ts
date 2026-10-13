@@ -15,6 +15,12 @@ export {
 } from "./scope-terms.js";
 
 const uuidSchema = z.uuid();
+// Profile ids are Prisma cuids, not UUIDs; keep a safe id charset.
+const profileIdSchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z0-9_-]+$/);
 const isoDateTimeSchema = z.iso.datetime();
 const addressSchema = z
   .string()
@@ -454,7 +460,7 @@ const deliveryResponseSchema = z.looseObject({
   version: z.number().int().positive(),
   manifest: manifestResponseSchema,
   manifestHash: bytes32Schema,
-  submittedByProfileId: uuidSchema,
+  submittedByProfileId: profileIdSchema,
   createdAt: isoDateTimeSchema,
 });
 
@@ -571,7 +577,7 @@ const reviewResponseSchema = z.looseObject({
   id: uuidSchema,
   workOrderId: uuidSchema,
   clientAddress: addressSchema,
-  vendorProfileId: uuidSchema,
+  vendorProfileId: profileIdSchema,
   rating: z.number().int().min(1).max(5),
   body: z.string(),
   subRatings: z.json().nullable(),

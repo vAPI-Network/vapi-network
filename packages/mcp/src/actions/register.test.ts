@@ -24,7 +24,7 @@ beforeEach(() => {
 });
 
 describe("action register", () => {
-  it("publishes every action through MCP with its exact declaration", async () => {
+  it("publishes every action through MCP with object output schemas only", async () => {
     const server = createVapiServer({
       account: privateKeyToAccount(PRIVATE_KEY),
       config: getDefaultConfig(),
@@ -34,11 +34,12 @@ describe("action register", () => {
     const listed = (await server.listTools()).tools;
     for (const action of actions) {
       const tool = listed.find((candidate) => candidate.name === action.name);
+      const outputSchema = z.toJSONSchema(action.output);
       expect(tool).toEqual({
         name: action.name,
         description: action.description,
         inputSchema: z.toJSONSchema(action.input),
-        outputSchema: z.toJSONSchema(action.output),
+        ...(outputSchema.type === "object" ? { outputSchema } : {}),
       });
     }
     await server.close();

@@ -175,11 +175,68 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
     });
   }
 
+  async function prepareOrResume(
+    prepare: () => Promise<Prepared>,
+    expected: VerifiedContext,
+    idempotencyKey: string,
+    kind: Prepared["operation"]["kind"],
+    steps: Prepared["operation"]["step"] | readonly string[],
+    authorizationExposed = false,
+    beforeSign?: () => Promise<void>,
+  ): Promise<TasksChainResult> {
+    let prepared: Prepared;
+    let resumedFromServer = false;
+    try {
+      prepared = await prepare();
+    } catch (error) {
+      if (!uncertainPreparation(error)) throw error;
+      // A failed response may hide a committed prepare. Read once; never prepare again here.
+      const fresh = await order(expected.milestone.workOrderId);
+      const matches = fresh.milestones.filter((item) => item.id === expected.milestone.id);
+      if (matches.length !== 1 || matches[0]!.workOrderId !== fresh.id)
+        throw new TasksValidationError("The task milestone does not match its parent order.");
+      const selected = matches[0]!;
+      const operation = selected.chainOperation;
+      if (expected.verb === "deliver" && selected.delivery && !operation)
+        throw new TasksValidationError(
+          "The server recorded this delivery but has no chain operation for it; open the task in the console to continue.",
+        );
+      if (
+        !operation ||
+        operation.kind !== kind ||
+        !(typeof steps === "string" ? [steps] : steps).includes(operation.step) ||
+        !["prepared", "submitted", "confirmed"].includes(operation.state)
+      )
+        throw error;
+      if (
+        expected.verb === "deliver" &&
+        selected.delivery &&
+        selected.delivery.manifestHash !== expected.manifestHash
+      )
+        throw new TasksValidationError(
+          "The server recorded a different delivery manifest; refusing to continue.",
+        );
+      prepared = {
+        operation,
+        milestone: { id: selected.id, workOrderId: selected.workOrderId },
+      };
+      resumedFromServer = true;
+    }
+    const result = await execute(
+      prepared,
+      expected,
+      idempotencyKey,
+      authorizationExposed,
+      beforeSign,
+    );
+    return resumedFromServer ? { ...result, resumedFromServer: true } : result;
+  }
+
   async function verifyReceipt(
     operation: Prepared["operation"],
     expected: VerifiedContext,
     hash: Hex,
-  ): Promise<void> {
+  ): Promise<string> {
     const rpc = rpcFor(expected.deployment.chainId);
     const receipt = await rpc.waitForTransactionReceipt({ hash, confirmations });
     if (
@@ -243,6 +300,7 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
       throw new TasksValidationError(
         "The RPC transaction input does not match the verified task plan.",
       );
+    return receipt.blockNumber.toString();
   }
 
   async function retryConflict<T>(call: () => Promise<T>): Promise<T> {
@@ -301,6 +359,7 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
       current = { ...initial, operation: live };
     let broadcast = current.operation.state === "submitted";
     let txHash = current.operation.transactionHash ?? undefined;
+    let blockNumber: string | undefined;
     const operationId = initial.operation.id;
     function checkTransition(previous: string, next: string) {
       if (previous !== next && !(previous === "approve-usdc" && next === afterApproval))
@@ -341,7 +400,7 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
           if (!operation.transactionHash)
             throw new TasksValidationError("The confirmed task operation has no transaction hash.");
           if (!checkpoint) {
-            await verifyReceipt(operation, expected, operation.transactionHash);
+            blockNumber = await verifyReceipt(operation, expected, operation.transactionHash);
             await pending.complete(operation.id, operation.step, current);
           }
           const fresh = await order(expected.milestone.workOrderId);
@@ -350,7 +409,12 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
           );
           if (!resultMilestone)
             throw new TasksValidationError("The reconciled task milestone is unavailable.");
-          return { txHash: operation.transactionHash, operation, milestone: resultMilestone };
+          return {
+            txHash: operation.transactionHash,
+            operation,
+            milestone: resultMilestone,
+            blockNumber,
+          };
         }
         const rpc = rpcFor(expected.deployment.chainId);
         if (operation.state === "prepared") {
@@ -568,7 +632,7 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
         }
         if (operation.state !== "submitted" || !operation.transactionHash)
           throw new TasksValidationError("The task operation has no submitted transaction.");
-        await verifyReceipt(operation, expected, operation.transactionHash);
+        blockNumber = await verifyReceipt(operation, expected, operation.transactionHash);
         const reconciled = await retryConflict(() =>
           client.reconcileOperation(
             operation.id,
@@ -604,6 +668,7 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
         )
           throw new TasksValidationError("The task transaction was not reconciled.");
         await pending.complete(operation.id, operation.step, reconciled);
+        if (reconciled.operation.step !== operation.step) blockNumber = undefined;
         current = reconciled;
       }
       throw new TasksValidationError("The task operation exceeded its allowed step transitions.");
@@ -650,14 +715,17 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
         verb === "dispute"
           ? client.disputeEscrow.bind(client)
           : client.counterEvidenceEscrow.bind(client);
-      return await execute(
-        await call(
-          input.escrowId,
-          { evidenceHash: input.evidenceHash },
-          { idempotencyKey: prepareKey },
-        ),
+      return await prepareOrResume(
+        () =>
+          call(
+            input.escrowId,
+            { evidenceHash: input.evidenceHash },
+            { idempotencyKey: prepareKey },
+          ),
         { ...expected, evidenceHash: input.evidenceHash },
         prepareKey,
+        verb === "dispute" ? "escrow-dispute" : "escrow-counter-evidence",
+        expected.steps,
         exposed,
         input.beforeSign,
       );
@@ -679,11 +747,43 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
     },
     createEscrow: (input) =>
       safe(async () => {
-        const workOrder = await order(input.orderId);
+        let workOrder = await order(input.orderId);
         const ready = await deployment();
-        const prepared = await client.createEscrow(input.orderId, {
-          idempotencyKey: input.idempotencyKey,
-        });
+        let prepared: Prepared;
+        let resumedFromServer = false;
+        try {
+          prepared = await client.createEscrow(input.orderId, {
+            idempotencyKey: input.idempotencyKey,
+          });
+        } catch (error) {
+          if (!uncertainPreparation(error)) throw error;
+          const fresh = await order(input.orderId);
+          // The server selects the milestone. Resume only a unique creation belonging
+          // to a milestone eligible in the pre-request snapshot; never guess or re-post.
+          const candidates = fresh.milestones.filter((item) => {
+            const previous = workOrder.milestones.find((prior) => prior.id === item.id);
+            const operation = item.chainOperation;
+            return (
+              item.workOrderId === input.orderId &&
+              previous &&
+              operation &&
+              operation.kind === "escrow-create" &&
+              operation.step === "create-escrow" &&
+              (previous.escrowState === null || previous.chainOperation?.id === operation.id)
+            );
+          });
+          if (candidates.length !== 1) throw error;
+          const selected = candidates[0]!;
+          prepared = {
+            operation: selected.chainOperation!,
+            milestone: {
+              id: selected.id,
+              workOrderId: selected.workOrderId,
+            },
+          };
+          workOrder = fresh;
+          resumedFromServer = true;
+        }
         const selected = workOrder.milestones.find((item) => item.id === prepared.milestone.id);
         if (!selected || selected.workOrderId !== input.orderId)
           throw new TasksValidationError(
@@ -693,11 +793,12 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
           { escrowId: selected.id, idempotencyKey: input.idempotencyKey },
           "createEscrow",
         );
-        return await execute(
+        const result = await execute(
           prepared,
           await expectation(selected, ready, "createEscrow", ["create-escrow"], input.counterparty),
           prepareKey,
         );
+        return resumedFromServer ? { ...result, resumedFromServer: true } : result;
       }),
     async fund(input) {
       let exposed = true;
@@ -793,10 +894,14 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
         // Persist uncertainty before the request can expose a redeemable authorization or operation.
         exposed = true;
         await pending.markExposure(selected.id);
-        const prepared = await client.fundEscrow(input.escrowId, body, {
-          idempotencyKey: prepareKey,
-        });
-        return await execute(prepared, expected, prepareKey, exposed);
+        return await prepareOrResume(
+          () => client.fundEscrow(input.escrowId, body, { idempotencyKey: prepareKey }),
+          expected,
+          prepareKey,
+          "escrow-funding",
+          expected.steps,
+          exposed,
+        );
       } catch (cause) {
         throw chainError(cause, false, exposed);
       }
@@ -825,22 +930,26 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
           manifest: frozen.manifest,
           note: input.note,
         });
-        const prepared = await client.deliverEscrow(
-          input.escrowId,
-          { fileIds: frozen.manifest.files.map((file) => file.fileId), note: input.note },
-          { idempotencyKey: prepareKey },
-        );
-        if (prepared.delivery.manifestHash !== frozen.manifestHash)
-          throw new TasksValidationError(
-            "The server task delivery manifest hash does not match the local manifest.",
-          );
-        return await execute(
-          prepared,
+        return await prepareOrResume(
+          async () => {
+            const prepared = await client.deliverEscrow(
+              input.escrowId,
+              { fileIds: frozen.manifest.files.map((file) => file.fileId), note: input.note },
+              { idempotencyKey: prepareKey },
+            );
+            if (prepared.delivery.manifestHash !== frozen.manifestHash)
+              throw new TasksValidationError(
+                "The server task delivery manifest hash does not match the local manifest.",
+              );
+            return prepared;
+          },
           {
             ...expected,
             manifestHash: frozen.manifestHash,
           },
           prepareKey,
+          "escrow-delivery",
+          "submit-delivery",
         );
       }),
     release: (input) =>
@@ -855,10 +964,12 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
           input.counterparty,
         );
         const prepareKey = await preparation(input, "release");
-        return await execute(
-          await client.releaseEscrow(input.escrowId, { idempotencyKey: prepareKey }),
+        return await prepareOrResume(
+          () => client.releaseEscrow(input.escrowId, { idempotencyKey: prepareKey }),
           expected,
           prepareKey,
+          "escrow-release",
+          "release-funds",
         );
       }),
     refund: (input) =>
@@ -873,10 +984,12 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
           input.counterparty,
         );
         const prepareKey = await preparation(input, "refund");
-        return await execute(
-          await client.refundEscrow(input.escrowId, { idempotencyKey: prepareKey }),
+        return await prepareOrResume(
+          () => client.refundEscrow(input.escrowId, { idempotencyKey: prepareKey }),
           expected,
           prepareKey,
+          "escrow-release",
+          "refund-buyer",
         );
       }),
     disputeFee: (input) =>
@@ -906,10 +1019,12 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
           input.counterparty,
         );
         const prepareKey = await preparation(input, "resolve-unmatched");
-        return execute(
-          await client.resolveUnmatchedEscrow(input.escrowId, { idempotencyKey: prepareKey }),
+        return prepareOrResume(
+          () => client.resolveUnmatchedEscrow(input.escrowId, { idempotencyKey: prepareKey }),
           expected,
           prepareKey,
+          "escrow-unmatched-resolution",
+          "resolve-unmatched-dispute",
         );
       }),
     signScopeMessage: (message) => safe(() => account.signMessage({ message })),
@@ -917,6 +1032,13 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
 }
 
 const chainError = safeTasksChainError;
+
+function uncertainPreparation(error: unknown): boolean {
+  return (
+    error instanceof TasksClientError &&
+    ((error.status ?? 0) >= 400 || error.code === "network" || error.code === "timeout")
+  );
+}
 
 function retryDelay(header: string, now: number): number | undefined {
   if (/^\d+(?:\.\d+)?$/u.test(header.trim())) return Math.max(1, Math.ceil(Number(header) * 1000));
