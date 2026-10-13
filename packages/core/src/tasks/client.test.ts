@@ -919,6 +919,7 @@ describe("tasks client errors and transport safety", () => {
     ],
     [404, { error: "No longer available", code: "gone" }, "gone", "No longer available"],
     [503, {}, undefined, "Service Unavailable"],
+    [503, { message: "" }, undefined, "Service Unavailable"],
     [400, { error: { code: 7, message: "malformed" } }, undefined, "malformed"],
   ])("normalizes HTTP status %i errors", async (status, body, serverCode, message) => {
     const recorder = recordedFetch(json(body, { status, statusText: "Service Unavailable" }));
@@ -935,6 +936,60 @@ describe("tasks client errors and transport safety", () => {
       ...(serverCode ? { serverCode } : {}),
     });
     expect((error as Error).message).toContain(message);
+  });
+
+  it.each([
+    [
+      400,
+      "  providerAddress\n\tcasing mismatch  ",
+      "Bad Request",
+      "providerAddress casing mismatch",
+    ],
+    [403, "permission details from upstream", "Forbidden", "Forbidden"],
+    [404, "", "", "HTTP 404"],
+  ])("normalizes plain HTTP status %i bodies", async (status, body, statusText, message) => {
+    const recorder = recordedFetch(new Response(body, { status, statusText }));
+    const error = await createTasksClient({
+      baseUrl: "https://tasks.example",
+      fetch: recorder.fetch,
+    })
+      .deployment()
+      .catch((value: unknown) => value);
+    expect(error).toMatchObject({ code: "http", status, message });
+    if (status === 400) expect((error as TasksClientError).serverCode).toBeUndefined();
+  });
+
+  it("caps normalized plain-text errors at 300 characters", async () => {
+    const recorder = recordedFetch(new Response(`  ${"x".repeat(350)}  `, { status: 400 }));
+    const error = await createTasksClient({
+      baseUrl: "https://tasks.example",
+      fetch: recorder.fetch,
+    })
+      .deployment()
+      .catch((value: unknown) => value);
+    expect((error as Error).message).toHaveLength(300);
+  });
+
+  it.each([401, 403])("never exposes HTTP %i authentication response bodies", async (status) => {
+    const recorder = recordedFetch(
+      json(
+        { error: { code: "token_expired", message: "bearer abc expired" } },
+        { status, statusText: status === 401 ? "Unauthorized" : "Forbidden" },
+      ),
+    );
+    const error = await createTasksClient({
+      baseUrl: "https://tasks.example",
+      fetch: recorder.fetch,
+    })
+      .deployment()
+      .catch((value: unknown) => value);
+    expect(error).toMatchObject({
+      code: "http",
+      status,
+      serverCode: "token_expired",
+      message: "token_expired",
+    });
+    expect((error as Error).message).not.toContain("abc");
   });
 
   it("does not follow redirects", async () => {

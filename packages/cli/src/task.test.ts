@@ -8,7 +8,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { WalletStore, type SecretStore } from "@vapi-network/core";
 import { agentSecretAccounts } from "@vapi-network/core/agent-link";
-import { TasksClientError } from "@vapi-network/core/tasks";
+import { createTasksClient, TasksClientError } from "@vapi-network/core/tasks";
 import {
   canonicalJson,
   createPendingTransactions,
@@ -233,8 +233,14 @@ async function invoke(
 ) {
   const stdout: string[] = [],
     stderr: string[] = [];
+  const args =
+    ["sign", "fund", "deliver", "release"].includes(argv[0]!) &&
+    !argv.includes("--no-wait") &&
+    !argv.includes("--timeout")
+      ? [...argv, "--no-wait"]
+      : argv;
   const code = await runCli(
-    ["task", ...argv, ...(json ? ["--json"] : [])],
+    ["task", ...args, ...(json ? ["--json"] : [])],
     { stdout: (line) => stdout.push(line), stderr: (line) => stderr.push(line) },
     dependencies,
   );
@@ -681,16 +687,97 @@ describe("vapi task", () => {
     });
   });
 
-  it("uses authenticated show, and public status even when signed in", async () => {
-    const { client, dependencies, store } = await fixture();
+  it("uses authenticated show and signed status when a token is available", async () => {
+    const client = fakeClient({
+      chainState: async () => ({
+        workOrderId: ID,
+        milestones: [],
+        observedAt: NOW.toISOString(),
+      }),
+      events: async () => ({ events: [], nextAfter: 0 }),
+    });
+    const { dependencies, store } = await fixture(true, client);
     const unlock = vi.spyOn(store, "unlock");
     expect((await invoke(["show", ID], dependencies)).code).toBe(0);
     expect(client.getOrder).toHaveBeenCalledWith(ID);
     const result = await invoke(["status", ID], dependencies);
     expect(result.code).toBe(0);
+    expect(result.value!.task).toMatchObject({ id: ID });
+    expect(client.getOrder).toHaveBeenCalledWith(ID);
+    expect(client.publicTask).not.toHaveBeenCalled();
+    expect(unlock).not.toHaveBeenCalled();
+  });
+
+  it("prints signed status milestones and the last ten sorted events", async () => {
+    const events = Array.from({ length: 12 }, (_, index) => ({
+      sequence: 12 - index,
+      type: `event-${12 - index}`,
+      at: `2026-10-08T12:${String(12 - index).padStart(2, "0")}:00.000Z`,
+      createdAt: `2026-10-08T12:${String(12 - index).padStart(2, "0")}:00.000Z`,
+      actor: ADDRESS,
+      payload: {},
+    }));
+    const { dependencies } = await fixture(true);
+    delete dependencies.tasks!.client;
+    const requests: { path: string; authorization: string | null }[] = [];
+    dependencies.fetchImpl = vi.fn(async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      requests.push({
+        path: `${url.pathname}${url.search}`,
+        authorization: request.headers.get("authorization"),
+      });
+      if (url.pathname.endsWith("/chain-state"))
+        return Response.json({
+          workOrderId: ID,
+          milestones: [
+            {
+              milestoneId: PROPOSAL_ID,
+              ordinal: 1,
+              network: "eip155:8453",
+              escrowAddress: ESCROW,
+              explorerUrl: `https://basescan.org/address/${ESCROW}`,
+              read: { status: "mirror", state: "locked" },
+            },
+          ],
+          observedAt: NOW.toISOString(),
+        });
+      if (url.pathname.endsWith("/events")) return Response.json({ events, nextAfter: 12 });
+      throw new Error(`Unexpected Tasks route ${url.pathname}`);
+    });
+
+    const human = await invoke(["status", ID], dependencies, false);
+    expect(human.code).toBe(0);
+    expect(human.stdout).toContain(
+      `milestone 1: mirror locked https://basescan.org/address/${ESCROW}`,
+    );
+    expect(human.stdout.filter((line) => /^\d+ event-/.test(line))).toHaveLength(10);
+    expect(human.stdout.at(-1)).toBe("12 event-12 2026-10-08T12:12:00.000Z");
+
+    const json = await invoke(["status", ID], dependencies);
+    expect(json.value).toMatchObject({
+      task: { id: ID },
+      chainState: { workOrderId: ID },
+      nextAfter: 12,
+    });
+    expect((json.value!.events as { sequence: number }[]).map(({ sequence }) => sequence)).toEqual(
+      Array.from({ length: 12 }, (_, index) => index + 1),
+    );
+    expect(requests).toEqual([
+      { path: `/v1/work-orders/${ID}/chain-state`, authorization: "Bearer test-bearer" },
+      { path: `/v1/work-orders/${ID}/events?wait=0`, authorization: "Bearer test-bearer" },
+      { path: `/v1/work-orders/${ID}/chain-state`, authorization: "Bearer test-bearer" },
+      { path: `/v1/work-orders/${ID}/events?wait=0`, authorization: "Bearer test-bearer" },
+    ]);
+  });
+
+  it("falls back to public status when no task token is available", async () => {
+    const { client, dependencies } = await fixture(false);
+    const result = await invoke(["status", ID], dependencies);
+    expect(result.code).toBe(0);
     expect(result.value!.task).toEqual(card());
     expect(client.publicTask).toHaveBeenCalledWith(ID);
-    expect(unlock).not.toHaveBeenCalled();
+    expect(client.getOrder).not.toHaveBeenCalled();
   });
 
   it("prints the server receipt URL for a settled public task", async () => {
@@ -877,6 +964,84 @@ describe("vapi task", () => {
     expect(result.code).toBe(1);
     expect((result.value!.error as { message: string }).message).toContain("Run vapi login");
     expect((result.value!.error as { message: string }).message).toContain("sign-in");
+  });
+
+  it("prints a structured task server error as one code-prefixed human line", async () => {
+    const { dependencies } = await fixture(true);
+    delete dependencies.tasks!.client;
+    const deployment = await fakeClient().deployment();
+    dependencies.fetchImpl = vi.fn(async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname === "/api/tasks/readiness") return Response.json(deployment);
+      if (url.pathname === `/v1/work-orders/${ID}`) return Response.json(order());
+      if (url.pathname === `/v1/work-orders/${ID}/proposals`)
+        return Response.json(
+          {
+            error: {
+              code: "invalid_signature",
+              message: "signature does not match providerAddress",
+            },
+          },
+          { status: 400 },
+        );
+      throw new Error(`Unexpected Tasks route ${url.pathname}`);
+    });
+    const result = await invoke(
+      ["propose", ID, "--price", "95", "--duration", "10m", "--note", BRIEF],
+      dependencies,
+      false,
+    );
+    expect(result.code).toBe(1);
+    expect(result.stdout).toEqual([]);
+    expect(result.stderr).toEqual(["invalid_signature: signature does not match providerAddress"]);
+    const json = await invoke(
+      ["propose", ID, "--price", "95", "--duration", "10m", "--note", BRIEF],
+      dependencies,
+    );
+    expect(json.value).toEqual({
+      ok: false,
+      error: {
+        code: "invalid_signature",
+        message: "signature does not match providerAddress",
+      },
+    });
+  });
+
+  it("prints a plaintext release preparation failure with its HTTP code", async () => {
+    const { dependencies } = await fixture(true);
+    const deployment = await fakeClient().deployment();
+    let transportClient: TasksClient | undefined;
+    dependencies.tasks!.client = (options) => (transportClient = createTasksClient(options));
+    const chain = fakeChain();
+    chain.release = vi.fn(async ({ escrowId, idempotencyKey }) => {
+      try {
+        await transportClient!.releaseEscrow(escrowId, { idempotencyKey });
+      } catch (error) {
+        throw safeTasksChainError(error, false, false);
+      }
+      throw new Error("release unexpectedly continued");
+    });
+    dependencies.tasks!.chain = chain;
+    const requests: string[] = [];
+    dependencies.fetchImpl = vi.fn(async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      requests.push(`${request.method} ${url.pathname}`);
+      if (url.pathname === `/v1/work-orders/${ID}`) return Response.json(milestoneOrder());
+      if (url.pathname === "/api/tasks/readiness") return Response.json(deployment);
+      if (url.pathname === `/v1/escrows/${PROPOSAL_ID}/release`)
+        return new Response("upstream exploded", { status: 500 });
+      throw new Error(`Unexpected Tasks route ${url.pathname}`);
+    });
+
+    const result = await invoke(["release", ID], dependencies, false);
+    expect(result.code).toBe(1);
+    expect(result.stderr).toEqual(["http_500: upstream exploded"]);
+    expect(result.stderr.join("\n")).not.toContain("Tasks service request failed");
+    expect(requests.filter((request) => request.endsWith(`/release`))).toEqual([
+      `POST /v1/escrows/${PROPOSAL_ID}/release`,
+    ]);
   });
 
   it("maps an insufficient Tasks scope through the CLI command", async () => {
@@ -1811,7 +1976,7 @@ describe("vapi task", () => {
       });
       dependencies.tasks!.chain = fakeChain({ deliver });
       const code = await runCli(
-        ["task", "deliver", ID, "--files", path, "--note", "Finished", "--json"],
+        ["task", "deliver", ID, "--files", path, "--note", "Finished", "--no-wait", "--json"],
         { stdout: (line) => stdout.push(line), stderr: () => {} },
         dependencies,
       );
@@ -1828,6 +1993,40 @@ describe("vapi task", () => {
         }),
       );
       expect(deliver).toHaveBeenCalledOnce();
+    });
+
+    it("reports when delivery resumes from the server only in human output", async () => {
+      const client = fakeClient({ getOrder: async () => milestoneOrder({ role: "provider" }) });
+      const { home, dependencies } = await fixture(true, client);
+      const path = join(home, "result.txt");
+      await writeFile(path, "result");
+      dependencies.tasks!.chain = fakeChain({
+        deliver: vi.fn(async () => ({
+          ...chainResult("delivered"),
+          resumedFromServer: true as const,
+        })),
+      });
+
+      const human = await invoke(
+        ["deliver", ID, "--files", path, "--note", "Finished"],
+        dependencies,
+        false,
+      );
+      expect(human.code).toBe(0);
+      expect(human.stdout).toContain("delivery recorded");
+      expect(human.stdout).toContain(
+        "The server had already recorded this delivery; resumed from it.",
+      );
+
+      const json = await invoke(
+        ["deliver", ID, "--files", path, "--note", "Finished"],
+        dependencies,
+      );
+      expect(json.code).toBe(0);
+      expect(json.value).toMatchObject({ result: { resumedFromServer: true } });
+      expect(json.stdout.join("\n")).not.toContain(
+        "The server had already recorded this delivery; resumed from it.",
+      );
     });
 
     it("emits one canonical error when delivery chain execution fails", async () => {
@@ -1985,7 +2184,7 @@ describe("vapi task", () => {
 
       const stderr: string[] = [];
       const code = await runCli(
-        ["task", "sign", ID, "--yes"],
+        ["task", "sign", ID, "--yes", "--no-wait"],
         { stdout: (line) => stdout.push(line), stderr: (line) => stderr.push(line) },
         dependencies,
       );
@@ -2380,6 +2579,7 @@ describe("vapi task", () => {
             "task",
             verb,
             ID,
+            ...(["release"].includes(verb) ? ["--no-wait"] : []),
             ...(verb === "dispute" ? ["--evidence-hash", `0x${"ab".repeat(32)}`, "--yes"] : []),
           ],
           { stdout: (line) => stdout.push(line), stderr: () => {} },
@@ -2658,6 +2858,223 @@ describe("vapi task", () => {
       await writeProfile(approval.home, { approveAboveUsd: 10 });
       approval.dependencies.tasks!.chain = fakeChain();
       expect((await invoke(["fund", ID], approval.dependencies)).code).toBe(3);
+    });
+
+    it("waits for a worker escrow creation and reports its confirmed block", async () => {
+      const scope = scopeFixture();
+      const accepted = tasksResponseSchemas.signScope.parse({
+        scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
+        milestone: {
+          id: PROPOSAL_ID,
+          workOrderId: ID,
+          ordinal: 1,
+          termsHash: scope.termsHash,
+          termsFrozenAt: NOW.toISOString(),
+        },
+      });
+      let created = false;
+      let polls = 0;
+      const client = fakeClient({
+        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+        signScope: vi.fn(async () => accepted),
+      });
+      const { dependencies, store } = await fixture(true, client);
+      const self = (await store.list()).find((wallet) => wallet.name === "worker")!.address!;
+      const requests: string[] = [];
+      const transport = createTasksClient({
+        baseUrl: "https://api.vapinetwork.ai",
+        token: "test-bearer",
+        fetch: vi.fn(async (input, init) => {
+          const request = new Request(input, init);
+          requests.push(`${request.method} ${new URL(request.url).pathname}`);
+          if (!created) return Response.json(signingOrder("provider", self));
+          polls++;
+          return Response.json(
+            milestoneOrder({ role: "provider", escrowState: polls === 1 ? null : "created" }),
+          );
+        }),
+      });
+      client.getOrder = transport.getOrder.bind(transport);
+      dependencies.tasks!.chain = fakeChain({
+        createEscrow: vi.fn(async () => {
+          created = true;
+          return { ...chainResult(), blockNumber: "123" };
+        }),
+      });
+      const sleeps: number[] = [];
+      let clock = NOW.getTime();
+      dependencies.now = () => new Date(clock);
+      dependencies.tasks!.sleep = vi.fn(async (milliseconds) => {
+        sleeps.push(milliseconds);
+        clock += milliseconds;
+      });
+
+      const result = await invoke(["sign", ID, "--yes", "--timeout", "120s"], dependencies, false);
+
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain(
+        "confirmed on chain in block 123, waiting for vAPI to index…",
+      );
+      expect(result.stdout).toContain("escrow created");
+      expect(sleeps).toEqual([3_000]);
+      expect(requests).toHaveLength(5);
+      expect(new Set(requests)).toEqual(new Set([`GET /v1/work-orders/${ID}`]));
+    });
+
+    it("skips post-operation polling with --no-wait", async () => {
+      const client = fakeClient({ getOrder: vi.fn(async () => milestoneOrder()) });
+      const { dependencies, home } = await fixture(true, client);
+      await writeProfile(home);
+      const chain = fakeChain();
+      dependencies.tasks!.chain = chain;
+      const result = await invoke(["fund", ID, "--yes", "--no-wait"], dependencies);
+      expect(result.code).toBe(0);
+      expect(result.value).toMatchObject({ wait: null });
+      expect(client.getOrder).toHaveBeenCalledTimes(1);
+      const human = await invoke(["fund", ID, "--yes", "--no-wait"], dependencies, false);
+      expect(human.stdout.join("\n")).not.toContain("waiting for vAPI to index");
+    });
+
+    it.each(["fund", "release"])(
+      "reports resumed %s preparations in human output",
+      async (verb) => {
+        const client = fakeClient({ getOrder: vi.fn(async () => milestoneOrder()) });
+        const { dependencies, home } = await fixture(true, client);
+        await writeProfile(home);
+        const action = vi.fn(async () => ({ ...chainResult(), resumedFromServer: true as const }));
+        dependencies.tasks!.chain = fakeChain({ [verb]: action });
+        const result = await invoke(
+          [verb, ID, ...(verb === "fund" ? ["--yes"] : []), "--no-wait"],
+          dependencies,
+          false,
+        );
+        expect(result.code).toBe(0);
+        expect(result.stdout).toContain(
+          "The server had already prepared this task operation; resumed from it.",
+        );
+        expect(action).toHaveBeenCalledOnce();
+      },
+    );
+
+    it("waits for funding to become locked", async () => {
+      const client = fakeClient({ getOrder: vi.fn(async () => milestoneOrder()) });
+      const { dependencies, home } = await fixture(true, client);
+      await writeProfile(home);
+      dependencies.tasks!.chain = fakeChain();
+      const result = await invoke(["fund", ID, "--yes", "--timeout", "120s"], dependencies);
+      expect(result.code).toBe(0);
+      expect(result.value).toMatchObject({ wait: { reached: true, polls: 1, elapsedMs: 0 } });
+    });
+
+    it.each([true, false])(
+      "preserves a polling server error (json=%s) without repeating funding",
+      async (json) => {
+        let funded = false;
+        const client = fakeClient({
+          getOrder: vi.fn(async () => {
+            if (funded)
+              throw new TasksClientError("http", "Indexer unavailable", 503, "indexer_down");
+            return milestoneOrder();
+          }),
+        });
+        const { dependencies, home } = await fixture(true, client);
+        await writeProfile(home);
+        const fund = vi.fn(async () => {
+          funded = true;
+          return chainResult();
+        });
+        dependencies.tasks!.chain = fakeChain({ fund });
+        const result = await invoke(["fund", ID, "--yes", "--timeout", "9s"], dependencies, json);
+        expect(result.code).toBe(1);
+        if (json)
+          expect(result.value).toMatchObject({
+            error: { code: "indexer_down", message: "Indexer unavailable" },
+          });
+        else expect(result.stderr.join("\n")).toContain("indexer_down: Indexer unavailable");
+        expect(fund).toHaveBeenCalledOnce();
+      },
+    );
+
+    it("keeps a confirmed funding successful when indexing times out", async () => {
+      const client = fakeClient({
+        getOrder: vi.fn(async () => milestoneOrder({ escrowState: "created" })),
+      });
+      const { dependencies, home } = await fixture(true, client);
+      await writeProfile(home);
+      dependencies.tasks!.chain = fakeChain();
+      let clock = NOW.getTime();
+      dependencies.now = () => new Date(clock);
+      dependencies.tasks!.sleep = vi.fn(async (milliseconds) => {
+        clock += milliseconds;
+      });
+      const result = await invoke(["fund", ID, "--yes", "--timeout", "6s"], dependencies);
+      expect(result.code).toBe(0);
+      expect(result.value).toMatchObject({ wait: { reached: false, elapsedMs: 6_000 } });
+      expect(result.stderr).toEqual([
+        `vAPI has not indexed the funding yet after 6s; run vapi task status ${ID} later.`,
+      ]);
+      expect(dependencies.tasks!.chain!.fund).toHaveBeenCalledOnce();
+    });
+
+    it.each(["0", "0s"])("rejects indexing timeout %s before mutation", async (timeout) => {
+      const { dependencies } = await fixture(true);
+      const chain = fakeChain();
+      dependencies.tasks!.chain = chain;
+      const result = await invoke(["fund", ID, "--yes", "--timeout", timeout], dependencies);
+      expect(result.code).toBe(1);
+      expect(result.value).toMatchObject({ error: { code: "usage_error" } });
+      expect(chain.fund).not.toHaveBeenCalled();
+    });
+
+    it("accepts --timeout for delivery and waits for submitted escrow", async () => {
+      let delivered = false;
+      const client = fakeClient({
+        getOrder: vi.fn(async () =>
+          milestoneOrder({
+            role: "provider",
+            escrowState: delivered ? "submitted" : "locked",
+            milestoneState: delivered ? "delivered" : "funded",
+          }),
+        ),
+      });
+      const { dependencies, home } = await fixture(true, client);
+      const path = join(home, "delivery.txt");
+      await writeFile(path, "done");
+      dependencies.tasks!.chain = fakeChain({
+        deliver: vi.fn(async () => {
+          delivered = true;
+          return chainResult("delivered");
+        }),
+      });
+      const result = await invoke(
+        ["deliver", ID, "--files", path, "--note", "Done", "--timeout", "9s"],
+        dependencies,
+      );
+      expect(result.code).toBe(0);
+      expect(result.value).toMatchObject({ wait: { reached: true, polls: 1 } });
+    });
+
+    it("waits for release settlement", async () => {
+      let released = false;
+      const client = fakeClient({
+        getOrder: vi.fn(async () =>
+          milestoneOrder({
+            escrowState: released ? "resolved" : "locked",
+            milestoneState: released ? "released" : "funded",
+            resolution: released ? "release" : null,
+          }),
+        ),
+      });
+      const { dependencies } = await fixture(true, client);
+      dependencies.tasks!.chain = fakeChain({
+        release: vi.fn(async () => {
+          released = true;
+          return chainResult("released");
+        }),
+      });
+      const result = await invoke(["release", ID, "--timeout", "9s"], dependencies);
+      expect(result.code).toBe(0);
+      expect(result.value).toMatchObject({ wait: { reached: true, polls: 1 } });
     });
 
     it("keeps task copy in the product vocabulary", () => {

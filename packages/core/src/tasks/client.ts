@@ -185,22 +185,27 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         try {
           errorBody = JSON.parse(raw) as unknown;
         } catch {
-          /* Use the status text below. */
+          /* Use a bounded plain-text body below. */
         }
         const parsed = serverErrorSchema.safeParse(errorBody);
         const server = parsed.success ? parsed.data : undefined;
         const nested = typeof server?.error === "object" ? server.error : undefined;
+        const serverCode = nested?.code ?? server?.code;
+        const serverMessage =
+          (typeof server?.error === "string" ? server.error : nested?.message) || server?.message;
+        const fallback = response.statusText || `HTTP ${response.status}`;
         const message =
-          (typeof server?.error === "string" ? server.error : nested?.message) ||
-          server?.message ||
-          response.statusText ||
-          `HTTP ${response.status}`;
-        const debugBody = process.env.VAPI_DEBUG_HTTP ? ` [body: ${raw.slice(0, 600)}]` : "";
+          response.status === 401 || response.status === 403
+            ? (serverCode ?? fallback)
+            : serverMessage ||
+              (errorBody === undefined && raw.trim()
+                ? raw.replace(/\s+/gu, " ").trim().slice(0, 300)
+                : fallback);
         throw new TasksClientError(
           "http",
-          message + debugBody,
+          message,
           response.status,
-          nested?.code ?? server?.code,
+          serverCode,
           response.headers.get("Retry-After") ?? undefined,
         );
       }

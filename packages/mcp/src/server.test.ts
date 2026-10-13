@@ -195,6 +195,36 @@ describe("Agent Cash MCP marketplace tools", () => {
     await server.close();
   });
 
+  it("publishes object output schemas only for tools that declare structured output", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => {
+      throw new Error("No network in output schema tests.");
+    });
+    const server = createVapiServer({
+      account: privateKeyToAccount(PRIVATE_KEY),
+      config: getDefaultConfig({}),
+      env: {},
+      fetchImpl,
+    });
+
+    try {
+      const tools = (await server.listTools()).tools;
+      for (const tool of tools) {
+        if ("outputSchema" in tool) expect(tool.outputSchema).toMatchObject({ type: "object" });
+      }
+
+      const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+      expect(byName["auth.status"]).toBeDefined();
+      expect(byName["auth.status"]).not.toHaveProperty("outputSchema");
+      expect(byName["swarm.run"]).toBeDefined();
+      expect(byName["swarm.run"]).not.toHaveProperty("outputSchema");
+      expect(byName["call.pay"]?.outputSchema).toMatchObject({ type: "object" });
+      expect(byName["docs.search"]?.outputSchema).toMatchObject({ type: "object" });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      await server.close();
+    }
+  });
+
   it("keeps deprecated aliases behavior-compatible and emits one deprecation line", async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
@@ -252,7 +282,7 @@ describe("Agent Cash MCP marketplace tools", () => {
           outcome: "paid",
           listing: { providerHost: "93.184.216.34", source: "direct" },
           policy: { capsApplied: false },
-          client: { name: "vapi-network", version: "0.9.0" },
+          client: { name: "vapi-network", version: "0.9.1" },
         },
       ],
     });

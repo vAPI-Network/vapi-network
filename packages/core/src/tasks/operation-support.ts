@@ -148,7 +148,10 @@ export async function taskRequest<T>(
           "not_signed_in",
           `${verb} needs sign-in. ${options.signInHint}`,
         );
-      throw new TaskOperationError(error.serverCode ?? error.code, error.message);
+      throw new TaskOperationError(
+        error.serverCode ?? (error.status ? `http_${error.status}` : error.code),
+        error.message,
+      );
     }
     throw error;
   }

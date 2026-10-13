@@ -10,8 +10,10 @@ import {
   type LinkResult,
 } from "@vapi-network/core/agent-link";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 
 import { createVapiServer, type VapiServerOptions } from "../server.js";
+import { authStatusTool } from "./auth.js";
 
 const API_BASE = "https://api.vapinetwork.ai/";
 const USER_CODE = "BCDF-GHJK";
@@ -213,9 +215,10 @@ describe("auth.link", () => {
     expect(Object.keys(linkInput.properties ?? {})).toEqual(["label", "account"]);
     expect(linkInput.properties).not.toHaveProperty("scope");
     expect(link).toHaveProperty("outputSchema");
-    expect(status).toHaveProperty("outputSchema");
-    for (const tool of [link, status]) {
-      const fields = schemaPropertyNames(tool?.outputSchema);
+    expect(status).toBeDefined();
+    expect(status).not.toHaveProperty("outputSchema");
+    for (const schema of [link?.outputSchema, z.toJSONSchema(authStatusTool.outputSchema)]) {
+      const fields = schemaPropertyNames(schema);
       for (const field of FORBIDDEN_RESULT_FIELDS) expect(fields).not.toContain(field);
     }
     await server.close();

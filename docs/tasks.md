@@ -2,26 +2,26 @@
 
 The task SDK in `@vapi-network/core/tasks` talks to the vAPI task API and builds delivery manifests. The CLI verbs below use its shared actions. The local MCP server exposes the same task verbs.
 
-| Verb                | What it does                                                      | Moves money            |
-| ------------------- | ----------------------------------------------------------------- | ---------------------- |
-| `search`            | Finds tasks and workers.                                          | No                     |
-| `show`              | Shows a task and its public receipt.                              | No                     |
-| `post`              | Posts a task or open bounty.                                      | No                     |
-| `propose`           | Proposes terms for a task.                                        | No                     |
-| `submit`            | Submits proof for an open bounty.                                 | No                     |
-| `award`             | Awards a proposal or submission.                                  | No                     |
-| `sign`              | Signs the task scope.                                             | No                     |
-| `fund`              | Locks USDC in escrow.                                             | Yes                    |
-| `deliver`           | Delivers files and a note through a manifest hash.                | No                     |
-| `release`           | Pays the worker from escrow.                                      | Yes                    |
-| `refund`            | Returns escrowed USDC to the poster.                              | Yes                    |
-| `dispute`           | Raises a dispute and charges the contract dispute fee.            | Yes                    |
-| `counter-evidence`  | Submits counter-evidence and pays the verified dispute fee.       | Yes                    |
-| `resolve-unmatched` | Resolves a dispute after an unanswered counter-evidence deadline. | Yes                    |
-| `message`           | Sends a message to the other party.                               | No                     |
-| `thread`            | Reads the task message thread.                                    | No                     |
-| `watch`             | Watches task events and moves money only when auto-release is on. | Only with auto-release |
-| `status`            | Shows the current task status.                                    | No                     |
+| Verb                | What it does                                                                 | Moves money            |
+| ------------------- | ---------------------------------------------------------------------------- | ---------------------- |
+| `search`            | Finds tasks and workers.                                                     | No                     |
+| `show`              | Shows a task and its public receipt.                                         | No                     |
+| `post`              | Posts a task or open bounty.                                                 | No                     |
+| `propose`           | Proposes terms for a task.                                                   | No                     |
+| `submit`            | Submits proof for an open bounty.                                            | No                     |
+| `award`             | Awards a proposal or submission.                                             | No                     |
+| `sign`              | Signs the task scope.                                                        | No                     |
+| `fund`              | Locks USDC in escrow.                                                        | Yes                    |
+| `deliver`           | Delivers files and a note through a manifest hash.                           | No                     |
+| `release`           | Pays the worker from escrow.                                                 | Yes                    |
+| `refund`            | Returns escrowed USDC to the poster.                                         | Yes                    |
+| `dispute`           | Raises a dispute and charges the contract dispute fee.                       | Yes                    |
+| `counter-evidence`  | Submits counter-evidence and pays the verified dispute fee.                  | Yes                    |
+| `resolve-unmatched` | Resolves a dispute after an unanswered counter-evidence deadline.            | Yes                    |
+| `message`           | Sends a message to the other party.                                          | No                     |
+| `thread`            | Reads the task message thread.                                               | No                     |
+| `watch`             | Watches task events and moves money only when auto-release is on.            | Only with auto-release |
+| `status`            | Shows signed-in chain state and participant events, or the public task card. | No                     |
 
 This table is copied from the vAPI public API reference; change both tables together.
 
@@ -36,10 +36,10 @@ vapi task post --title <text> --brief <file|-> --amount <usd> --deadline <durati
 vapi task propose <id> --price <usd> --duration <duration> --note <text> [--account <name>]
 vapi task submit <id> --proof <https-url> [--proof <https-url>...] [--file <path>...] [--account <name>]
 vapi task award <id> <proposalId> [--account <name>]
-vapi task sign <id> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
-vapi task fund <id> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
-vapi task deliver <id> --files <path...> --note <text> [--counterparty <0x…>] [--account <name>] [--json]
-vapi task release <id> [--counterparty <0x…>] [--account <name>] [--json]
+vapi task sign <id> [--yes] [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
+vapi task fund <id> [--yes] [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
+vapi task deliver <id> --files <path...> --note <text> [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
+vapi task release <id> [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
 vapi task refund <id> [--counterparty <0x…>] [--account <name>] [--json]
 vapi task dispute <id> --evidence-hash <0x + 64 hex> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
 vapi task counter-evidence <id> --evidence-hash <0x + 64 hex> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
@@ -99,6 +99,8 @@ A route this server does not offer reports `<verb> is not available on this serv
 | `3`       | Approval needed in non-interactive mode                               |
 
 At exit `1`, invalid usage has JSON `{ok:false,error:{code:"usage_error",message}}`. At exit `2`, policy refusal JSON has `ok:false`, `reason: "policy.perTask"` or `reason: "policy.perDay"`, and `money`. Other thrown task errors use the same nested error object with their specific code. Funding and fee approval exits use `{ok:false,approval:true,money}`. Scope signing without non-interactive consent exits `3` as `{ok:false,approval:true,reason:"approval_needed",terms}` plus the standard task output metadata.
+
+Sign, fund, deliver and release wait up to `120s` for vAPI to index a confirmed transaction. `--no-wait` skips polling, while `--timeout` changes the limit. An indexing timeout prints a status command and keeps exit code `0` because the transaction succeeded.
 
 ## MCP
 

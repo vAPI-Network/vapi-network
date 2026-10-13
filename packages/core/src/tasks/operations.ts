@@ -48,7 +48,7 @@ import {
 } from "./actions.js";
 import { canonicalJson } from "./canonical-json.js";
 import { TasksChainUnavailableError, type TasksChain } from "./chain-port.js";
-import type { TasksClient } from "./client.js";
+import { TasksClientError, type TasksClient } from "./client.js";
 import type { PendingTransactions } from "./pending-transactions.js";
 import { parseFeeBp, taskMoney, type TaskMoney } from "./money.js";
 import {
@@ -57,6 +57,7 @@ import {
   TaskOperationError,
   cachedMoneyClient,
   fundingRefusalReason,
+  isMissingTaskEntity,
   orderReceipts,
   proposalTerms,
   taskMoneySnapshot,
@@ -375,7 +376,59 @@ export async function showTask(
       : {}),
   };
 }
-export async function taskStatus(context: TaskOperationContext, input: { id: string }) {
+export async function taskStatus(
+  context: TaskOperationContext,
+  input: { id: string; signedIn: boolean },
+) {
+  if (input.signedIn) {
+    const chainState = await taskRequest(
+      "status",
+      "chainState",
+      async () => {
+        try {
+          return await context.client.chainState(input.id);
+        } catch (error) {
+          if (error instanceof TasksClientError && error.status === 404) {
+            if (isMissingTaskEntity(error.serverCode, error.message))
+              throw new TaskOperationError("not_found", error.message);
+            throw new TaskOperationError(
+              "not_available",
+              "GET /v1/work-orders/:id/chain-state is not available on this server.",
+            );
+          }
+          throw error;
+        }
+      },
+      context,
+    );
+    if (chainState.workOrderId !== input.id)
+      throw new TaskOperationError("invalid_response", "The response belongs to a different task.");
+    const page = await taskRequest(
+      "status",
+      "events",
+      async () => {
+        try {
+          return await context.client.events(input.id, { wait: 0 });
+        } catch (error) {
+          if (error instanceof TasksClientError && error.status === 404) {
+            if (isMissingTaskEntity(error.serverCode, error.message)) return null;
+            throw new TaskOperationError(
+              "not_available",
+              "GET /v1/work-orders/:id/events is not available on this server.",
+            );
+          }
+          throw error;
+        }
+      },
+      context,
+    );
+    return {
+      task: { id: input.id },
+      chainState,
+      events: page ? [...page.events].sort((a, b) => a.sequence - b.sequence) : null,
+      nextAfter: page?.nextAfter ?? null,
+    };
+  }
   const task = await taskRequest(
     "status",
     "publicTask",

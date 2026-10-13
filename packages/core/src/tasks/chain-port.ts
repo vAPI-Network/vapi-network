@@ -12,6 +12,8 @@ export type TasksChainResult = {
   txHash: `0x${string}`;
   operation: CreateEscrowResponse["operation"];
   milestone: Pick<TaskMilestone, "id" | "workOrderId" | "state" | "escrowState" | "resolution">;
+  resumedFromServer?: true;
+  blockNumber?: string;
 };
 
 export type TasksEscrowOperation = {

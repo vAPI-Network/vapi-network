@@ -50,6 +50,7 @@ import {
   taskStateMatches,
   taskStatus,
   threadTask,
+  waitForMilestone,
   type PendingTransactions,
   type TaskOperationContext,
   type TasksChain,
@@ -74,6 +75,10 @@ const moneyParticipant = {
     )
     .optional(),
 };
+const waitForIndexer = z
+  .boolean()
+  .default(true)
+  .describe("Wait up to 60 seconds for vAPI to index the chain result before returning.");
 const cursor = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 function usdWithinEscrow(value: string, positive = false): boolean {
   try {
@@ -162,17 +167,18 @@ export const tasksAwardTool = descriptor(
   { ...participant, proposalId: id },
 );
 export const tasksSignTool = descriptor(
-  "Does not move money. Sign the current counterparty scope locally after the human confirms the money direction via counterparty; a worker may also create the unfunded escrow with the local vault wallet.",
-  moneyParticipant,
+  "Signs the user's own task scope locally with the user's vault wallet after the human confirms the money direction via counterparty; a worker may also create the unfunded escrow; nothing is custodial. Does not move money. Waits up to 60 seconds for vAPI to index a created escrow by default.",
+  { ...moneyParticipant, wait: waitForIndexer },
 );
 export const tasksFundTool = descriptor(
-  "Moves money: locks the task amount in USDC escrow subject to the acting wallet's policy and daily cap. MCP cannot grant human approval; amounts above the approval threshold are refused with approval:true.",
-  moneyParticipant,
+  "Executes the user's own funding of this task from the user's vault wallet, within the spend policy the user configured; nothing is custodial. MCP cannot grant human approval; amounts above the approval threshold are refused with approval:true. Waits up to 60 seconds for vAPI to index the locked escrow by default.",
+  { ...moneyParticipant, wait: waitForIndexer },
 );
 export const tasksDeliverTool = descriptor(
-  "Does not move money. Upload local delivery files, freeze the manifest and record delivery with the local vault wallet.",
+  "Does not move money. Upload local delivery files, freeze the manifest and record delivery with the local vault wallet. Waits up to 60 seconds for vAPI to index the delivery by default.",
   {
     ...moneyParticipant,
+    wait: waitForIndexer,
     files: z.array(localPath).min(TASK_LIMITS.deliveryFilesMin).max(TASK_LIMITS.deliveryFilesMax),
     note: z
       .string()
@@ -181,26 +187,26 @@ export const tasksDeliverTool = descriptor(
   },
 );
 export const tasksReleaseTool = descriptor(
-  "Moves money: pays the worker from escrow with the local vault wallet. Returns gross · fee · net using the deployed fee.",
-  moneyParticipant,
+  "Executes the user's own payment to the worker from task escrow with the user's vault wallet; nothing is custodial. Returns gross · fee · net using the deployed fee. Waits up to 60 seconds for vAPI to index the release by default.",
+  { ...moneyParticipant, wait: waitForIndexer },
 );
 export const tasksRefundTool = descriptor(
-  "Moves money: returns escrowed USDC to the poster with the local vault wallet. Returns gross · fee · net using the deployed fee.",
+  "Executes the user's own refund of escrowed USDC to the poster with the user's vault wallet; nothing is custodial. Returns gross · fee · net using the deployed fee.",
   moneyParticipant,
 );
 export const tasksDisputeTool = descriptor(
-  "Moves money: approves the verified dispute fee and raises a dispute with the local vault wallet. Applies task and daily caps; MCP refuses human approval with approval:true. Accepts a precomputed evidence hash.",
+  "Executes the user's own approval of the verified dispute fee and raises a dispute with the user's vault wallet; nothing is custodial. Applies task and daily caps; MCP refuses human approval with approval:true. Accepts a precomputed evidence hash.",
   {
     ...moneyParticipant,
     evidenceHash: z.string().regex(TASK_LIMITS.disputeEvidenceHash),
   },
 );
 export const tasksCounterEvidenceTool = descriptor(
-  "Moves money: approves the verified dispute fee and submits counter-evidence as the non-opener before the onchain deadline. Applies task and daily caps; MCP refuses human approval with approval:true.",
+  "Executes the user's own counter-evidence submission and approval of the verified dispute fee with the user's vault wallet as the non-opener before the onchain deadline; nothing is custodial. Applies task and daily caps; MCP refuses human approval with approval:true.",
   { ...moneyParticipant, evidenceHash: z.string().regex(TASK_LIMITS.disputeEvidenceHash) },
 );
 export const tasksResolveUnmatchedTool = descriptor(
-  "Moves money: resolves an unmatched dispute after the onchain counter-evidence deadline when no counter-evidence was submitted.",
+  "Executes the user's own resolution of an unmatched dispute with the user's vault wallet after the onchain counter-evidence deadline when no counter-evidence was submitted; nothing is custodial.",
   moneyParticipant,
 );
 export const tasksMessageTool = descriptor(
@@ -228,8 +234,8 @@ export const tasksWatchTool = descriptor(
   },
 );
 export const tasksStatusTool = descriptor(
-  "Does not move money. Read the public task card and receipt URL when settled; sign-in is not required.",
-  { id },
+  "Does not move money. Read signed-in chain state and participant events, or the public task card without sign-in.",
+  participant,
 );
 
 export type TasksOverrides = {
@@ -414,6 +420,29 @@ export function createTasksTools(options: TasksToolsOptions) {
     };
   }
 
+  async function waitAfterChain(
+    ctx: TaskOperationContext,
+    orderId: string,
+    milestoneId: string,
+    target: "created" | "locked" | "delivered" | "released",
+  ) {
+    return await taskRequest(
+      target,
+      "getOrder",
+      () =>
+        waitForMilestone(ctx.client, {
+          orderId,
+          milestoneId,
+          target,
+          timeoutMs: 60_000,
+          intervalMs: 3_000,
+          ...(options.sleep === undefined ? {} : { sleep: options.sleep }),
+          now,
+        }),
+      ctx,
+    );
+  }
+
   async function feeAction(
     verb: "dispute" | "counter-evidence",
     input: Input<typeof tasksDisputeTool>,
@@ -533,16 +562,18 @@ export function createTasksTools(options: TasksToolsOptions) {
       const ctx = await acting(input.wallet);
       const signerAddress = (await options.session.addressesFor(ctx.selected.name)).address;
       try {
-        return taskResult(
-          await signTaskScope(ctx, {
-            id: input.id,
-            counterparty: input.counterparty,
-            signerAddress,
-            bindings: createScopeBindings(home),
-            signMessage: async (message) =>
-              (await unlock(ctx.selected.name)()).signMessage(message),
-          }),
-        );
+        const outcome = await signTaskScope(ctx, {
+          id: input.id,
+          counterparty: input.counterparty,
+          signerAddress,
+          bindings: createScopeBindings(home),
+          signMessage: async (message) => (await unlock(ctx.selected.name)()).signMessage(message),
+        });
+        const wait =
+          input.wait && outcome.escrowCreation
+            ? await waitAfterChain(ctx, input.id, outcome.escrowCreation.milestone.id, "created")
+            : null;
+        return taskResult({ ...outcome, wait });
       } catch (error) {
         if (!(error instanceof TasksScopeCreationError)) throw error;
         try {
@@ -578,28 +609,38 @@ export function createTasksTools(options: TasksToolsOptions) {
         // Stdio has no human approval channel. Model arguments cannot grant approval.
         approval: { granted: false },
       });
-      return taskResult(outcome, !outcome.ok);
+      const wait =
+        input.wait && outcome.ok
+          ? await waitAfterChain(ctx, input.id, outcome.result.milestone.id, "locked")
+          : null;
+      return taskResult({ ...outcome, wait }, !outcome.ok);
     },
     async deliver(input: Input<typeof tasksDeliverTool>) {
       const files = (await Promise.all(input.files.map(readTaskFile))).map(
         ({ fileName: name, bytes, contentType }) => ({ name, bytes, contentType }),
       );
-      return taskResult(
-        await deliverTaskOperation(await acting(input.wallet), {
-          id: input.id,
-          ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
-          files,
-          note: input.note,
-        }),
-      );
+      const ctx = await acting(input.wallet);
+      const outcome = await deliverTaskOperation(ctx, {
+        id: input.id,
+        ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
+        files,
+        note: input.note,
+      });
+      const wait = input.wait
+        ? await waitAfterChain(ctx, input.id, outcome.result.milestone.id, "delivered")
+        : null;
+      return taskResult({ ...outcome, wait });
     },
     async release(input: Input<typeof tasksReleaseTool>) {
-      return taskResult(
-        await releaseTaskOperation(await acting(input.wallet), {
-          id: input.id,
-          ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
-        }),
-      );
+      const ctx = await acting(input.wallet);
+      const outcome = await releaseTaskOperation(ctx, {
+        id: input.id,
+        ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
+      });
+      const wait = input.wait
+        ? await waitAfterChain(ctx, input.id, outcome.result.milestone.id, "released")
+        : null;
+      return taskResult({ ...outcome, wait });
     },
     async refund(input: Input<typeof tasksRefundTool>) {
       return taskResult(
@@ -667,7 +708,15 @@ export function createTasksTools(options: TasksToolsOptions) {
       }
     },
     async status(input: Input<typeof tasksStatusTool>) {
-      return taskResult(await taskStatus(await context(undefined, true), { id: input.id }));
+      await options.wallets?.reload();
+      const publicOnly =
+        input.wallet === undefined &&
+        options.session.activeName === undefined &&
+        options.wallets !== undefined &&
+        options.wallets.names().length === 0;
+      const candidate = await context(input.wallet, publicOnly);
+      const ctx = candidate.token || publicOnly ? candidate : await context(undefined, true);
+      return taskResult(await taskStatus(ctx, { id: input.id, signedIn: Boolean(ctx.token) }));
     },
   };
 }

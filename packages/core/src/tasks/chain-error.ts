@@ -14,9 +14,13 @@ export function safeTasksChainError(
   let message = "Task chain operation failed.";
   if (cause instanceof TasksValidationError || cause instanceof TasksChainError)
     message = cause.message;
-  else if (cause instanceof TasksClientError)
-    message = `Tasks service request failed${cause.status === undefined ? "" : ` (status ${cause.status})`}.`;
-  else if (cause instanceof Error) {
+  else if (cause instanceof TasksClientError) {
+    const code = cause.serverCode ?? (cause.status ? `http_${cause.status}` : cause.code);
+    message =
+      cause.status === 401 || cause.status === 403
+        ? `${code} (status ${cause.status})`
+        : `${code}: ${cause.message}`;
+  } else if (cause instanceof Error) {
     const short =
       "shortMessage" in cause && typeof cause.shortMessage === "string"
         ? cause.shortMessage

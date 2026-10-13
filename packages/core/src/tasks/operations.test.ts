@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { recoverMessageAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -14,12 +15,15 @@ import {
   TaskOperationError,
   nextTaskEvents,
   postTask,
+  proposeTask,
   signTaskScope,
   taskPolicyForWallet,
   taskRequest,
+  taskStatus,
+  submitTask,
 } from "./operations.js";
 import { missingTasksChain, TasksChainUnavailableError, type TasksChain } from "./chain-port.js";
-import { TasksClientError, type TasksClient } from "./client.js";
+import { createTasksClient, TasksClientError, type TasksClient } from "./client.js";
 import { canonicalJson } from "./canonical-json.js";
 import { freezeScopeTerms } from "./scope-terms.js";
 
@@ -115,6 +119,28 @@ describe("taskRequest", () => {
       message: "This sign-in lacks Tasks access. Call auth.link again.",
     });
   });
+
+  it("uses HTTP status fallback codes while preserving server codes", async () => {
+    await expect(
+      taskRequest(
+        "status",
+        "chainState",
+        async () => Promise.reject(new TasksClientError("http", "upstream failed", 500)),
+        { signInHint: "Run vapi login." },
+      ),
+    ).rejects.toMatchObject({ code: "http_500", message: "upstream failed" });
+    await expect(
+      taskRequest(
+        "status",
+        "chainState",
+        async () =>
+          Promise.reject(
+            new TasksClientError("http", "The signature is invalid.", 422, "invalid_signature"),
+          ),
+        { signInHint: "Run vapi login." },
+      ),
+    ).rejects.toMatchObject({ code: "invalid_signature", message: "The signature is invalid." });
+  });
 });
 
 describe("nextTaskEvents", () => {
@@ -181,6 +207,190 @@ describe("postTask", () => {
     });
     expect(createOrder).toHaveBeenCalledOnce();
     expect(configureWebhook).toHaveBeenCalledOnce();
+  });
+});
+
+describe("signed proposal payloads", () => {
+  const deployment = {
+    configured: true as const,
+    network: "eip155:84532",
+    usdc: "0x1111111111111111111111111111111111111111",
+    escrowContract: "0x2222222222222222222222222222222222222222",
+  };
+
+  it.each(["propose", "submit"] as const)(
+    "canonicalizes the provider address for %s",
+    async (kind) => {
+      expect(worker.address).not.toBe(worker.address.toLowerCase());
+      let signedMessage = "";
+      const signMessage = vi.fn((message: string) => {
+        signedMessage = message;
+        return worker.signMessage({ message });
+      });
+      let recordedBody:
+        { signedPayload: Record<string, unknown>; signature: `0x${string}` } | undefined;
+      const fetch = vi.fn<typeof globalThis.fetch>(async (_input, init) => {
+        recordedBody = JSON.parse(String(init?.body));
+        const signedPayload = recordedBody!.signedPayload as { milestones: unknown[] };
+        return Response.json({
+          proposal: {
+            id: KEY,
+            workOrderId: ORDER,
+            providerAddress: worker.address.toLowerCase(),
+            state: "pending",
+            signedPayload,
+            signature: recordedBody!.signature,
+            signatureHash: HASH,
+            proposedMilestones: signedPayload.milestones,
+            acceptedAt: null,
+            createdAt: NOW.toISOString(),
+            updatedAt: NOW.toISOString(),
+          },
+        });
+      });
+      const client = Object.assign(createTasksClient({ baseUrl: "https://tasks.example", fetch }), {
+        getOrder: vi.fn().mockResolvedValue({
+          workOrder: { id: ORDER, title: "Build an API", description: "Build the public API." },
+        }),
+        publicTask: vi.fn().mockResolvedValue({
+          id: ORDER,
+          title: "Build an API",
+          briefFull: "Build the complete public API.",
+          durationSeconds: 3600,
+          amount: { gross: "1000000" },
+        }),
+        deployment: vi.fn().mockResolvedValue(deployment),
+      });
+      const context = {
+        ...operationFixture(),
+        client,
+      };
+      if (kind === "propose")
+        await proposeTask(context, {
+          id: ORDER,
+          price: 1_000_000n,
+          durationSeconds: 3600,
+          note: "I will build the complete public API.",
+          unlock: async () => ({ ...worker, signMessage }),
+        });
+      else
+        await submitTask(context, {
+          id: ORDER,
+          proof: [{ kind: "url", value: "https://example.com/proof" }],
+          files: [],
+          unlock: async () => ({ ...worker, signMessage }),
+        });
+      expect(fetch).toHaveBeenCalledOnce();
+      const body = recordedBody!;
+      const expected = body.signedPayload;
+      expect(expected.providerAddress).toBe(worker.address.toLowerCase());
+      const message = canonicalJson(expected);
+      expect(signedMessage).toBe(message);
+      await expect(recoverMessageAddress({ message, signature: body.signature })).resolves.toBe(
+        worker.address,
+      );
+    },
+  );
+});
+
+describe("taskStatus", () => {
+  const event = (sequence: number) => ({
+    sequence,
+    type: "task.event",
+    at: NOW.toISOString(),
+    actor: "actor",
+    payload: {},
+  });
+  const chainState = { workOrderId: ORDER, milestones: [], observedAt: NOW.toISOString() };
+
+  it("keeps the public status path when signed out", async () => {
+    const task = { id: ORDER, receiptUrl: null };
+    const client = { publicTask: vi.fn().mockResolvedValue(task) } as unknown as TasksClient;
+    await expect(
+      taskStatus({ ...operationFixture(), client }, { id: ORDER, signedIn: false }),
+    ).resolves.toEqual({ task });
+  });
+
+  it("returns signed chain state and sorted events", async () => {
+    const client = {
+      chainState: vi.fn().mockResolvedValue(chainState),
+      events: vi.fn().mockResolvedValue({ events: [event(3), event(1)], nextAfter: 3 }),
+    } as unknown as TasksClient;
+    await expect(
+      taskStatus({ ...operationFixture(), client }, { id: ORDER, signedIn: true }),
+    ).resolves.toEqual({
+      task: { id: ORDER },
+      chainState,
+      events: [event(1), event(3)],
+      nextAfter: 3,
+    });
+    expect(client.events).toHaveBeenCalledWith(ORDER, { wait: 0 });
+  });
+
+  it("keeps chain state when participant events return 404", async () => {
+    const client = {
+      chainState: vi.fn().mockResolvedValue(chainState),
+      events: vi.fn().mockRejectedValue(new TasksClientError("http", "Work order not found", 404)),
+    } as unknown as TasksClient;
+    await expect(
+      taskStatus({ ...operationFixture(), client }, { id: ORDER, signedIn: true }),
+    ).resolves.toEqual({
+      task: { id: ORDER },
+      chainState,
+      events: null,
+      nextAfter: null,
+    });
+  });
+
+  it("distinguishes missing tasks from an unavailable chain-state route", async () => {
+    for (const [error, expected] of [
+      [
+        new TasksClientError("http", "work order not found", 404, "work_order_not_found"),
+        { code: "not_found" },
+      ],
+      [
+        new TasksClientError("http", "route missing", 404),
+        {
+          code: "not_available",
+          message: "GET /v1/work-orders/:id/chain-state is not available on this server.",
+        },
+      ],
+    ] as const) {
+      const client = { chainState: vi.fn().mockRejectedValue(error) } as unknown as TasksClient;
+      await expect(
+        taskStatus({ ...operationFixture(), client }, { id: ORDER, signedIn: true }),
+      ).rejects.toMatchObject(expected);
+    }
+  });
+
+  it("identifies an unavailable events route instead of silently returning null", async () => {
+    const client = {
+      chainState: vi.fn().mockResolvedValue(chainState),
+      events: vi.fn().mockRejectedValue(new TasksClientError("http", "Cannot GET /events", 404)),
+    } as unknown as TasksClient;
+    await expect(
+      taskStatus({ ...operationFixture(), client }, { id: ORDER, signedIn: true }),
+    ).rejects.toMatchObject({
+      code: "not_available",
+      message: "GET /v1/work-orders/:id/events is not available on this server.",
+    });
+  });
+
+  it("rejects mismatched chain identities and propagates sanitized auth errors", async () => {
+    const mismatch = {
+      chainState: vi.fn().mockResolvedValue({ ...chainState, workOrderId: ESCROW }),
+    } as unknown as TasksClient;
+    await expect(
+      taskStatus({ ...operationFixture(), client: mismatch }, { id: ORDER, signedIn: true }),
+    ).rejects.toMatchObject({ code: "invalid_response" });
+    const denied = {
+      chainState: vi
+        .fn()
+        .mockRejectedValue(new TasksClientError("http", "token_expired", 401, "token_expired")),
+    } as unknown as TasksClient;
+    await expect(
+      taskStatus({ ...operationFixture(), client: denied }, { id: ORDER, signedIn: true }),
+    ).rejects.toMatchObject({ code: "not_signed_in" });
   });
 });
 

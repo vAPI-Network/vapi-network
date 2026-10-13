@@ -19,11 +19,11 @@ import { describe, expect, it, vi } from "vitest";
 import { TasksChainError, type TaskMilestone } from "./chain-port.js";
 import { canonicalJson } from "./canonical-json.js";
 import { createTasksChain as createRawTasksChain } from "./chain.js";
-import { TasksClientError, type TasksClient } from "./client.js";
+import { createTasksClient, TasksClientError, type TasksClient } from "./client.js";
 import { prepareDeliveryManifest } from "./delivery-manifest.js";
 import type { PendingTransaction, PendingTransactions } from "./pending-transactions.js";
 import { TASKS_CHAIN_ABI, TASKS_READ_ABI } from "./plan-guard.js";
-import { freezeScopeTerms } from "./scope-terms.js";
+import { freezeScopeTerms, milestoneTermsSchema } from "./scope-terms.js";
 import type {
   CreateEscrowResponse,
   DeploymentResponse,
@@ -160,6 +160,38 @@ const buyerOrder = {
   ],
 } as Extract<GetOrderResponse["workOrder"], { version: "work-order-view-v1" }>;
 
+function orderAfterFailedPrepare(
+  chainOperation: TaskMilestone["chainOperation"],
+  delivery: TaskMilestone["delivery"] = null,
+) {
+  return {
+    ...order,
+    milestones: [{ ...milestone, chainOperation, delivery }],
+  } as Extract<GetOrderResponse["workOrder"], { version: "work-order-view-v1" }>;
+}
+
+function transportOrder(selected: TaskMilestone = milestone) {
+  return {
+    ...order,
+    state: "awarded",
+    title: "Build adapter",
+    description: scopeBrief,
+    policyFamily: "software-api",
+    listingDeliveryTimeSeconds: null,
+    invitedProviderAddress: account.address,
+    threadId: null,
+    canFinalize: false,
+    proposals: [],
+    milestones: [{ ...selected, terms: milestoneTermsSchema.strip().parse(selected.terms) }],
+    events: [],
+    review: null,
+    publishedAt: null,
+    completedAt: null,
+    createdAt: milestone.createdAt,
+    updatedAt: milestone.updatedAt,
+  };
+}
+
 async function acceptedScope(scopeMilestoneId = milestoneId, trancheOrdinal = 1) {
   const signingPayload = {
     version: "work-scope-signature-v1" as const,
@@ -257,6 +289,46 @@ function operationFor(input: {
             data: input.data,
             value: "0",
           },
+  };
+}
+
+async function deliveryFixture(state: "prepared" | "submitted" | "confirmed" = "prepared") {
+  const note = "Delivered after an ambiguous prepare response.";
+  const manifest = await prepareDeliveryManifest(
+    [
+      {
+        fileId: "10000000-0000-4000-8000-000000000006",
+        fileName: "result.txt",
+        sha256: "12".repeat(32),
+        sizeBytes: 12,
+      },
+    ],
+    note,
+  );
+  const data = encodeFunctionData({
+    abi: TASKS_CHAIN_ABI,
+    functionName: "submitDelivery",
+    args: [manifest.manifestHash],
+  });
+  const operation = operationFor({
+    step: "submit-delivery",
+    data,
+    kind: "escrow-delivery",
+    state,
+  });
+  return {
+    note,
+    manifest,
+    data,
+    operation,
+    delivery: {
+      id: "10000000-0000-4000-8000-000000000009",
+      version: 1,
+      note,
+      manifest: manifest.manifest,
+      manifestHash: manifest.manifestHash,
+      submittedAt: "2026-01-01T00:00:00.000Z",
+    },
   };
 }
 
@@ -373,6 +445,7 @@ function fakeClient(overrides: Record<string, unknown> = {}): TasksClient {
     getOrder: vi.fn(async () => ({ workOrder: order })),
     getScopes: vi.fn(async () => ({ scopes: [await acceptedScope()] })),
     listOrders: vi.fn(),
+    abandonOperation: vi.fn(),
     recoverOperation: vi.fn(async () => ({
       ...response(operation("prepared")),
       recovered: false,
@@ -594,6 +667,7 @@ describe("createTasksChain", () => {
     const result = await chain.release({ escrowId: milestoneId, orderId, idempotencyKey: key });
 
     expect(result.operation.state).toBe("confirmed");
+    expect(result.blockNumber).toBe(BigInt("0x10").toString());
     expect(api.listOrders).not.toHaveBeenCalled();
     expect(api.recoverOperation).toHaveBeenCalledOnce();
     expect(api.recordTransaction).toHaveBeenCalledOnce();
@@ -637,6 +711,8 @@ describe("createTasksChain", () => {
     const replay = await chain.release(input);
 
     expect(replay.txHash).toBe(first.txHash);
+    expect(first.blockNumber).toBe("16");
+    expect(replay.blockNumber).toBeUndefined();
     expect(api.recoverOperation).toHaveBeenCalledTimes(1);
     expect(api.recordTransaction).toHaveBeenCalledTimes(1);
     expect(api.reconcileOperation).toHaveBeenCalledTimes(1);
@@ -1168,87 +1244,112 @@ describe("createTasksChain", () => {
     expect(api.fundEscrow).not.toHaveBeenCalled();
   });
 
-  it("signs and submits EIP-3009 funding with the exact durable authorization body", async () => {
-    const authDeployment = {
-      ...deployment,
-      capabilities: { erc3009Funding: true, vapiVerify: false },
-      eip3009Domain: {
-        name: "USDC",
-        version: "2",
-        chainId: 84532,
-        verifyingContract: usdc,
-      },
-    } satisfies Extract<DeploymentResponse, { configured: true }>;
-    let fundingData: Hex = "0x";
-    const api = fakeClient({
-      deployment: vi.fn(async () => authDeployment),
-      getOrder: vi.fn(async () => ({ workOrder: buyerOrder })),
-      fundEscrow: vi.fn(async (_id, body) => {
-        const authorization = body.authorization;
-        fundingData = encodeFunctionData({
-          abi: TASKS_CHAIN_ABI,
-          functionName: "fundWithAuthorization",
-          args: [
-            BigInt(authorization.validAfter),
-            BigInt(authorization.validBefore),
-            authorization.nonce,
-            authorization.signature,
-          ],
-        });
-        return anyResponse(
-          operationFor({
-            step: "fund-with-authorization",
-            data: fundingData,
-            kind: "escrow-funding",
-          }),
-        );
-      }),
-      reconcileOperation: vi.fn(async (_id, input) =>
-        anyResponse(
-          operationFor({
-            step: "fund-with-authorization",
-            data: fundingData,
-            kind: "escrow-funding",
-            state: "confirmed",
-            txHash: input.transactionHash,
-          }),
-        ),
-      ),
-    });
-    const chain = createTasksChain({
-      client: api,
-      account,
-      rpcFor: () =>
-        rpcHarness("success", [], undefined, true, {
-          clone: { state: 1 },
-          transaction: { to: escrow, data: fundingData },
-        }).client,
-      pending: memoryPending(),
-      now: () => new Date("2026-01-01T00:00:00.000Z"),
-      randomBytes: () => new Uint8Array(32).fill(7),
-    });
-
-    await expect(
-      chain.fund({
-        escrowId: milestoneId,
-        orderId,
-        grossBaseUnits: 1_000_000n,
-        idempotencyKey: key,
-      }),
-    ).resolves.toMatchObject({
-      operation: { step: "fund-with-authorization", state: "confirmed" },
-    });
-    expect(api.fundEscrow).toHaveBeenCalledWith(
-      milestoneId,
-      {
-        authorization: expect.objectContaining({
-          validAfter: "0",
-          nonce: `0x${"07".repeat(32)}`,
+  it.each([false, true])(
+    "signs and submits EIP-3009 funding (committed error=%s)",
+    async (committedError) => {
+      const authDeployment = {
+        ...deployment,
+        capabilities: { erc3009Funding: true, vapiVerify: false },
+        eip3009Domain: {
+          name: "USDC",
+          version: "2",
+          chainId: 84532,
+          verifyingContract: usdc,
+        },
+      } satisfies Extract<DeploymentResponse, { configured: true }>;
+      let fundingData: Hex = "0x";
+      let prepareAttempted = false;
+      const api = fakeClient({
+        deployment: vi.fn(async () => authDeployment),
+        getOrder: vi.fn(async () => ({
+          workOrder: {
+            ...buyerOrder,
+            milestones: [
+              {
+                ...milestone,
+                chainOperation: prepareAttempted
+                  ? operationFor({
+                      step: "fund-with-authorization",
+                      data: fundingData,
+                      kind: "escrow-funding",
+                    })
+                  : null,
+              },
+            ],
+          },
+        })),
+        fundEscrow: vi.fn(async (_id, body) => {
+          const authorization = body.authorization;
+          fundingData = encodeFunctionData({
+            abi: TASKS_CHAIN_ABI,
+            functionName: "fundWithAuthorization",
+            args: [
+              BigInt(authorization.validAfter),
+              BigInt(authorization.validBefore),
+              authorization.nonce,
+              authorization.signature,
+            ],
+          });
+          prepareAttempted = true;
+          if (committedError) throw new TasksClientError("http", "prepare failed", 500);
+          return anyResponse(
+            operationFor({
+              step: "fund-with-authorization",
+              data: fundingData,
+              kind: "escrow-funding",
+            }),
+          );
         }),
-      },
-      { idempotencyKey: key },
-    );
-  });
+        reconcileOperation: vi.fn(async (_id, input) =>
+          anyResponse(
+            operationFor({
+              step: "fund-with-authorization",
+              data: fundingData,
+              kind: "escrow-funding",
+              state: "confirmed",
+              txHash: input.transactionHash,
+            }),
+          ),
+        ),
+      });
+      const chain = createTasksChain({
+        client: api,
+        account,
+        rpcFor: () =>
+          rpcHarness("success", [], undefined, true, {
+            clone: { state: 1 },
+            transaction: { to: escrow, data: fundingData },
+          }).client,
+        pending: memoryPending(),
+        now: () => new Date("2026-01-01T00:00:00.000Z"),
+        randomBytes: () => new Uint8Array(32).fill(7),
+      });
+
+      await expect(
+        chain.fund({
+          escrowId: milestoneId,
+          orderId,
+          grossBaseUnits: 1_000_000n,
+          idempotencyKey: key,
+        }),
+      ).resolves.toMatchObject({
+        operation: { step: "fund-with-authorization", state: "confirmed" },
+        ...(committedError ? { resumedFromServer: true } : {}),
+      });
+      expect(api.fundEscrow).toHaveBeenCalledOnce();
+      expect(api.abandonOperation).not.toHaveBeenCalled();
+      expect(api.fundEscrow).toHaveBeenCalledWith(
+        milestoneId,
+        {
+          authorization: expect.objectContaining({
+            validAfter: "0",
+            nonce: `0x${"07".repeat(32)}`,
+          }),
+        },
+        { idempotencyKey: key },
+      );
+    },
+  );
 
   it("uses the verified clone offer deadline for EIP-3009 funding", async () => {
     const authDeployment = {
@@ -1311,82 +1412,108 @@ describe("createTasksChain", () => {
     expect(api.fundEscrow).toHaveBeenCalledOnce();
   });
 
-  it("funds through approve then deposit with distinct stable operation keys", async () => {
-    const approveData = encodeFunctionData({
-      abi: TASKS_CHAIN_ABI,
-      functionName: "approve",
-      args: [escrow, 1_000_000n],
-    });
-    const depositData = encodeFunctionData({ abi: TASKS_CHAIN_ABI, functionName: "depositFunds" });
-    const approve = operationFor({
-      step: "approve-usdc",
-      data: approveData,
-      to: usdc,
-      kind: "escrow-funding",
-    });
-    const deposit = operationFor({
-      step: "deposit-funds",
-      data: depositData,
-      kind: "escrow-funding",
-      state: "prepared",
-    });
-    const api = fakeClient({
-      getOrder: vi.fn(async () => ({ workOrder: buyerOrder })),
-      fundEscrow: vi.fn(async () => anyResponse(approve)),
-      recoverOperation: vi.fn(async () => ({
-        ...anyResponse(deposit),
-        recovered: false,
-        scanComplete: true,
-      })),
-      recordTransaction: vi.fn(async (_id, input) =>
-        anyResponse(
-          operationFor({
-            step: "deposit-funds",
-            data: depositData,
-            kind: "escrow-funding",
-            state: "submitted",
-            txHash: input.transactionHash,
-          }),
+  it.each([false, true])(
+    "funds through approve then deposit (committed error=%s)",
+    async (committedError) => {
+      const approveData = encodeFunctionData({
+        abi: TASKS_CHAIN_ABI,
+        functionName: "approve",
+        args: [escrow, 1_000_000n],
+      });
+      const depositData = encodeFunctionData({
+        abi: TASKS_CHAIN_ABI,
+        functionName: "depositFunds",
+      });
+      const approve = operationFor({
+        step: "approve-usdc",
+        data: approveData,
+        to: usdc,
+        kind: "escrow-funding",
+      });
+      const deposit = operationFor({
+        step: "deposit-funds",
+        data: depositData,
+        kind: "escrow-funding",
+        state: "prepared",
+      });
+      let prepareAttempted = false;
+      const api = fakeClient({
+        getOrder: vi.fn(async () => ({
+          workOrder: {
+            ...buyerOrder,
+            milestones: [
+              {
+                ...milestone,
+                chainOperation: prepareAttempted ? approve : null,
+              },
+            ],
+          },
+        })),
+        fundEscrow: vi.fn(async () => {
+          prepareAttempted = true;
+          if (committedError) throw new TasksClientError("http", "prepare failed", 500);
+          return anyResponse(approve);
+        }),
+        recoverOperation: vi.fn(async () => ({
+          ...anyResponse(deposit),
+          recovered: false,
+          scanComplete: true,
+        })),
+        recordTransaction: vi.fn(async (_id, input) =>
+          anyResponse(
+            operationFor({
+              step: "deposit-funds",
+              data: depositData,
+              kind: "escrow-funding",
+              state: "submitted",
+              txHash: input.transactionHash,
+            }),
+          ),
         ),
-      ),
-      reconcileOperation: vi.fn(async (_id, input) =>
-        input.step === "approve-usdc"
-          ? anyResponse(deposit)
-          : anyResponse(
-              operationFor({
-                step: "deposit-funds",
-                data: depositData,
-                kind: "escrow-funding",
-                state: "confirmed",
-                txHash: input.transactionHash,
-              }),
-            ),
-      ),
-    });
-    const rpc = rpcHarness("success", [], undefined, true, {
-      clone: { state: 1 },
-      transaction: { to: usdc, data: approveData },
-    });
-    const chain = createTasksChain({
-      client: api,
-      account,
-      rpcFor: () => rpc.client,
-      pending: memoryPending(),
-    });
+        reconcileOperation: vi.fn(async (_id, input) =>
+          input.step === "approve-usdc"
+            ? anyResponse(deposit)
+            : anyResponse(
+                operationFor({
+                  step: "deposit-funds",
+                  data: depositData,
+                  kind: "escrow-funding",
+                  state: "confirmed",
+                  txHash: input.transactionHash,
+                }),
+              ),
+        ),
+      });
+      const rpc = rpcHarness("success", [], undefined, true, {
+        clone: { state: 1 },
+        transaction: { to: usdc, data: approveData },
+      });
+      const chain = createTasksChain({
+        client: api,
+        account,
+        rpcFor: () => rpc.client,
+        pending: memoryPending(),
+      });
 
-    await expect(
-      chain.fund({
-        escrowId: milestoneId,
-        orderId,
-        grossBaseUnits: 1_000_000n,
-        idempotencyKey: key,
-      }),
-    ).resolves.toMatchObject({ operation: { step: "deposit-funds", state: "confirmed" } });
-    const reconcileCalls = vi.mocked(api.reconcileOperation).mock.calls;
-    expect(reconcileCalls.map((call) => call[1].step)).toEqual(["approve-usdc", "deposit-funds"]);
-    expect(reconcileCalls[0]?.[2].idempotencyKey).not.toBe(reconcileCalls[1]?.[2].idempotencyKey);
-    expect(api.recordTransaction).toHaveBeenCalledOnce();
-  });
+      await expect(
+        chain.fund({
+          escrowId: milestoneId,
+          orderId,
+          grossBaseUnits: 1_000_000n,
+          idempotencyKey: key,
+        }),
+      ).resolves.toMatchObject({
+        operation: { step: "deposit-funds", state: "confirmed" },
+        ...(committedError ? { resumedFromServer: true } : {}),
+      });
+      expect(api.fundEscrow).toHaveBeenCalledOnce();
+      expect(api.abandonOperation).not.toHaveBeenCalled();
+      const reconcileCalls = vi.mocked(api.reconcileOperation).mock.calls;
+      expect(reconcileCalls.map((call) => call[1].step)).toEqual(["approve-usdc", "deposit-funds"]);
+      expect(reconcileCalls[0]?.[2].idempotencyKey).not.toBe(reconcileCalls[1]?.[2].idempotencyKey);
+      expect(api.recordTransaction).toHaveBeenCalledOnce();
+    },
+  );
 
   it("refuses a new dispute signature when the fee allowance is too small", async () => {
     const evidenceHash = `0x${"ab".repeat(32)}` as Hex;
@@ -1421,52 +1548,148 @@ describe("createTasksChain", () => {
     expect(rpc.raw).toHaveLength(0);
   });
 
-  it("creates an escrow from the first uncreated milestone", async () => {
-    const uncreated = { ...milestone, escrowState: null, escrowContract: factory };
-    const createOrder = { ...order, milestones: [uncreated] } as typeof order;
-    const data = encodeFunctionData({
-      abi: TASKS_CHAIN_ABI,
-      functionName: "createEscrow",
-      args: [buyer, usdc, 1_000_000n, 3_600n, 600n, termsHash, keccak256(stringToHex(milestoneId))],
-    });
-    const submitted = operationFor({
-      step: "create-escrow",
-      data,
-      to: factory,
-      kind: "escrow-create",
-    });
-    const api = fakeClient({
-      getOrder: vi.fn(async () => ({ workOrder: createOrder })),
-      createEscrow: vi.fn(async () => anyResponse(submitted, uncreated)),
-      reconcileOperation: vi.fn(async (_id, input) =>
-        anyResponse(
-          operationFor({
-            step: "create-escrow",
-            data,
-            to: factory,
-            kind: "escrow-create",
-            state: "confirmed",
-            txHash: input.transactionHash,
-          }),
-          uncreated,
+  it.each([false, true])(
+    "creates an escrow from the first uncreated milestone (committed error=%s)",
+    async (committedError) => {
+      const uncreated = { ...milestone, escrowState: null, escrowContract: factory };
+      const createOrder = { ...order, milestones: [uncreated] } as typeof order;
+      const data = encodeFunctionData({
+        abi: TASKS_CHAIN_ABI,
+        functionName: "createEscrow",
+        args: [
+          buyer,
+          usdc,
+          1_000_000n,
+          3_600n,
+          600n,
+          termsHash,
+          keccak256(stringToHex(milestoneId)),
+        ],
+      });
+      const submitted = operationFor({
+        step: "create-escrow",
+        data,
+        to: factory,
+        kind: "escrow-create",
+      });
+      let prepareAttempted = false;
+      const api = fakeClient({
+        getOrder: vi.fn(async () => ({
+          workOrder: {
+            ...createOrder,
+            milestones: [
+              {
+                ...uncreated,
+                chainOperation: prepareAttempted ? submitted : null,
+              },
+            ],
+          },
+        })),
+        createEscrow: vi.fn(async () => {
+          prepareAttempted = true;
+          if (committedError) throw new TasksClientError("http", "prepare failed", 500);
+          return anyResponse(submitted, uncreated);
+        }),
+        reconcileOperation: vi.fn(async (_id, input) =>
+          anyResponse(
+            operationFor({
+              step: "create-escrow",
+              data,
+              to: factory,
+              kind: "escrow-create",
+              state: "confirmed",
+              txHash: input.transactionHash,
+            }),
+            uncreated,
+          ),
         ),
-      ),
-    });
-    const rpc = rpcHarness("success", [], undefined, true, {
-      transaction: { to: factory, data },
-    });
-    const chain = createTasksChain({
-      client: api,
-      account,
-      rpcFor: () => rpc.client,
-      pending: memoryPending(),
-    });
+      });
+      const rpc = rpcHarness("success", [], undefined, true, {
+        transaction: { to: factory, data },
+      });
+      const chain = createTasksChain({
+        client: api,
+        account,
+        rpcFor: () => rpc.client,
+        pending: memoryPending(),
+      });
 
-    await expect(chain.createEscrow({ orderId, idempotencyKey: key })).resolves.toMatchObject({
-      operation: { state: "confirmed", step: "create-escrow" },
-    });
-    expect(api.createEscrow).toHaveBeenCalledWith(orderId, { idempotencyKey: key });
-  });
+      await expect(chain.createEscrow({ orderId, idempotencyKey: key })).resolves.toMatchObject({
+        operation: { state: "confirmed", step: "create-escrow" },
+        ...(committedError ? { resumedFromServer: true } : {}),
+      });
+      expect(api.createEscrow).toHaveBeenCalledOnce();
+      expect(api.abandonOperation).not.toHaveBeenCalled();
+      expect(api.createEscrow).toHaveBeenCalledWith(orderId, { idempotencyKey: key });
+    },
+  );
+
+  it.each(["absent", "ambiguous", "other-party"] as const)(
+    "refuses %s escrow creation recovery after a failed prepare",
+    async (failure) => {
+      const uncreated = { ...milestone, escrowState: null, escrowContract: factory };
+      const second = { ...uncreated, id: "10000000-0000-4000-8000-000000000016", ordinal: 2 };
+      const data = encodeFunctionData({
+        abi: TASKS_CHAIN_ABI,
+        functionName: "createEscrow",
+        args: [
+          buyer,
+          usdc,
+          1_000_000n,
+          3_600n,
+          600n,
+          termsHash,
+          keccak256(stringToHex(milestoneId)),
+        ],
+      });
+      const saved = operationFor({
+        step: "create-escrow",
+        kind: "escrow-create",
+        to: factory,
+        data,
+      });
+      let prepareAttempted = false;
+      const api = fakeClient({
+        getOrder: vi.fn(async () => ({
+          workOrder: {
+            ...order,
+            ...(prepareAttempted && failure === "other-party"
+              ? {
+                  proposals: [{ ...order.proposals[0]!, providerAddress: buyer }],
+                }
+              : {}),
+            milestones: [uncreated, second].map((item) => ({
+              ...item,
+              chainOperation: prepareAttempted && failure !== "absent" ? saved : null,
+            })),
+          },
+        })),
+        createEscrow: vi.fn(async () => {
+          prepareAttempted = true;
+          throw new TasksClientError("http", "prepare failed", 500);
+        }),
+      });
+      const signTransaction = vi.fn(account.signTransaction.bind(account));
+      const rpc = rpcHarness();
+      const chain = createTasksChain({
+        client: api,
+        account: { ...account, signTransaction },
+        rpcFor: () => rpc.client,
+        pending: memoryPending(),
+      });
+      await expect(chain.createEscrow({ orderId, idempotencyKey: key })).rejects.toThrow(
+        failure === "other-party"
+          ? "does not match the authenticated task party"
+          : "http_500: prepare failed",
+      );
+      expect(api.createEscrow).toHaveBeenCalledOnce();
+      expect(api.getOrder).toHaveBeenCalledTimes(2);
+      expect(api.getScopes).not.toHaveBeenCalled();
+      expect(signTransaction).not.toHaveBeenCalled();
+      expect(api.abandonOperation).not.toHaveBeenCalled();
+      expect(rpc.raw).toHaveLength(0);
+    },
+  );
 
   it("keeps escrow creation preparations separate for later milestones in the same order", async () => {
     const secondMilestoneId = "10000000-0000-4000-8000-000000000016";
@@ -1681,6 +1904,494 @@ describe("createTasksChain", () => {
         note,
       }),
     ).rejects.toMatchObject({ broadcast: false });
+  });
+
+  it("resumes a delivery the server committed but answered 500 for", async () => {
+    const fixture = await deliveryFixture();
+    const requests: Array<{ method: string; pathname: string }> = [];
+    let prepareAttempted = false;
+    const followupRead = vi.fn();
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      requests.push({ method: init?.method ?? "GET", pathname: url.pathname });
+      if (init?.method === "POST" && url.pathname === `/v1/escrows/${milestoneId}/deliver`) {
+        prepareAttempted = true;
+        return new Response("internal", { status: 500 });
+      }
+      if (init?.method === "GET" && url.pathname === `/v1/work-orders/${orderId}`) {
+        if (prepareAttempted) followupRead();
+        return Response.json({
+          workOrder: transportOrder(
+            prepareAttempted
+              ? { ...milestone, chainOperation: fixture.operation, delivery: fixture.delivery }
+              : milestone,
+          ),
+        });
+      }
+      throw new Error(`Unexpected request ${init?.method} ${url.pathname}`);
+    });
+    const transport = createTasksClient({
+      baseUrl: "https://tasks.example",
+      fetch: fetch as typeof globalThis.fetch,
+    });
+    const recoverOperation = vi.fn(async () => ({
+      ...anyResponse(fixture.operation),
+      recovered: false,
+      scanComplete: true,
+    }));
+    const api = fakeClient({
+      deliverEscrow: transport.deliverEscrow,
+      getOrder: vi.fn(transport.getOrder),
+      abandonOperation: vi.fn(),
+      recoverOperation,
+      recordTransaction: vi.fn(async (_id, input) =>
+        anyResponse(
+          operationFor({
+            step: "submit-delivery",
+            data: fixture.data,
+            kind: "escrow-delivery",
+            state: "submitted",
+            txHash: input.transactionHash,
+          }),
+        ),
+      ),
+      reconcileOperation: vi.fn(async (_id, input) =>
+        anyResponse(
+          operationFor({
+            step: "submit-delivery",
+            data: fixture.data,
+            kind: "escrow-delivery",
+            state: "confirmed",
+            txHash: input.transactionHash,
+          }),
+        ),
+      ),
+    });
+    const signTransaction = vi.fn(account.signTransaction.bind(account));
+    const signingAccount = { ...account, signTransaction } as LocalAccount;
+    const rpc = rpcHarness("success", [], undefined, true, {
+      clone: { buyer, seller: account.address, state: 2 },
+    });
+    const chain = createTasksChain({
+      client: api,
+      account: signingAccount,
+      rpcFor: () => rpc.client,
+      pending: memoryPending(),
+      now: () => new Date("2026-10-09T00:00:00.000Z"),
+    });
+
+    await expect(
+      chain.deliver({
+        escrowId: milestoneId,
+        orderId,
+        idempotencyKey: key,
+        manifest: fixture.manifest,
+        note: fixture.note,
+      }),
+    ).resolves.toMatchObject({
+      resumedFromServer: true,
+      operation: { state: "confirmed", step: "submit-delivery" },
+    });
+    expect(requests.filter((request) => request.method === "POST")).toEqual([
+      { method: "POST", pathname: `/v1/escrows/${milestoneId}/deliver` },
+    ]);
+    expect(requests.slice(requests.findIndex((request) => request.method === "POST") + 1)).toEqual([
+      { method: "GET", pathname: `/v1/work-orders/${orderId}` },
+      { method: "GET", pathname: `/v1/work-orders/${orderId}` },
+    ]);
+    expect(followupRead).toHaveBeenCalledTimes(2);
+    expect(followupRead.mock.invocationCallOrder[0]).toBeLessThan(
+      recoverOperation.mock.invocationCallOrder[0]!,
+    );
+    expect(requests.some((request) => request.pathname.includes("/abandon"))).toBe(false);
+    expect(api.abandonOperation).not.toHaveBeenCalled();
+    expect(signTransaction).toHaveBeenCalledOnce();
+    expect(rpc.raw).toHaveLength(1);
+    expect(rpc.methods.filter((method) => method === "eth_sendRawTransaction")).toHaveLength(1);
+  });
+
+  it("does not resume when the server has no operation and no delivery", async () => {
+    const fixture = await deliveryFixture();
+    const requests: Array<{ method: string; pathname: string }> = [];
+    let prepareAttempted = false;
+    const followupRead = vi.fn();
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      requests.push({ method: init?.method ?? "GET", pathname: url.pathname });
+      if (init?.method === "POST" && url.pathname === `/v1/escrows/${milestoneId}/deliver`) {
+        prepareAttempted = true;
+        return new Response("internal", { status: 500 });
+      }
+      if (init?.method === "GET" && url.pathname === `/v1/work-orders/${orderId}`) {
+        if (prepareAttempted) followupRead();
+        return Response.json({ workOrder: transportOrder() });
+      }
+      throw new Error(`Unexpected request ${init?.method} ${url.pathname}`);
+    });
+    const transport = createTasksClient({
+      baseUrl: "https://tasks.example",
+      fetch: fetch as typeof globalThis.fetch,
+    });
+    const api = fakeClient({
+      deliverEscrow: transport.deliverEscrow,
+      getOrder: vi.fn(transport.getOrder),
+      abandonOperation: vi.fn(),
+    });
+    const rpc = rpcHarness("success", [], undefined, true, {
+      clone: { buyer, seller: account.address, state: 2 },
+    });
+    const chain = createTasksChain({
+      client: api,
+      account,
+      rpcFor: () => rpc.client,
+      pending: memoryPending(),
+      now: () => new Date("2026-10-09T00:00:00.000Z"),
+    });
+
+    await expect(
+      chain.deliver({
+        escrowId: milestoneId,
+        orderId,
+        idempotencyKey: key,
+        manifest: fixture.manifest,
+        note: fixture.note,
+      }),
+    ).rejects.toMatchObject({
+      name: "TasksChainError",
+      message: "http_500: internal",
+      broadcast: false,
+    });
+    expect(requests.filter((request) => request.method === "POST")).toEqual([
+      { method: "POST", pathname: `/v1/escrows/${milestoneId}/deliver` },
+    ]);
+    expect(requests.slice(requests.findIndex((request) => request.method === "POST") + 1)).toEqual([
+      { method: "GET", pathname: `/v1/work-orders/${orderId}` },
+    ]);
+    expect(followupRead).toHaveBeenCalledOnce();
+    expect(api.abandonOperation).not.toHaveBeenCalled();
+    expect(rpc.raw).toHaveLength(0);
+  });
+
+  it("refuses a committed delivery with a different manifest hash", async () => {
+    const fixture = await deliveryFixture();
+    let prepareAttempted = false;
+    const deliverEscrow = vi.fn(async () => {
+      prepareAttempted = true;
+      throw new TasksClientError("http", "prepare failed", 500);
+    });
+    const api = fakeClient({
+      deliverEscrow,
+      getOrder: vi.fn(async () => ({
+        workOrder: prepareAttempted
+          ? orderAfterFailedPrepare(fixture.operation, {
+              ...fixture.delivery,
+              manifestHash: `0x${"ff".repeat(32)}`,
+            })
+          : order,
+      })),
+    });
+    const rpc = rpcHarness("success", [], undefined, true, {
+      clone: { buyer, seller: account.address, state: 2 },
+    });
+    const chain = createTasksChain({
+      client: api,
+      account,
+      rpcFor: () => rpc.client,
+      pending: memoryPending(),
+      now: () => new Date("2026-10-09T00:00:00.000Z"),
+    });
+
+    await expect(
+      chain.deliver({
+        escrowId: milestoneId,
+        orderId,
+        idempotencyKey: key,
+        manifest: fixture.manifest,
+        note: fixture.note,
+      }),
+    ).rejects.toMatchObject({
+      message: "The server recorded a different delivery manifest; refusing to continue.",
+      broadcast: false,
+    });
+    expect(deliverEscrow).toHaveBeenCalledOnce();
+    expect(rpc.raw).toHaveLength(0);
+  });
+
+  it("refuses a recorded delivery without a chain operation", async () => {
+    const fixture = await deliveryFixture();
+    let prepareAttempted = false;
+    const deliverEscrow = vi.fn(async () => {
+      prepareAttempted = true;
+      throw new TasksClientError("http", "prepare failed", 500);
+    });
+    const api = fakeClient({
+      deliverEscrow,
+      getOrder: vi.fn(async () => ({
+        workOrder: prepareAttempted ? orderAfterFailedPrepare(null, fixture.delivery) : order,
+      })),
+    });
+    const rpc = rpcHarness("success", [], undefined, true, {
+      clone: { buyer, seller: account.address, state: 2 },
+    });
+    const chain = createTasksChain({
+      client: api,
+      account,
+      rpcFor: () => rpc.client,
+      pending: memoryPending(),
+      now: () => new Date("2026-10-09T00:00:00.000Z"),
+    });
+
+    await expect(
+      chain.deliver({
+        escrowId: milestoneId,
+        orderId,
+        idempotencyKey: key,
+        manifest: fixture.manifest,
+        note: fixture.note,
+      }),
+    ).rejects.toMatchObject({
+      message:
+        "The server recorded this delivery but has no chain operation for it; open the task in the console to continue.",
+      broadcast: false,
+    });
+    expect(rpc.raw).toHaveLength(0);
+  });
+
+  it("resumes a release the server committed but answered 500 for", async () => {
+    const data = encodeFunctionData({ abi: TASKS_CHAIN_ABI, functionName: "releaseFunds" });
+    const prepared = operationFor({ step: "release-funds", data, state: "prepared" });
+    let prepareAttempted = false;
+    const releaseEscrow = vi.fn(async () => {
+      prepareAttempted = true;
+      throw new TasksClientError("http", "prepare failed", 500);
+    });
+    const api = fakeClient({
+      releaseEscrow,
+      getOrder: vi.fn(async () => ({
+        workOrder: prepareAttempted ? orderAfterFailedPrepare(prepared) : order,
+      })),
+      recoverOperation: vi.fn(async () => ({
+        ...anyResponse(prepared),
+        recovered: false,
+        scanComplete: true,
+      })),
+      recordTransaction: vi.fn(async (_id, input) =>
+        anyResponse(
+          operationFor({
+            step: "release-funds",
+            data,
+            state: "submitted",
+            txHash: input.transactionHash,
+          }),
+        ),
+      ),
+      reconcileOperation: vi.fn(async (_id, input) =>
+        anyResponse(
+          operationFor({
+            step: "release-funds",
+            data,
+            state: "confirmed",
+            txHash: input.transactionHash,
+          }),
+        ),
+      ),
+    });
+    const signTransaction = vi.fn(account.signTransaction.bind(account));
+    const signingAccount = { ...account, signTransaction } as LocalAccount;
+    const rpc = rpcHarness();
+    const chain = createTasksChain({
+      client: api,
+      account: signingAccount,
+      rpcFor: () => rpc.client,
+      pending: memoryPending(),
+      now: () => new Date("2026-10-09T00:00:00.000Z"),
+    });
+
+    await expect(
+      chain.release({ escrowId: milestoneId, orderId, idempotencyKey: key }),
+    ).resolves.toMatchObject({ resumedFromServer: true, operation: { state: "confirmed" } });
+    expect(releaseEscrow).toHaveBeenCalledOnce();
+    expect(signTransaction).toHaveBeenCalledOnce();
+    expect(rpc.raw).toHaveLength(1);
+  });
+
+  it("does not resume a release from a different operation kind or step", async () => {
+    const releaseData = encodeFunctionData({ abi: TASKS_CHAIN_ABI, functionName: "releaseFunds" });
+    const refundData = encodeFunctionData({ abi: TASKS_CHAIN_ABI, functionName: "refundBuyer" });
+    const candidates = [
+      operationFor({
+        step: "release-funds",
+        data: releaseData,
+        kind: "escrow-delivery",
+        state: "prepared",
+      }),
+      operationFor({
+        step: "refund-buyer",
+        data: refundData,
+        kind: "escrow-release",
+        state: "prepared",
+      }),
+    ];
+
+    for (const candidate of candidates) {
+      let prepareAttempted = false;
+      const releaseEscrow = vi.fn(async () => {
+        prepareAttempted = true;
+        throw new TasksClientError("http", "prepare failed", 500);
+      });
+      const api = fakeClient({
+        releaseEscrow,
+        getOrder: vi.fn(async () => ({
+          workOrder: prepareAttempted ? orderAfterFailedPrepare(candidate) : order,
+        })),
+      });
+      const signTransaction = vi.fn(account.signTransaction.bind(account));
+      const rpc = rpcHarness();
+      const chain = createTasksChain({
+        client: api,
+        account: { ...account, signTransaction } as LocalAccount,
+        rpcFor: () => rpc.client,
+        pending: memoryPending(),
+        now: () => new Date("2026-10-09T00:00:00.000Z"),
+      });
+
+      await expect(
+        chain.release({ escrowId: milestoneId, orderId, idempotencyKey: key }),
+      ).rejects.toMatchObject({ message: "http_500: prepare failed", broadcast: false });
+      expect(releaseEscrow).toHaveBeenCalledOnce();
+      expect(signTransaction).not.toHaveBeenCalled();
+      expect(rpc.raw).toHaveLength(0);
+    }
+  });
+
+  it("rejects an unsafe resumed release plan before signing or broadcasting", async () => {
+    const releaseData = encodeFunctionData({ abi: TASKS_CHAIN_ABI, functionName: "releaseFunds" });
+    const refundData = encodeFunctionData({ abi: TASKS_CHAIN_ABI, functionName: "refundBuyer" });
+    const candidates = [
+      operationFor({ step: "release-funds", data: releaseData, state: "prepared", to: factory }),
+      operationFor({ step: "release-funds", data: refundData, state: "prepared" }),
+    ];
+
+    for (const candidate of candidates) {
+      let prepareAttempted = false;
+      const releaseEscrow = vi.fn(async () => {
+        prepareAttempted = true;
+        throw new TasksClientError("http", "prepare failed", 500);
+      });
+      const api = fakeClient({
+        releaseEscrow,
+        getOrder: vi.fn(async () => ({
+          workOrder: prepareAttempted ? orderAfterFailedPrepare(candidate) : order,
+        })),
+        recoverOperation: vi.fn(async () => ({
+          ...anyResponse(candidate),
+          recovered: false,
+          scanComplete: true,
+        })),
+      });
+      const signTransaction = vi.fn(account.signTransaction.bind(account));
+      const rpc = rpcHarness();
+      const chain = createTasksChain({
+        client: api,
+        account: { ...account, signTransaction } as LocalAccount,
+        rpcFor: () => rpc.client,
+        pending: memoryPending(),
+        now: () => new Date("2026-10-09T00:00:00.000Z"),
+      });
+
+      await expect(
+        chain.release({ escrowId: milestoneId, orderId, idempotencyKey: key }),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining("Unsafe transaction plan:"),
+        broadcast: false,
+      });
+      expect(releaseEscrow).toHaveBeenCalledOnce();
+      expect(signTransaction).not.toHaveBeenCalled();
+      expect(rpc.raw).toHaveLength(0);
+    }
+  });
+
+  it.each([
+    ["network", "submitted"],
+    ["timeout", "confirmed"],
+  ] as const)(
+    "recovers a %s prepare failure from a %s operation without sending",
+    async (code, state) => {
+      const data = encodeFunctionData({ abi: TASKS_CHAIN_ABI, functionName: "releaseFunds" });
+      const resumed = operationFor({ step: "release-funds", data, state });
+      let prepareAttempted = false;
+      const releaseEscrow = vi.fn(async () => {
+        prepareAttempted = true;
+        throw new TasksClientError(code, `${code} prepare failed`);
+      });
+      const api = fakeClient({
+        releaseEscrow,
+        getOrder: vi.fn(async () => ({
+          workOrder: prepareAttempted ? orderAfterFailedPrepare(resumed) : order,
+        })),
+        reconcileOperation: vi.fn(async (_id, input) =>
+          anyResponse(
+            operationFor({
+              step: "release-funds",
+              data,
+              state: "confirmed",
+              txHash: input.transactionHash,
+            }),
+          ),
+        ),
+      });
+      const signTransaction = vi.fn(account.signTransaction.bind(account));
+      const rpc = rpcHarness("success", [], undefined, true, {
+        transaction: { to: escrow, data },
+      });
+      const chain = createTasksChain({
+        client: api,
+        account: { ...account, signTransaction } as LocalAccount,
+        rpcFor: () => rpc.client,
+        pending: memoryPending(),
+        now: () => new Date("2026-10-09T00:00:00.000Z"),
+      });
+
+      await expect(
+        chain.release({ escrowId: milestoneId, orderId, idempotencyKey: key }),
+      ).resolves.toMatchObject({ resumedFromServer: true, operation: { state: "confirmed" } });
+      expect(releaseEscrow).toHaveBeenCalledOnce();
+      expect(signTransaction).not.toHaveBeenCalled();
+      expect(rpc.raw).toHaveLength(0);
+      expect(rpc.methods).toContain("eth_getTransactionReceipt");
+      expect(rpc.methods).toContain("eth_getTransactionByHash");
+      if (state === "submitted") expect(api.reconcileOperation).toHaveBeenCalledOnce();
+      else expect(api.reconcileOperation).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not reprepare when the recovery order read fails", async () => {
+    let prepareAttempted = false;
+    const releaseEscrow = vi.fn(async () => {
+      prepareAttempted = true;
+      throw new TasksClientError("http", "prepare failed", 500);
+    });
+    const api = fakeClient({
+      releaseEscrow,
+      getOrder: vi.fn(async () => {
+        if (prepareAttempted) throw new TasksClientError("http", "read failed", 503);
+        return { workOrder: order };
+      }),
+    });
+    const rpc = rpcHarness();
+    const chain = createTasksChain({
+      client: api,
+      account,
+      rpcFor: () => rpc.client,
+      pending: memoryPending(),
+      now: () => new Date("2026-10-09T00:00:00.000Z"),
+    });
+
+    await expect(
+      chain.release({ escrowId: milestoneId, orderId, idempotencyKey: key }),
+    ).rejects.toMatchObject({ message: "http_503: read failed", broadcast: false });
+    expect(releaseEscrow).toHaveBeenCalledOnce();
+    expect(rpc.raw).toHaveLength(0);
   });
 
   it("rejects a locally altered delivery manifest before calling the server", async () => {
@@ -2337,6 +3048,43 @@ function feeFlow(
 }
 
 describe("V2 dispute executor", () => {
+  it.each(["dispute", "counterEvidence"] as const)(
+    "resumes a committed %s preparation after 500",
+    async (action) => {
+      const x = feeFlow(action);
+      let prepareAttempted = false;
+      x.prepare.mockImplementation(async () => {
+        prepareAttempted = true;
+        throw new TasksClientError("http", "prepare failed", 500);
+      });
+      vi.mocked(x.api.getOrder).mockImplementation(async () => ({
+        workOrder: {
+          ...order,
+          milestones: [
+            { ...milestone, chainOperation: prepareAttempted ? x.make("approve-usdc") : null },
+          ],
+        },
+      }));
+      const beforeSign = vi.fn(async () => {});
+      await expect(
+        x.chain[action]({
+          orderId,
+          escrowId: milestoneId,
+          idempotencyKey: key,
+          evidenceHash: x.evidenceHash,
+          feeBaseUnits: 20_000_000n,
+          beforeSign,
+        }),
+      ).resolves.toMatchObject({
+        resumedFromServer: true,
+        operation: { state: "confirmed", step: x.finalStep },
+      });
+      expect(x.prepare).toHaveBeenCalledOnce();
+      expect(x.signTransaction).toHaveBeenCalledTimes(2);
+      expect(beforeSign).toHaveBeenCalled();
+      expect(x.api.abandonOperation).not.toHaveBeenCalled();
+    },
+  );
   it("approves the verified fee then raises a dispute", async () => {
     const x = feeFlow("dispute");
     const result = await x.chain.dispute({

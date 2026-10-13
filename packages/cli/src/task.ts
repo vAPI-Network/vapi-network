@@ -51,6 +51,7 @@ import {
   taskStateMatches,
   taskStatus,
   threadTask,
+  waitForMilestone,
   TASK_LIMITS,
   TASK_WATCH_STATES,
   TASKS_CLIENT_VERBS,
@@ -98,10 +99,10 @@ export const TASK_HELP = `Usage:
   vapi task propose <id> --price <usd> --duration <duration> --note <text> [--account <name>] [--json]
   vapi task submit <id> --proof <https-url> [--proof <https-url>...] [--file <path>...] [--account <name>] [--json]
   vapi task award <id> <proposalId> [--account <name>] [--json]
-  vapi task sign <id> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
-  vapi task fund <id> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
-  vapi task deliver <id> --files <path...> --note <text> [--counterparty <0x…>] [--account <name>] [--json]
-  vapi task release <id> [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task sign <id> [--yes] [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task fund <id> [--yes] [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task deliver <id> --files <path...> --note <text> [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task release <id> [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task refund <id> [--counterparty <0x…>] [--account <name>] [--json]
   vapi task dispute <id> --evidence-hash <0x + 64 hex> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task counter-evidence <id> --evidence-hash <0x + 64 hex> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
@@ -124,7 +125,7 @@ Exit codes:
   2  policy refusal only (JSON ok:false with reason policy.perTask or policy.perDay)
   3  approval needed in non-interactive mode
 
-Fund, deliver, release, refund, dispute, counter-evidence, resolve-unmatched and watch auto-release sign with the local vault wallet. The CLI waits for two confirmations and records pending transactions for recovery. It never retries a chain mutation automatically.`;
+Fund, deliver, release, refund, dispute, counter-evidence, resolve-unmatched and watch auto-release sign with the local vault wallet. The CLI waits for two confirmations and records pending transactions for recovery. It never retries a chain mutation automatically. Sign, fund, deliver and release wait up to 120s for vAPI to index a confirmed transaction unless --no-wait is set; an indexing timeout keeps exit code 0.`;
 
 const IMPLEMENTED_VERBS = TASKS_CLIENT_VERBS;
 const USAGE = `Usage: vapi task <${IMPLEMENTED_VERBS.join("|")}>. Run vapi task --help.`;
@@ -136,6 +137,7 @@ export class TaskCommandError extends Error {
     readonly code: string,
     message: string,
     readonly manifestHash?: `0x${string}`,
+    readonly prefixCode = false,
   ) {
     super(message);
     this.name = "TaskCommandError";
@@ -145,7 +147,7 @@ export class TaskCommandError extends Error {
 function mapTaskError(error: unknown): unknown {
   if (error instanceof TaskInputError) return new UsageError(error.message);
   if (error instanceof TaskOperationError)
-    return new TaskCommandError(error.code, error.message, error.manifestHash);
+    return new TaskCommandError(error.code, error.message, error.manifestHash, true);
   return error;
 }
 
@@ -459,10 +461,12 @@ async function taskCommandInner(
                     : verb === "watch"
                       ? ["--until", "--timeout", "--interval"]
                       : []),
+      ...(["sign", "fund", "deliver", "release"].includes(verb!) ? ["--timeout"] : []),
     ]),
     booleanOptions: new Set([
       ...(verb === "search" ? ["--open"] : []),
       ...(["sign", "fund", "dispute", "counter-evidence"].includes(verb!) ? ["--yes"] : []),
+      ...(["sign", "fund", "deliver", "release"].includes(verb!) ? ["--no-wait"] : []),
       ...(verb === "watch" ? ["--auto-release"] : []),
     ]),
     repeatableOptions: new Set([
@@ -637,7 +641,7 @@ async function taskCommandInner(
       throw new UsageError("message needs text between 1 and 10000 characters.");
   }
   if (verb === "thread") cursor = optionalInteger(parsed.one("--after"), "--after");
-  const context = await taskContext(parsed, io, dependencies, verb === "status");
+  const context = await taskContext(parsed, io, dependencies);
   if (verb === "show" || verb === "status") {
     if (verb === "show" && context.token) {
       const result = await showTask(context, { id: id!, signedIn: true });
@@ -649,8 +653,30 @@ async function taskCommandInner(
     } else {
       const result =
         verb === "status"
-          ? await taskStatus(context, { id: id! })
+          ? await taskStatus(context, { id: id!, signedIn: Boolean(context.token) })
           : await showTask(context, { id: id!, signedIn: false });
+      if ("chainState" in result) {
+        const milestoneLines = result.chainState.milestones.map((milestone) => {
+          const ordinal =
+            "ordinal" in milestone &&
+            typeof milestone.ordinal === "number" &&
+            Number.isFinite(milestone.ordinal)
+              ? milestone.ordinal
+              : milestone.milestoneId;
+          const state = "state" in milestone.read ? ` ${milestone.read.state}` : "";
+          const explorer = milestone.explorerUrl ? ` ${milestone.explorerUrl}` : "";
+          return `milestone ${ordinal}: ${milestone.read.status}${state}${explorer}`;
+        });
+        const eventLines = (result.events ?? []).slice(-10).map((event) => {
+          const createdAt =
+            "createdAt" in event && typeof event.createdAt === "string"
+              ? event.createdAt
+              : event.at;
+          return `${event.sequence} ${event.type} ${createdAt}`;
+        });
+        taskOutput(io, json, context, verb, result, [...milestoneLines, ...eventLines]);
+        return;
+      }
       const task = result.task;
       taskOutput(
         io,
@@ -705,6 +731,11 @@ async function escrowTaskCommand(
 ): Promise<number | undefined> {
   taskCounterparty(parsed);
   if (verb === "watch") return await watchTask(id, parsed, json, io, dependencies, now);
+  const waitsForIndex = ["sign", "fund", "deliver", "release"].includes(verb);
+  const waitTimeoutText = parsed.one("--timeout") ?? "120s";
+  const waitTimeoutMs = waitsForIndex ? parseTaskDuration(waitTimeoutText, now) : undefined;
+  if (waitTimeoutMs !== undefined && waitTimeoutMs <= 0)
+    throw new UsageError("--timeout must be positive.");
   const disputeEvidenceHash = ["dispute", "counter-evidence"].includes(verb)
     ? required(parsed, "--evidence-hash")
     : undefined;
@@ -773,9 +804,26 @@ async function escrowTaskCommand(
           return await account.signMessage({ message });
         },
       });
-      taskOutput(io, json, displayContext, verb, result, [
+      if (!json && result.escrowCreation?.resumedFromServer)
+        io.stdout("The server had already prepared escrow creation; resumed from it.");
+      const wait = result.escrowCreation
+        ? await waitForTaskIndex(
+            context,
+            dependencies,
+            parsed,
+            json,
+            io,
+            id,
+            result.escrowCreation,
+            "created",
+            "escrow creation",
+            waitTimeoutText,
+            waitTimeoutMs!,
+          )
+        : null;
+      taskOutput(io, json, displayContext, verb, { ...result, wait }, [
         `Accepted scope for task ${id}.`,
-        ...(result.escrowCreation ? ["Created the task escrow."] : []),
+        ...(result.escrowCreation && (wait === null || wait.reached) ? ["escrow created"] : []),
       ]);
       return;
     } catch (error) {
@@ -810,7 +858,25 @@ async function escrowTaskCommand(
           taskOutput(io, false, context, verb, {}, [`Prepared delivery manifest ${manifestHash}.`]);
       },
     });
-    taskOutput(io, json, context, verb, outcome, [`Delivered task ${id}.`]);
+    const wait = await waitForTaskIndex(
+      context,
+      dependencies,
+      parsed,
+      json,
+      io,
+      id,
+      outcome.result,
+      "delivered",
+      "delivery",
+      waitTimeoutText,
+      waitTimeoutMs!,
+    );
+    taskOutput(io, json, context, verb, { ...outcome, wait }, [
+      ...(wait === null || wait.reached ? ["delivery recorded"] : []),
+      ...(outcome.result.resumedFromServer === true
+        ? ["The server had already recorded this delivery; resumed from it."]
+        : []),
+    ]);
     return;
   }
 
@@ -886,9 +952,36 @@ async function escrowTaskCommand(
     }
     if (!outcome.ok && "declined" in outcome)
       throw new TaskCommandError("not_approved", "Not approved; nothing was signed.");
-    taskOutput(io, json, context, verb, outcome, [
-      verb === "fund" ? `Funded task ${id}.` : `Completed task ${verb} for ${id}.`,
-    ]);
+    if (!json && outcome.result.resumedFromServer)
+      io.stdout("The server had already prepared this task operation; resumed from it.");
+    const wait =
+      verb === "fund"
+        ? await waitForTaskIndex(
+            context,
+            dependencies,
+            parsed,
+            json,
+            io,
+            id,
+            outcome.result,
+            "locked",
+            "funding",
+            waitTimeoutText,
+            waitTimeoutMs!,
+          )
+        : undefined;
+    taskOutput(
+      io,
+      json,
+      context,
+      verb,
+      wait === undefined ? outcome : { ...outcome, wait },
+      verb === "fund"
+        ? wait === null || wait?.reached
+          ? ["escrow funded"]
+          : []
+        : [`Completed task ${verb} for ${id}.`],
+    );
     return;
   }
 
@@ -900,7 +993,72 @@ async function escrowTaskCommand(
       : verb === "refund"
         ? await refundTaskOperation(context, settlementInput)
         : await resolveUnmatchedTaskOperation(context, settlementInput);
-  taskOutput(io, json, context, verb, result, [`Completed task ${verb} for ${id}.`]);
+  if (!json && result.result.resumedFromServer)
+    io.stdout("The server had already prepared this task operation; resumed from it.");
+  const wait =
+    verb === "release"
+      ? await waitForTaskIndex(
+          context,
+          dependencies,
+          parsed,
+          json,
+          io,
+          id,
+          result.result,
+          "released",
+          "release",
+          waitTimeoutText,
+          waitTimeoutMs!,
+        )
+      : undefined;
+  taskOutput(
+    io,
+    json,
+    context,
+    verb,
+    wait === undefined ? result : { ...result, wait },
+    verb === "release"
+      ? wait === null || wait?.reached
+        ? ["funds released"]
+        : []
+      : [`Completed task ${verb} for ${id}.`],
+  );
+}
+
+async function waitForTaskIndex(
+  context: TaskContext,
+  dependencies: CliDependencies,
+  parsed: Parsed,
+  json: boolean,
+  io: CliIo,
+  orderId: string,
+  result: { blockNumber?: string; milestone: { id: string } },
+  target: "created" | "locked" | "delivered" | "released",
+  description: "escrow creation" | "funding" | "delivery" | "release",
+  timeoutText: string,
+  timeoutMs: number,
+) {
+  if (parsed.has("--no-wait")) return null;
+  if (!json)
+    io.stdout(
+      `confirmed on chain${result.blockNumber === undefined ? "" : ` in block ${result.blockNumber}`}, waiting for vAPI to index…`,
+    );
+  const wait = await taskRequest(description, "getOrder", () =>
+    waitForMilestone(context.client, {
+      orderId,
+      milestoneId: result.milestone.id,
+      target,
+      timeoutMs,
+      intervalMs: 3_000,
+      sleep: context.sleep,
+      now: dependencies.now ?? (() => new Date()),
+    }),
+  );
+  if (!wait.reached)
+    io.stderr(
+      `vAPI has not indexed the ${description} yet after ${timeoutText}; run vapi task status ${orderId} later.`,
+    );
+  return wait;
 }
 
 class ScopeApprovalNeeded extends Error {
