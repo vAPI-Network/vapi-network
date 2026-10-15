@@ -1,0 +1,64 @@
+{
+  "services": [
+    {
+      "id": "birdeye",
+      "name": "Birdeye",
+      "description": "Return Solana token prices, market data and on-chain trades. Each request costs $0.003 in USDC on Solana over x402.",
+      "category": "crypto",
+      "tier": "partner",
+      "group": "partner",
+      "fee": {
+        "bps": 0,
+        "label": "No network fee"
+      },
+      "verified": true,
+      "verification": "verified",
+      "wrapped": false,
+      "lastCheckedAt": "2026-10-15T11:11:05.477Z",
+      "liveness": {
+        "uptime7d": 1,
+        "latencyP50Ms": 75,
+        "latencyP95Ms": 75,
+        "checks7d": 1
+      },
+      "conformance": {
+        "declaredVersion": 2,
+        "versionConformant": true,
+        "offerTransport": "header",
+        "issues": ["offer_header_only"]
+      },
+      "price": "$0.003",
+      "networks": ["solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"],
+      "endpoints": [
+        {
+          "name": "price",
+          "method": "GET",
+          "url": "https://public-api.birdeye.so/x402/defi/price?address=So11111111111111111111111111111111111111112",
+          "price": "$0.003",
+          "description": "Price of one token. Query: address is the token mint.",
+          "payment": {
+            "scheme": "exact",
+            "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+            "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            "payTo": "3Wuj6VjJXuCmQZjGRhW56xbEk6TzCyMEUVRZgLBYNE2Z",
+            "checkedAt": "2026-10-15T11:11:05.026Z"
+          }
+        },
+        {
+          "name": "multi_price",
+          "method": "GET",
+          "url": "https://public-api.birdeye.so/x402/defi/multi_price?list_address=So11111111111111111111111111111111111111112,EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "price": "$0.003",
+          "description": "Prices for several tokens. Query: list_address is a comma-separated list of mints.",
+          "payment": {
+            "scheme": "exact",
+            "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+            "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+            "payTo": "3Wuj6VjJXuCmQZjGRhW56xbEk6TzCyMEUVRZgLBYNE2Z",
+            "checkedAt": "2026-10-15T11:11:05.026Z"
+          }
+        }
+      ]
+    }
+  ]
+}

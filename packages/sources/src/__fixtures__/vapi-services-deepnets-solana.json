@@ -1,0 +1,30 @@
+{
+  "services": [
+    {
+      "id": "https://api.deepnets.ai/api/token/holder-graph",
+      "name": "api.deepnets.ai/api/token/holder-graph",
+      "description": "Funding-source graph for a token: nodes are wallets, edges are first-funding relationships, labeled with exchange attributions where known.",
+      "category": "other",
+      "tier": "listed",
+      "group": "external",
+      "fee": {
+        "bps": 0,
+        "label": "No network fee"
+      },
+      "verified": false,
+      "verification": "none",
+      "wrapped": false,
+      "price": "Live x402 quote",
+      "networks": ["solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"],
+      "endpoints": [
+        {
+          "name": "call",
+          "method": "GET",
+          "url": "https://api.deepnets.ai/api/token/holder-graph",
+          "price": "Live x402 quote",
+          "description": "Funding-source graph for a token: nodes are wallets, edges are first-funding relationships, labeled with exchange attributions where known."
+        }
+      ]
+    }
+  ]
+}

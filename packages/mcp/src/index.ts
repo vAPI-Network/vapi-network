@@ -8,6 +8,7 @@ export {
   type VapiServerOptions,
 } from "./server.js";
 export { inspectService, type InspectToolInput, type InspectToolResult } from "./tools/inspect.js";
+export { VapiCallError } from "./tools/call.js";
 export {
   resolveServiceEndpoint,
   resolveServiceListing,

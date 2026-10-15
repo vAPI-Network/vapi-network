@@ -134,6 +134,7 @@ export {
   BROWSER_ENABLED_X402_NETWORK_CONFIG,
   CANONICAL_X402_USDC_NETWORKS,
   getCanonicalX402Usdc,
+  SOLANA_DEVNET_CAIP2,
   type CanonicalX402UsdcIdentity,
   type CanonicalX402UsdcNetwork,
   type X402NetworkConfig,

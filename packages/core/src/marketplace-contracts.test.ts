@@ -6,6 +6,9 @@ import {
   MARKETPLACE_DISCOVERY_PROTOCOL,
   MARKETPLACE_KINDS,
   MARKETPLACE_RANKING_VERSION,
+  SOLANA_DEVNET_CAIP2,
+  SOLANA_MAINNET_CAIP2,
+  X402_SOLANA_MAINNET_CAIP2,
   apiMarketplaceHitSchema,
   isMirroredHit,
   marketplaceDiscoveryInputSchema,
@@ -270,6 +273,41 @@ describe("marketplace discovery wire contract", () => {
     ]) {
       expect(() => marketplaceHitSchema.parse({ ...external, execution })).toThrow();
     }
+  });
+
+  it("accepts Solana CAIP-2 networks and normalizes bare Solana aliases", () => {
+    const external = marketplaceDiscoveryPageSchema.parse(fixture).items[1];
+    if (external?.kind !== "api" || external.provenance !== "indexed") {
+      throw new Error("Expected the shared fixture to include a mirrored API hit");
+    }
+    const withNetwork = (network: string) => ({
+      ...external,
+      execution: { ...external.execution, network },
+    });
+
+    expect(marketplaceHitSchema.parse(withNetwork(X402_SOLANA_MAINNET_CAIP2))).toMatchObject({
+      execution: { network: X402_SOLANA_MAINNET_CAIP2 },
+    });
+    expect(marketplaceHitSchema.parse(withNetwork("solana"))).toMatchObject({
+      execution: { network: X402_SOLANA_MAINNET_CAIP2 },
+    });
+    expect(marketplaceHitSchema.parse(withNetwork("solana-devnet"))).toMatchObject({
+      execution: { network: SOLANA_DEVNET_CAIP2 },
+    });
+    expect(marketplaceHitSchema.parse(withNetwork(SOLANA_MAINNET_CAIP2))).toMatchObject({
+      execution: { network: SOLANA_MAINNET_CAIP2 },
+    });
+    expect(() => marketplaceHitSchema.parse(withNetwork("garbage"))).toThrow();
+  });
+
+  it("keeps full-page parsing strict for malformed marketplace rows", () => {
+    const page = fixture as { items: Record<string, unknown>[] };
+    expect(() =>
+      marketplaceDiscoveryPageSchema.parse({
+        ...page,
+        items: [...page.items, { unexpected: true }],
+      }),
+    ).toThrow();
   });
 
   it("normalizes bounded input and rejects ambiguous kind lists", () => {

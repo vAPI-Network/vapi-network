@@ -110,6 +110,8 @@ Task watch and a partially completed scope-signing flow can emit newline-delimit
 JSON; delivery emits one result after chain success. See [Task commands](./docs/tasks.md#cli). Exit codes are
 `0` for success, `1` for an operational failure, and `2` for invalid usage or
 an announced preview-only command.
+Solana listings remain searchable. Inspecting or paying one returns
+`unsupported_network` (CLI exit `1`); vault payments on Solana arrive in a later release.
 
 Every wallet command takes `--account <name>`, falls back to `VAPI_WALLET`, then the default from `vapi accounts use`; `--wallet <name>` keeps working for one release.
 

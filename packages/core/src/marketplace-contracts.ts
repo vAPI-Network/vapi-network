@@ -7,6 +7,12 @@
 // keys, so additive server fields also reach `--json` consumers untouched.
 import { z } from "zod";
 
+import {
+  SOLANA_DEVNET_CAIP2,
+  SOLANA_MAINNET_CAIP2,
+  X402_SOLANA_MAINNET_CAIP2,
+} from "./x402-networks.js";
+
 export const MARKETPLACE_DISCOVERY_PROTOCOL = "vapi.marketplace.discovery/1" as const;
 export const MARKETPLACE_RANKING_VERSION = "marketplace-ranking-v1" as const;
 export const MARKETPLACE_KINDS = ["api", "service_offer", "open_request"] as const;
@@ -228,7 +234,18 @@ const mirroredApiMarketplaceHitSchema = z.looseObject({
       .string()
       .trim()
       .max(160)
-      .regex(/^eip155:[1-9]\d*$/),
+      .transform((network) => {
+        if (network === "solana") return X402_SOLANA_MAINNET_CAIP2;
+        if (network === "solana-devnet") return SOLANA_DEVNET_CAIP2;
+        return network;
+      })
+      .pipe(
+        z.union([
+          z.string().regex(/^[-a-z0-9]{3,8}:[-_a-zA-Z0-9]{1,32}$/),
+          // Persisted mainnet configs also use the full genesis hash.
+          z.literal(SOLANA_MAINNET_CAIP2),
+        ]),
+      ),
   }),
   action: invokeApiActionSchema,
 });
@@ -297,11 +314,16 @@ export function isMirroredHit(hit: MarketplaceHit): boolean {
   return hit.kind === "api" && hit.provenance === "indexed";
 }
 
-export const marketplaceDiscoveryPageSchema = z.looseObject({
+/** Validate the page independently so adapters can isolate malformed rows. */
+export const marketplaceDiscoveryEnvelopeSchema = z.looseObject({
   protocol: z.literal(MARKETPLACE_DISCOVERY_PROTOCOL),
-  items: z.array(marketplaceHitSchema),
+  items: z.array(z.unknown()),
   nextCursor: z.string().min(1).max(4_096).nullable(),
   unavailableKinds: z.array(marketplaceKindSchema).max(MARKETPLACE_KINDS.length),
   rankingVersion: z.literal(MARKETPLACE_RANKING_VERSION),
+});
+
+export const marketplaceDiscoveryPageSchema = marketplaceDiscoveryEnvelopeSchema.extend({
+  items: z.array(marketplaceHitSchema),
 });
 export type MarketplaceDiscoveryPage = z.infer<typeof marketplaceDiscoveryPageSchema>;

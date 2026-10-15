@@ -9,7 +9,7 @@ import {
   assertPublicUrl,
   completeX402Payment,
   createPublicFetch,
-  DiscoveryCatalogError,
+  isDiscoveryCatalogError,
   formatUsdc,
   explorerTransactionUrl,
   getVapiPaths,
@@ -81,6 +81,7 @@ export class VapiCallError extends Error {
   constructor(
     public readonly code:
       | "invalid_request"
+      | "unsupported_network"
       | "payment_rejected"
       | "receipt_write_failed"
       | "response_unreadable"
@@ -96,6 +97,63 @@ export class VapiCallError extends Error {
     this.paymentRejection = options?.paymentRejection;
     this.confirmedSettlement = options?.confirmedSettlement;
   }
+}
+
+const SOLANA_PAYMENTS_UNSUPPORTED_MESSAGE =
+  "Solana payments are not supported in this version of vAPI yet; they arrive in a later release.";
+
+function isSolanaCaip2(network: string): boolean {
+  return network.startsWith("solana:");
+}
+
+/**
+ * The Solana network a listing pays on: its endpoint's payment network, or —
+ * when the endpoint carries none, as for mirrored rows resolved through the
+ * services API — the service's declared networks when every one is Solana.
+ */
+export function listingPaymentNetwork(
+  endpointNetwork: string | undefined,
+  serviceNetworks: readonly string[] | undefined,
+): string | undefined {
+  if (endpointNetwork !== undefined) return endpointNetwork;
+  return serviceNetworks?.length && serviceNetworks.every(isSolanaCaip2)
+    ? serviceNetworks[0]
+    : undefined;
+}
+
+/** Refuse listing payments before any request, reservation, or signing. */
+export function assertSupportedListingNetwork(network: string | undefined): void {
+  if (network !== undefined && isSolanaCaip2(network)) {
+    throw new VapiCallError(
+      "unsupported_network",
+      `${SOLANA_PAYMENTS_UNSUPPORTED_MESSAGE} This listing pays on ${network}.`,
+    );
+  }
+}
+
+/** A selector cannot make a service payable when all its endpoints use Solana. */
+export function assertSupportedListingResolution(error: unknown): void {
+  if (
+    isDiscoveryCatalogError(error) &&
+    error.code === "ambiguous_default" &&
+    error.paymentNetworks?.length &&
+    error.paymentNetworks.every(isSolanaCaip2)
+  ) {
+    assertSupportedListingNetwork(error.paymentNetworks[0]);
+  }
+}
+
+/**
+ * An account without a Solana signer (every vault account in this version)
+ * cannot pay a Solana quote, so quote selection must never pick one: picking it
+ * would reserve spend before the signer check refuses it.
+ */
+function payableConfig(config: VapiConfig, account: CallServiceArgs["account"]): VapiConfig {
+  if (account.solana !== undefined) return config;
+  const networks = Object.fromEntries(
+    Object.entries(config.networks).filter(([network]) => !isSolanaCaip2(network)),
+  );
+  return { ...config, networks };
 }
 
 const MAX_RESPONSE_BYTES = 1_048_576;
@@ -122,6 +180,8 @@ type ResolvedCallEndpoint = {
     network: string;
     payTo?: string;
   };
+  /** The service's declared networks, for a registered listing. */
+  serviceNetworks?: readonly string[];
 };
 
 export type CallToolResult = {
@@ -215,7 +275,9 @@ export async function callService(args: CallServiceArgs): Promise<CallToolResult
     execution = await executeCallService(args, trace);
   } catch (error) {
     // Receipt errors must never hide the primary call/settlement error.
-    await recordCallError(args, error, trace).catch(() => undefined);
+    if (!(error instanceof VapiCallError && error.code === "unsupported_network")) {
+      await recordCallError(args, error, trace).catch(() => undefined);
+    }
     throw error;
   }
   try {
@@ -271,10 +333,16 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
         config,
         fetchImpl,
       );
+    } catch (error) {
+      assertSupportedListingResolution(error);
+      throw error;
     } finally {
       trace.phases.discoverMs = elapsed(trace, discoverStarted);
     }
   }
+  assertSupportedListingNetwork(
+    listingPaymentNetwork(endpoint?.payment?.network, endpoint?.serviceNetworks),
+  );
   const requestedNetwork = normalizeRequiredNetwork(input.network);
   const listingNetwork = endpoint?.payment?.network;
   if (
@@ -529,7 +597,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
       challenge: challengeAttempt,
       account,
       caps: args.spendCaps ?? config.spendCaps,
-      config,
+      config: payableConfig(config, account),
       send: async (paidRequest) => {
         paidAttempt = await fetchWithGuardedRedirects(paidRequest, false);
         return paidAttempt;
@@ -865,7 +933,7 @@ async function resolveCallEndpoint(
     try {
       return registeredEndpoint(await resolveServiceListing(id, config, fetchImpl, endpointName));
     } catch (error) {
-      if (!(error instanceof DiscoveryCatalogError) || error.code !== "service_not_found") {
+      if (!isDiscoveryCatalogError(error) || error.code !== "service_not_found") {
         throw error;
       }
       const discovered = await findMarketplaceApiByRef(id, config, fetchImpl);
@@ -913,6 +981,7 @@ function registeredEndpoint(
   return {
     ...listing.endpoint,
     verification: verification ?? listing.service.verification,
+    serviceNetworks: listing.service.networks,
     registered: true,
     resolvedListing: true,
   };

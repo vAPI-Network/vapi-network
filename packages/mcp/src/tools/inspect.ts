@@ -1,5 +1,5 @@
 import {
-  DiscoveryCatalogError,
+  isDiscoveryCatalogError,
   type DiscoveryEndpoint,
   type ListingConformance,
   type ListingFee,
@@ -11,6 +11,11 @@ import {
   type VapiConfig,
 } from "@vapi-network/core";
 import { findMarketplaceApiByRef, resolveServiceListing } from "./search.js";
+import {
+  assertSupportedListingNetwork,
+  assertSupportedListingResolution,
+  listingPaymentNetwork,
+} from "./call.js";
 
 export type InspectToolInput = {
   id: string;
@@ -60,18 +65,17 @@ export async function inspectService(
   try {
     listing = await resolveServiceListing(input.id, config, fetchImpl, input.endpoint);
   } catch (error) {
-    if (
-      input.endpoint ||
-      !(error instanceof DiscoveryCatalogError) ||
-      error.code !== "service_not_found"
-    ) {
+    assertSupportedListingResolution(error);
+    if (input.endpoint || !isDiscoveryCatalogError(error) || error.code !== "service_not_found") {
       throw error;
     }
     const hit = await findMarketplaceApiByRef(input.id, config, fetchImpl);
     if (!hit || hit.kind !== "api" || hit.provenance !== "indexed") throw error;
+    assertSupportedListingNetwork(hit.execution.network);
     return inspectIndexedHit(hit);
   }
   const { endpoint, service } = listing;
+  assertSupportedListingNetwork(listingPaymentNetwork(endpoint.payment?.network, service.networks));
   return {
     name: endpoint.name,
     method: endpoint.method,

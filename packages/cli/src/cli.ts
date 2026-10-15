@@ -134,6 +134,7 @@ import {
   redactRunValue,
   runAction,
   RuntimeError,
+  VapiCallError,
   startStdioServer,
   type ActionContext,
   type CallPort,
@@ -949,6 +950,7 @@ export async function runCli(
             error: message,
             exitCode: code,
             ...(error instanceof RuntimeError ? { code: error.code } : {}),
+            ...(error instanceof VapiCallError ? { code: error.code } : {}),
             ...(error instanceof DocsError ? { code: error.code } : {}),
             ...(error instanceof RemoteKeyRefusedError ? { code: error.code } : {}),
             ...(error instanceof TransferError
