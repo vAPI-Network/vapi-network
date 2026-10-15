@@ -18,7 +18,7 @@ type McpInstallApp = "claude" | "cursor" | "codex";
 
 type McpServerEntry = {
   command: "npx";
-  args: ["-y", "vapi-network", "mcp"];
+  args: ["-y", "vapi-network@latest", "mcp"];
   env: {
     VAPI_HOME: string;
     VAPI_REGISTRY_URL: string;
@@ -124,7 +124,7 @@ function isMcpInstallApp(value: string): value is McpInstallApp {
 function serverEntry(home: string, registry: string): McpServerEntry {
   return {
     command: "npx",
-    args: ["-y", "vapi-network", "mcp"],
+    args: ["-y", "vapi-network@latest", "mcp"],
     env: { VAPI_HOME: home, VAPI_REGISTRY_URL: registry },
   };
 }
@@ -182,7 +182,7 @@ function tomlConfig(existing: string, entry: McpServerEntry): string {
   const block = [
     "[mcp_servers.vapi]",
     'command = "npx"',
-    'args = ["-y", "vapi-network", "mcp"]',
+    'args = ["-y", "vapi-network@latest", "mcp"]',
     `env = { VAPI_HOME = "${escapeToml(entry.env.VAPI_HOME)}", VAPI_REGISTRY_URL = "${escapeToml(entry.env.VAPI_REGISTRY_URL)}" }`,
     "",
   ].join("\n");

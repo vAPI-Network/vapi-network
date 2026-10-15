@@ -47,7 +47,7 @@ describe("vapi mcp install", () => {
       mcpServers: {
         vapi: {
           command: "npx",
-          args: ["-y", "vapi-network", "mcp"],
+          args: ["-y", "vapi-network@latest", "mcp"],
           env: {
             VAPI_HOME: INSTALL_HOME,
             VAPI_REGISTRY_URL: INSTALL_REGISTRY,
@@ -77,7 +77,10 @@ describe("vapi mcp install", () => {
       path,
       `${JSON.stringify(
         {
-          mcpServers: { other: { command: "other-command", args: ["serve"] } },
+          mcpServers: {
+            other: { command: "other-command", args: ["serve"] },
+            vapi: { command: "npx", args: ["-y", "vapi-network", "mcp"] },
+          },
           theme: "dark",
         },
         null,
@@ -93,7 +96,7 @@ describe("vapi mcp install", () => {
         other: { command: "other-command", args: ["serve"] },
         vapi: {
           command: "npx",
-          args: ["-y", "vapi-network", "mcp"],
+          args: ["-y", "vapi-network@latest", "mcp"],
           env: {
             VAPI_HOME: fixture.vapiHome,
             VAPI_REGISTRY_URL: "https://api.vapinetwork.ai",
@@ -143,7 +146,7 @@ describe("vapi mcp install", () => {
       mcpServers: {
         vapi: {
           command: "npx",
-          args: ["-y", "vapi-network", "mcp"],
+          args: ["-y", "vapi-network@latest", "mcp"],
           env: {
             VAPI_HOME: fixture.vapiHome,
             VAPI_REGISTRY_URL: "https://configured.example/root",
@@ -182,7 +185,7 @@ describe("vapi mcp install", () => {
       [
         "[mcp_servers.vapi]",
         'command = "npx"',
-        'args = ["-y", "vapi-network", "mcp"]',
+        'args = ["-y", "vapi-network@latest", "mcp"]',
         'env = { VAPI_HOME = "C:\\\\Users\\\\Agent \\"One\\"", VAPI_REGISTRY_URL = "https://registry.example/tenant/\\"one\\"" }',
         "",
       ].join("\n"),
@@ -202,6 +205,7 @@ describe("vapi mcp install", () => {
       "",
       "[mcp_servers.vapi]",
       'command = "old"',
+      'args = ["-y", "vapi-network", "mcp"]',
       "[mcp_servers.vapi.env]",
       'OLD = "remove"',
       "[second]",
@@ -226,8 +230,13 @@ describe("vapi mcp install", () => {
     expect(after.startsWith(preserved)).toBe(true);
     expect(after.match(/^\[mcp_servers\.vapi(?:\.|\])/gm)).toHaveLength(1);
     expect(after).not.toContain('command = "old"');
+    expect(after).not.toContain('"vapi-network", "mcp"');
+    expect(after).toContain('args = ["-y", "vapi-network@latest", "mcp"]');
     expect(after).not.toContain('OLD = "remove"');
     expect(captured.stdout[0]).toBe(`Updated ${path}.`);
+
+    expect(await runCli(["mcp", "install", "codex"], captureIo().io, fixture.dependencies)).toBe(0);
+    expect(await readFile(path, "utf8")).toBe(after);
   });
 
   it("recognizes quoted and commented vapi headers and stops at indented tables", async () => {

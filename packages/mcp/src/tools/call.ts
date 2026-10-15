@@ -48,6 +48,7 @@ export type CallToolInput = {
   network?: string;
   expectedPayTo?: string;
   contentType?: string;
+  timeoutSeconds?: number;
 };
 
 export type PossibleSettlement = {
@@ -269,6 +270,7 @@ type CallTrace = {
 };
 
 export async function callService(args: CallServiceArgs): Promise<CallToolResult> {
+  validateTimeoutSeconds(args.input.timeoutSeconds);
   const trace = createCallTrace(args);
   let execution: CallExecution;
   try {
@@ -411,6 +413,11 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
       body: method === "GET" || method === "HEAD" ? undefined : requestBody,
     });
   const request = createRequest(headers);
+  const probeTimeoutMs =
+    input.timeoutSeconds === undefined
+      ? (args.timeoutMs ?? 30_000)
+      : Math.min(input.timeoutSeconds, 30) * 1_000;
+  let requestTimeoutMs = probeTimeoutMs;
 
   const fetchWithGuardedRedirects = async (
     candidateRequest: Request,
@@ -428,7 +435,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
       const attempt = await fetchAttempt(
         fetchImpl,
         new Request(currentRequest.clone(), { redirect: "manual" }),
-        args.timeoutMs ?? 30_000,
+        requestTimeoutMs,
       );
       const response = attempt.response;
       if (!isRedirectStatus(response.status)) {
@@ -601,7 +608,12 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
       account,
       caps: args.spendCaps ?? config.spendCaps,
       config: payableConfig(config, account),
-      send: async (paidRequest) => {
+      send: async (paidRequest, quote) => {
+        requestTimeoutMs = paidRequestTimeoutMs(
+          input.timeoutSeconds,
+          args.timeoutMs,
+          quote.accepted.maxTimeoutSeconds,
+        );
         paidAttempt = await fetchWithGuardedRedirects(paidRequest, false);
         return paidAttempt;
       },
@@ -1215,7 +1227,7 @@ async function fetchAttempt(
 }> {
   const controller = new AbortController();
   let rejectTimeout: ((error: Error) => void) | null = null;
-  const timeoutError = new Error(`API request timed out after ${timeoutMs}ms.`);
+  const timeoutError = new Error(`API request timed out after ${timeoutMs / 1_000} seconds.`);
   const timedOut = new Promise<never>((_resolve, reject) => {
     rejectTimeout = reject;
   });
@@ -1256,6 +1268,33 @@ async function fetchAttempt(
   }
 }
 
+function validateTimeoutSeconds(timeoutSeconds: number | undefined): void {
+  if (
+    timeoutSeconds !== undefined &&
+    (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 300)
+  ) {
+    throw new Error("call timeoutSeconds must be an integer from 1 to 300 seconds.");
+  }
+}
+
+function paidRequestTimeoutMs(
+  timeoutSeconds: number | undefined,
+  internalTimeoutMs: number | undefined,
+  offerTimeoutSeconds: number,
+): number {
+  const usableOfferTimeout =
+    Number.isInteger(offerTimeoutSeconds) && offerTimeoutSeconds > 0
+      ? offerTimeoutSeconds
+      : undefined;
+  if (timeoutSeconds !== undefined) {
+    return Math.min(timeoutSeconds, usableOfferTimeout ?? timeoutSeconds) * 1_000;
+  }
+  if (internalTimeoutMs !== undefined) return internalTimeoutMs;
+  return usableOfferTimeout === undefined
+    ? 120_000
+    : Math.min(120_000, Math.max(30_000, usableOfferTimeout * 1_000));
+}
+
 /** Maps core payment facts back to the stable MCP error interface. */
 function mapX402PaymentError(error: unknown, resumeId: string | undefined): unknown {
   if (!(error instanceof X402PaymentError)) return error;
@@ -1275,9 +1314,13 @@ function mapX402PaymentError(error: unknown, resumeId: string | undefined): unkn
     resumeId !== undefined && error.possibleSettlement?.authorizationNonce
       ? ` Check whether it settled with \`vapi pay --resume ${resumeId}\` before paying again.`
       : "";
+  const timeoutDetail =
+    error.cause instanceof Error && error.cause.message.startsWith("API request timed out after ")
+      ? `${error.cause.message} `
+      : "";
   return new VapiCallError(
     "settlement_unknown",
-    `${error.message}${resume}`,
+    `${timeoutDetail}${error.message}${resume}`,
     error.possibleSettlement,
     { cause: error.cause },
   );

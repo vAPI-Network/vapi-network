@@ -139,6 +139,15 @@ export const callPayInputSchema = z.object({
   maxPriceUsd: z
     .union([z.number().nonnegative(), z.string().regex(/^\d+(?:\.\d{1,6})?$/)])
     .optional(),
+  timeoutSeconds: z
+    .number()
+    .int()
+    .min(1)
+    .max(300)
+    .optional()
+    .describe(
+      "Seconds to wait for the paid response. Default: the provider's maxTimeoutSeconds, at most 120.",
+    ),
 });
 
 export const callSearch = defineAction<

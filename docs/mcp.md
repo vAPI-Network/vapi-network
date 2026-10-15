@@ -11,7 +11,7 @@ Add this to Claude Code, Claude Desktop or Cursor:
   "mcpServers": {
     "vapi": {
       "command": "npx",
-      "args": ["-y", "vapi-network", "mcp"]
+      "args": ["-y", "vapi-network@latest", "mcp"]
     }
   }
 }
@@ -41,7 +41,7 @@ vapi unlock --wallet agent-claude
   "mcpServers": {
     "vapi": {
       "command": "npx",
-      "args": ["-y", "vapi-network", "mcp", "--wallet", "agent-claude"],
+      "args": ["-y", "vapi-network@latest", "mcp", "--wallet", "agent-claude"],
       "env": {
         "VAPI_WALLET": "agent-claude",
         "VAPI_NO_SECRETS": "1"
@@ -77,7 +77,7 @@ when the agent must not access other local accounts.
 | `router.buy`              | `usd` (`1`, `5`, `20`, or `50`), `wallet`                                                                                                                               | Receipt summary and the new vAPI Router balance; the Router key stays in the OS secret store and is never returned                                                                                                                                                                                                                                                    |
 | `call.search`             | `query`, `kinds[]`, `network`, `limit`, `cursor`, `includeUnverified`                                                                                                   | One discovery page: `items` with `group`, `fee` and `verification`, plus `nextCursor`, `unavailableKinds`, `rankingVersion`                                                                                                                                                                                                                                           |
 | `call.inspect`            | `id`, `endpoint`                                                                                                                                                        | A listing's `verification`, `fee`, `liveness`, `conformance`, identity, request contract and live quote                                                                                                                                                                                                                                                               |
-| `call.pay`                | `wallet`, `id` or `url`, `method`, `endpoint`, `body`, `contentType`, `network`, `expectedPayTo`, `maxPriceUsd`                                                         | `wallet`, `status`, `body`, `payment`, `verification` for a registry listing, and `expectedRequest` when a 402 named one                                                                                                                                                                                                                                              |
+| `call.pay`                | `wallet`, `id` or `url`, `method`, `endpoint`, `body`, `contentType`, `network`, `expectedPayTo`, `maxPriceUsd`, `timeoutSeconds`                                       | `wallet`, `status`, `body`, `payment`, `verification` for a registry listing, and `expectedRequest` when a 402 named one                                                                                                                                                                                                                                              |
 | `call.read`               | `url`                                                                                                                                                                   | Agent-run-only GET result: `status`, `contentType`, `body`; restricted to paid HTTPS origins, never pays, and redacts its SIWX proof                                                                                                                                                                                                                                  |
 | `tasks.search`            | `open`, `minUsd`, `tab` (`trending`, `new`, `closing`, `paid`), `limit`                                                                                                 | Public board `cards` and `pinned`, filtered by open state and minimum USD; does not move money                                                                                                                                                                                                                                                                        |
 | `tasks.show`              | `id`, `wallet`                                                                                                                                                          | Signed-in task order with `receipts`, or public `task` card with any `receiptUrl`; does not move money                                                                                                                                                                                                                                                                |
@@ -267,7 +267,7 @@ JSON. The entry's `VAPI_HOME` is the value passed to `--home`.
       "command": "npx",
       "args": [
         "-y",
-        "vapi-network",
+        "vapi-network@latest",
         "mcp"
       ],
       "env": {
@@ -279,7 +279,7 @@ JSON. The entry's `VAPI_HOME` is the value passed to `--home`.
 }
 ```
 
-The entry runs `npx -y vapi-network mcp`. A machine with a password-protected
+The entry runs `npx -y vapi-network@latest mcp`. A machine with a password-protected
 vault needs `VAPI_VAULT_PASSWORD` in the entry's `env` or an unlocked session.
 
 #### Deprecated tool aliases

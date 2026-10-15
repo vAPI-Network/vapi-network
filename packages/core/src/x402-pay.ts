@@ -112,7 +112,7 @@ export type CompleteX402PaymentArgs<T = undefined> = {
   account: VapiPaymentAccount;
   caps: SpendCaps;
   config: VapiConfig;
-  send(request: Request): Promise<X402PaymentAttempt>;
+  send(request: Request, quote: X402Quote): Promise<X402PaymentAttempt>;
   consumeResponse?: (response: Response) => Promise<T>;
   fetchImpl?: typeof fetch;
   ledgerPath?: string;
@@ -357,7 +357,7 @@ export async function completeX402Payment<T = undefined>(
   let paidAttempt: X402PaymentAttempt;
   const requestStarted = nowMs();
   try {
-    paidAttempt = await args.send(paidRequest);
+    paidAttempt = await args.send(paidRequest, quote);
   } catch (error) {
     if (trace) trace.phases.requestMs = elapsed(nowMs, requestStarted);
     throw settlementUnknown(

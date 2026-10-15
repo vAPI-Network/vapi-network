@@ -27,6 +27,10 @@ No install? Prefix any command with `npx vapi-network`, for example
 `npx vapi-network init`. (`npx vapi` cannot work: the bare `vapi` name on npm
 belongs to an unrelated package.)
 
+Interactive CLI runs check for a newer release at most once a day and cache the result in
+`~/.vapi/update-check.json`. JSON, MCP server, CI and non-TTY runs skip the check. Set
+`VAPI_NO_UPDATE_CHECK=1` to disable it.
+
 ## Quickstart
 
 ```bash
@@ -157,7 +161,7 @@ Posting a task moves no money. The create-order contract stores its market amoun
 | `vapi accounts`                               | `--enable <arc>`, `--wallet <name>`                                                                                                                                                                                                                | One deposit account per configured network, with balances and guidance                                                            |
 | `vapi search [query]`                         | `--kind <kind>` (repeatable), `--network <caip2>`, `--limit <n>`, `--cursor <cursor>`, `--include-unverified`                                                                                                                                      | Merged discovery across every configured source, tagged by group and tier                                                         |
 | `vapi inspect <id>`                           | `--endpoint <name>`                                                                                                                                                                                                                                | Verification, fee, liveness, conformance, identity, contract and registry’s last observed quote, for free                         |
-| `vapi pay <id-or-url>`                        | `--method`, `--endpoint`, `--body <json>`, `--content-type`, `--network <caip2>`, `--expected-pay-to`, `--max <usd>`, `--wallet <name>`                                                                                                            | Calls the API and pays it from the local wallet, naming an unverified tier                                                        |
+| `vapi pay <id-or-url>`                        | `--method`, `--endpoint`, `--body <json>`, `--content-type`, `--network <caip2>`, `--expected-pay-to`, `--max <usd>`, `--timeout <seconds>`, `--wallet <name>`                                                                                     | Calls the API and pays it from the local wallet, naming an unverified tier                                                        |
 | `vapi pay --resume <receipt-id>`              | -                                                                                                                                                                                                                                                  | Checks settlement, shows its payment id, and never pays                                                                           |
 | `vapi check <url>`                            | `--method <method>`                                                                                                                                                                                                                                | Grades its 402, extensions and same-origin discovery. Never pays                                                                  |
 | `vapi balance`                                | `--wallet <name>`                                                                                                                                                                                                                                  | The wallet's address and USDC balances                                                                                            |

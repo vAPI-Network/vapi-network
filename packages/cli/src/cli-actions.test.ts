@@ -8,6 +8,7 @@ import type { SecretStore } from "@vapi-network/core";
 import type { Action, ActionContext, Runtime } from "@vapi-network/mcp";
 
 const runActionCalls = vi.hoisted(() => [] as string[]);
+const runActionInputs = vi.hoisted(() => [] as unknown[]);
 const startStdioServer = vi.hoisted(() => vi.fn(async () => undefined));
 
 vi.mock("@vapi-network/mcp", async (importOriginal) => {
@@ -17,6 +18,7 @@ vi.mock("@vapi-network/mcp", async (importOriginal) => {
     startStdioServer,
     async runAction<I, O>(action: Action<I, O>, input: unknown, ctx: ActionContext): Promise<O> {
       runActionCalls.push(action.name);
+      runActionInputs.push(input);
       return await actual.runAction(action, input, ctx);
     },
   };
@@ -31,6 +33,7 @@ let dependencies: CliDependencies;
 
 beforeEach(async () => {
   runActionCalls.length = 0;
+  runActionInputs.length = 0;
   startStdioServer.mockClear();
   delete process.env.VAPI_KEYSTORE_PASSWORD;
   const home = await mkdtemp(join(tmpdir(), "vapi-cli-actions-"));
@@ -39,6 +42,7 @@ beforeEach(async () => {
   dependencies = { secretStore: secretStoreStub(), fetchImpl: zeroBalanceRpc() };
   expect(await runCli(["init", "--json"], captureIo().io, dependencies)).toBe(0);
   runActionCalls.length = 0;
+  runActionInputs.length = 0;
 });
 
 afterEach(async () => {
@@ -109,6 +113,22 @@ describe("CLI action register", () => {
       }),
     ]);
     expect(runActionCalls).toEqual(["call.pay"]);
+  });
+
+  it("passes pay --timeout to call.pay as whole seconds", async () => {
+    await allowPrivateNetwork();
+    const captured = captureIo();
+
+    expect(
+      await runCli(["pay", "https://127.0.0.1/free", "--timeout", "37", "--json"], captured.io, {
+        ...dependencies,
+        fetchImpl: async () => Response.json({ ok: true }),
+        ceiling: { drainCeilingSweeps: async () => undefined },
+      }),
+    ).toBe(0);
+
+    expect(runActionCalls).toEqual(["call.pay"]);
+    expect(runActionInputs).toEqual([expect.objectContaining({ timeoutSeconds: 37 })]);
   });
 
   it("passes the injected local runtime to the MCP stdio server", async () => {
