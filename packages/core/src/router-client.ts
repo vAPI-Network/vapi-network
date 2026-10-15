@@ -75,7 +75,7 @@ export type AgentRouterUsage = {
 
 export class RouterClientError extends Error {
   constructor(
-    readonly code: "not_linked" | "no_router_key" | "budget_exhausted" | "http",
+    readonly code: "not_linked" | "no_router_key" | "budget_exhausted" | "rate_limited" | "http",
     message: string,
     readonly status?: number,
   ) {
@@ -448,14 +448,20 @@ async function sendRouterChat(
 
   const body = await responseText(response);
   if (!response.ok) {
-    if (
-      response.status === 429 ||
-      body.includes("Budget has been exceeded") ||
-      body.includes("ExceededBudget")
-    ) {
+    if (/budget (?:has been )?exceeded|exceededbudget/iu.test(body)) {
       throw new RouterClientError(
         "budget_exhausted",
         "The Router key has no remaining budget.",
+        response.status,
+      );
+    }
+    if (response.status === 429) {
+      const retryAfter = response.headers.get("retry-after")?.trim();
+      const retrySeconds =
+        retryAfter !== undefined && /^\d+$/u.test(retryAfter) ? Number(retryAfter) : undefined;
+      throw new RouterClientError(
+        "rate_limited",
+        `The vAPI Router is rate limited. ${retrySeconds !== undefined && Number.isFinite(retrySeconds) ? `Retry after ${retrySeconds} seconds.` : "Wait and retry shortly."}`,
         response.status,
       );
     }

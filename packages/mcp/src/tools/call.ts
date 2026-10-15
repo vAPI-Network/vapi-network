@@ -59,7 +59,6 @@ export type PossibleSettlement = {
   paymentId?: string;
   authorizationNonce?: string;
   authorizationExpiresAt?: string;
-  authorizationTransaction?: string;
   receipt: unknown | null;
 };
 
@@ -82,6 +81,7 @@ export class VapiCallError extends Error {
     public readonly code:
       | "invalid_request"
       | "unsupported_network"
+      | "unsupported_payment"
       | "payment_rejected"
       | "receipt_write_failed"
       | "response_unreadable"
@@ -275,7 +275,10 @@ export async function callService(args: CallServiceArgs): Promise<CallToolResult
     execution = await executeCallService(args, trace);
   } catch (error) {
     // Receipt errors must never hide the primary call/settlement error.
-    if (!(error instanceof VapiCallError && error.code === "unsupported_network")) {
+    if (!(
+      error instanceof VapiCallError &&
+      (error.code === "unsupported_network" || error.code === "unsupported_payment")
+    )) {
       await recordCallError(args, error, trace).catch(() => undefined);
     }
     throw error;
@@ -640,7 +643,7 @@ async function executeCallService(args: CallServiceArgs, trace: CallTrace): Prom
         asset: completed.quote.accepted.asset,
         payTo: completed.quote.accepted.payTo,
         settlement: settlementWithExplorer(completed.settlement, completed.quote.accepted.network),
-        proof: completed.response.headers.get("x-vapi-payment-proof"),
+        proof: completed.paymentProof,
       },
       ...verificationFor(endpoint),
       ...expectedRequestFor(endpoint, completed.response.status),
@@ -978,8 +981,16 @@ function registeredEndpoint(
   listing: Awaited<ReturnType<typeof resolveServiceListing>>,
   verification?: ListingVerification,
 ): ResolvedCallEndpoint {
+  const { payment, ...endpoint } = listing.endpoint;
+  if (payment && (typeof payment.protocol === "string" || typeof payment.network !== "string")) {
+    throw new VapiCallError(
+      "unsupported_payment",
+      `Payment protocol ${payment.protocol} is not supported. This client pays x402 exact USDC endpoints only.`,
+    );
+  }
   return {
-    ...listing.endpoint,
+    ...endpoint,
+    ...(payment ? { payment: { network: payment.network, payTo: payment.payTo } } : {}),
     verification: verification ?? listing.service.verification,
     serviceNetworks: listing.service.networks,
     registered: true,

@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
 
+import { createKeyPairSignerFromPrivateKeyBytes } from "@solana/kit";
+import { TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getAddress, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -21,7 +23,7 @@ import {
   SOLANA_MAINNET_USDC,
   X402_SOLANA_MAINNET_CAIP2,
 } from "./x402-networks.js";
-import { payRequest } from "./x402-pay.js";
+import { completeX402Payment, payRequest } from "./x402-pay.js";
 import { X402Error } from "./x402.js";
 
 const PAY_TO = getAddress("0x1111111111111111111111111111111111111111");
@@ -94,6 +96,109 @@ async function paths() {
 }
 
 describe("payRequest", () => {
+  it("preserves a non-secret Uint8Array consumed response body", async () => {
+    const localPaths = await paths();
+    const bytes = Uint8Array.from([0, 1, 2, 127, 255]);
+    const challengeRequest = new Request("https://vendor.example/paid");
+    const paid = paidResponse();
+
+    const result = await completeX402Payment({
+      challenge: {
+        response: paymentRequired(),
+        request: challengeRequest,
+        finish() {},
+        async waitFor<T>(operation: Promise<T>): Promise<T> {
+          return await operation;
+        },
+      },
+      account: privateKeyToAccount(PRIVATE_KEY),
+      caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+      config: getDefaultConfig(),
+      ledgerPath: localPaths.ledgerPath,
+      wallet: "main",
+      now: NOW,
+      send: async (request) => ({
+        response: paid,
+        request,
+        finish() {},
+        async waitFor<T>(operation: Promise<T>): Promise<T> {
+          return await operation;
+        },
+      }),
+      consumeResponse: async () => bytes,
+    });
+
+    expect(result.body).toBe(bytes);
+    expect(result.body).toBeInstanceOf(Uint8Array);
+    expect([...result.body!]).toEqual([0, 1, 2, 127, 255]);
+  });
+
+  it("preserves deep clean JSON while redacting reflected signatures beyond 16 levels", async () => {
+    const localPaths = await paths();
+    const cleanLeaf = { value: "kept" };
+    let clean: Record<string, unknown> = cleanLeaf;
+    for (let index = 0; index < 20; index += 1) clean = { nested: clean };
+    let returnedBody: Record<string, unknown> | undefined;
+    let signature = "";
+
+    const result = await completeX402Payment({
+      challenge: {
+        response: paymentRequired(),
+        request: new Request("https://vendor.example/paid"),
+        finish() {},
+        async waitFor<T>(operation: Promise<T>): Promise<T> {
+          return await operation;
+        },
+      },
+      account: privateKeyToAccount(PRIVATE_KEY),
+      caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+      config: getDefaultConfig(),
+      ledgerPath: localPaths.ledgerPath,
+      wallet: "main",
+      now: NOW,
+      send: async (request) => {
+        const payment = JSON.parse(
+          Buffer.from(request.headers.get("payment-signature")!, "base64").toString("utf8"),
+        ) as { payload: { signature: string } };
+        signature = payment.payload.signature;
+        let reflected: Record<string, unknown> = {
+          [`key-${payment.payload.signature}`]: `value-${payment.payload.signature}`,
+        };
+        for (let index = 0; index < 20; index += 1) reflected = { nested: reflected };
+        const proto = JSON.parse(
+          `{"__proto__":{"polluted":"${payment.payload.signature}"}}`,
+        ) as Record<string, unknown>;
+        returnedBody = { clean, reflected, proto };
+        return {
+          response: paidResponse(),
+          request,
+          finish() {},
+          async waitFor<T>(operation: Promise<T>): Promise<T> {
+            return await operation;
+          },
+        };
+      },
+      consumeResponse: async () => returnedBody!,
+    });
+
+    expect((result.body as { clean: unknown }).clean).toBe(clean);
+    let cleanCursor = (result.body as { clean: Record<string, unknown> }).clean;
+    for (let index = 0; index < 20; index += 1) {
+      cleanCursor = cleanCursor.nested as Record<string, unknown>;
+    }
+    expect(cleanCursor).toBe(cleanLeaf);
+    const serialized = JSON.stringify(result.body);
+    expect(serialized).toContain('"value":"kept"');
+    expect(serialized).not.toContain(signature);
+    expect(serialized).toContain("key-[redacted]");
+    expect(serialized).toContain("value-[redacted]");
+    const proto = (result.body as { proto: Record<string, unknown> }).proto;
+    expect(Object.hasOwn(proto, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(proto)).toBe(Object.prototype);
+    expect(Reflect.get(proto, "polluted")).toBeUndefined();
+    expect(Reflect.get(proto, "__proto__")).toEqual({ polluted: "[redacted]" });
+  });
+
   it("declines an over-cap quote before signing or mutating the spend ledger", async () => {
     const localPaths = await paths();
     const config = getDefaultConfig();
@@ -522,6 +627,93 @@ describe("payRequest", () => {
     });
   });
 
+  it("does not expose an SVM signed transaction in an uncertain settlement error", async () => {
+    const localPaths = await paths();
+    const solana = await createKeyPairSignerFromPrivateKeyBytes(new Uint8Array(32).fill(7));
+    const account = Object.assign(privateKeyToAccount(PRIVATE_KEY), { solana });
+    const config = getDefaultConfig();
+    config.networks[SOLANA_MAINNET_CAIP2] = {
+      rpcUrl: "https://rpc.example",
+      usdc: SOLANA_MAINNET_USDC,
+    };
+    const solanaOffer = {
+      scheme: "exact",
+      network: X402_SOLANA_MAINNET_CAIP2,
+      amount: "2500",
+      asset: SOLANA_MAINNET_USDC,
+      payTo: "11111111111111111111111111111111",
+      maxTimeoutSeconds: 60,
+      extra: {
+        feePayer: "SysvarRent111111111111111111111111111111111",
+        recentBlockhash: "11111111111111111111111111111111",
+        lastValidBlockHeight: "365123999",
+      },
+    };
+    let signedTransaction = "";
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (
+        request.url === "https://vendor.example/paid" &&
+        !request.headers.has("payment-signature")
+      ) {
+        return paymentRequired([solanaOffer]);
+      }
+      if (request.url === "https://rpc.example/") {
+        const rpc = (await request.clone().json()) as { id: string | number };
+        return Response.json({
+          jsonrpc: "2.0",
+          id: rpc.id,
+          result: {
+            context: { apiVersion: "3.0.6", slot: 365_123_456 },
+            value: {
+              data: [solanaMintAccountBase64(), "base64"],
+              executable: false,
+              lamports: 1_461_600,
+              owner: TOKEN_PROGRAM_ADDRESS,
+              rentEpoch: 0,
+              space: 82,
+            },
+          },
+        });
+      }
+      const envelope = JSON.parse(
+        Buffer.from(request.headers.get("payment-signature")!, "base64").toString("utf8"),
+      ) as { payload: { transaction: string } };
+      signedTransaction = envelope.payload.transaction;
+      throw new Error(`provider lost response after ${signedTransaction}`);
+    });
+
+    let thrown: unknown;
+    try {
+      await payRequest({
+        url: "https://vendor.example/paid",
+        init: { method: "GET" },
+        account,
+        wallet: "main",
+        caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+        config,
+        fetchImpl,
+        paths: localPaths,
+        now: NOW,
+        lookup: async () => ["93.184.216.34"],
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(signedTransaction).not.toBe("");
+    const serialized = JSON.stringify(thrown, (_key, value: unknown) =>
+      value instanceof Error
+        ? Object.fromEntries(
+            Object.getOwnPropertyNames(value).map((name) => [name, Reflect.get(value, name)]),
+          )
+        : value,
+    );
+    expect(serialized).toContain("settlement_unknown");
+    expect(serialized).not.toContain(signedTransaction);
+    expect(serialized).not.toContain("authorizationTransaction");
+  });
+
   it("keeps the run budget reserved when settlement is unknown", async () => {
     const localPaths = await paths();
     const runBudget = createRunBudget({ id: "run_test", limitAtomic: 10_000n });
@@ -620,3 +812,10 @@ describe("payRequest", () => {
     await expect(readReceipts(errorPaths.receiptsPath)).resolves.toMatchObject([{ run }]);
   });
 });
+
+function solanaMintAccountBase64(): string {
+  const data = Buffer.alloc(82);
+  data[44] = 6;
+  data[45] = 1;
+  return data.toString("base64");
+}

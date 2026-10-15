@@ -2,6 +2,7 @@ import { join } from "node:path";
 
 import {
   getVapiPaths,
+  MAX_RESTORE_ACCOUNTS,
   lockVault,
   protectVault,
   readVaultFileUnlocked,
@@ -29,6 +30,8 @@ import { restoreVaultFromPhrase } from "./setup.js";
 import { collectStatus } from "./status.js";
 
 const VAULT_USAGE = "Usage: vapi vault protect|unprotect|lock|unlock|status [--json]";
+const RESTORE_USAGE =
+  "Usage: vapi restore [--accounts <n> | --from-owner [--owner <0x…>]] [--json]";
 const LEGACY_PASSWORD_NOTICE =
   "VAPI_KEYSTORE_PASSWORD is deprecated for vault passwords; use VAPI_VAULT_PASSWORD instead.";
 
@@ -71,9 +74,17 @@ export async function restoreCommand(
     await restoreFromOwnerCommand(argv, json, io, dependencies);
     return;
   }
-  if (argv.length > 0) {
-    throw new UsageError("Usage: vapi restore [--from-owner [--owner <0x…>]] [--json]");
+  let parsed;
+  try {
+    parsed = parseArguments(argv, {
+      valueOptions: new Set(["--accounts"]),
+      maximumPositionals: 0,
+    });
+  } catch (error) {
+    if (error instanceof UsageError) throw new UsageError(RESTORE_USAGE);
+    throw error;
   }
+  const accountCount = parseRestoreAccountCount(parsed.one("--accounts"));
   const paths = getVapiPaths();
   const path = join(paths.directory, "vault.json");
   if (await fileExists(path)) {
@@ -89,12 +100,39 @@ export async function restoreCommand(
     ? await getPrompts(dependencies).secret("Recovery phrase: ")
     : await (dependencies.readStdin ?? readProcessStdin)();
   const restoreIo = json ? quietIo(io) : io;
-  const { names } = await restoreVaultFromPhrase(phrase.trim(), config, restoreIo, dependencies);
+  const { names, scannedAddresses } = await restoreVaultFromPhrase(
+    phrase.trim(),
+    config,
+    restoreIo,
+    dependencies,
+    accountCount,
+  );
   if (json) {
-    output(io, true, { command: "restore", vault: "restored", accounts: names }, "");
+    output(
+      io,
+      true,
+      { command: "restore", vault: "restored", accounts: names, scannedAddresses },
+      "",
+    );
     return;
   }
   io.stdout(`Run vapi setup to link ${names[0]}.`);
+}
+
+function parseRestoreAccountCount(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^\d+$/u.test(value)) {
+    throw new UsageError(
+      `--accounts must be a positive integer no greater than ${MAX_RESTORE_ACCOUNTS}.`,
+    );
+  }
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count < 1 || count > MAX_RESTORE_ACCOUNTS) {
+    throw new UsageError(
+      `--accounts must be a positive integer no greater than ${MAX_RESTORE_ACCOUNTS}.`,
+    );
+  }
+  return count;
 }
 
 async function protectCommand(

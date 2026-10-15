@@ -230,7 +230,9 @@ describe("CLI JSON output", () => {
     const captured = captureIo();
 
     expect(await runCli(["init", "--networks", "base,foo"], captured.io)).toBe(2);
-    expect(captured.stderr[0]).toBe("--networks supports base, arc and solana.");
+    expect(captured.stderr[0]).toBe(
+      "--networks supports base and arc; Solana vault setup is unavailable.",
+    );
   });
 
   it("rejects enabling Solana until the device vault supports it", async () => {
@@ -455,6 +457,65 @@ describe("pay command arguments", () => {
     ]);
     expect(JSON.parse(captured.stdout[0]!)).toMatchObject({ wallet: "main", status: 200 });
     expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("does not print payment headers reflected by a paid provider", async () => {
+    const home = await initializedHome("vapi-cli-pay-redaction-");
+    const configPath = join(home, "config.json");
+    const config = JSON.parse(await readFile(configPath, "utf8")) as {
+      networks: Record<string, { usdc: string }>;
+    } & Record<string, unknown>;
+    config.allowPrivateNetwork = true;
+    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const request = new Request(input, init);
+      const paymentSignature = request.headers.get("payment-signature");
+      const legacyPayment = request.headers.get("x-payment");
+      if (paymentSignature === null || legacyPayment === null) {
+        return Response.json(
+          {
+            x402Version: 2,
+            resource: { url: request.url, description: "fixture", mimeType: "application/json" },
+            accepts: [
+              {
+                scheme: "exact",
+                network: BASE_MAINNET_CAIP2,
+                amount: "1",
+                asset: config.networks[BASE_MAINNET_CAIP2]!.usdc,
+                payTo: VECTOR_ADDRESS,
+                maxTimeoutSeconds: 60,
+                extra: { name: "USD Coin", version: "2" },
+              },
+            ],
+          },
+          { status: 402 },
+        );
+      }
+      const settlement = {
+        success: true,
+        nested: { [`settlement-${paymentSignature}`]: `echo:${legacyPayment}` },
+      };
+      return new Response(
+        JSON.stringify({ nested: { [`body-${legacyPayment}`]: `echo:${paymentSignature}` } }),
+        {
+          headers: {
+            "content-type": "application/json",
+            "payment-response": Buffer.from(JSON.stringify(settlement), "utf8").toString("base64"),
+          },
+        },
+      );
+    });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["pay", "https://127.0.0.1/paid", "--json"], captured.io, { fetchImpl }),
+    ).toBe(0);
+
+    const serialized = captured.stdout.join("\n");
+    const paidRequest = fetchImpl.mock.calls[1]![0] as Request;
+    expect(serialized).not.toContain(paidRequest.headers.get("payment-signature"));
+    expect(serialized).not.toContain(paidRequest.headers.get("x-payment"));
+    expect(serialized).toContain("[redacted]");
   });
 
   it("prints a paid-call result before draining queued ceiling sweeps", async () => {

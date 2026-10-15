@@ -67,7 +67,6 @@ export type X402PossibleSettlement = {
   paymentId?: string;
   authorizationNonce?: string;
   authorizationExpiresAt?: string;
-  authorizationTransaction?: string;
   receipt: unknown | null;
 };
 
@@ -141,6 +140,7 @@ export type CompleteX402PaymentResult<T = undefined> = {
   quote: X402Quote;
   payer: string;
   paymentId?: string;
+  paymentProof: string | null;
   settlement: unknown | null;
   settlementOutcome: X402SettlementOutcome;
 };
@@ -376,7 +376,7 @@ export async function completeX402Payment<T = undefined>(
   const settleStarted = nowMs();
   const settlement = parseSettlementResponse(paidResponse.headers);
   const settlementOutcome = classifySettlement(settlement);
-  const receiptSettlement = sanitizeReceiptValue(settlement, receiptSecrets);
+  const receiptSettlement = sanitizeReturnedValue(settlement, receiptSecrets);
   if (trace) {
     const transaction = settlementTransaction(receiptSettlement);
     const explorerUrl = transaction
@@ -459,6 +459,7 @@ export async function completeX402Payment<T = undefined>(
           trace.phases.requestMs = (trace.phases.requestMs ?? 0) + elapsed(nowMs, bodyStarted);
         }
       }
+      body = sanitizeReturnedValue(body, receiptSecrets) as T;
     }
 
     const result: CompleteX402PaymentResult<T> = {
@@ -468,7 +469,11 @@ export async function completeX402Payment<T = undefined>(
       quote,
       payer,
       ...(payment.paymentId ? { paymentId: payment.paymentId } : {}),
-      settlement,
+      paymentProof: sanitizeReturnedValue(
+        paidResponse.headers.get("x-vapi-payment-proof"),
+        receiptSecrets,
+      ) as string | null,
+      settlement: receiptSettlement,
       settlementOutcome,
     };
     if (settlementOutcome === "succeeded" && args.ceilingSweep) {
@@ -639,19 +644,87 @@ function sanitizeThrownError(error: unknown, secrets: readonly string[]): unknow
   return new Error(message, cause === undefined ? undefined : { cause });
 }
 
-function sanitizeReceiptValue(value: unknown, secrets: readonly string[], depth = 0): unknown {
+function sanitizeReturnedValue(value: unknown, secrets: readonly string[]): unknown {
   if (typeof value === "string") return redactKnownSecrets(value, secrets);
-  if (value === null || typeof value !== "object") return value;
-  if (depth >= 16) return "[redacted nested settlement value]";
-  if (Array.isArray(value)) {
-    return value.map((item) => sanitizeReceiptValue(item, secrets, depth + 1));
+  if (!isPlainReturnedContainer(value)) return value;
+
+  type Node = {
+    source: unknown[] | Record<string, unknown>;
+    copy: unknown[] | Record<string, unknown>;
+    parents: Set<Node>;
+    changed: boolean;
+  };
+  const nodes = new WeakMap<object, Node>();
+  const ordered: Node[] = [];
+  const nodeFor = (source: unknown[] | Record<string, unknown>): Node => {
+    const existing = nodes.get(source);
+    if (existing) return existing;
+    const copy = Array.isArray(source)
+      ? new Array(source.length)
+      : Object.create(Object.getPrototypeOf(source) as object | null);
+    const node = { source, copy, parents: new Set<Node>(), changed: false };
+    nodes.set(source, node);
+    ordered.push(node);
+    return node;
+  };
+  const root = nodeFor(value);
+
+  for (let index = 0; index < ordered.length; index += 1) {
+    const node = ordered[index]!;
+    for (const [key, item] of Object.entries(node.source)) {
+      const safeKey = Array.isArray(node.source) ? key : redactKnownSecrets(key, secrets);
+      if (safeKey !== key) node.changed = true;
+      if (typeof item === "string") {
+        const safeItem = redactKnownSecrets(item, secrets);
+        defineReturnedProperty(node.copy, safeKey, safeItem);
+        if (safeItem !== item) node.changed = true;
+      } else if (isPlainReturnedContainer(item)) {
+        const child = nodeFor(item);
+        child.parents.add(node);
+        defineReturnedProperty(node.copy, safeKey, child.copy);
+      } else {
+        defineReturnedProperty(node.copy, safeKey, item);
+      }
+    }
   }
-  return Object.fromEntries(
-    Object.entries(value).map(([key, item]) => [
-      redactKnownSecrets(key, secrets),
-      sanitizeReceiptValue(item, secrets, depth + 1),
-    ]),
-  );
+
+  const changed = ordered.filter((node) => node.changed);
+  for (let index = 0; index < changed.length; index += 1) {
+    for (const parent of changed[index]!.parents) {
+      if (parent.changed) continue;
+      parent.changed = true;
+      changed.push(parent);
+    }
+  }
+  for (const node of ordered) {
+    for (const [key, item] of Object.entries(node.source)) {
+      if (!isPlainReturnedContainer(item)) continue;
+      const safeKey = Array.isArray(node.source) ? key : redactKnownSecrets(key, secrets);
+      const child = nodes.get(item)!;
+      defineReturnedProperty(node.copy, safeKey, child.changed ? child.copy : item);
+    }
+  }
+  return root.changed ? root.copy : value;
+}
+
+function defineReturnedProperty(
+  target: unknown[] | Record<string, unknown>,
+  key: string,
+  value: unknown,
+): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
+function isPlainReturnedContainer(value: unknown): value is unknown[] | Record<string, unknown> {
+  if (Array.isArray(value)) return true;
+  if (value === null || typeof value !== "object") return false;
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  return prototype === Object.prototype || prototype === null;
 }
 
 function redactKnownSecrets(value: string, secrets: readonly string[]): string {
@@ -703,10 +776,7 @@ function possibleSettlement(
     payer,
     ...(payment.paymentId ? { paymentId: payment.paymentId } : {}),
     ...(isSvmPaymentRequirements(quote.accepted)
-      ? {
-          authorizationTransaction:
-            "transaction" in payment.payload.payload ? payment.payload.payload.transaction : "",
-        }
+      ? {}
       : "authorization" in payment.payload.payload
         ? {
             authorizationNonce: payment.payload.payload.authorization.nonce,

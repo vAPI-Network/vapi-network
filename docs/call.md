@@ -6,8 +6,8 @@ Discovering, checking, publishing and paying for APIs are covered here; see [REA
 
 That is the same order `vapi init` prints as its next steps, and the same order
 `vapi` alone lists. Two more are worth knowing early: `vapi inspect <ref>` shows
-a listing's request contract and live 402 quote for free, before you pay, and
-`vapi balance` shows what the wallet holds.
+a listing's request contract and the registry's last observed 402 quote for free.
+`vapi pay` fetches a fresh quote before signing, and `vapi balance` shows what the wallet holds.
 
 `vapi search` tags each listing with its group, `[vapi]`, `[added]`,
 `[partner]` or `[external]`, and prints the network fee that is already inside

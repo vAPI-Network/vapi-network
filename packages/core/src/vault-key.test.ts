@@ -434,8 +434,55 @@ describe("device vault keys", () => {
     expect(vault.accounts()).toEqual([
       expect.objectContaining({ name: "account-1", kind: "derived", index: 0 }),
     ]);
-    expect(probe).toHaveBeenCalledOnce();
-    expect(probe).toHaveBeenCalledWith(TEST_PHRASE_ADDRESS_0);
+    expect(probe).toHaveBeenCalledTimes(5);
+    expect(probe).toHaveBeenNthCalledWith(1, TEST_PHRASE_ADDRESS_0);
+  });
+
+  it("restores a funded account after an empty address and stops after five trailing empties", async () => {
+    const path = await temporaryVaultPath();
+    let probes = 0;
+    let scannedAddresses = -1;
+
+    const vault = await restoreVault({
+      path,
+      key: DEVICE_KEY,
+      phrase: TEST_PHRASE,
+      probe: async () => {
+        const index = probes;
+        probes += 1;
+        return index === 0 || index === 2;
+      },
+      onScanComplete: (count) => {
+        scannedAddresses = count;
+      },
+      now: NOW,
+    });
+
+    expect(vault.accounts()).toHaveLength(3);
+    expect(vault.accounts()[2]).toMatchObject({ name: "account-3", index: 2 });
+    expect(probes).toBe(8);
+    expect(scannedAddresses).toBe(8);
+  });
+
+  it("restores a fixed account count without probing balances", async () => {
+    const probe = vi.fn(async () => {
+      throw new Error("fixed recovery must not probe");
+    });
+    const onScanComplete = vi.fn();
+
+    const vault = await restoreVault({
+      path: await temporaryVaultPath(),
+      key: DEVICE_KEY,
+      phrase: TEST_PHRASE,
+      probe,
+      accountCount: 3,
+      onScanComplete,
+      now: NOW,
+    });
+
+    expect(vault.accounts()).toHaveLength(3);
+    expect(probe).not.toHaveBeenCalled();
+    expect(onScanComplete).toHaveBeenCalledWith(0);
   });
 
   it("reports an invalid restore phrase as a corrupt vault", async () => {
@@ -463,8 +510,8 @@ describe("device vault keys", () => {
 
     expect(vault.accounts()).toHaveLength(101);
     expect(vault.accounts()[100]).toMatchObject({ name: "account-101", index: 100 });
-    expect(probes).toBe(102);
-  }, 10_000);
+    expect(probes).toBe(106);
+  }, 20_000);
 
   it("propagates a restore probe error without creating a partial vault", async () => {
     const path = await temporaryVaultPath();

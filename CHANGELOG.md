@@ -3,6 +3,18 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## 0.9.3 (2026-10-15)
+
+### Fixed
+
+- Search keeps MPP and unverified listings, and tolerates unfamiliar display metadata instead of dropping otherwise valid results. Unsupported payment protocols remain unavailable for payment.
+- CLI setup and import help advertise Base and Arc. Solana listings remain searchable; inspecting or paying them returns `unsupported_network`.
+- CLI, MCP and SDK payment results redact locally created payment authorizations reflected by a provider, including uncertain Solana settlements.
+- SDK clients respect vault locks and expired sessions before subsequent payments while preserving injected-account and explicit-password access.
+- Router rate limits return retry guidance without using paid balance or buying more Router balance. Budget exhaustion still permits the configured fallback.
+- Phrase recovery scans through gaps until five consecutive addresses have no Base USDC. `--accounts <n>` restores a fixed count, and recovery reports how many addresses it scanned.
+- Inspect documentation describes the registry's last observed quote; a fresh quote is fetched when paying.
+
 ## 0.9.2 (2026-10-15)
 
 0.9.1 was never published to npm; 0.9.2 is the first npm release carrying its changes.

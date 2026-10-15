@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import {
   DEFAULT_WALLET_NAME,
+  MAX_RESTORE_ACCOUNTS,
   getVapiPaths,
   loadOrCreateDeviceKey,
   promptForSecret,
@@ -33,8 +34,7 @@ import { cloudBackupSetupChoice } from "./cloud-backup.js";
 import { runLoginFlow } from "./login.js";
 import { collectStatus, renderStatusScreen } from "./status.js";
 
-const SETUP_ARGUMENT_ERROR =
-  "vapi setup accepts only --no-cloud-backup; a recovery phrase is typed at the prompt, never passed on the command line.";
+const SETUP_ARGUMENT_ERROR = `vapi setup accepts only --no-cloud-backup and --accounts <n> (1-${MAX_RESTORE_ACCOUNTS}); a recovery phrase is typed at the prompt, never passed on the command line.`;
 const VAULT_CHOICE = "Create a new vault, or restore one from a recovery phrase? [new/restore] ";
 
 type SetupResult = {
@@ -44,6 +44,7 @@ type SetupResult = {
   linked: boolean;
   steps: string[];
   cloudBackup: "on" | "off" | "skipped";
+  scannedAddresses?: number;
 };
 
 export async function setupCommand(
@@ -55,7 +56,7 @@ export async function setupCommand(
   let parsed;
   try {
     parsed = parseArguments(argv, {
-      valueOptions: new Set(),
+      valueOptions: new Set(["--accounts"]),
       booleanOptions: new Set(["--no-cloud-backup"]),
       maximumPositionals: 0,
     });
@@ -67,6 +68,7 @@ export async function setupCommand(
   const paths = getVapiPaths();
   const steps: string[] = [];
   const humanIo = json ? stderrIo(io) : io;
+  const accountCount = parseAccountCount(parsed.one("--accounts"));
 
   if (!(await fileExists(paths.config))) {
     await writeDefaultConfig(paths.config, process.env, { networks: ["base"] });
@@ -78,6 +80,7 @@ export async function setupCommand(
   let changedVault = false;
   let changedAccount = false;
   let changedLink = false;
+  let scannedAddresses: number | undefined;
 
   if (!(await fileExists(join(paths.directory, "vault.json")))) {
     const choice = await vaultChoice(dependencies);
@@ -86,12 +89,14 @@ export async function setupCommand(
         throw new Error("Restoring needs a terminal to type the phrase.");
       }
       const readSecret = dependencies.prompts?.secret ?? promptForSecret;
-      await restoreVaultFromPhrase(
+      const restored = await restoreVaultFromPhrase(
         await readSecret("Recovery phrase: "),
         config,
         humanIo,
         dependencies,
+        accountCount,
       );
+      scannedAddresses = restored.scannedAddresses;
       store = await WalletStore.open(paths.directory, {
         secrets: getSecretStore(dependencies),
         env: dependencies.env ?? process.env,
@@ -151,7 +156,15 @@ export async function setupCommand(
 
   if (json) {
     io.stdout(
-      JSON.stringify({ vault, account, address, linked, steps, cloudBackup } satisfies SetupResult),
+      JSON.stringify({
+        vault,
+        account,
+        address,
+        linked,
+        steps,
+        cloudBackup,
+        ...(scannedAddresses === undefined ? {} : { scannedAddresses }),
+      } satisfies SetupResult),
     );
   }
 }
@@ -161,18 +174,24 @@ export async function restoreVaultFromPhrase(
   config: VapiConfig,
   io: CliIo,
   dependencies: CliDependencies,
-): Promise<{ names: string[] }> {
+  accountCount?: number,
+): Promise<{ names: string[]; scannedAddresses: number }> {
   const paths = getVapiPaths();
   const validatedPhrase = validateRecoveryPhrase(phrase);
   const readBalance = baseUsdcBalanceReader(config, dependencies);
   const key = await loadOrCreateDeviceKey({ secrets: getSecretStore(dependencies) });
   let names: string[];
+  let scannedAddresses = 0;
   try {
     const restored = await restoreVault({
       path: join(paths.directory, "vault.json"),
       key,
       phrase: validatedPhrase,
       probe: async (address) => (await readBalance(address)) > 0n,
+      ...(accountCount === undefined ? {} : { accountCount }),
+      onScanComplete: (count) => {
+        scannedAddresses = count;
+      },
       ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
     });
     names = restored.accounts().map((account) => account.name);
@@ -184,8 +203,26 @@ export async function restoreVaultFromPhrase(
     ...(names[0] === undefined ? {} : { wallet: names[0] }),
     detail: `${names.length} account(s)`,
   });
-  io.stdout(`Vault restored with ${names.length} account(s): ${names.join(", ")}`);
-  return { names };
+  io.stdout(
+    `Vault restored with ${names.length} account(s): ${names.join(", ")}. ${scannedAddresses} address(es) scanned.`,
+  );
+  return { names, scannedAddresses };
+}
+
+function parseAccountCount(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^\d+$/u.test(value)) {
+    throw new UsageError(
+      `--accounts must be a positive integer no greater than ${MAX_RESTORE_ACCOUNTS}.`,
+    );
+  }
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count < 1 || count > MAX_RESTORE_ACCOUNTS) {
+    throw new UsageError(
+      `--accounts must be a positive integer no greater than ${MAX_RESTORE_ACCOUNTS}.`,
+    );
+  }
+  return count;
 }
 
 async function vaultChoice(dependencies: CliDependencies): Promise<"new" | "restore"> {

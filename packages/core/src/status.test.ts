@@ -95,7 +95,7 @@ function linkedAccount(): AgentLink {
 
 function deps(home: string, wallets: WalletStore, overrides: Partial<StatusDeps> = {}): StatusDeps {
   return {
-    version: "0.9.2",
+    version: "0.9.3",
     home,
     registry: "https://api.vapinetwork.ai",
     wallets,
@@ -123,7 +123,7 @@ describe("buildStatus", () => {
     await expect(
       buildStatus(deps(home, wallets, { registry: "https://api.vapinetwork.ai/" })),
     ).resolves.toEqual({
-      version: "0.9.2",
+      version: "0.9.3",
       home,
       registry: "https://api.vapinetwork.ai",
       vault: {
@@ -170,7 +170,7 @@ describe("buildStatus", () => {
     );
 
     expect(report).toEqual({
-      version: "0.9.2",
+      version: "0.9.3",
       home,
       registry: "https://api.vapinetwork.ai",
       owner: {

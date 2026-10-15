@@ -125,7 +125,7 @@ function resolveTarget(service: DiscoveryService, endpointName?: string): CallTa
 
   if (targets.size !== 1) {
     const paymentNetworks = service.endpoints.flatMap((endpoint) =>
-      endpoint.payment ? [endpoint.payment.network] : [],
+      typeof endpoint.payment?.network === "string" ? [endpoint.payment.network] : [],
     );
     throw new DiscoveryCatalogError(
       "ambiguous_default",

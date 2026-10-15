@@ -4,12 +4,16 @@ import { join } from "node:path";
 
 import {
   BASE_MAINNET_CAIP2,
+  VAULT_LOCKED_MESSAGE,
+  VAULT_SESSION_ACCOUNT,
   WalletStore,
   createKeystoreFromPrivateKey,
   drainCeilingSweeps,
   getDefaultConfig,
   getVapiPaths,
+  lockVault,
   protectVault,
+  unlockProtectedVault,
   writeAgentProfile,
   type AgentLink,
   type SecretStore,
@@ -46,6 +50,51 @@ afterEach(async () => {
 });
 
 describe("createVapiClient", () => {
+  it.each(["lock", "expiry", "protect"] as const)(
+    "refuses a cached vault signer after %s and allows a new session",
+    async (invalidation) => {
+      const home = await temporaryHome();
+      const secretStore = secretsFor(home);
+      const store = await WalletStore.open(home, { secrets: secretStore, env: {} });
+      await store.create("main", "");
+      const protection = {
+        path: join(home, "vault.json"),
+        secrets: secretStore,
+        password: "test-vault-password",
+      };
+      if (invalidation !== "protect") {
+        await protectVault(protection);
+        (await unlockProtectedVault(protection)).fill(0);
+      }
+      const fetchImpl = vi.fn<typeof fetch>(async (input, init) =>
+        (input instanceof Request ? input.headers : new Headers(init?.headers)).has(
+          "payment-signature",
+        )
+          ? Response.json({ paid: true })
+          : paymentRequired(),
+      );
+      const client = await createVapiClient({ home, secretStore, env: {}, fetch: fetchImpl });
+      const input = { url: "https://93.184.216.34/weather", method: "GET" as const };
+      await expect(client.call.pay(input)).resolves.toMatchObject({ body: { paid: true } });
+      await drainCeilingSweeps();
+      if (invalidation === "protect") {
+        await protectVault(protection);
+      } else if (invalidation === "lock") {
+        await lockVault({ secrets: secretStore });
+      } else {
+        const session = JSON.parse((await secretStore.get(VAULT_SESSION_ACCOUNT))!);
+        session.expiresAt = "2000-01-01T00:00:00.000Z";
+        await secretStore.set(VAULT_SESSION_ACCOUNT, JSON.stringify(session));
+      }
+      const callsBeforeLock = fetchImpl.mock.calls.length;
+      await expect(client.call.pay(input)).rejects.toThrow(VAULT_LOCKED_MESSAGE);
+      expect(fetchImpl).toHaveBeenCalledTimes(callsBeforeLock);
+      (await unlockProtectedVault(protection)).fill(0);
+      await expect(client.call.pay(input)).resolves.toMatchObject({ body: { paid: true } });
+    },
+    15_000,
+  );
+
   it("reads documentation before a wallet exists", async () => {
     const home = await temporaryHome();
     const fetchImpl = vi

@@ -509,6 +509,27 @@ export class WalletStore {
     );
   }
 
+  /** Checks a cached signer's current vault session without decrypting its account again. */
+  async assertSigningAuthority(name: string): Promise<void> {
+    const stored = await this.readVaultUnlocked();
+    if (!stored?.protected || !stored.accounts.some((account) => account.name === name)) return;
+    try {
+      const key = await unlockProtectedVault({
+        path: this.vaultPath,
+        secrets: this.secrets,
+        env: this.environment,
+        now: () => this.now(),
+      });
+      key.fill(0);
+    } catch (error) {
+      this.dropVaultCache();
+      if (error instanceof VaultError && error.code === "password_required") {
+        throw new KeystoreError(VAULT_LOCKED_MESSAGE, { cause: error });
+      }
+      throw error;
+    }
+  }
+
   /** Returns one wallet's vault signer, migrating its legacy keystore if needed. */
   async unlock(name: string, passphrase: string): Promise<VapiPaymentAccount> {
     const wallet = this.resolve({ name });

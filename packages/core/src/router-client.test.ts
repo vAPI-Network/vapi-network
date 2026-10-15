@@ -370,32 +370,44 @@ describe("routerChat", () => {
     ]);
   });
 
-  it("maps a 429 to budget_exhausted with the console reset time", async () => {
-    const calls: Array<{ url: URL; authorization: string | null }> = [];
-    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
-      const url = new URL(String(input));
-      calls.push({ url, authorization: new Headers(init?.headers).get("authorization") });
-      if (url.host === "router.example") return new Response("rate limited", { status: 429 });
-      if (url.pathname === "/api/agents/self/router") return Response.json(usageResponse());
-      throw new Error(`Unexpected test URL ${url.origin}${url.pathname}`);
-    });
+  it.each([false, true])(
+    "returns rate_limited without fallback or refill (refill %s)",
+    async (refill) => {
+      const calls: Array<{ url: URL; authorization: string | null }> = [];
+      const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+        const url = new URL(String(input));
+        calls.push({ url, authorization: new Headers(init?.headers).get("authorization") });
+        if (url.host === "router.example")
+          return new Response("rate limited", { status: 429, headers: { "retry-after": "30" } });
+        if (url.pathname === "/api/agents/self/router") return Response.json(usageResponse());
+        throw new Error(`Unexpected test URL ${url.origin}${url.pathname}`);
+      });
 
-    await expect(
-      routerChat(await linkedDeps(fetchImpl), { model: "provider/model", messages: [] }),
-    ).rejects.toMatchObject({
-      name: "RouterClientError",
-      code: "budget_exhausted",
-      status: 429,
-      message: `Today's Router allowance is used up. It resets at ${RESET_AT}. Buy Router balance with vapi router buy 5.`,
-    });
-    expect(calls.some(({ url }) => url.host === "console.example")).toBe(true);
-    expect(
-      calls.some(
-        ({ url, authorization }) =>
-          url.host === "console.example" && authorization === `Bearer ${ROUTER_KEY}`,
-      ),
-    ).toBe(false);
-  });
+      const deps = await linkedDeps(fetchImpl, {
+        balanceKey: BALANCE_KEY,
+        ...(refill ? { routerRefill: { belowUsd: 10, tierUsd: 1 } } : {}),
+      });
+      await expect(
+        routerChat(
+          { ...deps, ...(refill ? { refill: refillOptions(deps.wallets) } : {}) },
+          { model: "provider/model", messages: [] },
+        ),
+      ).rejects.toMatchObject({
+        name: "RouterClientError",
+        code: "rate_limited",
+        status: 429,
+        message: "The vAPI Router is rate limited. Retry after 30 seconds.",
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.authorization).toBe(`Bearer ${ROUTER_KEY}`);
+      expect(
+        calls.some(
+          ({ url, authorization }) =>
+            url.host === "console.example" && authorization === `Bearer ${ROUTER_KEY}`,
+        ),
+      ).toBe(false);
+    },
+  );
 
   it("falls back to the stored balance key after the stake allowance is exhausted", async () => {
     const routerAuthorizations: string[] = [];
@@ -404,7 +416,8 @@ describe("routerChat", () => {
       const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
       if (url.host === "router.example") {
         routerAuthorizations.push(headers.get("authorization") ?? "");
-        if (routerAuthorizations.length === 1) return new Response("limited", { status: 429 });
+        if (routerAuthorizations.length === 1)
+          return new Response("Budget has been exceeded", { status: 429 });
         return Response.json({ choices: [{ message: { content: "balance answer" } }] });
       }
       if (url.pathname === "/api/agents/self/router") {
@@ -437,7 +450,7 @@ describe("routerChat", () => {
         const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
         if (url.host === "router.example") {
           routerCalls += 1;
-          if (routerCalls === 1) return new Response("limited", { status: 429 });
+          if (routerCalls === 1) return new Response("Budget has been exceeded", { status: 429 });
           expect(headers.get("authorization")).toBe(`Bearer ${BALANCE_KEY}`);
           return Response.json({ choices: [{ message: { content: "from balance" } }] });
         }
@@ -483,7 +496,7 @@ describe("routerChat", () => {
       const headers = input instanceof Request ? input.headers : new Headers(init?.headers);
       if (url.host === "router.example") {
         routerCalls += 1;
-        if (routerCalls === 1) return new Response("limited", { status: 429 });
+        if (routerCalls === 1) return new Response("Budget has been exceeded", { status: 429 });
         expect(headers.get("authorization")).toBe(`Bearer ${BALANCE_KEY}`);
         return Response.json({ choices: [{ message: { content: "still available" } }] });
       }
@@ -529,7 +542,8 @@ describe("routerChat", () => {
   it("audits and rethrows a run-budget-declined refill across bundle boundaries", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async (input) => {
       const url = new URL(input instanceof Request ? input.url : String(input));
-      if (url.host === "router.example") return new Response("limited", { status: 429 });
+      if (url.host === "router.example")
+        return new Response("Budget has been exceeded", { status: 429 });
       if (url.pathname === "/api/agents/self/router") {
         return Response.json({
           ...usageResponse(),
@@ -587,7 +601,7 @@ describe("routerChat", () => {
       const url = new URL(request.url);
       if (url.host === "router.example") {
         routerCalls += 1;
-        if (routerCalls === 1) return new Response("limited", { status: 429 });
+        if (routerCalls === 1) return new Response("Budget has been exceeded", { status: 429 });
         return Response.json({ choices: [{ message: { content: "from balance" } }] });
       }
       if (url.pathname === "/api/agents/self/router") {
@@ -629,7 +643,7 @@ describe("routerChat", () => {
       const url = new URL(input instanceof Request ? input.url : String(input));
       if (url.host === "router.example") {
         routerCalls += 1;
-        return new Response(routerCalls === 1 ? ROUTER_KEY : BALANCE_KEY, {
+        return new Response(routerCalls === 1 ? `ExceededBudget ${ROUTER_KEY}` : BALANCE_KEY, {
           status: routerCalls === 1 ? 429 : 401,
         });
       }

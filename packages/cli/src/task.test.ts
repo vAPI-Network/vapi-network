@@ -564,7 +564,9 @@ describe("vapi task", () => {
     };
     expect(await runCli(["init", "--networks", "base,foo"], io, dependencies)).toBe(2);
     expect(stdout).toEqual([]);
-    expect(stderr).toEqual(["--networks supports base, arc and solana."]);
+    expect(stderr).toEqual([
+      "--networks supports base and arc; Solana vault setup is unavailable.",
+    ]);
     expect(dependencies.fetchImpl).not.toHaveBeenCalled();
   });
 
