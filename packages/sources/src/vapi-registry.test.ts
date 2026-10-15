@@ -27,6 +27,23 @@ const holderGraphFixture = JSON.parse(
   ),
 ) as { items: Array<Record<string, unknown>> } & Record<string, unknown>;
 
+// Synthetic client fixture copied from the public service shape exercised by
+// apps/api/app/marketplace/server/adapters/calls-marketplace-source.server.test.ts;
+// it contains no production request data.
+const mppCallsFixture = JSON.parse(
+  readFileSync(new URL("./__fixtures__/vapi-services-mpp.json", import.meta.url), "utf8"),
+) as unknown;
+
+// Synthetic representative output copied from the MPP/unverified case in
+// apps/api/app/marketplace/server/adapters/calls-marketplace-source.server.test.ts;
+// it contains no production request data.
+const mppMarketplaceFixture = JSON.parse(
+  readFileSync(
+    new URL("./__fixtures__/vapi-marketplace-mpp-unverified.json", import.meta.url),
+    "utf8",
+  ),
+) as unknown;
+
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
@@ -109,6 +126,44 @@ describe("vAPI registry helpers", () => {
       ref: "https://api.deepnets.ai/api/token/holder-graph",
       execution: { network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" },
     });
+  });
+
+  it("keeps the server's MPP and unverified marketplace row without a drop diagnostic", async () => {
+    const debug = vi.fn();
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(mppMarketplaceFixture));
+
+    const page = await searchMarketplace(
+      { query: "email", includeUnverified: true },
+      config,
+      fetchImpl,
+      { debug },
+    );
+
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]?.card.badges).toEqual([
+      { code: "mpp", label: "MPP (Stripe/Tempo), not payable here" },
+      { code: "payout_wallet_confirmed", label: "Payout wallet confirmed" },
+      { code: "unverified", label: "Unverified" },
+    ]);
+    expect(page.items[0]).toMatchObject({
+      group: "added",
+      fee: { bps: 500 },
+      verification: "none",
+      card: {
+        byline: "api.example.test",
+        facts: [
+          { label: "Price", value: "$0.01" },
+          { label: "Payment", value: "MPP (Stripe/Tempo), not payable here" },
+          { label: "Network", value: "eip155:8453" },
+          { label: "Settled calls (30d)", value: "128" },
+          { label: "Checked", value: "2026-08-27T10:00:00.000Z" },
+          { label: "Freshness", value: "Checked 2h ago" },
+          { label: "Category", value: "Data" },
+          { label: "Method", value: "POST, GET" },
+        ],
+      },
+    });
+    expect(debug).not.toHaveBeenCalled();
   });
 
   it("drops malformed rows, logs their count, and emits one debug message", async () => {
@@ -366,6 +421,20 @@ describe("vAPI registry helpers", () => {
       method: "POST",
       url: "https://weather.example/call",
     });
+  });
+
+  it("keeps an MPP compatibility row inspectable without inventing an x402 network", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(mppCallsFixture));
+
+    const endpoint = await resolveServiceEndpoint("email-count-mpp", config, fetchImpl);
+
+    expect(endpoint.payment).toEqual({
+      protocol: "mpp",
+      intent: "charge",
+      method: "tempo",
+      checkedAt: "2026-08-19T10:30:00.000Z",
+    });
+    expect(endpoint.payment).not.toHaveProperty("network");
   });
 });
 

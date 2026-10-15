@@ -52,6 +52,17 @@ const helpSwarmSubcommands = new Set(
 );
 
 describe("the help text and runCli list the same commands", () => {
+  it("advertises only supported vault networks and explains Solana discovery", () => {
+    const setupLines = HELP.split("\n").filter((line) => /^ {2}vapi (?:init|import)\b/u.test(line));
+    expect(setupLines).toHaveLength(2);
+    for (const line of setupLines) {
+      expect(line).toContain("--networks <base,arc>");
+      expect(line).not.toContain("solana");
+    }
+    expect(HELP).toContain("Solana listings remain searchable");
+    expect(HELP).toContain("unsupported_network");
+  });
+
   it("dispatches every command the help text promises", () => {
     const dispatched = new Set(
       [...caseLabels(source, 6), ...PRE_SWITCH_COMMANDS].filter(

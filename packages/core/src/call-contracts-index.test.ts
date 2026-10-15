@@ -96,6 +96,72 @@ describe("public Call discovery contract", () => {
     ).toThrow();
   });
 
+  it("accepts MPP endpoint metadata and preserves future display-only category and tier values", () => {
+    const mpp = {
+      protocol: "mpp",
+      intent: "charge",
+      method: "tempo",
+      checkedAt: "2026-08-19T10:30:00.000Z",
+    } as const;
+    const parsed = serviceSummarySchema.parse({
+      ...validService,
+      category: "communications",
+      tier: "community",
+      endpoints: [{ ...validService.endpoints[0], payment: mpp }],
+    });
+
+    expect(parsed).toMatchObject({ category: "communications", tier: "community" });
+    expect(parsed.endpoints[0]?.payment).toEqual(mpp);
+  });
+
+  it("preserves unknown non-x402 payment metadata for an explicit pay-time refusal", () => {
+    const parsed = serviceSummarySchema.parse({
+      ...validService,
+      endpoints: [
+        {
+          ...validService.endpoints[0],
+          payment: {
+            protocol: "future-pay",
+            intent: "future-intent",
+            method: { display: "future method" },
+            checkedAt: "2026-08-19T10:30:00.000Z",
+          },
+        },
+      ],
+    });
+
+    expect(parsed.endpoints[0]?.payment).toMatchObject({
+      protocol: "future-pay",
+      intent: "future-intent",
+      method: { display: "future method" },
+    });
+    expect(parsed.endpoints[0]?.payment?.network).toBeUndefined();
+    expect(parsed.endpoints[0]?.payment?.payTo).toBeUndefined();
+  });
+
+  it("keeps an MPP row when display-only intent and method vocabularies advance", () => {
+    const parsed = serviceSummarySchema.parse({
+      ...validService,
+      endpoints: [
+        {
+          ...validService.endpoints[0],
+          payment: {
+            protocol: "mpp",
+            intent: "future-intent",
+            method: { display: "future method" },
+            checkedAt: "2026-08-19T10:30:00.000Z",
+          },
+        },
+      ],
+    });
+
+    expect(parsed.endpoints[0]?.payment).toMatchObject({
+      protocol: "mpp",
+      intent: "future-intent",
+      method: { display: "future method" },
+    });
+  });
+
   it("accepts the external wire category without adding it to provider policy", () => {
     expect(serviceSummarySchema.parse({ ...validService, category: "other" }).category).toBe(
       "other",
@@ -105,8 +171,8 @@ describe("public Call discovery contract", () => {
     expect(isCallableListing("agent", "other")).toBe(false);
   });
 
-  it("rejects unknown categories and non-callable endpoint URLs", () => {
-    expect(() => serviceSummarySchema.parse({ ...validService, category: "work" })).toThrow();
+  it("rejects malformed display metadata and non-callable endpoint URLs", () => {
+    expect(() => serviceSummarySchema.parse({ ...validService, category: "   " })).toThrow();
     expect(() =>
       serviceSummarySchema.parse({
         ...validService,
@@ -130,10 +196,15 @@ describe("public Call discovery contract", () => {
         fee: { bps: 0, label: "No network fee" },
       }),
     ).toMatchObject({ group: "external", fee: { bps: 0 } });
-    expect(() => serviceSummarySchema.parse({ ...validService, group: "affiliate" })).toThrow();
-    expect(() =>
-      serviceSummarySchema.parse({ ...validService, fee: { bps: 1.5, label: "half a bip" } }),
-    ).toThrow();
+    expect(
+      serviceSummarySchema.parse({ ...validService, group: "affiliate" }).group,
+    ).toBeUndefined();
+    expect(
+      serviceSummarySchema.parse({
+        ...validService,
+        fee: { bps: 1.5, label: "half a bip" },
+      }).fee,
+    ).toBeUndefined();
   });
 
   it("tolerates additive registry fields instead of failing the whole response", () => {

@@ -1423,14 +1423,22 @@ export async function loadServerConfig() {
   return await loadConfig();
 }
 
-function toolError(error: unknown) {
+export function toolError(error: unknown) {
   const text =
     error instanceof VapiCallError
       ? JSON.stringify(
           {
             error: error.message,
             code: error.code,
-            ...(error.possibleSettlement ? { possibleSettlement: error.possibleSettlement } : {}),
+            ...(error.possibleSettlement
+              ? {
+                  possibleSettlement: Object.fromEntries(
+                    Object.entries(error.possibleSettlement).filter(
+                      ([key]) => key !== "authorizationTransaction",
+                    ),
+                  ),
+                }
+              : {}),
             ...(error.paymentRejection ? { paymentRejection: error.paymentRejection } : {}),
             ...(error.confirmedSettlement
               ? { confirmedSettlement: error.confirmedSettlement }

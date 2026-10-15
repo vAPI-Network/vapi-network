@@ -13,7 +13,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
-import { createVapiServer } from "./server.js";
+import { createVapiServer, toolError } from "./server.js";
+import { VapiCallError } from "./tools/call.js";
 
 const PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" as Hex;
 const temporaryDirectories: string[] = [];
@@ -28,6 +29,24 @@ afterEach(async () => {
 });
 
 describe("Agent Cash MCP marketplace tools", () => {
+  it("omits an SVM signed transaction from serialized uncertain-settlement errors", () => {
+    const signedTransaction = "signed-solana-transaction-fixture";
+    const error = new VapiCallError("settlement_unknown", "Settlement is uncertain.", {
+      network: "solana:mainnet",
+      asset: "usdc",
+      amountAtomic: "1",
+      payTo: "payee",
+      payer: "payer",
+      receipt: null,
+      authorizationTransaction: signedTransaction,
+    } as never);
+
+    const serialized = JSON.stringify(toolError(error));
+    expect(serialized).toContain("settlement_unknown");
+    expect(serialized).not.toContain(signedTransaction);
+    expect(serialized).not.toContain("authorizationTransaction");
+  });
+
   it("returns the Solana holder-graph row through call.search output validation", async () => {
     const page = await fixture("vapi-discovery-holder-graph-solana.json");
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(page));
@@ -430,7 +449,7 @@ describe("Agent Cash MCP marketplace tools", () => {
           outcome: "paid",
           listing: { providerHost: "93.184.216.34", source: "direct" },
           policy: { capsApplied: false },
-          client: { name: "vapi-network", version: "0.9.2" },
+          client: { name: "vapi-network", version: "0.9.3" },
         },
       ],
     });

@@ -240,7 +240,9 @@ describe("vapi setup", () => {
     expect(store.defaultName).toBe("account-1");
     expect(await store.readAddress("account-1")).toBe(VECTOR_ADDRESS);
     expect(store.entry("account-1")?.link).toBeDefined();
-    expect(captured.stdout[0]).toBe("Vault restored with 1 account(s): account-1");
+    expect(captured.stdout[0]).toBe(
+      "Vault restored with 1 account(s): account-1. 6 address(es) scanned.",
+    );
     expect(captured.stdout.join("\n")).toContain("Code          BCDF-GHJK");
     expect(captured.stdout.at(-1)).toBe(
       `Fund account-1: send USDC on Base to ${VECTOR_ADDRESS} (or run vapi fund --account account-1).`,
@@ -280,7 +282,47 @@ describe("vapi setup", () => {
     expect(await runCli(["setup", "some", "words"], captured.io, baseDependencies())).toBe(2);
     expect(captured.stdout).toEqual([]);
     expect(captured.stderr).toEqual([
-      "vapi setup accepts only --no-cloud-backup; a recovery phrase is typed at the prompt, never passed on the command line.",
+      "vapi setup accepts only --no-cloud-backup and --accounts <n> (1-10000); a recovery phrase is typed at the prompt, never passed on the command line.",
+    ]);
+  });
+
+  it("restores a fixed number of accounts without reading balances", async () => {
+    const home = await temporaryHome("vapi-setup-fixed-restore-");
+    const fetchImpl = vi.fn<typeof fetch>(async () => {
+      throw new Error("balance RPC must not be called");
+    });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["setup", "--accounts", "3", "--no-cloud-backup", "--json"], captured.io, {
+        ...baseDependencies(fetchImpl),
+        interactive: true,
+        prompts: scriptedPrompts({
+          [SETUP_CHOICE]: "restore",
+          "Recovery phrase: ": RECOVERY_PHRASE,
+        }).prompts,
+        agentLink: linkMocks().operations,
+        openUrl: vi.fn(() => true),
+      }),
+    ).toBe(0);
+
+    const store = await WalletStore.open(home, { secrets: testSecretStore(home) });
+    expect(store.names()).toEqual(["account-1", "account-2", "account-3"]);
+    expect(JSON.parse(captured.stdout[0]!)).toMatchObject({
+      vault: "restored",
+      scannedAddresses: 0,
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(captured.stderr.join("\n")).toContain("0 address(es) scanned");
+  });
+
+  it("rejects invalid fixed account counts before prompting", async () => {
+    await temporaryHome("vapi-setup-invalid-count-");
+    const captured = captureIo();
+
+    expect(await runCli(["setup", "--accounts", "0"], captured.io, baseDependencies())).toBe(2);
+    expect(captured.stderr).toEqual([
+      "--accounts must be a positive integer no greater than 10000.",
     ]);
   });
 

@@ -298,7 +298,7 @@ describe("vapi restore", () => {
     expect(store.names()).toEqual(["account-1"]);
     expect(await store.readAddress("account-1")).toBe(VECTOR_ADDRESS);
     expect(captured.stdout).toEqual([
-      "Vault restored with 1 account(s): account-1",
+      "Vault restored with 1 account(s): account-1. 6 address(es) scanned.",
       "Run vapi setup to link account-1.",
     ]);
     const audit = await readFile(join(home, "audit.log"), "utf8");
@@ -313,6 +313,44 @@ describe("vapi restore", () => {
       detail: "1 account(s)",
     });
     expect(audit).not.toContain(RECOVERY_PHRASE);
+  });
+
+  it("restores an explicit account count and reports that discovery was skipped", async () => {
+    const home = await temporaryHome("vapi-restore-fixed-");
+    const fetchImpl = vi.fn<typeof fetch>(async () => {
+      throw new Error("balance RPC must not be called");
+    });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["restore", "--accounts", "3", "--json"], captured.io, {
+        ...baseDependencies(fetchImpl),
+        readStdin: async () => RECOVERY_PHRASE,
+      }),
+    ).toBe(0);
+
+    const store = await WalletStore.open(home, { secrets: secretStores.get(home)! });
+    expect(store.names()).toEqual(["account-1", "account-2", "account-3"]);
+    expect(JSON.parse(captured.stdout[0]!)).toEqual({
+      command: "restore",
+      vault: "restored",
+      accounts: ["account-1", "account-2", "account-3"],
+      scannedAddresses: 0,
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(captured.stderr).toEqual([]);
+  });
+
+  it("rejects invalid explicit account counts", async () => {
+    await temporaryHome("vapi-restore-invalid-count-");
+    const captured = captureIo();
+
+    expect(await runCli(["restore", "--accounts", "10001"], captured.io, baseDependencies())).toBe(
+      2,
+    );
+    expect(captured.stderr).toEqual([
+      "--accounts must be a positive integer no greater than 10000.",
+    ]);
   });
 
   it("reads an interactive restore phrase from the secret prompt", async () => {
@@ -427,6 +465,7 @@ describe("vapi restore", () => {
       command: "restore",
       vault: "restored",
       accounts: ["account-1"],
+      scannedAddresses: 5,
     });
     expect([...captured.stdout, ...captured.stderr].join("\n")).not.toContain(RECOVERY_PHRASE);
   });
@@ -438,7 +477,7 @@ describe("vapi restore", () => {
     expect(await runCli(["restore", "some", "words"], captured.io, baseDependencies())).toBe(2);
     expect(captured.stdout).toEqual([]);
     expect(captured.stderr).toEqual([
-      "Usage: vapi restore [--from-owner [--owner <0x…>]] [--json]",
+      "Usage: vapi restore [--accounts <n> | --from-owner [--owner <0x…>]] [--json]",
     ]);
   });
 });

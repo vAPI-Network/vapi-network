@@ -106,12 +106,14 @@ vapi backup
 vapi backup prints your recovery phrase and only works in a terminal.
 ```
 
-Restore reads the phrase, rebuilds the vault, and re-derives accounts from index 0 until it finds an unused address. Setup offers the same restore choice when no vault exists.
+Restore reads the phrase, rebuilds the vault, and checks Base USDC balances from index 0 until it finds five unused addresses in a row. It restores through the last funded address, without keeping the trailing empty gap, and always restores the first account. The result reports how many addresses it scanned. Setup offers the same restore choice when no vault exists.
 
 ```sh
 vapi restore
 vapi setup
 ```
+
+If balance history is unavailable or you know exactly how many derived accounts to recover, use `vapi restore --accounts <n>` or `vapi setup --accounts <n>`. The explicit count restores the first `n` accounts without querying balances; it accepts 1 through 10,000.
 
 This wallet is yours. vAPI stores at most an encrypted backup that only your owner wallet can open, and cannot recover the key without it. If you lose this machine, your recovery phrase, and the owner-encrypted backup, the funds are gone.
 
@@ -200,7 +202,7 @@ vapi
 This screen comes from a vault restored from the BIP-39 test phrase into an empty home, so the account holds nothing and is not linked yet:
 
 ```text
-vAPI 0.9.2        home /tmp/vapi-docs-home        registry api.vapinetwork.ai
+vAPI 0.9.3        home /tmp/vapi-docs-home        registry api.vapinetwork.ai
 
 Owner      not linked   console: https://api.vapinetwork.ai/agents
 Vault      unlocked on this device (macOS Keychain)   backup: vapi backup

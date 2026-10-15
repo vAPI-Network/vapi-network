@@ -1,0 +1,33 @@
+{
+  "services": [
+    {
+      "id": "email-count-mpp",
+      "name": "Email Count MPP",
+      "description": "Synthetic MPP compatibility fixture.",
+      "category": "data",
+      "tier": "listed",
+      "group": "added",
+      "fee": { "bps": 500, "label": "5% network fee, paid by the API's splitter" },
+      "verified": false,
+      "verification": "none",
+      "wrapped": false,
+      "price": "$0.01",
+      "networks": ["eip155:8453"],
+      "endpoints": [
+        {
+          "name": "email_count",
+          "method": "POST",
+          "url": "https://mpp.example/email-count",
+          "price": "$0.01",
+          "description": "Count matching emails.",
+          "payment": {
+            "protocol": "mpp",
+            "intent": "charge",
+            "method": "tempo",
+            "checkedAt": "2026-08-19T10:30:00.000Z"
+          }
+        }
+      ]
+    }
+  ]
+}

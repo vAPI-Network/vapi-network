@@ -31,6 +31,51 @@ afterEach(async () => {
 });
 
 describe("Agent Cash marketplace call boundary", () => {
+  it.each(["mpp", "future-payment"])(
+    "refuses %s metadata before requesting or signing",
+    async (protocol) => {
+      const directory = await mkdtemp(join(tmpdir(), "vapi-unsupported-payment-"));
+      temporaryDirectories.push(directory);
+      const account = privateKeyToAccount(PRIVATE_KEY);
+      const sign = vi.spyOn(account, "signTypedData");
+      const fetchImpl = vi.fn<typeof fetch>().mockResolvedValueOnce(
+        Response.json({
+          services: [
+            service({
+              endpoints: [
+                endpoint({
+                  payment: {
+                    protocol,
+                    intent: "charge",
+                    method: "tempo",
+                    checkedAt: "2026-10-15T12:00:00.000Z",
+                  },
+                }),
+              ],
+            }),
+          ],
+        }),
+      );
+      await expect(
+        callService({
+          input: { id: "imported-weather" },
+          account,
+          config: getDefaultConfig(),
+          fetchImpl,
+          ledgerPath: join(directory, "spend-ledger.json"),
+        }),
+      ).rejects.toMatchObject({
+        code: "unsupported_payment",
+        message: expect.stringContaining(`Payment protocol ${protocol} is not supported`),
+      });
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      expect(sign).not.toHaveBeenCalled();
+      await expect(readFile(join(directory, "spend-ledger.json"))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    },
+  );
+
   it("rejects a Work result before making a network request", async () => {
     const fetchImpl = vi.fn<typeof fetch>();
 

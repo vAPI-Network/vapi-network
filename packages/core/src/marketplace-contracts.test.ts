@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 
 import {
   MARKETPLACE_DISCOVERY_PROTOCOL,
@@ -43,6 +44,10 @@ describe("marketplace discovery wire contract", () => {
     ).toEqual(["direct", "direct"]);
   });
 
+  it("exports a JSON Schema for MCP result registration", () => {
+    expect(() => z.toJSONSchema(marketplaceDiscoveryPageSchema)).not.toThrow();
+  });
+
   it("never promotes a Work kind to an API hit, whatever extra axes ride along", () => {
     const [, , service, request] = marketplaceDiscoveryPageSchema.parse(fixture).items;
 
@@ -80,12 +85,14 @@ describe("marketplace discovery wire contract", () => {
       label: "5% network fee, paid by the API's splitter",
     });
     expect(page.items.map((item) => item.fee?.bps)).toEqual([500, 0, 0, 0]);
-    // The vocabulary is closed, and bps stays a non-negative integer.
-    expect(() => marketplaceHitSchema.parse({ ...page.items[0], group: "affiliate" })).toThrow();
-    expect(() =>
-      marketplaceHitSchema.parse({ ...page.items[0], fee: { bps: -1, label: "negative" } }),
-    ).toThrow();
-    expect(() => marketplaceHitSchema.parse({ ...page.items[0], fee: { bps: 500 } })).toThrow();
+    // Unknown or malformed presentation disclosures are omitted safely.
+    expect(
+      marketplaceHitSchema.parse({ ...page.items[0], group: "affiliate" }).group,
+    ).toBeUndefined();
+    expect(
+      marketplaceHitSchema.parse({ ...page.items[0], fee: { bps: -1, label: "negative" } }).fee,
+    ).toBeUndefined();
+    expect(marketplaceHitSchema.parse({ ...page.items[0], fee: { bps: 500 } }).fee).toBeUndefined();
   });
 
   it("carries the verification tier on every kind of hit, defaulting to none", () => {
@@ -171,6 +178,30 @@ describe("marketplace discovery wire contract", () => {
       somethingTheRegistryAddedLater: { nested: true },
       card: { highlight: "new" },
     });
+  });
+
+  it("keeps a row when badge and display-only disclosure vocabularies advance", () => {
+    const page = fixture as { items: Record<string, unknown>[] };
+    const parsed = marketplaceDiscoveryPageSchema.parse({
+      ...page,
+      items: page.items.map((item) => ({
+        ...item,
+        group: "future_group",
+        fee: { bps: "unknown", label: "Future fee" },
+        card: {
+          ...(item.card as Record<string, unknown>),
+          badges: [
+            { code: "live_x402", label: "Live x402" },
+            { code: "future_badge", label: "A newer registry badge" },
+          ],
+        },
+      })),
+    });
+
+    expect(parsed.items).toHaveLength(page.items.length);
+    expect(parsed.items[0]?.group).toBeUndefined();
+    expect(parsed.items[0]?.fee).toBeUndefined();
+    expect(parsed.items[0]?.card.badges).toEqual([{ code: "live_x402", label: "Live x402" }]);
   });
 
   it("binds every marketplace kind to its one valid action and provenance policy", () => {

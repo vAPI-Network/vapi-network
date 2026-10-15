@@ -23,6 +23,8 @@ export type VaultEnv = Record<string, string | undefined>;
 
 const DEVICE_KEY_LENGTH = 32;
 const DEFAULT_SESSION_HOURS = 8;
+export const RESTORE_GAP_LIMIT = 5;
+export const MAX_RESTORE_ACCOUNTS = 10_000;
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 let deviceKeyOperations: Promise<void> = Promise.resolve();
 const sessionSchema = z
@@ -205,6 +207,8 @@ export async function restoreVault(args: {
   key: Uint8Array;
   phrase: string;
   probe: (address: `0x${string}`) => Promise<boolean>;
+  accountCount?: number;
+  onScanComplete?: (scannedAddresses: number) => void;
   now?: () => Date;
 }): Promise<Vault> {
   let phrase: string;
@@ -215,7 +219,20 @@ export async function restoreVault(args: {
   }
 
   let seed: Uint8Array | undefined;
-  let discoveredAccounts = 0;
+  if (
+    args.accountCount !== undefined &&
+    (!Number.isSafeInteger(args.accountCount) ||
+      args.accountCount < 1 ||
+      args.accountCount > MAX_RESTORE_ACCOUNTS)
+  ) {
+    throw new VaultError(
+      "corrupt",
+      `Account count must be a positive integer no greater than ${MAX_RESTORE_ACCOUNTS}.`,
+    );
+  }
+
+  let discoveredAccounts = args.accountCount ?? 0;
+  let scannedAddresses = 0;
   try {
     seed = phraseToSeed(phrase);
   } catch (error) {
@@ -223,19 +240,27 @@ export async function restoreVault(args: {
   }
 
   try {
-    for (let index = 0; ; index += 1) {
+    for (let index = 0, emptyRun = 0; args.accountCount === undefined; index += 1) {
       let address: `0x${string}`;
       try {
         address = privateKeyToAccount(deriveEvmPrivateKey(seed, `m/44'/60'/0'/0/${index}`)).address;
       } catch (error) {
         throw asVaultError(error, "Unable to derive an account while restoring the vault.");
       }
-      if (!(await args.probe(address))) break;
-      discoveredAccounts += 1;
+      const funded = await args.probe(address);
+      scannedAddresses += 1;
+      if (funded) {
+        discoveredAccounts = index + 1;
+        emptyRun = 0;
+      } else {
+        emptyRun += 1;
+        if (emptyRun === RESTORE_GAP_LIMIT) break;
+      }
     }
   } finally {
     seed.fill(0);
   }
+  args.onScanComplete?.(scannedAddresses);
 
   let vault: Vault;
   try {

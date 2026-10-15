@@ -195,8 +195,8 @@ const HELP_HEADING = "vAPI Network";
 export const HELP = `${HELP_HEADING}
 
 Usage:
-  vapi init [--networks <base,arc,solana>] [--json]
-  vapi setup [--no-cloud-backup] [--json]
+  vapi init [--networks <base,arc>] [--json]
+  vapi setup [--no-cloud-backup] [--accounts <n>] [--json]
   vapi accounts [--all] [--json]
   vapi accounts add <name> [--label <text>] [--no-link] [--json]
   vapi accounts import <name> [--keystore <path> | --key-file <path>] [--label <text>] [--json]
@@ -272,8 +272,8 @@ Usage:
   vapi task status <id> [--account <name>] [--json]
   vapi export-key [--network <caip2>] [--account <name>] [--json]
   vapi backup [--account <name>] [--cloud [off]] [--json]
-  vapi restore [--from-owner [--owner <0x…>]] [--json]
-  vapi import (--phrase | --key) [--account <name>] [--networks <base,arc,solana>] [--replace] [--force] [--json]
+  vapi restore [--accounts <n> | --from-owner [--owner <0x…>]] [--json]
+  vapi import (--phrase | --key) [--account <name>] [--networks <base,arc>] [--replace] [--force] [--json]
   vapi passphrase [--account <name>] [--json]
   vapi vault protect [--json]
   vapi vault unprotect [--json]
@@ -301,6 +301,8 @@ Every command that touches a wallet takes \`--account <name>\`, falls back to \`
 
 \`vapi search\` answers with vAPI-verified listings plus the mirrored external catalogs. \`--include-unverified\` also returns self-listed APIs that passed vAPI's automated x402 probe but were never reviewed; every result is tagged \`[verified]\`, \`[requested]\`, \`[unverified]\` or \`[external]\`.
 
+Solana listings remain searchable; inspect and pay return \`unsupported_network\`. Solana keys are not part of the device vault yet.
+
 \`vapi docs\` asks the public vAPI documentation assistant; \`vapi docs search\` searches documentation excerpts and \`vapi docs read\` reads one Markdown page. They need no account, wallet or payment.
 
 \`vapi task --help\` lists task options and availability. Task exit codes: 0 ok, 1 error, 2 policy refusal (JSON ok:false with a policy. reason) or invalid usage (JSON error), 3 approval needed in non-interactive mode. Posting moves no money; the current create-order contract does not store amount, deadline, intake, max awards or webhook yet.
@@ -313,7 +315,7 @@ Every command that touches a wallet takes \`--account <name>\`, falls back to \`
 
 \`vapi vault protect\` adds a password to the device vault. \`vapi vault unlock\` opens it on this device for 8 hours; for unattended use, set \`VAPI_VAULT_PASSWORD\`. \`vapi unlock\` and \`vapi lock\` remain aliases for one release.
 
-\`vapi backup\` and \`vapi export-key\` print a secret, so they run only on a real terminal, never for an agent, and ask you to type the wallet name first. \`vapi backup --cloud\` keeps an encrypted vault copy that only the owner can approve for recovery. \`vapi restore\` rebuilds the vault from the phrase and re-derives accounts until an unused address. Set \`VAPI_NO_SECRETS=1\` to switch exports off entirely. Every export and every wallet change is logged to ~/.vapi/audit.log.
+\`vapi backup\` and \`vapi export-key\` print a secret, so they run only on a real terminal, never for an agent, and ask you to type the wallet name first. \`vapi backup --cloud\` keeps an encrypted vault copy that only the owner can approve for recovery. \`vapi restore\` rebuilds the vault from the phrase and re-derives accounts until five consecutive addresses have no Base USDC, and reports the number scanned. Use \`--accounts <n>\` with restore or setup to recover a fixed count without querying balances. Set \`VAPI_NO_SECRETS=1\` to switch exports off entirely. Every export and every wallet change is logged to ~/.vapi/audit.log.
 
 \`vapi publish <url>\` lists an API you own. vAPI probes the URL — an origin, one endpoint, or an OpenAPI document — you choose which endpoints to list, and your wallet signs one line naming where the payouts go. Listing is permissionless: a listing that passed the probe goes live with \`vapi publish activate <slug>\`, and \`vapi publish verify-request <slug>\` asks for the review that puts it in the default search. Deploying the FeeSplitter that receives the payouts is a wallet transaction and stays in the console. A catalog of more than 20 endpoints is listed as several listings of up to 20, with one result line per endpoint; \`--resume\` skips every endpoint this key already lists.
 
@@ -4170,7 +4172,7 @@ function parseInitNetworks(value: string): string[] {
   }
   for (const network of networks) {
     if (network !== "base" && network !== "arc" && network !== "solana") {
-      throw new UsageError("--networks supports base, arc and solana.");
+      throw new UsageError("--networks supports base and arc; Solana vault setup is unavailable.");
     }
   }
   return networks;

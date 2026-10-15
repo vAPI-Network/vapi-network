@@ -1,0 +1,39 @@
+{
+  "protocol": "vapi.marketplace.discovery/1",
+  "items": [
+    {
+      "ref": "email-count-mpp",
+      "kind": "api",
+      "provenance": "self_listed",
+      "group": "added",
+      "fee": { "bps": 500, "label": "5% network fee, paid by the API's splitter" },
+      "verification": "none",
+      "execution": { "mode": "direct", "payable": false },
+      "card": {
+        "title": "Email verifier",
+        "summary": "Verifies an email address.",
+        "byline": "api.example.test",
+        "badges": [
+          { "code": "mpp", "label": "MPP (Stripe/Tempo), not payable here" },
+          { "code": "payout_wallet_confirmed", "label": "Payout wallet confirmed" },
+          { "code": "unverified", "label": "Unverified" }
+        ],
+        "facts": [
+          { "label": "Price", "value": "$0.01" },
+          { "label": "Payment", "value": "MPP (Stripe/Tempo), not payable here" },
+          { "label": "Network", "value": "eip155:8453" },
+          { "label": "Settled calls (30d)", "value": "128" },
+          { "label": "Checked", "value": "2026-08-27T10:00:00.000Z" },
+          { "label": "Freshness", "value": "Checked 2h ago" },
+          { "label": "Category", "value": "Data" },
+          { "label": "Method", "value": "POST, GET" }
+        ]
+      },
+      "action": { "type": "invoke_api", "href": "/call/email-count-mpp" },
+      "listedAt": "2026-08-26T10:00:00.000Z"
+    }
+  ],
+  "nextCursor": null,
+  "unavailableKinds": [],
+  "rankingVersion": "marketplace-ranking-v1"
+}

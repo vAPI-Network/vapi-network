@@ -19,7 +19,9 @@ export type CallableCategory = z.infer<typeof callableCategorySchema>;
 // publish vAPI's internal category taxonomy. `other` belongs to the wire seam
 // only; it is deliberately excluded from callable listing and publish policy.
 export const DISCOVERY_CATEGORIES = [...CALLABLE_CATEGORIES, "other"] as const;
-export const discoveryCategorySchema = z.enum(DISCOVERY_CATEGORIES);
+// Category and tier are labels used for display and filtering. Preserve future
+// non-empty values so vocabulary growth cannot hide an executable service.
+export const discoveryCategorySchema = z.string().trim().min(1);
 export type DiscoveryCategory = z.infer<typeof discoveryCategorySchema>;
 
 export const CALLABLE_CATEGORY_LABELS = {
@@ -36,7 +38,7 @@ export function isCallableListing(kind: string, category: string): boolean {
   return kind === CALLABLE_KIND && CALLABLE_CATEGORY_SET.has(category);
 }
 
-export const serviceTierSchema = z.enum(["listed", "verified", "partner"]);
+export const serviceTierSchema = z.string().trim().min(1);
 export type ServiceTier = z.infer<typeof serviceTierSchema>;
 
 export const discoveryEndpointSchema = z.looseObject({
@@ -69,6 +71,24 @@ export const discoveryEndpointSchema = z.looseObject({
         asset: z.string().refine(isSolanaAddress, "Expected a Solana base58 address."),
         payTo: z.string().refine(isSolanaAddress, "Expected a Solana base58 address."),
         checkedAt: z.iso.datetime(),
+      }),
+      z.looseObject({
+        protocol: z.literal("mpp"),
+        intent: z.enum(["charge", "authorize", "subscription"]).nullable(),
+        method: z.string().trim().min(1).max(40).nullable(),
+        checkedAt: z.iso.datetime(),
+        // Keep common x402 properties readable on the union while making it
+        // impossible for MPP metadata to masquerade as executable x402 terms.
+        network: z.never().optional(),
+        payTo: z.never().optional(),
+      }),
+      z.looseObject({
+        // Future payment protocols remain visible to callers so the payment
+        // layer can refuse them explicitly instead of discovery losing the row.
+        protocol: z.string().trim().min(1).max(40),
+        checkedAt: z.iso.datetime(),
+        network: z.never().optional(),
+        payTo: z.never().optional(),
       }),
     ])
     .optional(),

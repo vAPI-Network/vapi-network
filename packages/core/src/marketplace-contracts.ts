@@ -135,8 +135,10 @@ export type ListingIdentity = z.infer<typeof listingIdentitySchema>;
  * malformed value reads as absent instead of failing the listing around it.
  */
 export const listingDisclosureShape = {
-  group: listingGroupSchema.optional(),
-  fee: listingFeeSchema.optional(),
+  // Presentation metadata must not make an otherwise executable row vanish
+  // when the registry adds a new group or changes the fee display shape.
+  group: listingGroupSchema.optional().catch(undefined),
+  fee: listingFeeSchema.optional().catch(undefined),
   verification: listingVerificationFieldSchema,
   liveness: listingLivenessSchema.optional().catch(undefined),
   conformance: listingConformanceSchema.optional().catch(undefined),
@@ -145,11 +147,13 @@ export const listingDisclosureShape = {
 
 export const marketplaceBadgeCodeSchema = z.enum([
   "live_x402",
+  "mpp",
   "partner",
   "payout_wallet_confirmed",
   "vapi_verified",
   "external_catalog",
   "approved_vendor",
+  "unverified",
 ]);
 export type MarketplaceBadgeCode = z.infer<typeof marketplaceBadgeCodeSchema>;
 
@@ -183,7 +187,16 @@ const marketplaceCardSchema = z.looseObject({
   summary: z.string().trim().min(1).max(1_000),
   byline: z.string().trim().min(1).max(160).optional(),
   bylineHref: marketplaceHrefSchema.optional(),
-  badges: z.array(marketplaceBadgeSchema).max(8),
+  badges: z.preprocess(
+    (badges) =>
+      Array.isArray(badges)
+        ? badges.flatMap((badge) => {
+            const parsed = marketplaceBadgeSchema.safeParse(badge);
+            return parsed.success ? [parsed.data] : [];
+          })
+        : badges,
+    z.array(marketplaceBadgeSchema).max(8),
+  ),
   facts: z.array(marketplacePublicFactSchema).max(12),
 });
 

@@ -1,5 +1,6 @@
 import {
   MARKETPLACE_KINDS,
+  discoveryEndpointSchema,
   isMirroredHit,
   isSolanaAddress,
   isSupportedPaymentNetwork,
@@ -83,15 +84,7 @@ export const inspectToolResultSchema = z.object({
   liveness: listingLivenessSchema.optional(),
   conformance: listingConformanceSchema.optional(),
   identity: listingIdentitySchema.optional(),
-  payment: z
-    .object({
-      scheme: z.literal("exact"),
-      network: z.string(),
-      asset: z.string(),
-      payTo: z.string(),
-      checkedAt: z.string(),
-    })
-    .nullable(),
+  payment: discoveryEndpointSchema.shape.payment.unwrap().nullable(),
 });
 
 export const callSearchInputSchema = z.object({

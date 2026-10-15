@@ -99,6 +99,34 @@ describe("semantic Call discovery catalog", () => {
     ).not.toThrow();
   });
 
+  it("parses MPP metadata without treating it as an x402 payment network", () => {
+    const parsed = searchServicesResponseSchema.parse({
+      services: [
+        {
+          ...service,
+          endpoints: [
+            {
+              ...service.endpoints[0],
+              payment: {
+                protocol: "mpp",
+                intent: "authorize",
+                method: "stripe",
+                checkedAt: "2026-08-19T10:30:00.000Z",
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(parsed.services[0]?.endpoints[0]?.payment).toEqual({
+      protocol: "mpp",
+      intent: "authorize",
+      method: "stripe",
+      checkedAt: "2026-08-19T10:30:00.000Z",
+    });
+  });
+
   it("preserves payment networks only when every ambiguous endpoint declares one", () => {
     const assertAmbiguous = (raw: unknown, expectedNetworks: readonly string[] | undefined) => {
       try {
@@ -117,7 +145,9 @@ describe("semantic Call discovery catalog", () => {
     const parsed = searchServicesResponseSchema.parse(birdeyeFixture);
     assertAmbiguous(
       birdeyeFixture,
-      parsed.services[0]!.endpoints.map(({ payment }) => payment!.network),
+      parsed.services[0]!.endpoints.flatMap(({ payment }) =>
+        typeof payment?.network === "string" ? [payment.network] : [],
+      ),
     );
 
     const incomplete = structuredClone(parsed);

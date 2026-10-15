@@ -355,7 +355,7 @@ describe("x402 v2 challenge parsing", () => {
       outcome: "declined_policy",
       quote: { amountAtomic: "2500" },
       policy: { capsApplied: true },
-      client: { name: "vapi-network", version: "0.9.2" },
+      client: { name: "vapi-network", version: "0.9.3" },
       error: { code: "per_call_cap_exceeded" },
     });
     expect(receipt).not.toHaveProperty("payer");
@@ -531,6 +531,63 @@ describe("x402 v2 challenge parsing", () => {
         },
       },
     ]);
+  });
+
+  it("redacts reflected payment headers from returned body and settlement fields", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-call-"));
+    temporaryDirectories.push(directory);
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const paymentSignature = request.headers.get("payment-signature");
+      const legacyPayment = request.headers.get("x-payment");
+      if (paymentSignature === null || legacyPayment === null) {
+        return new Response(JSON.stringify(challenge()), {
+          status: 402,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const payload = JSON.parse(Buffer.from(paymentSignature, "base64").toString("utf8")) as {
+        payload: { signature: string };
+      };
+      const rawSignature = payload.payload.signature;
+      const settlement = {
+        success: true,
+        nested: { [`provider-${paymentSignature}`]: `echo:${legacyPayment}:${rawSignature}` },
+      };
+      return new Response(
+        JSON.stringify({
+          nested: { [`body-${legacyPayment}`]: `echo:${paymentSignature}:${rawSignature}` },
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "payment-response": Buffer.from(JSON.stringify(settlement), "utf8").toString("base64"),
+            "x-vapi-payment-proof": `proof:${rawSignature}`,
+          },
+        },
+      );
+    });
+
+    const result = await callService({
+      input: { url: "https://vendor.example/paid" },
+      account: privateKeyToAccount(PRIVATE_KEY),
+      config: getDefaultConfig(),
+      fetchImpl,
+      lookup: async () => ["93.184.216.34"],
+      ledgerPath: join(directory, "ledger.json"),
+    });
+
+    const serialized = JSON.stringify(result);
+    const paidRequest = fetchImpl.mock.calls[1]![0] as Request;
+    const payload = JSON.parse(
+      Buffer.from(paidRequest.headers.get("payment-signature")!, "base64").toString("utf8"),
+    ) as { payload: { signature: string } };
+    expect(serialized).not.toContain(paidRequest.headers.get("payment-signature"));
+    expect(serialized).not.toContain(paidRequest.headers.get("x-payment"));
+    expect(serialized).not.toContain(payload.payload.signature);
+    expect(result.payment?.proof).toBe("proof:[redacted]");
+    expect(serialized).toContain("[redacted]");
   });
 
   it("writes the run reference on a paid call receipt", async () => {

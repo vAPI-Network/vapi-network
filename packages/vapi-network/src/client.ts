@@ -144,10 +144,18 @@ export async function createVapiClient(options: VapiClientOptions = {}): Promise
 
   let accountPromise: Promise<VapiPaymentAccount> | undefined;
 
-  const account = (): Promise<VapiPaymentAccount> => {
-    if (injected !== undefined) return Promise.resolve(injected);
-    accountPromise ??= unlockOnce();
-    return accountPromise;
+  const account = async (): Promise<VapiPaymentAccount> => {
+    if (injected !== undefined) return injected;
+    try {
+      if (accountPromise !== undefined && !env.VAPI_VAULT_PASSWORD?.trim()) {
+        await wallets.assertSigningAuthority(selected.name);
+      }
+      accountPromise ??= unlockOnce();
+      return await accountPromise;
+    } catch (error) {
+      accountPromise = undefined;
+      throw error;
+    }
   };
 
   const unlockOnce = async (): Promise<VapiPaymentAccount> => {
@@ -304,7 +312,10 @@ export async function createVapiClient(options: VapiClientOptions = {}): Promise
           account: await account(),
           wallet: selected.name,
           spendCaps,
-          currentSpendCaps,
+          currentSpendCaps: async () => {
+            await account();
+            return await currentSpendCaps();
+          },
           chat: async (request) => await routerChat(deps, request),
           approve: runOptions.approve ?? (async () => false),
           ...(runOptions.onEvent === undefined ? {} : { onEvent: runOptions.onEvent }),
