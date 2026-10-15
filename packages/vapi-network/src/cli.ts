@@ -1,5 +1,5 @@
 #!/usr/bin/env node
 
-import { runCli } from "@vapi-network/cli";
+import { runCliWithUpdateCheck } from "@vapi-network/cli";
 
-process.exitCode = await runCli();
+process.exitCode = await runCliWithUpdateCheck();

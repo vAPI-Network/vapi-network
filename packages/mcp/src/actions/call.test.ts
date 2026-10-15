@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 
-import { inspectToolResultSchema } from "./call.js";
+import { callPayInputSchema, inspectToolResultSchema } from "./call.js";
 
 const inspected = {
   name: "email_count",
@@ -13,6 +13,17 @@ const inspected = {
 };
 
 describe("call action result contracts", () => {
+  it("validates paid response timeout seconds", () => {
+    expect(
+      callPayInputSchema.parse({ url: "https://example.com", timeoutSeconds: 45 }),
+    ).toMatchObject({ timeoutSeconds: 45 });
+    for (const timeoutSeconds of [0, 1.5, 301]) {
+      expect(() =>
+        callPayInputSchema.parse({ url: "https://example.com", timeoutSeconds }),
+      ).toThrow();
+    }
+  });
+
   it("exports inspect output as JSON Schema for MCP registration", () => {
     expect(() => z.toJSONSchema(inspectToolResultSchema)).not.toThrow();
   });

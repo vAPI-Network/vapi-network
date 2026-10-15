@@ -40,7 +40,11 @@ the registry and does not read the chain.
 ## Paying and resuming
 
 `vapi pay` also accepts `--max-price-usd` as a long-standing alias for `--max`;
-the two cannot be combined. When a paid call loses its response, `vapi pay` refuses to guess
+the two cannot be combined. `--timeout <seconds>` bounds the paid request from 1 to 300
+seconds; a provider's smaller advertised maximum still applies. Without this option, the
+paid request uses the provider maximum clamped to 30–120 seconds, or 120 seconds when the
+provider supplies none. The initial unpaid probe uses at most 30 seconds. When a paid call
+loses its response, `vapi pay` refuses to guess
 and names its receipt: `vapi pay --resume <receipt-id>` asks the token contract
 on that receipt's network, with EIP-3009 `authorizationState(authorizer,
 nonce)`, whether the signed authorization was used. **Settled** means the

@@ -162,7 +162,9 @@ describe("CLI JSON output", () => {
     expect(text).toContain("\u2588");
     expect(text).toMatch(/Fund {6}vapi fund\s+\(card via Coinbase, a wallet transfer/);
     expect(text).toContain('vapi search "weather"');
-    expect(text).toContain('Agent     add {"command":"npx","args":["-y","vapi-network","mcp"]}');
+    expect(text).toContain(
+      'Agent     add {"command":"npx","args":["-y","vapi-network@latest","mcp"]}',
+    );
     expect(text).not.toContain("\u001b[");
   });
 
@@ -390,7 +392,7 @@ describe("pay command arguments", () => {
     expect(await runCli(["pay"], captured.io)).toBe(2);
     expect(captured.stdout).toEqual([]);
     expect(captured.stderr.join("\n")).toBe(
-      "Missing <id-or-url>.\nUsage: vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--account <name>] [--json]",
+      "Missing <id-or-url>.\nUsage: vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--timeout <seconds>] [--account <name>] [--json]",
     );
   });
 
@@ -401,9 +403,19 @@ describe("pay command arguments", () => {
     expect(captured.stderr).toEqual([]);
     expect(JSON.parse(captured.stdout[0]!)).toEqual({
       error:
-        "Missing <id-or-url>.\nUsage: vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--account <name>] [--json]",
+        "Missing <id-or-url>.\nUsage: vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--timeout <seconds>] [--account <name>] [--json]",
       exitCode: 2,
     });
+  });
+
+  it.each(["0", "abc", "301"])("rejects pay --timeout %s", async (timeout) => {
+    const captured = captureIo();
+
+    expect(
+      await runCli(["pay", "https://example.test/paid", "--timeout", timeout], captured.io),
+    ).toBe(2);
+    expect(captured.stdout).toEqual([]);
+    expect(captured.stderr).toEqual(["--timeout must be an integer from 1 to 300."]);
   });
 
   it("rejects --wallet together with --account", async () => {

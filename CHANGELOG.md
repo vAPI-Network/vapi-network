@@ -3,6 +3,20 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## 0.9.4 (2026-10-15)
+
+### Added
+
+- Paid calls accept a 1–300 second timeout through MCP `call.pay`'s `timeoutSeconds` input and CLI `vapi pay --timeout <seconds>`. The initial unpaid probe uses at most 30 seconds. Without an explicit timeout, the paid request uses the provider's advertised maximum clamped to 30–120 seconds, or 120 seconds when the provider supplies none.
+
+### Changed
+
+- Generated MCP client entries run `vapi-network@latest`, so a restarted client picks up the current release.
+
+### Upgrade note
+
+- Interactive CLI runs report when a newer release is available. The check is skipped for JSON, MCP server, CI and non-TTY runs, uses a daily cache, and adds at most 1.5 seconds. Update with `npm i -g vapi-network@latest`.
+
 ## 0.9.3 (2026-10-15)
 
 ### Fixed

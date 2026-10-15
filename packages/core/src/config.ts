@@ -61,6 +61,7 @@ export type VapiPaths = {
   receipts: string;
   searches: string;
   ledger: string;
+  updateCheck: string;
 };
 
 /** @deprecated The public name is now vAPI; retained for source compatibility. */
@@ -194,6 +195,7 @@ export function getVapiPaths(
     receipts: join(directory, "receipts.jsonl"),
     searches: join(directory, "searches.jsonl"),
     ledger: join(directory, "spend-ledger.json"),
+    updateCheck: join(directory, "update-check.json"),
   };
 }
 

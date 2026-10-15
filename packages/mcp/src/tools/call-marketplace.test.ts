@@ -25,12 +25,103 @@ const TOKEN_PROGRAM_ADDRESS = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true })),
   );
 });
 
 describe("Agent Cash marketplace call boundary", () => {
+  it.each([
+    { offerSeconds: 10, expectedSeconds: 30 },
+    { offerSeconds: 300, expectedSeconds: 120 },
+    { offerSeconds: 10, timeoutSeconds: 25, expectedSeconds: 10 },
+    { offerSeconds: 300, timeoutSeconds: 45, internalTimeoutMs: 100, expectedSeconds: 45 },
+  ])(
+    "times out a paid response after $expectedSeconds seconds for offer $offerSeconds",
+    async ({ offerSeconds, timeoutSeconds, internalTimeoutMs, expectedSeconds }) => {
+      vi.useFakeTimers();
+      const directory = await mkdtemp(join(tmpdir(), "vapi-paid-timeout-"));
+      temporaryDirectories.push(directory);
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(paymentRequired(PAY_TO, offerSeconds))
+        .mockImplementationOnce(async (input) => await abortedFetch(input));
+
+      const call = callService({
+        input: {
+          url: "https://93.184.216.34/weather",
+          method: "GET",
+          maxPriceUsd: "0.01",
+          ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+        },
+        account: privateKeyToAccount(PRIVATE_KEY),
+        config: getDefaultConfig(),
+        fetchImpl,
+        ledgerPath: join(directory, "ledger.json"),
+        receiptsPath: join(directory, "receipts.jsonl"),
+        ...(internalTimeoutMs === undefined ? {} : { timeoutMs: internalTimeoutMs }),
+      });
+      await waitForFetchCalls(fetchImpl, 2);
+      let rejected = false;
+      void call.catch(() => {
+        rejected = true;
+      });
+      await vi.advanceTimersByTimeAsync(expectedSeconds * 1_000 - 1);
+      expect(rejected).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(call).rejects.toMatchObject({
+        code: "settlement_unknown",
+        message: expect.stringMatching(
+          new RegExp(`${expectedSeconds} seconds.*before paying again`, "s"),
+        ),
+      });
+    },
+  );
+
+  it.each([
+    { expectedSeconds: 30 },
+    { timeoutSeconds: 5, expectedSeconds: 5 },
+    { timeoutSeconds: 45, expectedSeconds: 30 },
+  ])(
+    "times out the unpaid probe after $expectedSeconds seconds",
+    async ({ timeoutSeconds, expectedSeconds }) => {
+      vi.useFakeTimers();
+      const fetchImpl = vi.fn<typeof fetch>(async (input) => await abortedFetch(input));
+      const call = callService({
+        input: {
+          url: "https://93.184.216.34/weather",
+          method: "GET",
+          ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
+        },
+        account: privateKeyToAccount(PRIVATE_KEY),
+        config: getDefaultConfig(),
+        fetchImpl,
+      });
+      await vi.advanceTimersByTimeAsync(expectedSeconds * 1_000 - 1);
+      let rejected = false;
+      void call.catch(() => {
+        rejected = true;
+      });
+      expect(rejected).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(call).rejects.toThrow(`${expectedSeconds} seconds`);
+    },
+  );
+
+  it.each([0, 1.5, 301])("rejects invalid timeoutSeconds %s before I/O", async (timeoutSeconds) => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    await expect(
+      callService({
+        input: { url: "https://93.184.216.34/weather", timeoutSeconds },
+        account: privateKeyToAccount(PRIVATE_KEY),
+        config: getDefaultConfig(),
+        fetchImpl,
+      }),
+    ).rejects.toThrow("integer from 1 to 300 seconds");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it.each(["mpp", "future-payment"])(
     "refuses %s metadata before requesting or signing",
     async (protocol) => {
@@ -1034,7 +1125,7 @@ function service(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function paymentRequired(payTo: string) {
+function paymentRequired(payTo: string, maxTimeoutSeconds = 60) {
   const config = getDefaultConfig();
   return Response.json(
     {
@@ -1047,13 +1138,30 @@ function paymentRequired(payTo: string) {
           amount: "2500",
           asset: config.networks[BASE_MAINNET_CAIP2]!.usdc,
           payTo,
-          maxTimeoutSeconds: 60,
+          maxTimeoutSeconds,
           extra: { name: "USD Coin", version: "2" },
         },
       ],
     },
     { status: 402 },
   );
+}
+
+async function abortedFetch(input: RequestInfo | URL): Promise<Response> {
+  const request = input instanceof Request ? input : new Request(input);
+  return await new Promise<Response>((_resolve, reject) => {
+    request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
+  });
+}
+
+async function waitForFetchCalls(
+  fetchImpl: ReturnType<typeof vi.fn<typeof fetch>>,
+  count: number,
+): Promise<void> {
+  for (let attempt = 0; attempt < 1_000 && fetchImpl.mock.calls.length < count; attempt += 1) {
+    await vi.advanceTimersByTimeAsync(0);
+  }
+  expect(fetchImpl).toHaveBeenCalledTimes(count);
 }
 
 function signInRequired() {

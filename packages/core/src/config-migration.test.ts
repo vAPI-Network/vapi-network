@@ -29,6 +29,7 @@ describe("vAPI config home", () => {
       receipts: "/tmp/vapi-home/receipts.jsonl",
       searches: "/tmp/vapi-home/searches.jsonl",
       ledger: "/tmp/vapi-home/spend-ledger.json",
+      updateCheck: "/tmp/vapi-home/update-check.json",
     });
   });
 

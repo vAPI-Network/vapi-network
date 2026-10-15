@@ -169,6 +169,7 @@ describe("createVapiClient", () => {
         url: "https://93.184.216.34/weather",
         method: "GET",
         maxPriceUsd: 0.01,
+        timeoutSeconds: 45,
       }),
     ).resolves.toMatchObject({ body: { paid: true } });
     expect(sign).toHaveBeenCalledOnce();

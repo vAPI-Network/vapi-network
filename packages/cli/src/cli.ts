@@ -226,7 +226,7 @@ Usage:
   vapi docs read <url-or-path> [--json]
   vapi search [query] [--kind <kind>] [--network <caip2>] [--limit <n>] [--cursor <cursor>] [--include-unverified] [--json]
   vapi inspect <id> [--endpoint <name>] [--json]
-  vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--account <name>] [--json]
+  vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--timeout <seconds>] [--account <name>] [--json]
   vapi pay --resume <receipt-id> [--json]
   vapi check <url> [--method <method>] [--json]
   vapi balance [--account <name>] [--json]
@@ -1497,7 +1497,7 @@ async function inspectCommand(
 }
 
 const PAY_USAGE =
-  "Usage: vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--account <name>] [--json]";
+  "Usage: vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--timeout <seconds>] [--account <name>] [--json]";
 
 async function payCommand(
   argv: string[],
@@ -1519,11 +1519,13 @@ async function payCommand(
       "--expected-pay-to",
       "--max",
       "--max-price-usd",
+      "--timeout",
       WALLET_OPTION,
     ]),
     maximumPositionals: 1,
   });
   const target = requiredPositional(parsed.positionals[0], "<id-or-url>", PAY_USAGE);
+  const timeoutSeconds = optionalBoundedInteger(parsed.one("--timeout"), "--timeout", 1, 300);
   const paths = getVapiPaths();
   const config = await readConfig(paths.config, io);
   const wallet = await targetWallet(parsed, dependencies);
@@ -1540,6 +1542,7 @@ async function payCommand(
     ...(parsed.one("--network") ? { network: parsed.one("--network") } : {}),
     ...(parsed.one("--expected-pay-to") ? { expectedPayTo: parsed.one("--expected-pay-to") } : {}),
     ...(maxPriceUsd ? { maxPriceUsd } : {}),
+    ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
   };
   const call = createCallPort({
     config,
@@ -3864,7 +3867,7 @@ function buildNextSteps(address: string): string[] {
     formatNextStep("Pay", "vapi pay <ref> --max 0.02"),
     formatNextStep(
       "Agent",
-      'add {"command":"npx","args":["-y","vapi-network","mcp"]} to your MCP config',
+      'add {"command":"npx","args":["-y","vapi-network@latest","mcp"]} to your MCP config',
     ),
   ];
 }
@@ -4096,6 +4099,23 @@ function optionalPositiveInteger(value: string | undefined, option: string): num
   const result = optionalNonNegativeInteger(value, option);
   if (result === 0) throw new UsageError(`${option} must be a positive integer.`);
   return result;
+}
+
+function optionalBoundedInteger(
+  value: string | undefined,
+  option: string,
+  minimum: number,
+  maximum: number,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^\d+$/.test(value)) {
+    throw new UsageError(`${option} must be an integer from ${minimum} to ${maximum}.`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new UsageError(`${option} must be an integer from ${minimum} to ${maximum}.`);
+  }
+  return parsed;
 }
 
 function optionalUsdAmount(value: string | undefined, option: string): number | undefined {
