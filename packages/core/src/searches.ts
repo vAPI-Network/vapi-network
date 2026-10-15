@@ -13,6 +13,7 @@ export interface SearchEvent {
       source: string;
       latencyMs: number;
       count: number;
+      dropped?: number;
       error?: string;
     }>
   >;
@@ -27,6 +28,7 @@ const searchEventSchema: z.ZodType<SearchEvent> = z.strictObject({
       source: z.string().min(1),
       latencyMs: z.number().nonnegative().finite(),
       count: z.number().int().nonnegative(),
+      dropped: z.number().int().nonnegative().optional(),
       error: z.string().optional(),
     }),
   ),

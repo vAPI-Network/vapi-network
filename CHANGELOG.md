@@ -3,6 +3,29 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## 0.9.2 (2026-10-15)
+
+0.9.1 was never published to npm; 0.9.2 is the first npm release carrying its changes.
+
+### Fixed
+
+- `vapi search`, MCP `call.search` and the SDK no longer fail on a discovery page with a Solana row. Mirrored rows accept any CAIP-2 network; bare `solana` and `solana-devnet` normalize to CAIP-2.
+- One malformed discovery row is dropped instead of failing the page, with the count recorded as `dropped` in `searches.jsonl`.
+- Service endpoints accept Solana payment metadata.
+- An account without a Solana signer never selects a Solana quote, so a Solana-only `402` fails at quote selection instead of reserving spend that could not be signed.
+
+### Changed
+
+- `vapi inspect`, `vapi pay`, `call.inspect` and `call.pay` on a Solana listing (by its payment network, or a service whose declared networks are all Solana) return `unsupported_network`.
+
+### Known limitations
+
+- Solana payments from the vault arrive in a later release.
+
+### Upgrade note
+
+- Clients ≤ 0.9.0 fail every search whose results include a Solana row. Update to 0.9.2 with `npm i -g vapi-network@latest`.
+
 ## 0.9.1 (2026-10-13)
 
 ### Fixed

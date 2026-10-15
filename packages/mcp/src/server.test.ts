@@ -28,6 +28,154 @@ afterEach(async () => {
 });
 
 describe("Agent Cash MCP marketplace tools", () => {
+  it("returns the Solana holder-graph row through call.search output validation", async () => {
+    const page = await fixture("vapi-discovery-holder-graph-solana.json");
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(page));
+    const { client, server } = await connectedServer(fetchImpl);
+
+    const result = await client.callTool({
+      name: "call.search",
+      arguments: { query: "holder graph", limit: 20 },
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      items: [
+        { ref: "the-graph" },
+        {
+          ref: "https://api.deepnets.ai/api/token/holder-graph",
+          execution: { network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" },
+        },
+      ],
+    });
+    await client.close();
+    await server.close();
+  });
+
+  it.each([
+    {
+      label: "an indexed DeepNets result",
+      id: "https://api.deepnets.ai/api/token/holder-graph",
+      fixtureName: "vapi-discovery-holder-graph-solana.json",
+      responsePath: "/api/call/discovery",
+    },
+    {
+      label: "the registered Birdeye service",
+      id: "birdeye",
+      fixtureName: "vapi-services-birdeye-solana.json",
+      responsePath: "/api/call/services",
+    },
+  ])("returns unsupported_network when call.inspect resolves $label", async (testCase) => {
+    const response = await fixture(testCase.fixtureName);
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const pathname = new URL(input instanceof Request ? input.url : String(input)).pathname;
+      if (pathname === testCase.responsePath) return Response.json(response);
+      if (pathname === "/api/call/services") return Response.json({ services: [] });
+      throw new Error(`Unexpected request to ${pathname}`);
+    });
+    const { client, server } = await connectedServer(fetchImpl);
+
+    const result = await client.callTool({
+      name: "call.inspect",
+      arguments: { id: testCase.id },
+    });
+
+    expect(result.isError).toBe(true);
+    const error = JSON.parse(result.content[0]?.text ?? "null") as {
+      code?: string;
+      error?: string;
+    };
+    expect(error.code).toBe("unsupported_network");
+    expect(error.error).toContain("Solana payments are not supported");
+    expect(error.error).not.toContain("ZodError");
+    await client.close();
+    await server.close();
+  });
+
+  it("refuses call.pay for a cached Solana row without requesting, signing, or recording payment", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-solana-refusal-"));
+    temporaryDirectories.push(directory);
+    const ledgerPath = join(directory, "ledger.json");
+    const receiptsPath = join(directory, "receipts.jsonl");
+    const page = await fixture("vapi-discovery-holder-graph-solana.json");
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const signTypedData = vi.spyOn(account, "signTypedData");
+    const signMessage = vi.spyOn(account, "signMessage");
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const pathname = new URL(input instanceof Request ? input.url : String(input)).pathname;
+      if (pathname === "/api/call/discovery") return Response.json(page);
+      throw new Error(`Unexpected request to ${pathname}`);
+    });
+    const server = createVapiServer({
+      account,
+      config: getDefaultConfig(),
+      fetchImpl,
+      ledgerPath,
+      receiptsPath,
+      searchesPath: join(directory, "searches.jsonl"),
+    });
+
+    await server.callTool({ name: "call.search", arguments: { query: "holder graph" } });
+    const result = await server.callTool({
+      name: "call.pay",
+      arguments: { id: "https://api.deepnets.ai/api/token/holder-graph" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0]?.text ?? "null")).toMatchObject({
+      code: "unsupported_network",
+    });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(signTypedData).not.toHaveBeenCalled();
+    expect(signMessage).not.toHaveBeenCalled();
+    await expect(readFile(ledgerPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(receiptsPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await server.close();
+  });
+
+  it("refuses call.pay for the registered Birdeye service before requesting or signing", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-birdeye-refusal-"));
+    temporaryDirectories.push(directory);
+    const ledgerPath = join(directory, "ledger.json");
+    const receiptsPath = join(directory, "receipts.jsonl");
+    const services = await fixture("vapi-services-birdeye-solana.json");
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const signTypedData = vi.spyOn(account, "signTypedData");
+    const signMessage = vi.spyOn(account, "signMessage");
+    const requestedPaths: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const pathname = new URL(input instanceof Request ? input.url : String(input)).pathname;
+      requestedPaths.push(pathname);
+      if (pathname === "/api/call/discovery") {
+        return Response.json(marketplacePage([nativeApiHit("birdeye")]));
+      }
+      if (pathname === "/api/call/services") return Response.json(services);
+      throw new Error(`Unexpected request to ${pathname}`);
+    });
+    const server = createVapiServer({
+      account,
+      config: getDefaultConfig(),
+      fetchImpl,
+      ledgerPath,
+      receiptsPath,
+      searchesPath: join(directory, "searches.jsonl"),
+    });
+
+    await server.callTool({ name: "call.search", arguments: { query: "birdeye" } });
+    const result = await server.callTool({ name: "call.pay", arguments: { id: "birdeye" } });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0]?.text ?? "null")).toMatchObject({
+      code: "unsupported_network",
+    });
+    expect(requestedPaths).toEqual(["/api/call/discovery", "/api/call/services"]);
+    expect(signTypedData).not.toHaveBeenCalled();
+    expect(signMessage).not.toHaveBeenCalled();
+    await expect(readFile(ledgerPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(receiptsPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await server.close();
+  });
+
   it("registers inspect as the free request-contract step before call", async () => {
     const fetchImpl = vi.fn<typeof fetch>();
     const { client, server } = await connectedServer(fetchImpl);
@@ -282,7 +430,7 @@ describe("Agent Cash MCP marketplace tools", () => {
           outcome: "paid",
           listing: { providerHost: "93.184.216.34", source: "direct" },
           policy: { capsApplied: false },
-          client: { name: "vapi-network", version: "0.9.1" },
+          client: { name: "vapi-network", version: "0.9.2" },
         },
       ],
     });
@@ -757,6 +905,12 @@ function nativeApiHit(
     },
     action: { type: "invoke_api", href: `/call/${ref}` },
   };
+}
+
+async function fixture(name: string): Promise<unknown> {
+  return JSON.parse(
+    await readFile(new URL(`../../sources/src/__fixtures__/${name}`, import.meta.url), "utf8"),
+  ) as unknown;
 }
 
 function workHit(ref: string): MarketplaceHit {

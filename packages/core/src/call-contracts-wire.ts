@@ -6,6 +6,8 @@
 import { z } from "zod";
 
 import { listingDisclosureShape } from "./marketplace-contracts.js";
+import { isSolanaAddress } from "./svm.js";
+import { SOLANA_MAINNET_CAIP2 } from "./x402-networks.js";
 
 export const CALLABLE_KIND = "agent" as const;
 export const CALLABLE_CATEGORIES = ["ai", "data", "crypto", "compute", "search"] as const;
@@ -50,13 +52,25 @@ export const discoveryEndpointSchema = z.looseObject({
   pathTemplate: z.string().trim().min(1).optional(),
   pathParameters: z.array(z.string().trim().min(1)).optional(),
   payment: z
-    .looseObject({
-      scheme: z.literal("exact"),
-      network: z.string().regex(/^eip155:\d+$/),
-      asset: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-      payTo: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
-      checkedAt: z.iso.datetime(),
-    })
+    .union([
+      z.looseObject({
+        scheme: z.literal("exact"),
+        network: z.string().regex(/^eip155:\d+$/),
+        asset: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+        payTo: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+        checkedAt: z.iso.datetime(),
+      }),
+      z.looseObject({
+        scheme: z.literal("exact"),
+        network: z.union([
+          z.string().regex(/^solana:[-_a-zA-Z0-9]{1,32}$/),
+          z.literal(SOLANA_MAINNET_CAIP2),
+        ]),
+        asset: z.string().refine(isSolanaAddress, "Expected a Solana base58 address."),
+        payTo: z.string().refine(isSolanaAddress, "Expected a Solana base58 address."),
+        checkedAt: z.iso.datetime(),
+      }),
+    ])
     .optional(),
 });
 export type DiscoveryEndpoint = z.infer<typeof discoveryEndpointSchema>;

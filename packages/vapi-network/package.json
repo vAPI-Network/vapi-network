@@ -1,6 +1,6 @@
 {
   "name": "vapi-network",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "mcpName": "io.github.vAPI-Network/vapi-network",
   "description": "One local wallet for discovering and paying every x402 API",
   "license": "Apache-2.0",

@@ -1,0 +1,136 @@
+{
+  "protocol": "vapi.marketplace.discovery/1",
+  "items": [
+    {
+      "ref": "the-graph",
+      "card": {
+        "title": "The Graph",
+        "summary": "Query onchain data from 22 Subgraphs: Uniswap, Aave, Aerodrome, ENS, Curve, Lido and more. Each request costs $0.01 in USDC on Base over x402.",
+        "byline": "gateway.thegraph.com",
+        "brand": {
+          "logo": "/partners/the-graph-v2.png"
+        },
+        "badges": [
+          {
+            "code": "live_x402",
+            "label": "Live x402"
+          },
+          {
+            "code": "partner",
+            "label": "Verified Provider"
+          },
+          {
+            "code": "vapi_verified",
+            "label": "vAPI verified"
+          }
+        ],
+        "facts": [
+          {
+            "label": "Price",
+            "value": "$0.01"
+          },
+          {
+            "label": "Network",
+            "value": "eip155:8453"
+          },
+          {
+            "label": "Settled calls (30d)",
+            "value": "4"
+          },
+          {
+            "label": "Checked",
+            "value": "2026-10-15T11:11:04.328Z"
+          },
+          {
+            "label": "Freshness",
+            "value": "Checked 4m ago"
+          },
+          {
+            "label": "Category",
+            "value": "Data"
+          },
+          {
+            "label": "Method",
+            "value": "POST"
+          }
+        ]
+      },
+      "kind": "api",
+      "provenance": "partner",
+      "group": "partner",
+      "fee": {
+        "bps": 0,
+        "label": "No network fee"
+      },
+      "verification": "verified",
+      "execution": {
+        "mode": "direct"
+      },
+      "action": {
+        "type": "invoke_api",
+        "href": "/call/the-graph"
+      },
+      "listedAt": "2026-10-13T16:57:32.473Z"
+    },
+    {
+      "ref": "https://api.deepnets.ai/api/token/holder-graph",
+      "card": {
+        "title": "api.deepnets.ai/api/token/holder-graph",
+        "summary": "Funding-source graph for a token: nodes are wallets, edges are first-funding relationships, labeled with exchange attributions where known.",
+        "byline": "x402 Bazaar",
+        "badges": [
+          {
+            "code": "external_catalog",
+            "label": "External catalog"
+          }
+        ],
+        "facts": [
+          {
+            "label": "Price",
+            "value": "10000 EPjFWd…Dt1v"
+          },
+          {
+            "label": "Network",
+            "value": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"
+          },
+          {
+            "label": "Method",
+            "value": "GET"
+          }
+        ]
+      },
+      "kind": "api",
+      "provenance": "indexed",
+      "group": "external",
+      "fee": {
+        "bps": 0,
+        "label": "No network fee"
+      },
+      "verification": "none",
+      "execution": {
+        "mode": "direct",
+        "url": "https://api.deepnets.ai/api/token/holder-graph",
+        "method": "GET",
+        "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+        "payable": false
+      },
+      "action": {
+        "type": "invoke_api",
+        "href": "https://api.deepnets.ai/api/token/holder-graph"
+      }
+    }
+  ],
+  "nextCursor": null,
+  "unavailableKinds": [],
+  "rankingVersion": "marketplace-ranking-v1",
+  "totals": {
+    "items": 2,
+    "callTabs": {
+      "all": 2,
+      "most-used": 1,
+      "partners": 1,
+      "verified": 1,
+      "external": 1
+    }
+  }
+}

@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -283,6 +283,115 @@ describe("Agent Cash marketplace call boundary", () => {
       }),
     ).rejects.toThrow(/requires eip155:8453.*requested network was eip155:5042002/);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("refuses a cached Solana marketplace hit before requesting or signing", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-solana-marketplace-"));
+    temporaryDirectories.push(directory);
+    const ledgerPath = join(directory, "ledger.json");
+    const receiptsPath = join(directory, "receipts.jsonl");
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const signTypedData = vi.spyOn(account, "signTypedData");
+    const signMessage = vi.spyOn(account, "signMessage");
+    const fetchImpl = vi.fn<typeof fetch>();
+
+    const error = await callService({
+      input: { id: "https://api.deepnets.ai/api/token/holder-graph" },
+      marketplaceHit: {
+        ref: "https://api.deepnets.ai/api/token/holder-graph",
+        kind: "api",
+        provenance: "indexed",
+        verification: "none",
+        execution: {
+          mode: "direct",
+          url: "https://api.deepnets.ai/api/token/holder-graph",
+          method: "GET",
+          network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+        },
+        card: {
+          title: "DeepNets holder graph",
+          summary: "Funding-source graph for a token.",
+          badges: [{ code: "external_catalog", label: "External catalog" }],
+          facts: [],
+        },
+        action: {
+          type: "invoke_api",
+          href: "https://api.deepnets.ai/api/token/holder-graph",
+        },
+      },
+      account,
+      config: getDefaultConfig(),
+      fetchImpl,
+      ledgerPath,
+      receiptsPath,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(VapiCallError);
+    expect(error).toMatchObject({ code: "unsupported_network" });
+    expect((error as Error).message).not.toContain("ZodError");
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(signTypedData).not.toHaveBeenCalled();
+    expect(signMessage).not.toHaveBeenCalled();
+    await expect(readReceipts(receiptsPath)).resolves.toEqual([]);
+  });
+
+  it("refuses a services-API mirror whose declared networks are all Solana", async () => {
+    // Production resolves a mirrored URL ref through /services as a service with
+    // `networks: ["solana:…"]` and an endpoint without payment metadata.
+    const fixture = JSON.parse(
+      await readFile(
+        new URL(
+          "../../../sources/src/__fixtures__/vapi-services-deepnets-solana.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as unknown;
+    const targetUrl = "https://api.deepnets.ai/api/token/holder-graph";
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const signTypedData = vi.spyOn(account, "signTypedData");
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname.endsWith("/services")) return Response.json(fixture);
+      throw new Error(`Unexpected request to ${url.href}`);
+    });
+
+    const error = await callService({
+      input: { id: targetUrl },
+      account,
+      config: getDefaultConfig(),
+      fetchImpl,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ code: "unsupported_network" });
+    expect(
+      fetchImpl.mock.calls.some(([input]) =>
+        (input instanceof Request ? input.url : String(input)).startsWith(targetUrl),
+      ),
+    ).toBe(false);
+    expect(signTypedData).not.toHaveBeenCalled();
+  });
+
+  it("never selects a Solana quote for an account without a Solana signer", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-solana-no-signer-"));
+    temporaryDirectories.push(directory);
+    const ledgerPath = join(directory, "ledger.json");
+    const config = getDefaultConfig({}, { networks: ["base", "solana"] });
+    config.networks[SOLANA_MAINNET_CAIP2]!.rpcUrl = "https://rpc.example";
+    const fetchImpl = vi.fn<typeof fetch>(async () => solanaPaymentRequired());
+
+    await expect(
+      callService({
+        input: { url: "https://93.184.216.34/weather", method: "GET" },
+        account: privateKeyToAccount(PRIVATE_KEY),
+        config,
+        fetchImpl,
+        ledgerPath,
+        receiptsPath: join(directory, "receipts.jsonl"),
+      }),
+    ).rejects.toThrow(/No exact x402 payment option matches/);
+    // Quote selection failed, so no spend was reserved for a payment that could not be signed.
+    await expect(readFile(ledgerPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("requires an explicit method when external execution metadata publishes null", async () => {

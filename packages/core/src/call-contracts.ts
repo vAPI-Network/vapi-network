@@ -23,11 +23,34 @@ export class DiscoveryCatalogError extends Error {
   readonly code: DiscoveryCatalogErrorCode;
   readonly serviceId: string | undefined;
 
-  constructor(code: DiscoveryCatalogErrorCode, message: string, serviceId?: string) {
+  constructor(
+    code: DiscoveryCatalogErrorCode,
+    message: string,
+    serviceId?: string,
+    /** Present when every candidate endpoint declares a payment network. */
+    public readonly paymentNetworks?: readonly string[],
+  ) {
     super(message);
     this.code = code;
     this.serviceId = serviceId;
   }
+}
+
+/** Bundled interface packages can carry separate copies of the error class. */
+export function isDiscoveryCatalogError(error: unknown): error is DiscoveryCatalogError {
+  if (
+    !(error instanceof Error) ||
+    error.name !== "DiscoveryCatalogError" ||
+    !("code" in error) ||
+    typeof error.code !== "string"
+  ) {
+    return false;
+  }
+  const networks = Reflect.get(error, "paymentNetworks") as unknown;
+  return (
+    networks === undefined ||
+    (Array.isArray(networks) && networks.every((network) => typeof network === "string"))
+  );
 }
 
 /**
@@ -101,10 +124,14 @@ function resolveTarget(service: DiscoveryService, endpointName?: string): CallTa
   }
 
   if (targets.size !== 1) {
+    const paymentNetworks = service.endpoints.flatMap((endpoint) =>
+      endpoint.payment ? [endpoint.payment.network] : [],
+    );
     throw new DiscoveryCatalogError(
       "ambiguous_default",
       `Service ${JSON.stringify(service.id)} has ${targets.size} distinct payable endpoints. Choose one with endpoint: ${[...targetsByName.keys()].join(", ")}.`,
       service.id,
+      paymentNetworks.length === service.endpoints.length ? paymentNetworks : undefined,
     );
   }
 

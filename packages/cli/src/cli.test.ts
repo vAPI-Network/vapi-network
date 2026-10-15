@@ -696,6 +696,39 @@ describe("search output", () => {
       label: "5% network fee, paid by the API's splitter",
     });
   });
+
+  it("returns an indexed Solana row from the production holder-graph page in --json", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-search-solana-"));
+    process.env.VAPI_HOME = home;
+    const fixture = JSON.parse(
+      await readFile(
+        new URL(
+          "../../sources/src/__fixtures__/vapi-discovery-holder-graph-solana.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    ) as { items: Array<{ ref: string; execution: { network?: string } }> };
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(fixture));
+    const captured = captureIo();
+
+    expect(
+      await runCli(["search", "holder graph", "--limit", "20", "--json"], captured.io, {
+        fetchImpl,
+      }),
+    ).toBe(0);
+
+    const page = JSON.parse(captured.stdout[0]!) as typeof fixture;
+    expect(page.items).toHaveLength(2);
+    expect(page.items).toContainEqual(
+      expect.objectContaining({
+        ref: "https://api.deepnets.ai/api/token/holder-graph",
+        execution: expect.objectContaining({
+          network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+        }),
+      }),
+    );
+  });
 });
 
 describe("inspect output", () => {
@@ -896,6 +929,115 @@ describe("inspect output", () => {
       identity: { erc8004Id: "42", reputation: { score: 4, count: 0 } },
     });
   });
+
+  it.each([
+    {
+      label: "indexed DeepNets",
+      ref: "https://api.deepnets.ai/api/token/holder-graph",
+      fixture: "vapi-discovery-holder-graph-solana.json",
+    },
+    {
+      label: "partner Birdeye",
+      ref: "birdeye",
+      fixture: "vapi-services-birdeye-solana.json",
+    },
+    {
+      label: "services-API DeepNets mirror",
+      ref: "https://api.deepnets.ai/api/token/holder-graph",
+      fixture: "vapi-services-deepnets-solana.json",
+    },
+  ])("refuses the $label Solana listing with a clean JSON error", async ({ ref, fixture }) => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-solana-"));
+    process.env.VAPI_HOME = home;
+    const response = JSON.parse(
+      await readFile(new URL(`../../sources/src/__fixtures__/${fixture}`, import.meta.url), "utf8"),
+    ) as unknown;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (fixture.startsWith("vapi-discovery") && url.pathname.endsWith("/services")) {
+        return Response.json({ services: [] });
+      }
+      return Response.json(response);
+    });
+    const captured = captureIo();
+
+    expect(await runCli(["inspect", ref, "--json"], captured.io, { fetchImpl })).toBe(1);
+
+    const error = JSON.parse(captured.stdout[0]!) as {
+      code?: string;
+      error: string;
+      exitCode: number;
+    };
+    expect(error.error).toContain("Solana payments are not supported");
+    expect(error.error).not.toContain("ZodError");
+    expect(error.error).not.toContain("invalid_format");
+    expect(error).toMatchObject({ code: "unsupported_network", exitCode: 1 });
+  });
+});
+
+describe("Solana pay refusal", () => {
+  it.each([
+    { label: "indexed DeepNets", ref: "deepnets-holder-graph", kind: "indexed" },
+    { label: "partner Birdeye", ref: "birdeye", kind: "partner" },
+  ])(
+    "refuses the $label row before requesting, signing, or recording payment",
+    async (testCase) => {
+      await initializedHome("vapi-cli-pay-solana-");
+      const paths = getVapiPaths();
+      const discoveryFixture = JSON.parse(
+        await readFile(
+          new URL(
+            "../../sources/src/__fixtures__/vapi-discovery-holder-graph-solana.json",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      ) as { items: Array<Record<string, unknown>> };
+      const indexedItem = discoveryFixture.items.find(
+        (item) => item.ref === "https://api.deepnets.ai/api/token/holder-graph",
+      );
+      if (indexedItem === undefined) throw new Error("Missing DeepNets fixture row.");
+      const indexedFixture = {
+        ...discoveryFixture,
+        items: [{ ...indexedItem, ref: "deepnets-holder-graph" }],
+      };
+      const partnerFixture = JSON.parse(
+        await readFile(
+          new URL(
+            "../../sources/src/__fixtures__/vapi-services-birdeye-solana.json",
+            import.meta.url,
+          ),
+          "utf8",
+        ),
+      ) as unknown;
+      const targetUrl = "https://api.deepnets.ai/api/token/holder-graph";
+      const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname.endsWith("/services")) {
+          return Response.json(testCase.kind === "partner" ? partnerFixture : { services: [] });
+        }
+        if (url.pathname.endsWith("/discovery")) return Response.json(indexedFixture);
+        throw new Error(`Unexpected request to ${url.href}`);
+      });
+      const captured = captureIo();
+
+      expect(await runCli(["pay", testCase.ref, "--json"], captured.io, { fetchImpl })).toBe(1);
+
+      const error = JSON.parse(captured.stdout[0]!) as {
+        code?: string;
+        error: string;
+        exitCode: number;
+      };
+      expect(error.error).toContain("Solana payments are not supported");
+      expect(error.error).not.toContain("ZodError");
+      expect(error).toMatchObject({ code: "unsupported_network", exitCode: 1 });
+      expect(fetchImpl.mock.calls.some(([input]) => String(input).startsWith(targetUrl))).toBe(
+        false,
+      );
+      await expect(readFile(paths.ledger, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(readFile(paths.receipts, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
 });
 
 describe("vapi receipts", () => {

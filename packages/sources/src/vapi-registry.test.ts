@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,6 +19,13 @@ const config = {
 } satisfies VapiRegistryConfig;
 
 const temporaryDirectories: string[] = [];
+
+const holderGraphFixture = JSON.parse(
+  readFileSync(
+    new URL("./__fixtures__/vapi-discovery-holder-graph-solana.json", import.meta.url),
+    "utf8",
+  ),
+) as { items: Array<Record<string, unknown>> } & Record<string, unknown>;
 
 afterEach(async () => {
   await Promise.all(
@@ -91,6 +99,79 @@ const callsPage = {
 } as const;
 
 describe("vAPI registry helpers", () => {
+  it("returns every valid row from the holder graph Solana fixture", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(Response.json(holderGraphFixture));
+
+    const page = await searchMarketplace({ query: "holder graph" }, config, fetchImpl);
+
+    expect(page.items).toHaveLength(2);
+    expect(page.items[1]).toMatchObject({
+      ref: "https://api.deepnets.ai/api/token/holder-graph",
+      execution: { network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" },
+    });
+  });
+
+  it("drops malformed rows, logs their count, and emits one debug message", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-registry-dropped-"));
+    temporaryDirectories.push(directory);
+    const searchesPath = join(directory, "searches.jsonl");
+    const debug = vi.fn();
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        ...holderGraphFixture,
+        items: [
+          marketplacePage.items[1],
+          holderGraphFixture.items[1],
+          {
+            ...marketplacePage.items[1],
+            execution: { ...marketplacePage.items[1].execution, network: "garbage" },
+          },
+        ],
+      }),
+    );
+
+    const page = await searchMarketplace({ query: "mixed" }, config, fetchImpl, {
+      searchesPath,
+      now: new Date("2026-10-15T12:00:00.000Z"),
+      debug,
+    });
+
+    expect(page.items).toHaveLength(2);
+    expect(debug).toHaveBeenCalledOnce();
+    expect(debug).toHaveBeenCalledWith(
+      "vAPI marketplace discovery dropped invalid row at index 2.",
+    );
+    expect(await readSearchEvents(searchesPath)).toEqual([
+      {
+        timestamp: "2026-10-15T12:00:00.000Z",
+        query: "mixed",
+        sources: [
+          { source: "console.vapinetwork.ai", latencyMs: expect.any(Number), count: 2, dropped: 1 },
+        ],
+        mergedCount: 2,
+      },
+    ]);
+  });
+
+  it("continues discovery when the debug callback throws", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        ...holderGraphFixture,
+        items: [holderGraphFixture.items[1], { malformed: true }],
+      }),
+    );
+
+    await expect(
+      searchMarketplace({ query: "holder graph" }, config, fetchImpl, {
+        debug() {
+          throw new Error("debug sink failed");
+        },
+      }),
+    ).resolves.toMatchObject({
+      items: [{ ref: "https://api.deepnets.ai/api/token/holder-graph" }],
+    });
+  });
+
   it("falls back on a primary 404, logs once, and records both search attempts", async () => {
     const directory = await mkdtemp(join(tmpdir(), "vapi-registry-search-"));
     temporaryDirectories.push(directory);

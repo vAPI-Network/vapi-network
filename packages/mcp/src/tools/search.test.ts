@@ -124,7 +124,7 @@ describe("Agent Cash marketplace discovery", () => {
     );
   });
 
-  it("rejects a kind/action mismatch from the app", async () => {
+  it("drops a kind/action mismatch from the app", async () => {
     const malformed = {
       ...marketplacePage,
       items: [
@@ -138,7 +138,11 @@ describe("Agent Cash marketplace discovery", () => {
       .fn<typeof fetch>()
       .mockResolvedValue(new Response(JSON.stringify(malformed), { status: 200 }));
 
-    await expect(searchMarketplace({ query: "weather" }, config, fetchImpl)).rejects.toThrow();
+    await expect(searchMarketplace({ query: "weather" }, config, fetchImpl)).resolves.toMatchObject(
+      {
+        items: [],
+      },
+    );
   });
 
   it("passes the registry's group, fee, and any later field straight through", async () => {

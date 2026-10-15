@@ -1,6 +1,7 @@
 import {
   marketplaceDiscoveryInputSchema,
-  marketplaceDiscoveryPageSchema,
+  marketplaceDiscoveryEnvelopeSchema,
+  marketplaceHitSchema,
   appendSearchEvent,
   createPublicFetch,
   DEFAULT_REGISTRY_FALLBACKS,
@@ -49,6 +50,7 @@ export type MarketplaceSearchOptions = Readonly<{
   now?: Date;
   nowMs?: () => number;
   notice?: (message: string) => void;
+  debug?: (message: string) => void;
 }>;
 
 export type VapiRegistrySourceOptions = GuardedSourceOptions &
@@ -101,11 +103,29 @@ export async function searchMarketplace(
         }
       },
     });
-    const page = marketplaceDiscoveryPageSchema.parse(await response.json());
-    mergedCount = page.items.length;
+    const envelope = marketplaceDiscoveryEnvelopeSchema.parse(await response.json());
+    const items: MarketplaceHit[] = [];
+    let dropped = 0;
+    for (const [index, rawItem] of envelope.items.entries()) {
+      const parsed = marketplaceHitSchema.safeParse(rawItem);
+      if (parsed.success) {
+        items.push(parsed.data);
+        continue;
+      }
+      dropped += 1;
+      try {
+        options.debug?.(`vAPI marketplace discovery dropped invalid row at index ${index}.`);
+      } catch {
+        // Diagnostics must never break discovery.
+      }
+    }
+    mergedCount = items.length;
     const attempt = attempts.at(-1);
-    if (attempt) attempt.count = mergedCount;
-    return page;
+    if (attempt) {
+      attempt.count = mergedCount;
+      if (dropped > 0) attempt.dropped = dropped;
+    }
+    return { ...envelope, items };
   } finally {
     if (options.searchesPath) {
       await appendSearchEvent(
@@ -372,6 +392,7 @@ type SearchAttempt = {
   source: string;
   latencyMs: number;
   count: number;
+  dropped?: number;
   error?: string;
 };
 
