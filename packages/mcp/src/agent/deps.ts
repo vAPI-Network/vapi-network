@@ -1,5 +1,6 @@
 import {
   classifySettlement,
+  formatUsdc,
   getVapiPaths,
   type AgentProfile,
   type CeilingSweepHook,
@@ -82,6 +83,7 @@ export function createAgentRunDeps(input: {
       config: input.config,
       home: input.home,
       chat: input.chat,
+      searchPage: call.search,
       async search(query) {
         const page = await call.search(query);
         const rows = page.items.map((hit) => ({
@@ -135,7 +137,10 @@ export function createAgentRunDeps(input: {
           network: result.payment?.network ?? listing?.payment?.network ?? listing?.network ?? "",
         };
       },
-      caps: { perCallUsd: Number(input.spendCaps.perCallAtomic) / 1_000_000 },
+      caps: {
+        perCallUsd: Number(input.spendCaps.perCallAtomic) / 1_000_000,
+        perDayUsd: formatUsdc(BigInt(input.spendCaps.perDayAtomic)),
+      },
       approve: input.approve,
       ...(input.budget === undefined ? {} : { budget: input.budget }),
       ...(input.runId === undefined ? {} : { runId: input.runId }),
@@ -145,6 +150,12 @@ export function createAgentRunDeps(input: {
         return {
           ...this,
           search: this.search === dependencies.search ? next.search : this.search,
+          searchPage:
+            this.searchPage !== dependencies.searchPage
+              ? this.searchPage
+              : this.search === dependencies.search
+                ? next.searchPage
+                : undefined,
           inspect: this.inspect === dependencies.inspect ? next.inspect : this.inspect,
           read: this.read === dependencies.read ? next.read : this.read,
           pay: this.pay === dependencies.pay ? next.pay : this.pay,

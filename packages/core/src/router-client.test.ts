@@ -16,7 +16,7 @@ import { readAuditLog } from "./audit.js";
 import { DEFAULT_SPEND_CAPS, getDefaultConfig } from "./config.js";
 import { NETWORKS } from "./networks.js";
 import { readReceipts } from "./receipts.js";
-import type { RunBudget } from "./run-budget.js";
+import { createRunBudget, type RunBudget } from "./run-budget.js";
 import {
   DEFAULT_ROUTER_BASE_URL,
   ROUTER_KEY_REVOKED_MESSAGE,
@@ -31,6 +31,8 @@ import {
   type RouterClientDeps,
 } from "./router-client.js";
 import type { SecretStore } from "./secret-store.js";
+import { SpendCapExceededError } from "./spend-cap-exceeded.js";
+import { readSpendLedger } from "./spend-policy.js";
 import { BASE_MAINNET_CAIP2 } from "./x402-networks.js";
 import { WalletStore, type AgentLink } from "./wallet-store.js";
 
@@ -529,7 +531,11 @@ describe("routerChat", () => {
 
     await expect(readAuditLog(deps.wallets.home)).resolves.toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ event: "router.refill.declined", wallet: "main" }),
+        expect.objectContaining({
+          event: "router.refill.declined",
+          wallet: "main",
+          detail: "SpendCapExceededError: per_call",
+        }),
       ]),
     );
     expect(
@@ -580,7 +586,12 @@ describe("routerChat", () => {
         },
         { model: "provider/model", messages: [] },
       ),
-    ).rejects.toBe(foreignBudgetError);
+    ).rejects.toMatchObject({
+      name: "SpendCapExceededError",
+      code: "spend_cap_exceeded",
+      cap: "run_budget",
+      cause: foreignBudgetError,
+    });
 
     expect(runBudget.spentAtomic()).toBe(0n);
     await expect(readAuditLog(deps.wallets.home)).resolves.toEqual(
@@ -588,10 +599,61 @@ describe("routerChat", () => {
         expect.objectContaining({
           event: "router.refill.declined",
           wallet: "main",
-          detail: "RunBudgetError: run_budget_exceeded",
+          detail: "SpendCapExceededError: run_budget",
         }),
       ]),
     );
+  });
+
+  it("stops a refill at the run budget without retrying or keeping a wallet reservation", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.host === "router.example")
+        return new Response("Budget has been exceeded", { status: 429 });
+      if (url.pathname === "/api/agents/self/router") {
+        return Response.json({
+          ...usageResponse(),
+          balance: { purchasedUsd: 10, spentUsd: 9, remainingUsd: 1 },
+        });
+      }
+      if (url.pathname === "/api/router/top-up/1") return topupRequired(1);
+      throw new Error(`Unexpected test URL ${url.origin}${url.pathname}`);
+    });
+    const deps = await linkedDeps(fetchImpl, {
+      balanceKey: BALANCE_KEY,
+      routerRefill: { belowUsd: 5, tierUsd: 1 },
+    });
+    const runBudget = createRunBudget({ id: "run_refill", limitAtomic: 999_999n });
+    const refill = { ...refillOptions(deps.wallets), runBudget };
+
+    const error = await routerChat(
+      { ...deps, refill },
+      { model: "provider/model", messages: [] },
+    ).catch((error: unknown) => error);
+
+    expect(error).toBeInstanceOf(SpendCapExceededError);
+    expect(error).toMatchObject({
+      cap: "run_budget",
+      amountUsd: "1",
+      limitUsd: "0.999999",
+      spentUsd: "0",
+      command: "--budget 1",
+      retryable: false,
+    });
+    expect(runBudget.spentAtomic()).toBe(0n);
+    await expect(readSpendLedger(refill.paths.ledgerPath, NOW, "main")).resolves.toMatchObject({
+      spentAtomic: "0",
+    });
+    expect(
+      fetchImpl.mock.calls.filter(([input]) =>
+        String(input instanceof Request ? input.url : input).includes("/api/router/top-up/1"),
+      ),
+    ).toHaveLength(1);
+    expect(
+      fetchImpl.mock.calls.filter(([input]) =>
+        String(input instanceof Request ? input.url : input).includes("router.example"),
+      ),
+    ).toHaveLength(1);
   });
 
   it("writes the run descriptor on an automatic refill receipt", async () => {

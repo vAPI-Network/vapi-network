@@ -75,9 +75,9 @@ when the agent must not access other local accounts.
 | `router.usage`            | `wallet`                                                                                                                                                                | Router usage plus the linked owner's stake and stake-funded Compute                                                                                                                                                                                                                                                                                                   |
 | `router.chat`             | `model`, `messages[]`, `max_tokens`, `wallet`                                                                                                                           | Completion `content`, resolved `model`, and token `usage`; the Router key stays in the OS secret store and is never returned                                                                                                                                                                                                                                          |
 | `router.buy`              | `usd` (`1`, `5`, `20`, or `50`), `wallet`                                                                                                                               | Receipt summary and the new vAPI Router balance; the Router key stays in the OS secret store and is never returned                                                                                                                                                                                                                                                    |
-| `call.search`             | `query`, `kinds[]`, `network`, `limit`, `cursor`, `includeUnverified`                                                                                                   | One discovery page: `items` with `group`, `fee` and `verification`, plus `nextCursor`, `unavailableKinds`, `rankingVersion`                                                                                                                                                                                                                                           |
-| `call.inspect`            | `id`, `endpoint`                                                                                                                                                        | A listing's `verification`, `fee`, `liveness`, `conformance`, identity, request contract and live quote                                                                                                                                                                                                                                                               |
-| `call.pay`                | `wallet`, `id` or `url`, `method`, `endpoint`, `body`, `contentType`, `network`, `expectedPayTo`, `maxPriceUsd`, `timeoutSeconds`                                       | `wallet`, `status`, `body`, `payment`, `verification` for a registry listing, and `expectedRequest` when a 402 named one                                                                                                                                                                                                                                              |
+| `call.search`             | `query`, `kinds[]`, `network`, `limit`, `cursor`, `includeUnverified`, `includeOutage`                                                                                  | One discovery page with health, alternatives and `hints`, plus `nextCursor`, `unavailableKinds`, `rankingVersion`                                                                                                                                                                                                                                                     |
+| `call.inspect`            | `id`, `endpoint`                                                                                                                                                        | Verification, health, `requestSchema`, `responseSchema`, `exampleRequest`, the registry's last observed quote and `hints`                                                                                                                                                                                                                                             |
+| `call.pay`                | `wallet`, `id` or `url`, `method`, `endpoint`, `body`, `contentType`, `network`, `expectedPayTo`, `maxPriceUsd`, `timeoutSeconds`                                       | `wallet`, `status`, `body`, `payment`, optional `verification` and `expectedRequest`, and `hints`                                                                                                                                                                                                                                                                     |
 | `call.read`               | `url`                                                                                                                                                                   | Agent-run-only GET result: `status`, `contentType`, `body`; restricted to paid HTTPS origins, never pays, and redacts its SIWX proof                                                                                                                                                                                                                                  |
 | `tasks.search`            | `open`, `minUsd`, `tab` (`trending`, `new`, `closing`, `paid`), `limit`                                                                                                 | Public board `cards` and `pinned`, filtered by open state and minimum USD; does not move money                                                                                                                                                                                                                                                                        |
 | `tasks.show`              | `id`, `wallet`                                                                                                                                                          | Signed-in task order with `receipts`, or public `task` card with any `receiptUrl`; does not move money                                                                                                                                                                                                                                                                |
@@ -187,6 +187,21 @@ automated x402 probe but were not reviewed. Every result of `call.search`,
 Prefer a verified listing, and read the request contract and the price with
 `call.inspect` before paying one that is not.
 
+The hosted registry hides listings whose health state is `outage` unless
+`call.search` receives `includeOutage: true`. Health contains `state`
+(`healthy`, `degraded`, `outage` or `unknown`), `uptime7d`, `latencyP50Ms`,
+`latencyP95Ms` and `checks7d`. Alternatives contain `ref` and `reason`, either
+`cheaper` or `healthier`. Results from `call.search`, `call.inspect` and
+`call.pay` contain a `hints` string array with zero to four suggested next actions.
+
+A spend-cap block from `call.pay` returns `isError: true`. Its text content is
+JSON with `error` containing the message, `code: "spend_cap_exceeded"`, `cap`,
+`amountUsd`, `limitUsd`, optional `spentUsd` and `wallet`, `command`, and
+`retryable: false`. Amounts are decimal USD strings. Do not retry the payment
+without changing the blocking limit. For account caps, `command` is the terminal command to run.
+For maximum price and run-budget caps, it is the `--max` or `--budget` flag to
+apply to the relevant command. The internal maximum-amount cap returns null.
+
 ### MCP registry
 
 The root `server.json` describes the local vAPI Network server from the
@@ -217,26 +232,39 @@ local stdio; hosted MCP needs separate production transport and auth validation.
 
 ### Install into a client
 
-Use this command to write or update a client's vAPI server entry:
+Use this command to register vAPI with a client:
 
 ```text
-vapi mcp install <claude|cursor|codex> [--home <dir>] [--registry <url>] [--json]
+vapi mcp install <claude-code|claude-desktop|cursor|codex> [--home <dir>] [--registry <url>] [--json]
 ```
 
 `--home` sets the vAPI home written into the entry's `VAPI_HOME`; it defaults
 to `~/.vapi` and does not change the client configuration path. `--registry`
 sets the registry URL written into `VAPI_REGISTRY_URL`.
 
+For Claude Code, run:
+
+```bash
+vapi mcp install claude-code
+```
+
+Install Claude Code first so its `claude` command is on PATH. This runs
+`claude mcp add --scope user` to register the same vAPI server entry for your
+user account. Start a new Claude Code session, then ask: "Search vAPI for a
+weather API."
+
 For Claude Desktop, run:
 
 ```bash
-vapi mcp install claude
+vapi mcp install claude-desktop
 ```
 
 On macOS, this writes `~/Library/Application Support/Claude/claude_desktop_config.json`.
 On Windows, it writes `%APPDATA%\Claude\claude_desktop_config.json`. On Linux,
 it writes `~/.config/Claude/claude_desktop_config.json`. The next step is:
 Restart Claude Desktop, then ask it: "Search vAPI for a weather API."
+The `claude` target remains an alias for `claude-desktop` and prints a note
+naming `claude-code`.
 
 For Cursor, run:
 

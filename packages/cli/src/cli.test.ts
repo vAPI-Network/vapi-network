@@ -14,9 +14,12 @@ import {
   appendSearchEvent,
   getVapiPaths,
   protectVault,
+  SpendCapExceededError,
   SweepGasError,
+  type AgentProfile,
   type SecretStore,
   WalletStore,
+  writeAgentProfile,
 } from "@vapi-network/core";
 
 import {
@@ -471,6 +474,114 @@ describe("pay command arguments", () => {
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
+  it("reports a blocked payment as a structured spend-cap error", async () => {
+    const home = await initializedHome("vapi-cli-pay-cap-");
+    const configPath = join(home, "config.json");
+    const config = JSON.parse(await readFile(configPath, "utf8")) as {
+      networks: Record<string, { usdc: string }>;
+    } & Record<string, unknown>;
+    config.allowPrivateNetwork = true;
+    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+    const store = await WalletStore.open(home, { secrets: sharedSecretStore(home) });
+    await store.setSpendCaps("main", {
+      perCallAtomic: "1000000",
+      perDayAtomic: "10000000",
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async (input) =>
+      Response.json(
+        {
+          x402Version: 2,
+          resource: {
+            url: String(input),
+            description: "fixture",
+            mimeType: "application/json",
+          },
+          accepts: [
+            {
+              scheme: "exact",
+              network: BASE_MAINNET_CAIP2,
+              amount: "2000000",
+              asset: config.networks[BASE_MAINNET_CAIP2]!.usdc,
+              payTo: VECTOR_ADDRESS,
+              maxTimeoutSeconds: 60,
+              extra: { name: "USD Coin", version: "2" },
+            },
+          ],
+        },
+        { status: 402 },
+      ),
+    );
+    const expectedError = new SpendCapExceededError({
+      cap: "per_call",
+      amountUsd: "2",
+      limitUsd: "1",
+      wallet: "main",
+    }).toJSON();
+    const json = captureIo();
+
+    expect(await runCli(["pay", "https://127.0.0.1/paid", "--json"], json.io, { fetchImpl })).toBe(
+      1,
+    );
+    expect(json.stderr).toEqual([]);
+    expect(JSON.parse(json.stdout[0]!)).toEqual({ error: expectedError, exitCode: 1 });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+
+    const human = captureIo();
+    expect(await runCli(["pay", "https://127.0.0.1/paid"], human.io, { fetchImpl })).toBe(1);
+    expect(human.stdout).toEqual([]);
+    expect(human.stderr).toEqual([expectedError.message]);
+  });
+
+  it("records spend_cap_exceeded in an agent result file", async () => {
+    const home = await initializedHome("vapi-cli-result-cap-");
+    const profile: AgentProfile = {
+      version: 1,
+      name: "researcher",
+      wallet: "main",
+      model: "router/test",
+      instructions: "Research carefully.",
+      verifiedOnly: true,
+      approveAboveUsd: 0.5,
+      maxPerTaskUsd: 100,
+      autoReleaseBelowUsd: 25,
+      maxSteps: 12,
+      tools: ["call.search", "call.inspect", "call.pay"],
+      grants: [],
+      paused: false,
+      createdAt: "2026-10-18T00:00:00.000Z",
+    };
+    await writeAgentProfile(home, profile);
+    const refusal = new SpendCapExceededError({
+      cap: "run_budget",
+      amountUsd: "0.25",
+      limitUsd: "0.1",
+      spentUsd: "0",
+      wallet: "main",
+    });
+    const resultFile = join(home, "run.result.json");
+    const captured = captureIo();
+
+    expect(
+      await runCli(
+        ["agent", "run", "researcher", "Do work", "--result-file", resultFile, "--json"],
+        captured.io,
+        {
+          agent: {
+            runAgent: async () => {
+              throw refusal;
+            },
+          },
+        },
+      ),
+    ).toBe(1);
+    expect(JSON.parse(captured.stdout[0]!)).toEqual({ error: refusal.toJSON(), exitCode: 1 });
+    expect(JSON.parse(await readFile(resultFile, "utf8"))).toEqual({
+      v: 1,
+      exitCode: 1,
+      error: { message: refusal.message, code: "spend_cap_exceeded" },
+    });
+  });
+
   it("does not print payment headers reflected by a paid provider", async () => {
     const home = await initializedHome("vapi-cli-pay-redaction-");
     const configPath = join(home, "config.json");
@@ -639,7 +750,7 @@ describe("search output", () => {
         kind: "api",
         provenance: "self_listed",
         group: "vapi",
-        fee: { bps: 500, label: "5% network fee, paid by the API's splitter" },
+        fee: { bps: 500, label: "Network fee kept by this API's legacy payout splitter" },
         execution: { mode: "direct" },
         card: {
           title: "decodePaymentAuthorization",
@@ -654,7 +765,7 @@ describe("search output", () => {
         kind: "api",
         provenance: "indexed",
         group: "external",
-        fee: { bps: 0, label: "No network fee" },
+        fee: { bps: 0, label: "Outdated fee label" },
         execution: {
           mode: "direct",
           url: "https://agent402.tools/api/skill/decode-blob",
@@ -688,11 +799,15 @@ describe("search output", () => {
 
     const text = captured.stdout.join("\n");
     // The page sends no tier, so the first-party listing is not vouched for.
-    expect(text).toContain("[vapi] [unverified] decodePaymentAuthorization");
+    expect(text).toContain(
+      "decodepaymentauthorization\tapi\t-\t[vapi] [unverified] decodePaymentAuthorization",
+    );
     // A mirrored row says `external` once, not `[external] [external]`.
-    expect(text).toContain("[external] agent402.tools/api/skill/decode-blob");
+    expect(text).toContain(
+      "https://agent402.tools/api/skill/decode-blob\tapi\t-\t[external] agent402.tools/api/skill/decode-blob",
+    );
     expect(text).not.toContain("[external] [external]");
-    expect(text).toContain("Fee: 5% network fee, paid by the API's splitter");
+    expect(text).toContain("Fee: Network fee kept by this API's legacy payout splitter (5%)");
     expect(text).toContain("Fee: No network fee");
   });
 
@@ -735,6 +850,132 @@ describe("search output", () => {
     expect(switches).toEqual([null, "true"]);
   });
 
+  it("forwards --include-outage only when given", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-search-outage-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (input) =>
+      Response.json({
+        ...discoveryPage,
+        rankingVersion:
+          new URL(input as URL).searchParams.get("includeOutage") === "true"
+            ? "marketplace-ranking-v2"
+            : discoveryPage.rankingVersion,
+      }),
+    );
+
+    expect(await runCli(["search", "decode"], captureIo().io, { fetchImpl })).toBe(0);
+    const captured = captureIo();
+    expect(
+      await runCli(["search", "decode", "--include-outage", "--json"], captured.io, {
+        fetchImpl,
+      }),
+    ).toBe(0);
+    expect(JSON.parse(captured.stdout[0]!)).toMatchObject({
+      rankingVersion: "marketplace-ranking-v2",
+    });
+    expect(
+      fetchImpl.mock.calls.map(([url]) => new URL(url as URL).searchParams.get("includeOutage")),
+    ).toEqual([null, "true"]);
+  });
+
+  it.each([
+    {
+      health: {
+        state: "healthy",
+        uptime7d: 1,
+        latencyP50Ms: 212.6,
+        latencyP95Ms: 480,
+        checks7d: 168,
+      },
+      cell: "healthy 213ms",
+    },
+    {
+      health: {
+        state: "unknown",
+        uptime7d: null,
+        latencyP50Ms: null,
+        latencyP95Ms: null,
+        checks7d: 0,
+      },
+      cell: "unknown",
+    },
+    {
+      health: {
+        state: "degraded",
+        uptime7d: 0.9,
+        latencyP50Ms: 0,
+        latencyP95Ms: 10,
+        checks7d: 168,
+      },
+      cell: "degraded 0ms",
+    },
+    {
+      health: {
+        state: "outage",
+        uptime7d: 0.8,
+        latencyP50Ms: null,
+        latencyP95Ms: null,
+        checks7d: 168,
+      },
+      cell: "outage",
+    },
+    { health: undefined, cell: "-" },
+    { health: "malformed", cell: "-" },
+  ])("prints a plain tab-separated health cell: $cell", async ({ health, cell }) => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-search-health-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        ...discoveryPage,
+        items: [{ ...discoveryPage.items[0], health }],
+      }),
+    );
+    const captured = captureIo();
+
+    expect(await runCli(["search", "decode"], captured.io, { fetchImpl })).toBe(0);
+    const text = captured.stdout.join("\n");
+    expect(text.split("\n")[0]!.split("\t")).toEqual([
+      "decodepaymentauthorization",
+      "api",
+      cell,
+      "[vapi] [unverified] decodePaymentAuthorization",
+    ]);
+    expect(text).not.toContain(String.fromCharCode(27));
+    expect(captured.stderr).toEqual([]);
+  });
+
+  it("prints the health placeholder for Work hits and lists API alternatives", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-search-alternatives-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        ...discoveryPage,
+        items: [
+          {
+            ...discoveryPage.items[0],
+            alternatives: [
+              { ref: "budget-api", reason: "cheaper" },
+              { ref: "reliable-api", reason: "healthier" },
+            ],
+          },
+          {
+            ...discoveryPage.items[0],
+            ref: "work",
+            kind: "service_offer",
+            action: { type: "start_engagement", href: "/work/listings/work" },
+            health: { state: "healthy" },
+          },
+        ],
+      }),
+    );
+    const captured = captureIo();
+    expect(await runCli(["search"], captured.io, { fetchImpl })).toBe(0);
+    const text = captured.stdout.join("\n");
+    expect(text).toContain("  Alternatives: budget-api (cheaper), reliable-api (healthier)");
+    expect(text).toContain("work\tservice_offer\t-\t");
+    expect(text).not.toContain(String.fromCharCode(27));
+  });
+
   it("passes the verification tier through --json", async () => {
     const home = await mkdtemp(join(tmpdir(), "vapi-cli-search-verification-json-"));
     process.env.VAPI_HOME = home;
@@ -766,7 +1007,7 @@ describe("search output", () => {
     expect(page.items.map((item) => item.group)).toEqual(["vapi", "external"]);
     expect(page.items[0]?.fee).toEqual({
       bps: 500,
-      label: "5% network fee, paid by the API's splitter",
+      label: "Network fee kept by this API's legacy payout splitter",
     });
   });
 
@@ -815,7 +1056,7 @@ describe("inspect output", () => {
           category: "crypto",
           tier: "verified",
           group: "vapi",
-          fee: { bps: 500, label: "5% network fee, paid by the API's splitter" },
+          fee: { bps: 500, label: "Network fee kept by this API's legacy payout splitter" },
           verified: true,
           wrapped: false,
           price: "$0.005",
@@ -835,12 +1076,18 @@ describe("inspect output", () => {
     };
   }
 
-  it("says how far vAPI reviewed the listing, and what fee is inside the price", async () => {
+  it.each([
+    { fee: { bps: 0, label: "Outdated fee label" }, display: "No network fee" },
+    {
+      fee: { bps: 500, label: "Network fee kept by this API's legacy payout splitter" },
+      display: "Network fee kept by this API's legacy payout splitter (5%)",
+    },
+  ])("shows the fee for $fee.bps basis points", async ({ fee, display }) => {
     const home = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-"));
     process.env.VAPI_HOME = home;
     const fetchImpl = vi
       .fn<typeof fetch>()
-      .mockResolvedValue(Response.json(servicesResponse({ verification: "verified" })));
+      .mockResolvedValue(Response.json(servicesResponse({ verification: "verified", fee })));
     const captured = captureIo();
 
     expect(
@@ -849,7 +1096,7 @@ describe("inspect output", () => {
 
     const text = captured.stdout.join("\n");
     expect(text).toContain("Verification: verified");
-    expect(text).toContain("Fee: 5% network fee, paid by the API's splitter");
+    expect(text).toContain(`Fee: ${display}`);
   });
 
   it("calls a listing the registry never reviewed unverified, in text and in --json", async () => {
@@ -917,6 +1164,73 @@ describe("inspect output", () => {
     const text = captured.stdout.join("\n");
     expect(text).not.toContain("Liveness:");
     expect(text).not.toContain("Conformance:");
+    expect(text).not.toContain("Health:");
+    expect(text).not.toContain("Example request:");
+  });
+
+  it("prints health and a compact example request before the inspect JSON", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-contract-"));
+    process.env.VAPI_HOME = home;
+    const responseSchema = { type: "object", properties: { decoded: { type: "string" } } };
+    const exampleRequest = { query: { format: "json" }, body: { authorization: "example" } };
+    const response = servicesResponse({
+      health: {
+        state: "healthy",
+        uptime7d: 0.9941,
+        latencyP50Ms: 212.4,
+        latencyP95Ms: 480.6,
+        checks7d: 168,
+      },
+    });
+    Object.assign(response.services[0]!.endpoints[0]!, { responseSchema, exampleRequest });
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async () => Response.json(response));
+    const captured = captureIo();
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization"], captured.io, { fetchImpl }),
+    ).toBe(0);
+    const text = captured.stdout.join("\n");
+    expect(text).toContain(
+      "Health: healthy · 99.4% up over 7 days (168 checks) · p50 212 ms · p95 481 ms",
+    );
+    expect(text).toContain(`Example request: ${JSON.stringify(exampleRequest)}`);
+    const jsonStart = text.indexOf("\n{");
+    expect(text.indexOf("Health:")).toBeLessThan(jsonStart);
+    expect(text.indexOf("Example request:")).toBeLessThan(jsonStart);
+    expect(JSON.parse(text.slice(jsonStart + 1))).toMatchObject({ responseSchema, exampleRequest });
+
+    const asJson = captureIo();
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization", "--json"], asJson.io, { fetchImpl }),
+    ).toBe(0);
+    expect(JSON.parse(asJson.stdout[0]!)).toMatchObject({
+      responseSchema,
+      exampleRequest,
+      health: { state: "healthy" },
+    });
+  });
+
+  it("omits unknown uptime and latency from the health line", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-cli-inspect-unknown-health-"));
+    process.env.VAPI_HOME = home;
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json(
+        servicesResponse({
+          health: {
+            state: "unknown",
+            uptime7d: null,
+            latencyP50Ms: null,
+            latencyP95Ms: null,
+            checks7d: 0,
+          },
+        }),
+      ),
+    );
+    const captured = captureIo();
+    expect(
+      await runCli(["inspect", "decodepaymentauthorization"], captured.io, { fetchImpl }),
+    ).toBe(0);
+    expect(captured.stdout[0]!.split("\n")).toContain("Health: unknown · (0 checks)");
+    expect(captured.stdout[0]).not.toContain("null% up");
   });
 
   it("prints the registry's ERC-8004 identity and reputation", async () => {

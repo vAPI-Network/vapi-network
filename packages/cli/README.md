@@ -9,6 +9,12 @@ locally.
 The `vapi docs`, `vapi docs search` and `vapi docs read` commands access the
 public documentation without a wallet, account or payment.
 
+Search JSON can include health and alternatives; inspect can include response
+schemas and an example request. Search, inspect and pay JSON results carry zero
+to four hints. A spend-cap block returns `spend_cap_exceeded` with the limit and
+guidance for raising it when available. The MCP installer accepts `claude-code`,
+`claude-desktop`, `cursor` and `codex`; `claude` remains an alias for Desktop.
+
 Two entry points: `@vapi-network/cli` exports `runCli` and the `HELP` text for
 embedding, and `@vapi-network/cli/cli` is the executable itself.
 

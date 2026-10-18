@@ -14,8 +14,9 @@ import { drainCeilingSweeps } from "./ceiling.js";
 import { getDefaultConfig } from "./config.js";
 import { NETWORKS } from "./networks.js";
 import { readReceipts } from "./receipts.js";
-import { createRunBudget, RunBudgetError } from "./run-budget.js";
-import { readSpendLedger, SpendCapError } from "./spend-policy.js";
+import { createRunBudget } from "./run-budget.js";
+import { SpendCapExceededError } from "./spend-cap-exceeded.js";
+import { readSpendLedger, reserveSpend } from "./spend-policy.js";
 import {
   ARC_TESTNET_CAIP2,
   BASE_MAINNET_CAIP2,
@@ -24,7 +25,7 @@ import {
   X402_SOLANA_MAINNET_CAIP2,
 } from "./x402-networks.js";
 import { completeX402Payment, payRequest } from "./x402-pay.js";
-import { X402Error } from "./x402.js";
+import * as x402 from "./x402.js";
 
 const PAY_TO = getAddress("0x1111111111111111111111111111111111111111");
 const PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" as Hex;
@@ -219,7 +220,15 @@ describe("payRequest", () => {
         now: NOW,
         lookup: async () => ["93.184.216.34"],
       }),
-    ).rejects.toBeInstanceOf(SpendCapError);
+    ).rejects.toMatchObject({
+      code: "spend_cap_exceeded",
+      cap: "per_call",
+      amountUsd: "0.0025",
+      limitUsd: "0.002499",
+      wallet: "main",
+      command: "vapi accounts caps main --per-call 0.0025",
+      cause: { code: "per_call_cap_exceeded" },
+    } satisfies Partial<SpendCapExceededError>);
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(signSpy).not.toHaveBeenCalled();
@@ -231,9 +240,52 @@ describe("payRequest", () => {
       {
         outcome: "declined_policy",
         quote: { network: BASE_MAINNET_CAIP2, amountAtomic: "2500", payTo: PAY_TO },
-        error: { code: "per_call_cap_exceeded" },
+        error: {
+          code: "spend_cap_exceeded",
+          message: expect.stringContaining("per-call spend cap"),
+        },
       },
     ]);
+  });
+
+  it("reports locked per-day spend without adding another reservation", async () => {
+    const localPaths = await paths();
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const signSpy = vi.spyOn(account, "signTypedData");
+    const caps = { perCallAtomic: "10000", perDayAtomic: "10000" };
+    await reserveSpend(8_000n, caps, {
+      ledgerPath: localPaths.ledgerPath,
+      now: NOW,
+      wallet: "main",
+    });
+
+    await expect(
+      payRequest({
+        url: "https://vendor.example/paid",
+        init: { method: "GET" },
+        account,
+        wallet: "main",
+        caps,
+        config: getDefaultConfig(),
+        fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(paymentRequired()),
+        paths: localPaths,
+        now: NOW,
+        lookup: async () => ["93.184.216.34"],
+      }),
+    ).rejects.toMatchObject({
+      code: "spend_cap_exceeded",
+      cap: "per_day",
+      amountUsd: "0.0025",
+      limitUsd: "0.01",
+      spentUsd: "0.008",
+      command: "vapi accounts caps main --per-day 0.0105",
+      cause: { code: "per_day_cap_exceeded" },
+    } satisfies Partial<SpendCapExceededError>);
+
+    expect(signSpy).not.toHaveBeenCalled();
+    await expect(readSpendLedger(localPaths.ledgerPath, NOW, "main")).resolves.toMatchObject({
+      spentAtomic: "8000",
+    });
   });
 
   it("returns the paid response and writes one paid receipt with settlement details", async () => {
@@ -381,7 +433,14 @@ describe("payRequest", () => {
         now: NOW,
         lookup: async () => ["93.184.216.34"],
       }),
-    ).rejects.toMatchObject({ code: "max_price_exceeded" } satisfies Partial<X402Error>);
+    ).rejects.toMatchObject({
+      code: "spend_cap_exceeded",
+      cap: "max_amount",
+      amountUsd: "0.0025",
+      limitUsd: "0.002499",
+      command: null,
+      cause: { code: "max_price_exceeded" },
+    } satisfies Partial<SpendCapExceededError>);
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(signSpy).not.toHaveBeenCalled();
@@ -389,8 +448,169 @@ describe("payRequest", () => {
       spentAtomic: "0",
     });
     await expect(readReceipts(localPaths.receiptsPath)).resolves.toMatchObject([
-      { outcome: "declined_policy", error: { code: "max_price_exceeded" } },
+      { outcome: "declined_policy", error: { code: "spend_cap_exceeded" } },
     ]);
+  });
+
+  it("reports maxPriceUsd separately from the maximum atomic amount", async () => {
+    const localPaths = await paths();
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const signSpy = vi.spyOn(account, "signTypedData");
+
+    await expect(
+      completeX402Payment({
+        challenge: {
+          response: paymentRequired(),
+          request: new Request("https://vendor.example/paid"),
+          finish() {},
+          async waitFor<T>(operation: Promise<T>): Promise<T> {
+            return await operation;
+          },
+        },
+        account,
+        caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+        config: getDefaultConfig(),
+        ledgerPath: localPaths.ledgerPath,
+        wallet: "main",
+        maxPriceUsd: "0.002499",
+        now: NOW,
+        send: vi.fn(),
+      }),
+    ).rejects.toMatchObject({
+      code: "spend_cap_exceeded",
+      cap: "max_price",
+      amountUsd: "0.0025",
+      limitUsd: "0.002499",
+      command: "--max 0.0025",
+      cause: { code: "max_price_exceeded" },
+    } satisfies Partial<SpendCapExceededError>);
+
+    expect(signSpy).not.toHaveBeenCalled();
+    await expect(readSpendLedger(localPaths.ledgerPath, NOW)).resolves.toMatchObject({
+      spentAtomic: "0",
+    });
+  });
+
+  it.each([
+    {
+      cap: "per_call" as const,
+      caps: { perCallAtomic: "1000", perDayAtomic: "2000" },
+      seedAtomic: 1_000n,
+      expected: {
+        limitUsd: "0.001",
+        command: "vapi accounts caps main --per-call 0.0025 --per-day 0.0025",
+        cause: { code: "per_call_cap_exceeded" },
+      },
+    },
+    {
+      cap: "per_call" as const,
+      caps: { perCallAtomic: "2499", perDayAtomic: "10000" },
+      seedAtomic: 1_000n,
+      expected: {
+        limitUsd: "0.002499",
+        command: "vapi accounts caps main --per-call 0.0025",
+        cause: { code: "per_call_cap_exceeded" },
+      },
+    },
+    {
+      cap: "per_day" as const,
+      caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+      seedAtomic: 8_000n,
+      expected: {
+        limitUsd: "0.01",
+        spentUsd: "0.008",
+        command: "vapi accounts caps main --per-day 0.0105",
+        cause: { code: "per_day_cap_exceeded" },
+      },
+    },
+    {
+      cap: "max_amount" as const,
+      caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+      seedAtomic: 1_000n,
+      maxAtomic: 2_499n,
+      expected: {
+        limitUsd: "0.002499",
+        command: null,
+        cause: { code: "max_price_exceeded" },
+      },
+    },
+    {
+      cap: "max_price" as const,
+      caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+      seedAtomic: 1_000n,
+      maxPriceUsd: "0.002499",
+      expected: {
+        limitUsd: "0.002499",
+        command: "--max 0.0025",
+        cause: { code: "max_price_exceeded" },
+      },
+    },
+    {
+      cap: "run_budget" as const,
+      caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+      seedAtomic: 1_000n,
+      expected: {
+        limitUsd: "0.003499",
+        spentUsd: "0.001",
+        command: "--budget 0.0035",
+        cause: { code: "run_budget_exceeded" },
+      },
+    },
+  ])("blocks $cap before building a payment and preserves reservations", async (testCase) => {
+    const localPaths = await paths();
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const signSpy = vi.spyOn(account, "signTypedData");
+    const buildSpy = vi.spyOn(x402, "buildCompatibleX402Payment");
+    const runBudget = createRunBudget({
+      id: "run_test",
+      limitAtomic: testCase.cap === "run_budget" ? 3_499n : 100_000n,
+    });
+    runBudget.reserve(1_000n, "existing-run-reservation");
+    await reserveSpend(testCase.seedAtomic, testCase.caps, {
+      ledgerPath: localPaths.ledgerPath,
+      now: NOW,
+      wallet: "main",
+    });
+
+    await expect(
+      completeX402Payment({
+        challenge: {
+          response: paymentRequired(),
+          request: new Request("https://vendor.example/paid"),
+          finish() {},
+          async waitFor<T>(operation: Promise<T>): Promise<T> {
+            return await operation;
+          },
+        },
+        account,
+        caps: testCase.caps,
+        config: getDefaultConfig(),
+        ledgerPath: localPaths.ledgerPath,
+        wallet: "main",
+        paymentId: "blocked-payment",
+        runBudget,
+        ...(testCase.maxAtomic === undefined ? {} : { maxAtomic: testCase.maxAtomic }),
+        ...(testCase.maxPriceUsd === undefined ? {} : { maxPriceUsd: testCase.maxPriceUsd }),
+        now: NOW,
+        send: vi.fn(),
+      }),
+    ).rejects.toMatchObject({
+      code: "spend_cap_exceeded",
+      cap: testCase.cap,
+      amountUsd: "0.0025",
+      wallet: "main",
+      ...testCase.expected,
+    } satisfies Partial<SpendCapExceededError>);
+
+    expect(buildSpy).not.toHaveBeenCalled();
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(runBudget.spentAtomic()).toBe(1_000n);
+    expect(runBudget.reservedAtomic("existing-run-reservation")).toBe(1_000n);
+    expect(runBudget.reservedAtomic("blocked-payment")).toBe(0n);
+    await expect(readSpendLedger(localPaths.ledgerPath, NOW, "main")).resolves.toMatchObject({
+      spentAtomic: testCase.seedAtomic.toString(),
+    });
+    expect(await readFile(localPaths.ledgerPath, "utf8")).not.toContain("blocked-payment");
   });
 
   it("honors preferNetworks when two configured exact quotes are offered", async () => {
@@ -527,7 +747,8 @@ describe("payRequest", () => {
     const account = privateKeyToAccount(PRIVATE_KEY);
     const signSpy = vi.spyOn(account, "signTypedData");
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(paymentRequired());
-    const runBudget = createRunBudget({ id: "run_test", limitAtomic: 2_499n });
+    const runBudget = createRunBudget({ id: "run_test", limitAtomic: 3_499n });
+    runBudget.reserve(1_000n, "existing");
 
     await expect(
       payRequest({
@@ -543,14 +764,119 @@ describe("payRequest", () => {
         lookup: async () => ["93.184.216.34"],
         runBudget,
       }),
-    ).rejects.toBeInstanceOf(RunBudgetError);
+    ).rejects.toMatchObject({
+      code: "spend_cap_exceeded",
+      cap: "run_budget",
+      amountUsd: "0.0025",
+      limitUsd: "0.003499",
+      spentUsd: "0.001",
+      command: "--budget 0.0035",
+      cause: { code: "run_budget_exceeded" },
+    } satisfies Partial<SpendCapExceededError>);
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(signSpy).not.toHaveBeenCalled();
-    expect(runBudget.spentAtomic()).toBe(0n);
+    expect(runBudget.spentAtomic()).toBe(1_000n);
     await expect(readSpendLedger(localPaths.ledgerPath, NOW)).resolves.toMatchObject({
       spentAtomic: "0",
     });
+  });
+
+  it("releases wallet spend even when reading a failed run budget throws", async () => {
+    const localPaths = await paths();
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const signSpy = vi.spyOn(account, "signTypedData");
+    const budget = createRunBudget({ id: "run_test", limitAtomic: 2_499n });
+    const reportingFailure = new Error("Run budget usage could not be read.");
+
+    await expect(
+      payRequest({
+        url: "https://vendor.example/paid",
+        init: { method: "GET" },
+        account,
+        wallet: "main",
+        caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+        config: getDefaultConfig(),
+        fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(paymentRequired()),
+        paths: localPaths,
+        now: NOW,
+        lookup: async () => ["93.184.216.34"],
+        runBudget: {
+          ...budget,
+          spentAtomic() {
+            throw reportingFailure;
+          },
+        },
+      }),
+    ).rejects.toBe(reportingFailure);
+
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(budget.spentAtomic()).toBe(0n);
+    await expect(readSpendLedger(localPaths.ledgerPath, NOW, "main")).resolves.toMatchObject({
+      spentAtomic: "0",
+    });
+  });
+
+  it("rebuilds a typed cap error while redacting its foreign run-budget cause", async () => {
+    const localPaths = await paths();
+    const secret = "agent-token-must-stay-secret";
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const signSpy = vi.spyOn(account, "signTypedData");
+    const foreignFailure = Object.assign(new Error(`budget rejected ${secret}`), {
+      code: "run_budget_exceeded",
+    });
+    const runBudget = {
+      id: "foreign",
+      limitAtomic: 2_499n,
+      spentAtomic: () => 0n,
+      reservedAtomic: () => 0n,
+      reserve: vi.fn(() => {
+        throw foreignFailure;
+      }),
+      release: vi.fn(),
+    };
+
+    let failure: unknown;
+    try {
+      await payRequest({
+        url: "https://vendor.example/paid",
+        init: { method: "GET", headers: { authorization: `Bearer ${secret}` } },
+        account,
+        wallet: "main",
+        caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+        config: getDefaultConfig(),
+        fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(paymentRequired()),
+        paths: localPaths,
+        now: NOW,
+        lookup: async () => ["93.184.216.34"],
+        runBudget,
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(SpendCapExceededError);
+    expect(failure).toMatchObject({
+      cap: "run_budget",
+      amountUsd: "0.0025",
+      limitUsd: "0.002499",
+      spentUsd: "0",
+      command: "--budget 0.0025",
+      cause: { message: "budget rejected [redacted]" },
+    });
+    expect(failure).not.toHaveProperty("cause", foreignFailure);
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(runBudget.reserve).toHaveBeenCalledTimes(1);
+    expect(runBudget.release).not.toHaveBeenCalled();
+    await expect(readSpendLedger(localPaths.ledgerPath, NOW)).resolves.toMatchObject({
+      spentAtomic: "0",
+    });
+    await expect(readReceipts(localPaths.receiptsPath)).resolves.toMatchObject([
+      {
+        outcome: "declined_policy",
+        error: { code: "spend_cap_exceeded", message: expect.stringContaining("run budget") },
+      },
+    ]);
   });
 
   it("releases the run budget when the spend cap refuses the quote", async () => {
@@ -573,7 +899,7 @@ describe("payRequest", () => {
         lookup: async () => ["93.184.216.34"],
         runBudget,
       }),
-    ).rejects.toBeInstanceOf(SpendCapError);
+    ).rejects.toMatchObject({ code: "spend_cap_exceeded", cap: "per_call" });
 
     expect(signSpy).not.toHaveBeenCalled();
     expect(runBudget.spentAtomic()).toBe(0n);
@@ -808,7 +1134,7 @@ describe("payRequest", () => {
         lookup: async () => ["93.184.216.34"],
         run,
       }),
-    ).rejects.toBeInstanceOf(SpendCapError);
+    ).rejects.toBeInstanceOf(SpendCapExceededError);
     await expect(readReceipts(errorPaths.receiptsPath)).resolves.toMatchObject([{ run }]);
   });
 });

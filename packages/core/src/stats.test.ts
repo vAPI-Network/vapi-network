@@ -107,6 +107,22 @@ describe("local metrics aggregation", () => {
     expect(stats.totals.spendUsd).toBe("0");
     expect(stats.outcomes.signed_in).toEqual({ count: 1, rate: 1 });
   });
+
+  it("classifies the stable spend-cap code as a policy decline", () => {
+    const stats = aggregateStats({
+      receipts: [
+        receipt("cap", "2026-09-10T11:00:00.000Z", "https://cap.example/call", {
+          error: { code: "spend_cap_exceeded", message: "Nothing was signed." },
+        }),
+      ],
+      searches: [],
+      range: "24h",
+      now,
+    });
+
+    expect(stats.totals.policyDeclines).toBe(1);
+    expect(stats.outcomes.declined_policy).toEqual({ count: 1, rate: 1 });
+  });
 });
 
 function receipt(

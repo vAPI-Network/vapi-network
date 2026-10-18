@@ -56,6 +56,70 @@ afterEach(async () => {
 });
 
 describe("CLI action register", () => {
+  it("includes CLI search hints in JSON without persisting them", async () => {
+    const captured = captureIo();
+    const page = {
+      ...marketplacePage(),
+      items: [
+        {
+          ref: "weather",
+          kind: "api",
+          provenance: "self_listed",
+          execution: { mode: "direct" },
+          card: { title: "Weather", summary: "Forecasts.", badges: [], facts: [] },
+          action: { type: "invoke_api", href: "/call/weather" },
+        },
+      ],
+    };
+    expect(
+      await runCli(["search", "weather", "--json"], captured.io, {
+        ...dependencies,
+        fetchImpl: async () => Response.json(page),
+      }),
+    ).toBe(0);
+    const result = JSON.parse(captured.stdout[0]!) as { hints: string[] };
+    expect(result.hints).toEqual(["Inspect before paying: vapi inspect weather"]);
+    expect(result.hints.join(" ")).not.toMatch(/call[._]inspect/);
+    expect(await readFile(join(process.env.VAPI_HOME!, "searches.jsonl"), "utf8")).not.toContain(
+      '"hints"',
+    );
+  });
+
+  it("includes CLI pay hints in inspect JSON and keeps human output unchanged", async () => {
+    const options = { ...dependencies, fetchImpl: async () => Response.json(servicesResponse()) };
+    const json = captureIo();
+    expect(await runCli(["inspect", "weather", "--json"], json.io, options)).toBe(0);
+    const result = JSON.parse(json.stdout[0]!) as { hints: string[] };
+    expect(result.hints).toEqual([
+      "Pay with: vapi pay weather --endpoint forecast --body '<json>'",
+    ]);
+    expect(result.hints.join(" ")).not.toMatch(/call[._](inspect|pay)/);
+    const human = captureIo();
+    expect(await runCli(["inspect", "weather"], human.io, options)).toBe(0);
+    expect(human.stdout.join("\n")).not.toContain('"hints"');
+    expect(human.stdout.join("\n")).not.toContain("Pay with:");
+  });
+
+  it("keeps pay hints out of human output and receipt persistence", async () => {
+    await allowPrivateNetwork();
+    const options = {
+      ...dependencies,
+      fetchImpl: async () => Response.json({ ok: true }),
+      ceiling: { drainCeilingSweeps: async () => undefined },
+    };
+    const human = captureIo();
+    expect(await runCli(["pay", "https://127.0.0.1/free"], human.io, options)).toBe(0);
+    expect(human.stdout.join("\n")).not.toContain('"hints"');
+    const json = captureIo();
+    expect(await runCli(["pay", "https://127.0.0.1/free", "--json"], json.io, options)).toBe(0);
+    expect(JSON.parse(json.stdout[0]!) as unknown).toMatchObject({
+      hints: ["Receipt saved; review it with: vapi receipts --limit 1 --account main"],
+    });
+    expect(await readFile(join(process.env.VAPI_HOME!, "receipts.jsonl"), "utf8")).not.toContain(
+      '"hints"',
+    );
+  });
+
   it("runs search, inspect, and pay through runAction", async () => {
     const search = captureIo();
     expect(

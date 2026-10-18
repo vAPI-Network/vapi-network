@@ -205,7 +205,11 @@ describe("the wallet argument", () => {
     const fromArgument = await pay("main");
 
     expect(fromDefault.structuredContent).toMatchObject({ wallet: "main", status: 200 });
-    expect(fromSession.structuredContent).toMatchObject({ wallet: "agent", status: 200 });
+    expect(fromSession.structuredContent).toMatchObject({
+      wallet: "agent",
+      status: 200,
+      hints: ['Receipt saved; review it with: receipts.list {"limit":1,"wallet":"agent"}'],
+    });
     expect(fromArgument.structuredContent).toMatchObject({ wallet: "main", status: 200 });
     const lines = (await readFile(receiptsPath, "utf8")).trim().split("\n");
     expect(lines.map((line) => (JSON.parse(line) as { wallet?: string }).wallet)).toEqual([
@@ -233,7 +237,16 @@ describe("the wallet argument", () => {
     });
 
     expect(refused.isError).toBe(true);
-    expect(JSON.stringify(refused.content)).toContain("exceeds the per-call cap 10000");
+    const errorText = refused.content.find((item) => item.type === "text");
+    expect(JSON.parse(errorText?.text ?? "null")).toMatchObject({
+      code: "spend_cap_exceeded",
+      cap: "per_call",
+      amountUsd: "0.025",
+      limitUsd: "0.01",
+      wallet: "agent",
+      command: "vapi accounts caps agent --per-call 0.025 --per-day 0.025",
+      retryable: false,
+    });
     expect(allowed.structuredContent).toMatchObject({ wallet: "main", status: 200 });
     await server.close();
   });

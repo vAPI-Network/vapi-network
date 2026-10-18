@@ -82,6 +82,7 @@ export {
   type VapiPaymentAccount,
 } from "./keystore.js";
 export * from "./marketplace-contracts.js";
+export * from "./listing-fee.js";
 export {
   cancelMovement,
   executeMovement,
@@ -109,6 +110,7 @@ export * from "./secret-store.js";
 export * from "./siblings.js";
 export * from "./stats.js";
 export * from "./spend-policy.js";
+export * from "./spend-cap-exceeded.js";
 export * from "./swarm-capital.js";
 export * from "./swarm.js";
 export * from "./status.js";

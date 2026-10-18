@@ -50,6 +50,14 @@ export const discoveryEndpointSchema = z.looseObject({
   operationId: z.string().trim().min(1).optional(),
   requestContentType: z.string().trim().min(1).optional(),
   requestSchema: z.json().optional(),
+  responseSchema: z.json().optional().catch(undefined),
+  exampleRequest: z
+    .looseObject({
+      query: z.record(z.string(), z.string()).optional().catch(undefined),
+      body: z.json().optional(),
+    })
+    .optional()
+    .catch(undefined),
   responseContentType: z.string().trim().min(1).optional(),
   pathTemplate: z.string().trim().min(1).optional(),
   pathParameters: z.array(z.string().trim().min(1)).optional(),

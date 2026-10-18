@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -33,6 +33,57 @@ afterEach(async () => {
 });
 
 describe("agent loop inspection cache", () => {
+  it("returns shared search hints and health metadata and forwards the outage opt-in", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-agent-search-hints-"));
+    temporaryDirectories.push(home);
+    const page = marketplacePage();
+    Object.assign(page.items[0]!, {
+      health: { state: "healthy", uptime7d: 1, latencyP50Ms: 10, latencyP95Ms: 20, checks7d: 5 },
+      alternatives: [{ ref: "budget-weather", reason: "cheaper" }],
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async () => Response.json(page));
+    const requests: ChatRequest[] = [];
+    const replies = [
+      toolReply("search", "call_search", { query: "weather", network: null, includeOutage: false }),
+      toolReply("outage", "call_search", { query: "weather", network: null, includeOutage: true }),
+      toolReply("finish", "finish", { answer: "done" }),
+    ];
+    const deps = createAgentRunDeps({
+      profile: profile(),
+      config: getDefaultConfig(),
+      home,
+      account: privateKeyToAccount(PRIVATE_KEY),
+      wallet: "researcher",
+      spendCaps: { perCallAtomic: "50000", perDayAtomic: "1000000" },
+      fetchImpl,
+      async chat(request) {
+        requests.push(structuredClone(request));
+        return replies.shift()!;
+      },
+      approve: async () => false,
+    });
+    expect((await runAgent("Find weather", deps)).answer).toBe("done");
+    const result = JSON.parse(
+      String(requests[1]!.messages.at(-1)?.content).split("\n").slice(1, -1).join("\n"),
+    ) as { items: unknown[]; hints: string[] };
+    expect(result.items[0]).toMatchObject({
+      health: { state: "healthy" },
+      alternatives: [{ ref: "budget-weather", reason: "cheaper" }],
+    });
+    expect(result.hints).toEqual([
+      'Inspect before paying: call_inspect {"ref":"weather"}',
+      "weather has a cheaper healthy alternative: budget-weather",
+    ]);
+    const outages = JSON.parse(
+      String(requests[2]!.messages.at(-1)?.content).split("\n").slice(1, -1).join("\n"),
+    ) as { hints: string[] };
+    expect(outages.hints).toEqual(result.hints);
+    expect(
+      fetchImpl.mock.calls.map(([input]) => requestUrl(input).searchParams.get("includeOutage")),
+    ).toEqual([null, "true"]);
+    expect(await readFile(join(home, "searches.jsonl"), "utf8")).not.toContain('"hints"');
+  });
+
   it("pins the inspected payee without inspecting twice", async () => {
     const home = await mkdtemp(join(tmpdir(), "vapi-agent-shared-cache-"));
     temporaryDirectories.push(home);
@@ -82,6 +133,8 @@ describe("agent loop inspection cache", () => {
       .filter((request) => request.url === API_URL);
     expect(apiRequests).toHaveLength(1);
     expect(apiRequests[0]!.headers.has("payment-signature")).toBe(false);
+    expect(requests[2]!.messages.at(-1)?.content).toContain("Pay with: call_pay");
+    expect(requests[2]!.messages.at(-1)?.content).not.toContain("call_inspect failed.");
     expect(requests[3]!.messages.at(-1)?.content).toContain("call_pay failed.");
   });
 });

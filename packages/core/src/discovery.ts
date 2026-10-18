@@ -40,6 +40,8 @@ export type SourceSearchOptions = Readonly<{
    * vAPI-verified listings plus mirrored external catalogs.
    */
   includeUnverified?: boolean;
+  /** Include API listings whose recent health checks show an outage. */
+  includeOutage?: boolean;
 }>;
 
 /** Discovery adapter seam. A null inspect result means the reference is unknown. */
@@ -92,8 +94,12 @@ export async function discover(
 ): Promise<{ listings: Listing[]; errors: ReadonlyArray<{ source: string; error: unknown }> }> {
   const nowMs = options.nowMs ?? (() => performance.now());
   const startedAt = options.now ?? new Date();
-  const searchOptions: SourceSearchOptions =
-    options.includeUnverified === undefined ? {} : { includeUnverified: options.includeUnverified };
+  const searchOptions: SourceSearchOptions = {
+    ...(options.includeUnverified === undefined
+      ? {}
+      : { includeUnverified: options.includeUnverified }),
+    ...(options.includeOutage === undefined ? {} : { includeOutage: options.includeOutage }),
+  };
   const settled = await Promise.all(
     sources.map(async (source) => {
       const started = nowMs();

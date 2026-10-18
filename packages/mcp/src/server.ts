@@ -6,6 +6,7 @@ import {
   MovementError,
   ONRAMP_NETWORK,
   STATS_RANGES,
+  SpendCapExceededError,
   SwarmError,
   TransferError,
   VAPI_CLIENT_VERSION,
@@ -1424,37 +1425,73 @@ export async function loadServerConfig() {
 }
 
 export function toolError(error: unknown) {
+  const spendCapError = serializeSpendCapError(error);
   const text =
-    error instanceof VapiCallError
-      ? JSON.stringify(
-          {
-            error: error.message,
-            code: error.code,
-            ...(error.possibleSettlement
-              ? {
-                  possibleSettlement: Object.fromEntries(
-                    Object.entries(error.possibleSettlement).filter(
-                      ([key]) => key !== "authorizationTransaction",
+    spendCapError !== undefined
+      ? JSON.stringify(spendCapError, null, 2)
+      : error instanceof VapiCallError
+        ? JSON.stringify(
+            {
+              error: error.message,
+              code: error.code,
+              ...(error.possibleSettlement
+                ? {
+                    possibleSettlement: Object.fromEntries(
+                      Object.entries(error.possibleSettlement).filter(
+                        ([key]) => key !== "authorizationTransaction",
+                      ),
                     ),
-                  ),
-                }
-              : {}),
-            ...(error.paymentRejection ? { paymentRejection: error.paymentRejection } : {}),
-            ...(error.confirmedSettlement
-              ? { confirmedSettlement: error.confirmedSettlement }
-              : {}),
-          },
-          null,
-          2,
-        )
-      : error instanceof DocsError
-        ? JSON.stringify({ error: error.message, code: error.code }, null, 2)
-        : error instanceof Error
-          ? error.message
-          : String(error);
+                  }
+                : {}),
+              ...(error.paymentRejection ? { paymentRejection: error.paymentRejection } : {}),
+              ...(error.confirmedSettlement
+                ? { confirmedSettlement: error.confirmedSettlement }
+                : {}),
+            },
+            null,
+            2,
+          )
+        : error instanceof DocsError
+          ? JSON.stringify({ error: error.message, code: error.code }, null, 2)
+          : error instanceof Error
+            ? error.message
+            : String(error);
   return {
     isError: true as const,
     content: [{ type: "text" as const, text }],
+  };
+}
+
+function serializeSpendCapError(error: unknown): Record<string, unknown> | undefined {
+  const record = asRecord(error);
+  if (
+    !(error instanceof SpendCapExceededError) &&
+    (record === undefined || record.code !== "spend_cap_exceeded")
+  ) {
+    return undefined;
+  }
+  const value = error as SpendCapExceededError;
+  if (typeof value.amountUsd !== "string" || typeof value.limitUsd !== "string") return undefined;
+  if (
+    value.cap !== "per_call" &&
+    value.cap !== "per_day" &&
+    value.cap !== "max_price" &&
+    value.cap !== "max_amount" &&
+    value.cap !== "run_budget"
+  ) {
+    return undefined;
+  }
+  const message = typeof value.message === "string" ? value.message : "A spend cap was exceeded.";
+  return {
+    error: message,
+    code: "spend_cap_exceeded",
+    cap: value.cap,
+    amountUsd: value.amountUsd,
+    limitUsd: value.limitUsd,
+    ...(typeof value.spentUsd === "string" ? { spentUsd: value.spentUsd } : {}),
+    ...(typeof value.wallet === "string" ? { wallet: value.wallet } : {}),
+    command: typeof value.command === "string" ? value.command : null,
+    retryable: false,
   };
 }
 
