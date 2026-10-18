@@ -31,6 +31,7 @@ import {
   type VapiPaymentAccount,
   type VapiConfig,
   type WalletName,
+  SpendCapExceededError,
   X402PaymentError,
 } from "@vapi-network/core";
 
@@ -832,7 +833,11 @@ function receiptContext(args: CallServiceArgs, trace: CallTrace, resourceUrl: st
 }
 
 function errorOutcome(error: unknown, code: string): NonNullable<Receipt["outcome"]> {
-  if (code === "max_price_exceeded" || code.includes("cap_exceeded")) {
+  if (
+    error instanceof SpendCapExceededError ||
+    code === "max_price_exceeded" ||
+    code.includes("cap_exceeded")
+  ) {
     return "declined_policy";
   }
   if (error instanceof VapiCallError) {
@@ -1297,6 +1302,9 @@ function paidRequestTimeoutMs(
 
 /** Maps core payment facts back to the stable MCP error interface. */
 function mapX402PaymentError(error: unknown, resumeId: string | undefined): unknown {
+  // Policy refusals happen before authorization. Preserve their typed, actionable
+  // details and never reinterpret them as a retryable transport failure.
+  if (error instanceof SpendCapExceededError) return error;
   if (!(error instanceof X402PaymentError)) return error;
   if (error.code === "payment_rejected") {
     return new VapiCallError("payment_rejected", error.message, undefined, {

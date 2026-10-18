@@ -32,6 +32,7 @@ import {
   readUsdcBalance,
   readVaultFileUnlocked,
   secretStore,
+  SpendCapExceededError,
   reserveSpend,
   unlockProtectedVault,
   usdToAtomic,
@@ -1218,7 +1219,10 @@ async function reserveRemoteAllowance(args: {
     );
     return { atomic: reserved, expiresAt: nextUtcMidnight(reservation.date) };
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "per_day_cap_exceeded") {
+    if (
+      (error instanceof SpendCapExceededError && error.cap === "per_day") ||
+      (error instanceof Error && "code" in error && error.code === "per_day_cap_exceeded")
+    ) {
       throw new RemoteKeyRefusedError(
         "no_daily_allowance",
         `${args.account}'s remaining daily allowance changed while Railway was starting. Run the command again.`,

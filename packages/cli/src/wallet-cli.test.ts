@@ -8,6 +8,7 @@ import {
   appendReceipt,
   AGENT_MARKER_VARIABLES,
   protectVault,
+  SpendCapExceededError,
   unlockProtectedVault,
   VAULT_KEY_ACCOUNT,
   VAULT_SESSION_ACCOUNT,
@@ -284,6 +285,33 @@ describe("vapi accounts use, rename and caps", () => {
     ).toBe(2);
     expect(notMoney.stderr[0]).toContain("--per-day must be a US dollar amount");
   });
+
+  it.each(["10", "100"])(
+    "accepts the suggested per-call remedy with daily cap %s",
+    async (perDay) => {
+      const home = await initializedHome("vapi-wallet-cap-remedy-");
+      expect(
+        await runCli(
+          ["accounts", "caps", "main", "--per-call", "1", "--per-day", perDay],
+          captureIo().io,
+          AGENT,
+        ),
+      ).toBe(0);
+      const error = new SpendCapExceededError({
+        cap: "per_call",
+        amountUsd: "20",
+        limitUsd: "1",
+        perDayLimitUsd: perDay,
+        wallet: "main",
+      });
+      expect(await runCli(error.command!.split(" ").slice(1), captureIo().io, AGENT)).toBe(0);
+      const registry = await readRegistry(home);
+      expect(registry.wallets.main?.spendCaps).toEqual({
+        perCallAtomic: "20000000",
+        perDayAtomic: perDay === "10" ? "20000000" : "100000000",
+      });
+    },
+  );
 });
 
 describe("vapi accounts remove and restore", () => {

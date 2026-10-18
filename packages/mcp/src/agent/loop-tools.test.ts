@@ -31,6 +31,12 @@ describe("agent loop tool definitions", () => {
             "parameters": {
               "additionalProperties": false,
               "properties": {
+                "includeOutage": {
+                  "type": [
+                    "boolean",
+                    "null",
+                  ],
+                },
                 "network": {
                   "type": [
                     "string",
@@ -44,6 +50,7 @@ describe("agent loop tool definitions", () => {
               "required": [
                 "query",
                 "network",
+                "includeOutage",
               ],
               "type": "object",
             },
@@ -142,6 +149,12 @@ describe("agent loop tool definitions", () => {
             "parameters": {
               "additionalProperties": false,
               "properties": {
+                "includeOutage": {
+                  "type": [
+                    "boolean",
+                    "null",
+                  ],
+                },
                 "network": {
                   "type": [
                     "string",
@@ -155,6 +168,7 @@ describe("agent loop tool definitions", () => {
               "required": [
                 "query",
                 "network",
+                "includeOutage",
               ],
               "type": "object",
             },

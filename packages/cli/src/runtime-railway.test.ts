@@ -18,6 +18,7 @@ import {
   readAuditLog,
   readSpendLedger,
   reserveSpend,
+  SpendCapExceededError,
   WalletStore,
   writeAgentProfile,
   writeSwarm,
@@ -1203,6 +1204,30 @@ describe("railway runtime env file", () => {
 });
 
 describe("railway runtime spend reservation", () => {
+  it("classifies the typed per-day cap raised during reservation as exhausted allowance", async () => {
+    const f = await fixture();
+    const railway = fakeRailway();
+    const reservation = vi
+      .spyOn(await import("@vapi-network/core"), "reserveSpend")
+      .mockRejectedValueOnce(
+        new SpendCapExceededError({
+          cap: "per_day",
+          amountUsd: "1",
+          limitUsd: "1",
+          spentUsd: "0.5",
+          wallet: ALPHA,
+        }),
+      );
+
+    const failure = await runtimeFor(f, railway.exec)
+      .start(MEMBER, RUN)
+      .catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: "no_daily_allowance" });
+    expect((failure as Error).message).toContain("changed while Railway was starting");
+    reservation.mockRestore();
+  });
+
   it("reserves the remaining local daily allowance and gives only that amount to the run", async () => {
     const f = await fixture();
     const railway = fakeRailway();

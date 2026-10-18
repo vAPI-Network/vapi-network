@@ -71,18 +71,13 @@ describe("the listing write API", () => {
     });
   });
 
-  it("asks for a payout nonce and a splitter state by wallet", async () => {
+  it("asks for a payout nonce by wallet", async () => {
     const nonce = client({ body: { nonce: "abcdef1234567890" } });
     await nonce.client.payoutNonce("0x1111111111111111111111111111111111111111");
     expect(nonce.requests[0]?.url.pathname).toBe("/api/call/listings/payout-nonce");
     expect(nonce.requests[0]?.url.searchParams.get("wallet")).toBe(
       "0x1111111111111111111111111111111111111111",
     );
-
-    const splitters = client({ body: { networkStates: [], feeBp: 500 } });
-    await splitters.client.splitters("0x1111111111111111111111111111111111111111");
-    expect(splitters.requests[0]?.url.pathname).toBe("/api/call/listings/splitters");
-    expect(splitters.requests[0]?.method).toBe("GET");
   });
 
   it("creates a listing and moves its status", async () => {
@@ -128,10 +123,15 @@ describe("registry errors", () => {
   it("passes a 409 refusal through in the registry's own words", async () => {
     const { client: listings } = client({
       status: 409,
-      body: { error: { message: "Deploy the splitter before activating this listing." } },
+      body: {
+        error: {
+          message:
+            "Set every endpoint's payTo to your payout wallet before activating this listing.",
+        },
+      },
     });
     await expect(listings.status("weather", "activate")).rejects.toThrow(
-      "Deploy the splitter before activating this listing.",
+      "Set every endpoint's payTo to your payout wallet before activating this listing.",
     );
   });
 

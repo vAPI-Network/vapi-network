@@ -24,7 +24,8 @@
   "type": "module",
   "sideEffects": false,
   "files": [
-    "dist"
+    "dist",
+    "SKILL.md"
   ],
   "bin": {
     "vapi": "dist/cli.js"

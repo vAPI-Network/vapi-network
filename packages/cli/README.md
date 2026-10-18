@@ -9,12 +9,18 @@ locally.
 The `vapi docs`, `vapi docs search` and `vapi docs read` commands access the
 public documentation without a wallet, account or payment.
 
-`vapi init`, `vapi wallet create <name>` and `vapi mcp install <claude|cursor|codex>`
+`vapi init`, `vapi wallet create <name>` and `vapi mcp install <app>`
 offer to link the wallet to your vAPI dashboard in an interactive terminal.
 Use `--no-link` to skip the prompt. Non-interactive and JSON runs return a login
 hint, and a failed link leaves wallet creation or MCP installation successful.
 `vapi dashboard [--account <name>] [--no-browser] [--json]` opens or prints
 My agents and offers to link an unlinked account.
+
+Search JSON can include health and alternatives; inspect can include response
+schemas and an example request. Search, inspect and pay JSON results carry zero
+to four hints. A spend-cap block returns `spend_cap_exceeded` with the limit and
+guidance for raising it when available. The MCP installer accepts `claude-code`,
+`claude-desktop`, `cursor` and `codex`; `claude` remains an alias for Desktop.
 
 Two entry points: `@vapi-network/cli` exports `runCli` and the `HELP` text for
 embedding, and `@vapi-network/cli/cli` is the executable itself.

@@ -50,6 +50,12 @@ export class SpendCapError extends Error {
     public readonly code:
       "per_call_cap_exceeded" | "per_task_cap_exceeded" | "per_day_cap_exceeded",
     message: string,
+    public readonly details?: {
+      amountAtomic: bigint;
+      limitAtomic: bigint;
+      spentAtomic?: bigint;
+      wallet?: WalletName;
+    },
   ) {
     super(message);
     this.name = "SpendCapError";
@@ -209,6 +215,7 @@ export async function reserveSpend(
       throw new SpendCapError(
         "per_call_cap_exceeded",
         `Payment quote ${amountAtomic} atomic USDC exceeds the per-call cap ${perCallAtomic}. Refusing to sign.`,
+        { amountAtomic, limitAtomic: perCallAtomic, wallet: options?.wallet },
       );
     }
   }
@@ -319,6 +326,7 @@ export async function reserveSpend(
       throw new SpendCapError(
         "per_day_cap_exceeded",
         `${kind === "escrow-funding" ? "Escrow funding" : "Payment quote"} ${amountAtomic} atomic USDC would raise today's spend to ${nextSpent} for wallet ${wallet}, above the per-day cap ${perDayAtomic}. Refusing to sign.`,
+        { amountAtomic, limitAtomic: perDayAtomic, spentAtomic: BigInt(spentAtomic), wallet },
       );
     }
     const reservationId =

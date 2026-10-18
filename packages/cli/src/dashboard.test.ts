@@ -34,6 +34,7 @@ const commands = [
   { label: "init", argv: ["init"], account: "main" },
   { label: "wallet create", argv: ["wallet", "create", "researcher"], account: "researcher" },
   { label: "mcp install", argv: ["mcp", "install", "cursor"], account: "main" },
+  { label: "mcp install claude-code", argv: ["mcp", "install", "claude-code"], account: "main" },
 ];
 
 for (const command of commands) {
@@ -123,6 +124,31 @@ for (const command of commands) {
 }
 
 describe("dashboard link helper", () => {
+  it.each([false, true])(
+    "does not offer linking when Claude Code installation fails (json=%s)",
+    async (json) => {
+      const fixture = await setup();
+      fixture.dependencies.mcpInstall!.runProcess = vi.fn(async () => ({
+        exitCode: 1,
+        stdout: "",
+        stderr: "registration failed",
+      }));
+      const flow = vi.spyOn(login, "runLoginFlow").mockRejectedValue(new Error("must not run"));
+
+      expect(
+        await runCli(
+          ["mcp", "install", "claude-code", ...(json ? ["--json"] : [])],
+          fixture.io,
+          fixture.dependencies,
+        ),
+      ).toBe(1);
+
+      expect(flow).not.toHaveBeenCalled();
+      expect(fixture.line).not.toHaveBeenCalled();
+      if (json) expect(JSON.parse(fixture.stdout[0]!)).not.toHaveProperty("linked");
+    },
+  );
+
   it("skips an existing link without prompting or printing a hint", async () => {
     const fixture = await setup();
     await setLink(fixture.home, "main", fixture.dependencies);
@@ -476,7 +502,12 @@ async function setup(initialized = true, answer = "yes") {
         result: request.method === "eth_call" ? `0x${"0".repeat(64)}` : "0x0",
       });
     }),
-    mcpInstall: { platform: "darwin", homedir: home, cwd: home },
+    mcpInstall: {
+      platform: "darwin",
+      homedir: home,
+      cwd: home,
+      runProcess: vi.fn(async () => ({ exitCode: 0, stdout: "registered", stderr: "" })),
+    },
   };
   if (initialized) {
     const store = await WalletStore.open(home, { secrets: secretStore });

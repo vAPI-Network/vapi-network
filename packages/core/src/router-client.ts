@@ -17,6 +17,7 @@ import { createPublicFetch } from "./net-guard.js";
 import type { Receipt } from "./receipts.js";
 import type { RunBudget } from "./run-budget.js";
 import type { SecretStore } from "./secret-store.js";
+import { SpendCapExceededError } from "./spend-cap-exceeded.js";
 import { SpendCapError } from "./spend-policy.js";
 import { swarmParentResolver } from "./swarm.js";
 import {
@@ -680,19 +681,28 @@ function budgetExhaustedError(resetsAt: string, status?: number): RouterClientEr
 }
 
 function refillDeclinedDetail(error: unknown): string {
+  if (error instanceof SpendCapExceededError) return `${error.name}: ${error.cap}`;
   if (error instanceof SpendCapError) return `${error.name}: ${error.code}`;
-  if (isRunBudgetError(error)) return `RunBudgetError: ${error.code}`;
+  if (isRunBudgetError(error)) {
+    return error.code === "spend_cap_exceeded"
+      ? "SpendCapExceededError: run_budget"
+      : `RunBudgetError: ${error.code}`;
+  }
   if (error instanceof RouterClientError) {
     return `${error.name}: ${error.code}${error.status === undefined ? "" : ` (${error.status})`}`;
   }
   return "Error: Router balance refill failed.";
 }
 
-function isRunBudgetError(error: unknown): error is { code: "run_budget_exceeded" } {
+function isRunBudgetError(
+  error: unknown,
+): error is { code: "run_budget_exceeded" } | { code: "spend_cap_exceeded"; cap: "run_budget" } {
   return (
     typeof error === "object" &&
     error !== null &&
-    Reflect.get(error, "code") === "run_budget_exceeded"
+    (Reflect.get(error, "code") === "run_budget_exceeded" ||
+      (Reflect.get(error, "code") === "spend_cap_exceeded" &&
+        Reflect.get(error, "cap") === "run_budget"))
   );
 }
 

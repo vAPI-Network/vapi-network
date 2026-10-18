@@ -144,7 +144,15 @@ describe("createVapiClient", () => {
 
     await expect(
       client.call.pay({ url: "https://93.184.216.34/weather", method: "GET" }),
-    ).rejects.toThrow(/per-call cap/i);
+    ).rejects.toMatchObject({
+      code: "spend_cap_exceeded",
+      cap: "per_call",
+      amountUsd: "0.0025",
+      limitUsd: "0.001",
+      wallet: "main",
+      command: "vapi accounts caps main --per-call 0.0025 --per-day 0.0025",
+      retryable: false,
+    });
     expect(fetchImpl).toHaveBeenCalledOnce();
     expect(sign).not.toHaveBeenCalled();
     await expect(stat(getVapiPaths(home).ledger)).rejects.toMatchObject({ code: "ENOENT" });
