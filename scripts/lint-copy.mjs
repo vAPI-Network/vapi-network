@@ -99,6 +99,7 @@ try {
 async function collectFiles() {
   const files = [];
   await addFile(join(repositoryRoot, "README.md"), files);
+  await addFile(join(repositoryRoot, "packages", "vapi-network", "SKILL.md"), files);
   await addDirectMarkdown(join(repositoryRoot, "docs"), files);
   await addPackageReadmes(files);
   await addDirectMarkdown(join(repositoryRoot, "examples"), files);

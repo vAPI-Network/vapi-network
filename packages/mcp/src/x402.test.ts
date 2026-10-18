@@ -12,7 +12,7 @@ import {
   ARC_TESTNET_CAIP2,
   BASE_MAINNET_CAIP2,
   NETWORKS,
-  RunBudgetError,
+  SpendCapExceededError,
   createRunBudget,
   getDefaultConfig,
   readReceipts,
@@ -336,17 +336,22 @@ describe("x402 v2 challenge parsing", () => {
         }),
     ) as unknown as typeof fetch;
 
-    await expect(
-      callService({
-        input: { url: "https://vendor.example/paid", body: { prompt: "hello" } },
-        account,
-        config,
-        fetchImpl,
-        lookup: async () => ["93.184.216.34"],
-        ledgerPath: join(directory, "ledger.json"),
-        receiptsPath: join(directory, "receipts.jsonl"),
-      }),
-    ).rejects.toThrow("exceeds the per-call cap");
+    const failure = await callService({
+      input: { url: "https://vendor.example/paid", body: { prompt: "hello" } },
+      account,
+      config,
+      fetchImpl,
+      lookup: async () => ["93.184.216.34"],
+      ledgerPath: join(directory, "ledger.json"),
+      receiptsPath: join(directory, "receipts.jsonl"),
+    }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(SpendCapExceededError);
+    expect(failure).toMatchObject({
+      code: "spend_cap_exceeded",
+      cap: "per_call",
+      amountUsd: "0.0025",
+      limitUsd: "0.002499",
+    });
     expect(signSpy).not.toHaveBeenCalled();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [receipt] = await readReceipts(join(directory, "receipts.jsonl"));
@@ -356,7 +361,7 @@ describe("x402 v2 challenge parsing", () => {
       quote: { amountAtomic: "2500" },
       policy: { capsApplied: true },
       client: { name: "vapi-network", version: "0.9.4" },
-      error: { code: "per_call_cap_exceeded" },
+      error: { code: "spend_cap_exceeded" },
     });
     expect(receipt).not.toHaveProperty("payer");
     expect(receipt?.phases?.quoteMs).toBeTypeOf("number");
@@ -390,8 +395,14 @@ describe("x402 v2 challenge parsing", () => {
       runBudget,
     }).catch((error: unknown) => error);
 
-    expect(failure).toBeInstanceOf(RunBudgetError);
-    expect(failure).toMatchObject({ code: "run_budget_exceeded" });
+    expect(failure).toBeInstanceOf(SpendCapExceededError);
+    expect(failure).toMatchObject({
+      code: "spend_cap_exceeded",
+      cap: "run_budget",
+      amountUsd: "0.0025",
+      limitUsd: "0.002499",
+      spentUsd: "0",
+    });
     expect(signSpy).not.toHaveBeenCalled();
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(runBudget.spentAtomic()).toBe(0n);

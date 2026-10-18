@@ -34,6 +34,8 @@ export type MarketplaceSearchInput = {
    * never reviewed.
    */
   includeUnverified?: boolean;
+  /** Include API listings whose recent health checks show an outage. */
+  includeOutage?: boolean;
 };
 
 export type VapiRegistryConfig = Readonly<{
@@ -77,6 +79,7 @@ export async function searchMarketplace(
     limit: input.limit,
     cursor: input.cursor,
     includeUnverified: input.includeUnverified,
+    includeOutage: input.includeOutage,
   });
   const startedAt = options.now ?? new Date();
   const attempts: SearchAttempt[] = [];
@@ -95,11 +98,12 @@ export async function searchMarketplace(
         if (normalized.network !== undefined) url.searchParams.set("network", normalized.network);
         if (normalized.limit !== undefined) url.searchParams.set("limit", String(normalized.limit));
         if (normalized.cursor !== undefined) url.searchParams.set("cursor", normalized.cursor);
-        // Only the opt-in is worth sending: `false` is the registry default, and
-        // an explicit `includeUnverified=false` would only make cached URLs and
-        // search logs harder to read.
+        // Only opt-ins travel: omitting false preserves default URLs and cache keys.
         if (normalized.includeUnverified === true) {
           url.searchParams.set("includeUnverified", "true");
+        }
+        if (normalized.includeOutage === true) {
+          url.searchParams.set("includeOutage", "true");
         }
       },
     });
@@ -169,8 +173,8 @@ export async function resolveServiceListing(
 /**
  * Resolve one exact API ref from marketplace discovery across fresh CLI
  * processes. Resolving a ref the caller already holds is not a browse, so the
- * verification tier must not hide it: the answer carries the tier and the
- * interfaces disclose it instead.
+ * verification tier or health must not hide it: the answer carries the
+ * disclosures and the interfaces show them instead.
  */
 export async function findMarketplaceApiByRef(
   ref: string,
@@ -178,7 +182,7 @@ export async function findMarketplaceApiByRef(
   fetchImpl?: Fetch,
 ): Promise<MarketplaceHit | null> {
   const page = await searchMarketplace(
-    { query: ref, kinds: ["api"], limit: 50, includeUnverified: true },
+    { query: ref, kinds: ["api"], limit: 50, includeUnverified: true, includeOutage: true },
     config,
     fetchImpl,
   );
@@ -206,6 +210,9 @@ export function vapiRegistrySource(
           ...(searchOptions?.includeUnverified === undefined
             ? {}
             : { includeUnverified: searchOptions.includeUnverified }),
+          ...(searchOptions?.includeOutage === undefined
+            ? {}
+            : { includeOutage: searchOptions.includeOutage }),
         },
         config,
         fetchImpl,
@@ -252,9 +259,9 @@ export function vapiRegistrySource(
         ) {
           throw resolutionError;
         }
-        // An exact ref, so the trust switch must not hide the answer.
+        // An exact ref, so trust and health filters must not hide the answer.
         const page = await searchMarketplace(
-          { query: ref, kinds: ["api"], includeUnverified: true },
+          { query: ref, kinds: ["api"], includeUnverified: true, includeOutage: true },
           config,
           fetchImpl,
         );
@@ -283,9 +290,10 @@ async function fetchCallsDiscovery(
     configureUrl(url) {
       url.searchParams.set("q", query);
       // Same reason as `findMarketplaceApiByRef`: this resolves one ref the
-      // caller already chose, so an unverified listing must still resolve. Its
-      // tier travels with it and `inspect`/`pay` say so.
+      // caller already chose, so an unverified or outage listing must still
+      // resolve. Its tier travels with it and `inspect`/`pay` say so.
       url.searchParams.set("includeUnverified", "true");
+      url.searchParams.set("includeOutage", "true");
     },
   });
   return parseDiscovery(await response.json());

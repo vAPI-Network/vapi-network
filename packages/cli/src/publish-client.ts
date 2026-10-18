@@ -78,23 +78,6 @@ export type ProbeResult = Readonly<{
 export type PayoutNonce = Readonly<{ nonce: string; message?: string }> &
   Readonly<Record<string, unknown>>;
 
-export type SplitterNetworkState = Readonly<{
-  network?: string;
-  name?: string;
-  chainId?: number;
-  factoryAddress?: string;
-  splitterAddress?: string;
-  deployed?: boolean;
-  balanceWei?: string;
-}> &
-  Readonly<Record<string, unknown>>;
-
-export type SplitterStates = Readonly<{
-  networkStates?: readonly SplitterNetworkState[];
-  feeBp?: number;
-}> &
-  Readonly<Record<string, unknown>>;
-
 export type ListingEndpointInput = {
   name: string;
   method: string;
@@ -173,7 +156,6 @@ export type ListingsClient = {
   readonly baseUrl: string;
   probe(input: { url: string; method?: string; mode?: ProbeMode }): Promise<ProbeResult>;
   payoutNonce(wallet: string): Promise<PayoutNonce>;
-  splitters(wallet: string): Promise<SplitterStates>;
   create(input: CreateListingInput): Promise<CreatedListing>;
   status(slug: string, action: ListingStatusAction): Promise<ListingStatusResult>;
   mine(): Promise<MyListings>;
@@ -238,12 +220,6 @@ export function createListingsClient(options: ListingsClientOptions): ListingsCl
         method: "GET",
         query: { wallet },
       })) as PayoutNonce;
-    },
-    async splitters(wallet) {
-      return (await call("/api/call/listings/splitters", {
-        method: "GET",
-        query: { wallet },
-      })) as SplitterStates;
     },
     async create(input) {
       return (await call("/api/call/listings", { method: "POST", body: input })) as CreatedListing;

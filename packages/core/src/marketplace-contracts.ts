@@ -60,6 +60,7 @@ export const LISTING_GROUPS = ["vapi", "added", "partner", "external"] as const;
 export const listingGroupSchema = z.enum(LISTING_GROUPS);
 export type ListingGroup = z.infer<typeof listingGroupSchema>;
 
+/** New listings have zero fee; positive fees disclose legacy payout splitters. */
 export const listingFeeSchema = z.looseObject({
   bps: z.number().int().min(0),
   label: z.string(),
@@ -99,6 +100,40 @@ export const listingLivenessSchema = z.looseObject({
   checks7d: z.number().int().nonnegative(),
 });
 export type ListingLiveness = z.infer<typeof listingLivenessSchema>;
+
+export const LISTING_HEALTH_STATES = ["healthy", "degraded", "outage", "unknown"] as const;
+export const listingHealthStateSchema = z.enum(LISTING_HEALTH_STATES).catch("unknown");
+export type ListingHealthState = z.infer<typeof listingHealthStateSchema>;
+
+/** Recent registry checks; incomplete summaries preserve the listing around them. */
+export const listingHealthSchema = z.looseObject({
+  state: listingHealthStateSchema,
+  uptime7d: z.number().min(0).max(1).nullable().catch(null),
+  latencyP50Ms: z.number().nonnegative().nullable().catch(null),
+  latencyP95Ms: z.number().nonnegative().nullable().catch(null),
+  checks7d: z.number().int().nonnegative().catch(0),
+});
+export type ListingHealth = z.infer<typeof listingHealthSchema>;
+
+export const marketplaceAlternativeSchema = z.looseObject({
+  ref: z.string().trim().min(1),
+  reason: z.enum(["cheaper", "healthier"]),
+});
+export type MarketplaceAlternative = z.infer<typeof marketplaceAlternativeSchema>;
+
+const marketplaceAlternativesSchema = z.preprocess((value) => {
+  if (!Array.isArray(value)) return undefined;
+  const alternatives: MarketplaceAlternative[] = [];
+  const refs = new Set<string>();
+  for (const entry of value) {
+    const parsed = marketplaceAlternativeSchema.safeParse(entry);
+    if (!parsed.success || refs.has(parsed.data.ref)) continue;
+    refs.add(parsed.data.ref);
+    alternatives.push(parsed.data);
+    if (alternatives.length === 2) break;
+  }
+  return alternatives.length > 0 ? alternatives : undefined;
+}, z.array(marketplaceAlternativeSchema).optional());
 
 /**
  * How closely the listing's 402 follows the x402 version it declares, as the
@@ -154,6 +189,7 @@ export const marketplaceBadgeCodeSchema = z.enum([
   "external_catalog",
   "approved_vendor",
   "unverified",
+  "failed_calls_free",
 ]);
 export type MarketplaceBadgeCode = z.infer<typeof marketplaceBadgeCodeSchema>;
 
@@ -220,6 +256,8 @@ const firstPartyApiMarketplaceHitSchema = z.looseObject({
   ...marketplaceHitBase,
   kind: z.literal("api"),
   provenance: firstPartyProvenanceSchema,
+  health: listingHealthSchema.optional().catch(undefined),
+  alternatives: marketplaceAlternativesSchema.optional().catch(undefined),
   execution: z.looseObject({
     mode: executionModeSchema,
   }),
@@ -236,6 +274,8 @@ const mirroredApiMarketplaceHitSchema = z.looseObject({
   ...marketplaceHitBase,
   kind: z.literal("api"),
   provenance: z.literal("indexed"),
+  health: listingHealthSchema.optional().catch(undefined),
+  alternatives: marketplaceAlternativesSchema.optional().catch(undefined),
   execution: z.looseObject({
     mode: z.literal("direct"),
     url: z
@@ -306,6 +346,7 @@ export const marketplaceDiscoveryInputSchema = z
     cursor: z.string().trim().min(1).max(4_096).optional(),
     limit: z.number().int().min(1).max(50).optional(),
     includeUnverified: z.boolean().optional(),
+    includeOutage: z.boolean().optional(),
   })
   .superRefine((input, context) => {
     if (input.kinds && new Set(input.kinds).size !== input.kinds.length) {
@@ -333,7 +374,17 @@ export const marketplaceDiscoveryEnvelopeSchema = z.looseObject({
   items: z.array(z.unknown()),
   nextCursor: z.string().min(1).max(4_096).nullable(),
   unavailableKinds: z.array(marketplaceKindSchema).max(MARKETPLACE_KINDS.length),
-  rankingVersion: z.literal(MARKETPLACE_RANKING_VERSION),
+  // The ranking label is informational: pinning it made every installed client
+  // reject the page the day the registry re-ranked, so any label is accepted.
+  rankingVersion: z.string().trim().min(1).max(80),
+  // `hiddenOutage` counts listings in outage the registry left out because
+  // `includeOutage` was not set. Older registries send no totals at all.
+  totals: z
+    .looseObject({
+      hiddenOutage: z.number().int().nonnegative().optional().catch(undefined),
+    })
+    .optional()
+    .catch(undefined),
 });
 
 export const marketplaceDiscoveryPageSchema = marketplaceDiscoveryEnvelopeSchema.extend({

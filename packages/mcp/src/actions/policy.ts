@@ -1,4 +1,4 @@
-import { formatUsdc, treasuryRequestMovementId } from "@vapi-network/core";
+import { formatUsdc, SpendCapExceededError, treasuryRequestMovementId } from "@vapi-network/core";
 
 import { decidePayment } from "../agent/guards.js";
 import { inspectionCacheKey, type ActionContext } from "./context.js";
@@ -114,6 +114,15 @@ export async function checkAction<I, O>(
   }
   const priceUsd = exactUsdcPrice(listing.price);
   const profile = ctx.caller.profile;
+  if (priceUsd !== null && ctx.caps !== undefined && priceUsd > ctx.caps.perCallUsd) {
+    throw new SpendCapExceededError({
+      cap: "per_call",
+      amountUsd: listing.price.trim().slice(1),
+      limitUsd: String(ctx.caps.perCallUsd),
+      ...(ctx.caps.perDayUsd === undefined ? {} : { perDayLimitUsd: ctx.caps.perDayUsd }),
+      wallet: profile.wallet,
+    });
+  }
   const decision = decidePayment({
     ref,
     priceUsd,
@@ -136,10 +145,12 @@ export async function checkAction<I, O>(
 
   const maxUsd = Number((input as { maxPriceUsd?: unknown }).maxPriceUsd);
   if (priceUsd !== null && maxUsd < priceUsd) {
-    return {
-      kind: "deny",
-      reason: `Requested maximum $${maxUsd} is below the listing price $${priceUsd}.`,
-    };
+    throw new SpendCapExceededError({
+      cap: "max_price",
+      amountUsd: listing.price.trim().slice(1),
+      limitUsd: String(maxUsd),
+      wallet: profile.wallet,
+    });
   }
   return { kind: "allow" };
 }

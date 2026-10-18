@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   createRunBudget,
   RunBudgetError,
+  SpendCapExceededError,
   type AgentProfile,
   type AuditEntry,
   type ChatRequest,
@@ -107,6 +108,29 @@ describe("runAgent", () => {
       },
       budget: { limitUsd: 0.1, spentUsd: 0 },
     });
+  });
+
+  it("recognizes a Router-bundled typed run-budget error structurally", async () => {
+    const deps = await agentDeps([]);
+    deps.budget = createRunBudget({ id: "run_666666666666666666666666", limitAtomic: 100_000n });
+    deps.chat = vi.fn().mockRejectedValue(
+      Object.assign(new Error("Bundled copy"), {
+        code: "spend_cap_exceeded",
+        cap: "run_budget",
+        amountUsd: "0.01",
+        limitUsd: "0.1",
+        retryable: false,
+      }),
+    );
+
+    const result = await runAgent("Do work", deps);
+
+    expect(result.stoppedBecause).toEqual({
+      type: "stopped",
+      reason: "run_budget",
+      detail: "The run budget of $0.1 is spent.",
+    });
+    expect(deps.chat).toHaveBeenCalledOnce();
   });
 
   it("reports reserved run-budget usage in USD", async () => {
@@ -389,9 +413,12 @@ describe("runAgent", () => {
       ]);
     deps.inspect = vi.fn().mockResolvedValue(inspected({ price: "$0.01" }));
     deps.pay = vi.fn().mockRejectedValue(
-      Object.assign(new Error("secret-looking upstream detail sk-do-not-print"), {
-        name: "SpendCapError",
-        code: "per_day_cap_exceeded",
+      new SpendCapExceededError({
+        cap: "per_day",
+        amountUsd: "0.01",
+        limitUsd: "1",
+        spentUsd: "1",
+        wallet: "researcher",
       }),
     );
 
@@ -416,7 +443,80 @@ describe("runAgent", () => {
     });
     const audit = await readFile(join(deps.home, "audit.log"), "utf8");
     expect(audit).toContain('"event":"agent.run.declined"');
-    expect(audit).not.toContain("sk-do-not-print");
+    expect(audit).not.toContain("vapi accounts caps");
+  });
+
+  it.each([
+    ["per_call", "This wallet's per-call Call budget is exhausted."],
+    ["max_price", "This call exceeds its maximum price."],
+    ["max_amount", "This payment exceeds its maximum amount."],
+  ] as const)("makes a %s refusal terminal before a second payment", async (cap, detail) => {
+    const deps = await agentDeps([
+      toolReply("search", "call_search", { query: "weather", network: null }),
+      toolReply("pay-1", "call_pay", { ref: "weather", body: null, max_usd: 0.05 }),
+      toolReply("pay-2", "call_pay", { ref: "weather", body: null, max_usd: 0.05 }),
+    ]);
+    deps.search = vi
+      .fn()
+      .mockResolvedValue([
+        { ref: "weather", name: "Weather", priceUsd: 0.01, verification: "verified" },
+      ]);
+    deps.inspect = vi.fn().mockResolvedValue(inspected({ price: "$0.01" }));
+    deps.pay = vi.fn().mockRejectedValue(
+      new SpendCapExceededError({
+        cap,
+        amountUsd: "0.01",
+        limitUsd: "0.005",
+        wallet: "researcher",
+      }),
+    );
+
+    const result = await runAgent("Get the weather", deps);
+
+    expect(result.stoppedBecause).toEqual({ type: "stopped", reason: "error", detail });
+    expect(deps.chat).toHaveBeenCalledTimes(2);
+    expect(deps.pay).toHaveBeenCalledOnce();
+  });
+
+  it("stops a typed payment run-budget refusal after recording the decline", async () => {
+    const events: AgentEvent[] = [];
+    const deps = await agentDeps([
+      toolReply("search", "call_search", { query: "weather", network: null }),
+      toolReply("pay-1", "call_pay", { ref: "weather", body: null, max_usd: 0.05 }),
+      toolReply("pay-2", "call_pay", { ref: "weather", body: null, max_usd: 0.05 }),
+    ]);
+    deps.budget = createRunBudget({ id: "run_555555555555555555555555", limitAtomic: 5_000n });
+    deps.onEvent = (event) => events.push(event);
+    deps.search = vi
+      .fn()
+      .mockResolvedValue([
+        { ref: "weather", name: "Weather", priceUsd: 0.01, verification: "verified" },
+      ]);
+    deps.inspect = vi.fn().mockResolvedValue(inspected({ price: "$0.01" }));
+    deps.pay = vi.fn().mockRejectedValue(
+      new SpendCapExceededError({
+        cap: "run_budget",
+        amountUsd: "0.01",
+        limitUsd: "0.005",
+        spentUsd: "0",
+        wallet: "researcher",
+      }),
+    );
+
+    const result = await runAgent("Get the weather", deps);
+
+    expect(result.stoppedBecause).toEqual({
+      type: "stopped",
+      reason: "run_budget",
+      detail: "The run budget of $0.005 is spent; this call was not paid.",
+    });
+    expect(deps.chat).toHaveBeenCalledTimes(2);
+    expect(deps.pay).toHaveBeenCalledOnce();
+    expect(events).toContainEqual({
+      type: "declined",
+      ref: "weather",
+      reason: "The run budget of $0.005 is spent; this call was not paid.",
+    });
   });
 
   it("stops after twelve tool rounds without finish", async () => {
@@ -432,24 +532,33 @@ describe("runAgent", () => {
     expect(deps.chat).toHaveBeenCalledTimes(12);
   });
 
-  it("declines when the model's maximum is below the inspected price", async () => {
+  it.each(["per_call", "max_price"] as const)("stops on a preflight %s refusal", async (cap) => {
+    const events: AgentEvent[] = [];
     const deps = await agentDeps([
       toolReply("search", "call_search", { query: "weather", network: null }),
-      toolReply("pay", "call_pay", { ref: "weather", body: null, max_usd: 0.01 }),
-      toolReply("finish", "finish", { answer: "Too expensive." }),
+      toolReply("pay", "call_pay", {
+        ref: "weather",
+        body: null,
+        max_usd: cap === "per_call" ? 0.01 : 0.005,
+      }),
+      toolReply("retry", "call_pay", { ref: "weather", body: null, max_usd: 0.01 }),
     ]);
-    deps.caps = { perCallUsd: 1 };
+    deps.caps = { perCallUsd: cap === "per_call" ? 0.005 : 1 };
+    deps.onEvent = (event) => events.push(event);
     deps.search = vi
       .fn()
       .mockResolvedValue([
-        { ref: "weather", name: "Weather", priceUsd: 0.05, verification: "verified" },
+        { ref: "weather", name: "Weather", priceUsd: 0.01, verification: "verified" },
       ]);
-    deps.inspect = vi.fn().mockResolvedValue(inspected({ price: "$0.05" }));
+    deps.inspect = vi.fn().mockResolvedValue(inspected({ price: "$0.01" }));
 
-    await runAgent("Get the weather", deps);
+    const result = await runAgent("Get the weather", deps);
 
+    expect(result).toMatchObject({ steps: 2, paidUsd: 0, stoppedBecause: { reason: "error" } });
+    expect(deps.chat).toHaveBeenCalledTimes(2);
     expect(deps.approve).not.toHaveBeenCalled();
     expect(deps.pay).not.toHaveBeenCalled();
+    expect(events).toContainEqual(expect.objectContaining({ type: "declined", ref: "weather" }));
     expect(await auditEvents(deps.home)).toContain("agent.run.declined");
   });
 

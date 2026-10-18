@@ -4,7 +4,12 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { SpendCapError, type SecretStore, WalletStore } from "@vapi-network/core";
+import {
+  SpendCapError,
+  SpendCapExceededError,
+  type SecretStore,
+  WalletStore,
+} from "@vapi-network/core";
 import { AGENT_LINK_REVOKED_MESSAGE, agentSecretAccounts } from "@vapi-network/core/agent-link";
 import {
   ROUTER_KEY_REVOKED_MESSAGE,
@@ -238,6 +243,30 @@ describe("vapi router buy", () => {
         "Router balance purchase refused by the wallet spend policy: Refusing to sign. Review or change it with vapi accounts caps researcher.",
       exitCode: 1,
     });
+  });
+
+  it("preserves a typed spend-cap refusal for the top-level JSON handler", async () => {
+    await initializedHome();
+    const refusal = new SpendCapExceededError({
+      cap: "per_call",
+      amountUsd: "5",
+      limitUsd: "1",
+      wallet: WALLET,
+    });
+    const buy = vi.fn<typeof buyRouterBalance>(async () => {
+      throw refusal;
+    });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["router", "buy", "5", "--wallet", WALLET, "--json"], captured.io, {
+        ...commandDependencies(),
+        interactive: true,
+        prompts: { secret: async () => PASSPHRASE },
+        router: { buyRouterBalance: buy },
+      }),
+    ).toBe(1);
+    expect(JSON.parse(captured.stdout[0]!)).toEqual({ error: refusal.toJSON(), exitCode: 1 });
   });
 });
 

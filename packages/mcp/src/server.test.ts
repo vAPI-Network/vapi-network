@@ -4,8 +4,10 @@ import { join } from "node:path";
 
 import {
   SOLANA_MAINNET_CAIP2,
+  SpendCapExceededError,
   createKeystore,
   getDefaultConfig,
+  readReceipts,
   type MarketplaceDiscoveryPage,
   type MarketplaceHit,
 } from "@vapi-network/core";
@@ -29,6 +31,50 @@ afterEach(async () => {
 });
 
 describe("Agent Cash MCP marketplace tools", () => {
+  it("serializes spend-cap refusals as structured, non-retryable tool errors", () => {
+    const error = new SpendCapExceededError({
+      cap: "per_day",
+      amountUsd: "0.01",
+      limitUsd: "1",
+      spentUsd: "0.995",
+      wallet: "researcher",
+    });
+
+    const bundledCopy = Object.assign(new Error(error.message), error.toJSON(), {
+      retryable: false,
+    });
+    expect(JSON.parse(toolError(bundledCopy).content[0]!.text)).toEqual({
+      error: error.message,
+      code: "spend_cap_exceeded",
+      cap: "per_day",
+      amountUsd: "0.01",
+      limitUsd: "1",
+      spentUsd: "0.995",
+      wallet: "researcher",
+      command: "vapi accounts caps researcher --per-day 1.005",
+      retryable: false,
+    });
+  });
+
+  it("keeps a null command for the internal Router amount cap", () => {
+    const error = new SpendCapExceededError({
+      cap: "max_amount",
+      amountUsd: "5.01",
+      limitUsd: "5",
+    });
+
+    expect(toolError(error).isError).toBe(true);
+    expect(JSON.parse(toolError(error).content[0]!.text)).toEqual({
+      error: error.message,
+      code: "spend_cap_exceeded",
+      cap: "max_amount",
+      amountUsd: "5.01",
+      limitUsd: "5",
+      command: null,
+      retryable: false,
+    });
+  });
+
   it("omits an SVM signed transaction from serialized uncertain-settlement errors", () => {
     const signedTransaction = "signed-solana-transaction-fixture";
     const error = new VapiCallError("settlement_unknown", "Settlement is uncertain.", {
@@ -405,7 +451,10 @@ describe("Agent Cash MCP marketplace tools", () => {
     expect(text.split("\n")[0]).toBe(
       "DEPRECATED: use call.search; this alias will be removed in a later release.",
     );
-    expect(result.structuredContent).toEqual(marketplacePage([workHit("research-brief")]));
+    expect(result.structuredContent).toEqual({
+      ...marketplacePage([workHit("research-brief")]),
+      hints: [],
+    });
 
     await client.close();
     await server.close();
@@ -461,6 +510,62 @@ describe("Agent Cash MCP marketplace tools", () => {
       search: { count: 0, zeroResultRate: 0 },
     });
     await client.close();
+    await server.close();
+  });
+
+  it("returns a structured spend-cap error before call.pay signs or retries", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-mcp-cap-"));
+    temporaryDirectories.push(directory);
+    const ledgerPath = join(directory, "ledger.json");
+    const receiptsPath = join(directory, "receipts.jsonl");
+    const config = getDefaultConfig();
+    config.spendCaps = { perCallAtomic: "2499", perDayAtomic: "10000" };
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const signTypedData = vi.spyOn(account, "signTypedData");
+    const challenge = {
+      x402Version: 2,
+      resource: { url: "https://93.184.216.34/paid" },
+      accepts: [
+        {
+          scheme: "exact",
+          network: "eip155:8453",
+          amount: "2500",
+          asset: config.networks["eip155:8453"]!.usdc,
+          payTo: "0x1111111111111111111111111111111111111111",
+          maxTimeoutSeconds: 60,
+          extra: { name: "USD Coin", version: "2" },
+        },
+      ],
+    };
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json(challenge, { status: 402 }));
+    const server = createVapiServer({
+      account,
+      config,
+      fetchImpl,
+      ledgerPath,
+      receiptsPath,
+    });
+
+    const result = await server.callTool({
+      name: "call.pay",
+      arguments: { url: "https://93.184.216.34/paid" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0]?.text ?? "null")).toMatchObject({
+      code: "spend_cap_exceeded",
+      cap: "per_call",
+      amountUsd: "0.0025",
+      limitUsd: "0.002499",
+      retryable: false,
+    });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(signTypedData).not.toHaveBeenCalled();
+    expect(await readReceipts(receiptsPath)).toMatchObject([
+      { outcome: "declined_policy", error: { code: "spend_cap_exceeded" } },
+    ]);
     await server.close();
   });
 
@@ -651,6 +756,7 @@ describe("Agent Cash MCP marketplace tools", () => {
     // The page predates the verification tier, so every item reads as `none`.
     expect(searchResult.structuredContent).toEqual({
       ...page,
+      hints: [],
       items: page.items.map((item) => ({ ...item, verification: "none" })),
     });
 

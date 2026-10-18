@@ -6,9 +6,10 @@ import type { SpendCaps, VapiConfig } from "./config.js";
 import { getVapiPaths } from "./config.js";
 import type { VapiPaymentAccount } from "./keystore.js";
 import { assertPublicUrl, createPublicFetch, type LookupFn } from "./net-guard.js";
-import { areSamePaymentNetwork, explorerTransactionUrl } from "./networks.js";
+import { areSamePaymentNetwork, explorerTransactionUrl, formatUsdc } from "./networks.js";
 import { appendReceipt, type Receipt } from "./receipts.js";
 import { RunBudgetError, type RunBudget } from "./run-budget.js";
+import { SpendCapExceededError } from "./spend-cap-exceeded.js";
 import { releaseSpend, reserveSpend, SpendCapError } from "./spend-policy.js";
 import { VAPI_CLIENT_VERSION } from "./support-report.js";
 import type { WalletName } from "./wallet-name.js";
@@ -20,6 +21,7 @@ import {
   isSvmPaymentRequirements,
   parse402Response,
   parseSettlementResponse,
+  usdToAtomic,
   X402Error,
   type X402NetworkConfig,
   type X402Quote,
@@ -265,8 +267,28 @@ export async function completeX402Payment<T = undefined>(
   }
   args.challenge.request.signal.throwIfAborted();
   if (trace) trace.capsApplied = true;
-  assertMaximumAtomic(quote.amountAtomic, args.maxAtomic);
-  assertMaxPrice(quote.amountAtomic, args.maxPriceUsd);
+  try {
+    assertMaximumAtomic(quote.amountAtomic, args.maxAtomic);
+  } catch (error) {
+    if (args.maxAtomic !== undefined && isErrorCode(error, "max_price_exceeded")) {
+      throw paymentCapError("max_amount", quote.amountAtomic, args.maxAtomic, args, error);
+    }
+    throw error;
+  }
+  try {
+    assertMaxPrice(quote.amountAtomic, args.maxPriceUsd);
+  } catch (error) {
+    if (args.maxPriceUsd !== undefined && isErrorCode(error, "max_price_exceeded")) {
+      throw paymentCapError(
+        "max_price",
+        quote.amountAtomic,
+        usdToAtomic(args.maxPriceUsd),
+        args,
+        error,
+      );
+    }
+    throw error;
+  }
   const spendReservation = {
     ledgerPath: args.ledgerPath ?? getVapiPaths().ledger,
     now: args.now,
@@ -275,18 +297,42 @@ export async function completeX402Payment<T = undefined>(
   let reservationId: string | undefined;
   let reservedOn: string | undefined;
   if (args.runBudget === undefined) {
-    await reserveSpend(quote.amountAtomic, args.caps, spendReservation);
+    try {
+      await reserveSpend(quote.amountAtomic, args.caps, spendReservation);
+    } catch (error) {
+      throw walletCapError(error, quote.amountAtomic, args);
+    }
   } else {
     reservationId = args.paymentId ?? `x402_${randomBytes(12).toString("hex")}`;
-    const reservation = await reserveSpend(quote.amountAtomic, args.caps, {
-      ...spendReservation,
-      reservationId,
-    });
+    let reservation: Awaited<ReturnType<typeof reserveSpend>>;
+    try {
+      reservation = await reserveSpend(quote.amountAtomic, args.caps, {
+        ...spendReservation,
+        reservationId,
+      });
+    } catch (error) {
+      throw walletCapError(error, quote.amountAtomic, args);
+    }
     reservedOn = reservation.date;
     try {
       args.runBudget.reserve(quote.amountAtomic, reservationId);
     } catch (error) {
-      await releaseUnsentReservation(args, quote.amountAtomic, reservationId, reservedOn);
+      let runSpentAtomic: bigint;
+      try {
+        runSpentAtomic = args.runBudget.spentAtomic();
+      } finally {
+        await releaseUnsentReservation(args, quote.amountAtomic, reservationId, reservedOn);
+      }
+      if (error instanceof RunBudgetError || isErrorCode(error, "run_budget_exceeded")) {
+        throw new SpendCapExceededError({
+          cap: "run_budget",
+          amountUsd: formatUsdc(quote.amountAtomic),
+          limitUsd: formatUsdc(args.runBudget.limitAtomic),
+          spentUsd: formatUsdc(runSpentAtomic),
+          ...(args.wallet === undefined ? {} : { wallet: args.wallet }),
+          cause: error,
+        });
+      }
       throw error;
     }
   }
@@ -624,6 +670,18 @@ function sanitizeThrownError(error: unknown, secrets: readonly string[]): unknow
   if (!(error instanceof Error)) return error;
   const message = redactKnownSecrets(error.message, secrets);
   const cause = error.cause === undefined ? undefined : sanitizeThrownError(error.cause, secrets);
+  if (error instanceof SpendCapExceededError) {
+    return new SpendCapExceededError({
+      cap: error.cap,
+      amountUsd: error.amountUsd,
+      limitUsd: error.limitUsd,
+      ...(error.spentUsd === undefined ? {} : { spentUsd: error.spentUsd }),
+      ...(error.wallet === undefined ? {} : { wallet: error.wallet }),
+      command: error.command,
+      message,
+      ...(cause === undefined ? {} : { cause }),
+    });
+  }
   if (message === error.message && cause === error.cause) return error;
   if (error instanceof X402Error) {
     return new X402Error(error.code, message, cause === undefined ? undefined : { cause });
@@ -746,6 +804,57 @@ function assertMaximumAtomic(amountAtomic: bigint, maxAtomic: bigint | undefined
   }
 }
 
+function walletCapError(
+  error: unknown,
+  amountAtomic: bigint,
+  args: Pick<CompleteX402PaymentArgs<unknown>, "caps" | "wallet">,
+): unknown {
+  if (!(error instanceof SpendCapError)) return error;
+  if (error.code === "per_call_cap_exceeded") {
+    return paymentCapError(
+      "per_call",
+      amountAtomic,
+      error.details?.limitAtomic ?? BigInt(args.caps.perCallAtomic),
+      args,
+      error,
+    );
+  }
+  if (error.code === "per_day_cap_exceeded") {
+    return paymentCapError(
+      "per_day",
+      amountAtomic,
+      error.details?.limitAtomic ?? BigInt(args.caps.perDayAtomic),
+      args,
+      error,
+      error.details?.spentAtomic,
+    );
+  }
+  return error;
+}
+
+function paymentCapError(
+  cap: "per_call" | "per_day" | "max_price" | "max_amount",
+  amountAtomic: bigint,
+  limitAtomic: bigint,
+  args: Pick<CompleteX402PaymentArgs<unknown>, "wallet" | "caps">,
+  cause: unknown,
+  spentAtomic?: bigint,
+): SpendCapExceededError {
+  return new SpendCapExceededError({
+    cap,
+    amountUsd: formatUsdc(amountAtomic),
+    limitUsd: formatUsdc(limitAtomic),
+    ...(cap === "per_call" ? { perDayLimitUsd: formatUsdc(BigInt(args.caps.perDayAtomic)) } : {}),
+    ...(spentAtomic === undefined ? {} : { spentUsd: formatUsdc(spentAtomic) }),
+    ...(args.wallet === undefined ? {} : { wallet: args.wallet }),
+    cause,
+  });
+}
+
+function isErrorCode(error: unknown, code: string): boolean {
+  return typeof error === "object" && error !== null && Reflect.get(error, "code") === code;
+}
+
 function settlementUnknown(
   message: string,
   quote: X402Quote,
@@ -858,6 +967,7 @@ function receiptQuote(quote: X402Quote): NonNullable<Receipt["quote"]> {
 
 function paymentErrorOutcome(error: unknown): NonNullable<Receipt["outcome"]> {
   if (
+    error instanceof SpendCapExceededError ||
     error instanceof SpendCapError ||
     error instanceof RunBudgetError ||
     (error instanceof X402Error && error.code === "max_price_exceeded")
@@ -885,6 +995,7 @@ function errorCode(error: unknown): string {
 
 function receiptSafeErrorMessage(error: unknown): string {
   if (
+    error instanceof SpendCapExceededError ||
     error instanceof SpendCapError ||
     error instanceof RunBudgetError ||
     error instanceof X402Error ||

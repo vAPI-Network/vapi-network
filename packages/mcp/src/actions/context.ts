@@ -95,7 +95,7 @@ export type ActionContext = {
   swarm?: SwarmPort;
   swarmRun?: { run(input: SwarmRunActionInput): Promise<SwarmRunActionResult> };
   swarmRuns?: { list(input: SwarmRunsInput): Promise<SwarmRunsResult> };
-  caps?: { perCallUsd: number };
+  caps?: { perCallUsd: number; perDayUsd?: string };
   askOwner?: (question: {
     action: string;
     reason: string;
