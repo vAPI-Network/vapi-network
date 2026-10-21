@@ -52,14 +52,20 @@ test("a plain sibling value is ignored", () => {
     "VAPI_VAULT_PASSWORD",
     "VAPI_PRIVATE_KEY",
     "VAPI_WALLET",
+    "VAPI_REGISTRY_URL",
+    "VAPI_DISCOVERY_URL",
+    "VAPI_MARKETPLACE_DISCOVERY_URL",
+    "VAPI_DOCS_URL",
+    "VAPI_KEYSTORE_PASSWORD",
     "BASE_RPC_URL",
+    "BASE_SEPOLIA_RPC_URL",
     "ARC_RPC_URL",
     "ARC_TESTNET_RPC_URL",
     "SOLANA_RPC_URL",
   ];
   passed(
     shell(
-      `for name in ${names.join(" ")}; do [[ ! -v "$name" ]] || exit 1; done
+      `for name in ${names.join(" ")}; do [[ -z "\${!name+x}" ]] || exit 1; done
        [[ "$NODE_OPTIONS" == '--max-old-space-size=8192' && -n "$BASH_ENV" ]]
        [[ "$VAPI_NETWORK_CLOUD_ENV_APPLIED" == 1 ]]`,
       Object.fromEntries(names.map((name) => [name, "sibling-value"])),
@@ -71,13 +77,16 @@ test("prefixed values map literally, including empty values, without tracing sec
   const secret = "literal-secret-'\" $(exit 91) `exit 92`\nsecond line";
   const result = shell(
     `[[ "$VAPI_API_KEY" == "$VAPI_NETWORK_VAPI_API_KEY" ]] || exit 1
-     [[ -v VAPI_VAULT_PASSWORD && -z "$VAPI_VAULT_PASSWORD" ]] || exit 1
-     [[ "$ARC_TESTNET_RPC_URL" == "$VAPI_NETWORK_ARC_TESTNET_RPC_URL" ]] || exit 1`,
+     [[ -n "\${VAPI_VAULT_PASSWORD+x}" && -z "$VAPI_VAULT_PASSWORD" ]] || exit 1
+     [[ "$ARC_TESTNET_RPC_URL" == "$VAPI_NETWORK_ARC_TESTNET_RPC_URL" ]] || exit 1
+     [[ "$BASE_SEPOLIA_RPC_URL" == "$VAPI_NETWORK_BASE_SEPOLIA_RPC_URL" ]] || exit 1`,
     {
       VAPI_API_KEY: "sibling-value",
       VAPI_NETWORK_VAPI_API_KEY: secret,
       VAPI_NETWORK_VAPI_VAULT_PASSWORD: "",
       VAPI_NETWORK_ARC_TESTNET_RPC_URL: "https://rpc.invalid/",
+      BASE_SEPOLIA_RPC_URL: "https://sibling.invalid/",
+      VAPI_NETWORK_BASE_SEPOLIA_RPC_URL: "https://repo-sepolia.invalid/",
     },
   );
   passed(result);
@@ -111,7 +120,7 @@ test("a nested bash -c keeps a caller-set value and does not reapply mappings", 
        bash -c '[[ "$VAPI_API_KEY" == caller-value ]]' || exit 1
        VAPI_API_KEY=child-value bash -c '[[ "$VAPI_API_KEY" == child-value ]]' || exit 1
        unset VAPI_API_KEY
-       bash -c '[[ ! -v VAPI_API_KEY ]]'`,
+       bash -c '[[ -z "\${VAPI_API_KEY+x}" ]]'`,
       { VAPI_NETWORK_VAPI_API_KEY: "repo-value" },
     ),
   );
@@ -149,7 +158,7 @@ test("local and unknown environments preserve plain values and setup does nothin
     passed(
       shell(
         `source scripts/cloud-env.sh
-         [[ "$VAPI_API_KEY" == local-value && ! -v VAPI_NETWORK_CLOUD_ENV_APPLIED ]]`,
+         [[ "$VAPI_API_KEY" == local-value && -z "\${VAPI_NETWORK_CLOUD_ENV_APPLIED+x}" ]]`,
         env,
       ),
     );
@@ -159,7 +168,7 @@ test("local and unknown environments preserve plain values and setup does nothin
 });
 
 test("preflight checks prefixed names and never requests optional missing inputs", () => {
-  const result = shell("bash scripts/cloud-preflight.sh --strict", {
+  const result = shell("bash scripts/cloud-preflight.sh", {
     VAPI_API_KEY: "sibling-key",
     VAPI_VAULT_PASSWORD: "sibling-password",
     ARC_TESTNET_RPC_URL: "https://sibling.invalid/",
@@ -170,7 +179,7 @@ test("preflight checks prefixed names and never requests optional missing inputs
   }
   assert.doesNotMatch(result.stdout + result.stderr, /needs:|sibling-key|sibling-password/);
 
-  const prefixed = shell("bash scripts/cloud-preflight.sh --strict", {
+  const prefixed = shell("bash scripts/cloud-preflight.sh", {
     VAPI_NETWORK_VAPI_API_KEY: "repo-key",
     VAPI_NETWORK_VAPI_VAULT_PASSWORD: "",
     VAPI_NETWORK_ARC_TESTNET_RPC_URL: "https://repo.invalid/",

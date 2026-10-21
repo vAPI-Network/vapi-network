@@ -14,7 +14,7 @@ vapi_cloud_export_environment() {
   # The shared cloud environment may contain another repo's plain variables.
   # None of these owned names are non-secret defaults in settings.toml;
   # NODE_OPTIONS and BASH_ENV from [environment_variables.cloud] stay intact.
-  for vapi_cloud_name in "${!VAPI_@}" BASE_RPC_URL ARC_RPC_URL ARC_TESTNET_RPC_URL SOLANA_RPC_URL; do
+  for vapi_cloud_name in "${!VAPI_@}" BASE_RPC_URL BASE_SEPOLIA_RPC_URL ARC_RPC_URL ARC_TESTNET_RPC_URL SOLANA_RPC_URL; do
     [[ "$vapi_cloud_name" == VAPI_NETWORK_* ]] && continue
     unset "$vapi_cloud_name"
   done

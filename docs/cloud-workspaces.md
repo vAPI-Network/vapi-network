@@ -2,8 +2,9 @@
 
 Run `bash scripts/cloud-preflight.sh` first. It prints one table, shows variable
 names only, and exits 0 by default. `--strict` exits 1 when a level 1 check fails;
-optional level 2 credentials do not block CI. Report `needs:` rows rather than
-substituting mock credentials. Tool failures have installation instructions.
+optional level 2 credentials do not block CI. Report failed checks and optional
+unset inputs without substituting mock credentials. Tool failures have installation
+instructions; missing optional inputs need no credentials for development or CI.
 
 Conductor's shared setup calls `bash scripts/cloud-setup.sh` only when
 `CONDUCTOR_IS_LOCAL=0`. Local setup is a no-op, as it was before this configuration.
@@ -18,16 +19,19 @@ variables as `VAPI_NETWORK_<NAME>` in Conductor: Settings → Cloud computer →
 Environment, then Build computer. For example, `VAPI_NETWORK_ARC_TESTNET_RPC_URL`
 maps to `ARC_TESTNET_RPC_URL`. Only prefixed values are mapped, including explicitly
 empty values. On first cloud entry the helper unsets inherited plain `VAPI_*`
-names (except the `VAPI_NETWORK_*` inputs) and `BASE_RPC_URL`, `ARC_RPC_URL`,
-`ARC_TESTNET_RPC_URL`, and `SOLANA_RPC_URL`. A sibling repository's plain credentials
-or RPC settings are never used. Non-secret defaults declared in
+names (except the `VAPI_NETWORK_*` inputs) and `BASE_RPC_URL`, `BASE_SEPOLIA_RPC_URL`,
+`ARC_RPC_URL`, `ARC_TESTNET_RPC_URL`, and `SOLANA_RPC_URL`. A sibling repository's
+plain credentials or RPC settings are never used. Non-secret defaults declared in
 `[environment_variables.cloud]` (`NODE_OPTIONS` and `BASH_ENV`) are retained.
 
 Cloud `BASH_ENV` points to the helper using `CONDUCTOR_WORKSPACE_PATH`, so every
 new non-interactive Bash shell loads it, even from a subdirectory. An exported
 `VAPI_NETWORK_CLOUD_ENV_APPLIED=1` sentinel applies mapping once per process tree;
 later sourcing and nested shells preserve any value the caller sets for a child.
-For an existing cloud shell that predates this configuration, initialize it with:
+Interactive Bash (`bash -i`) does not read `BASH_ENV`. In every interactive cloud
+terminal, and in existing cloud shells that predate this configuration, run the
+following from the workspace root. It is safe to source again when the sentinel
+is already set; no shell startup files are modified by setup:
 
 ```sh
 source scripts/cloud-env.sh
