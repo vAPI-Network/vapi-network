@@ -1,0 +1,14 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+[environment_variables.cloud]
+NODE_OPTIONS = "--max-old-space-size=8192"
+
+[scripts]
+setup = '''
+set -euo pipefail
+if [ "${CONDUCTOR_IS_LOCAL:-}" = "0" ]; then
+  bash scripts/cloud-setup.sh
+else
+  pnpm install --frozen-lockfile
+fi
+'''
