@@ -11,7 +11,8 @@
   "packageManager": "pnpm@10.27.0",
   "scripts": {
     "build": "pnpm -r --if-present build",
-    "test": "pnpm -r --if-present test",
+    "test": "pnpm test:scripts && pnpm -r --if-present test",
+    "test:scripts": "node --test scripts/cloud-scripts.test.mjs",
     "typecheck": "pnpm -r --if-present typecheck && tsc -p examples/tsconfig.json",
     "lint": "eslint . --max-warnings 0",
     "lint:copy": "node scripts/lint-copy.mjs",

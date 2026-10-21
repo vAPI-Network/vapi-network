@@ -38,6 +38,13 @@ Run the full relevant checks before handing work off. Tests must be deterministi
 and must not require a funded wallet or a live network. Prefer injected clocks,
 randomness, filesystem roots, and `fetch` implementations.
 
+## Cloud workspaces
+
+Run `bash scripts/cloud-preflight.sh` first; report failed checks and optional unset inputs without mocking credentials.
+Cloud `BASH_ENV` loads `scripts/cloud-env.sh` in non-interactive Bash once per process tree to map only `VAPI_NETWORK_<NAME>` to `<NAME>`; plain owned names are ignored. Every interactive cloud terminal must `source scripts/cloud-env.sh` from the workspace root; existing shells also need an explicit source.
+See [cloud setup](docs/cloud-workspaces.md) for checks and optional credentials; never deploy or touch production from cloud.
+Never run Railway/infra writes or enable `VAPI_RAILWAY_SMOKE` in cloud workspaces.
+
 ## Invariants
 
 - The project is non-custodial. Private keys and passphrases never leave the
