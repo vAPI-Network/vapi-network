@@ -31,11 +31,11 @@ vapi_cloud_tool() {
 
 vapi_cloud_optional_env() {
   local vapi_cloud_key="$1"
-  if [[ -n "${!vapi_cloud_key:-}" ]]; then
+  local vapi_cloud_prefixed_key="VAPI_NETWORK_$vapi_cloud_key"
+  if [[ -n "${!vapi_cloud_prefixed_key:-}" ]]; then
     vapi_cloud_row "L2: $vapi_cloud_key ($2)" set '—'
   else
-    vapi_cloud_row "L2: $vapi_cloud_key ($2)" 'optional, unset' \
-      "needs: VAPI_NETWORK_$vapi_cloud_key → add in Conductor: Settings → Cloud computer → Environment, then Build computer"
+    vapi_cloud_row "L2: $vapi_cloud_key ($2)" 'optional, unset' '—'
   fi
 }
 

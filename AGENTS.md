@@ -41,7 +41,7 @@ randomness, filesystem roots, and `fetch` implementations.
 ## Cloud workspaces
 
 Run `bash scripts/cloud-preflight.sh` first; report its `needs:` rows instead of mocking missing inputs.
-Source `scripts/cloud-env.sh` in cloud shells to map `VAPI_NETWORK_<NAME>` to `<NAME>`; plain names are fallbacks.
+Cloud `BASH_ENV` loads `scripts/cloud-env.sh` once per process tree to map only `VAPI_NETWORK_<NAME>` to `<NAME>`; plain owned names are ignored. Source it explicitly in existing cloud shells.
 See [cloud setup](docs/cloud-workspaces.md) for checks and optional credentials; never deploy or touch production from cloud.
 Never run Railway/infra writes or enable `VAPI_RAILWAY_SMOKE` in cloud workspaces.
 

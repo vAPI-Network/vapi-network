@@ -2,13 +2,12 @@
 
 [environment_variables.cloud]
 NODE_OPTIONS = "--max-old-space-size=8192"
+# Bash expands the workspace variable when it opens this startup file.
+BASH_ENV = '${CONDUCTOR_WORKSPACE_PATH}/scripts/cloud-env.sh'
 
 [scripts]
 setup = '''
-set -euo pipefail
 if [ "${CONDUCTOR_IS_LOCAL:-}" = "0" ]; then
   bash scripts/cloud-setup.sh
-else
-  pnpm install --frozen-lockfile
 fi
 '''
