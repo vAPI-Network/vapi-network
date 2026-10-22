@@ -122,6 +122,7 @@ export async function mcpInstallCommand(
       io,
       dependencies,
       home,
+      apiBase: parsed.one("--registry"),
     });
   const link = json && name !== undefined ? await offerLink(name) : {};
   output(

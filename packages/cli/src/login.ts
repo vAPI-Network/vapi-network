@@ -50,14 +50,15 @@ export async function runLoginFlow(
   json: boolean,
   io: CliIo,
   dependencies: CliDependencies,
-  options: { routerAllowanceUsd?: number } = {},
+  options: { routerAllowanceUsd?: number; home?: string; apiBase?: string } = {},
 ): Promise<void> {
   const parsed = parseArguments(argv, {
     valueOptions: new Set([WALLET_OPTION, "--label"]),
     booleanOptions: new Set(["--publish", "--no-browser"]),
     maximumPositionals: 0,
   });
-  const target = await targetWallet(parsed, dependencies);
+  const paths = getVapiPaths(options.home);
+  const target = await targetWallet(parsed, dependencies, paths.directory);
   const { account } = await unlockTarget(target, dependencies);
   const label = parsed.one("--label") ?? target.name;
   const scopes = [
@@ -66,13 +67,13 @@ export async function runLoginFlow(
     "tasks:write",
     ...(parsed.has("--publish") ? ["call.publish"] : []),
   ];
-  const config = await loadConfig(getVapiPaths().config, process.env, { notice: io.stderr });
-  const apiBase = registryBaseUrl(config);
+  const config = await loadConfig(paths.config, process.env, { notice: io.stderr });
+  const apiBase = options.apiBase ?? registryBaseUrl(config);
   const fetchImpl = dependencies.fetchImpl ?? createPublicFetch({ allowPrivateNetwork: false });
   const secrets = getSecretStore(dependencies);
   const device = await ensureDeviceName({
     env: getEnvironment(dependencies),
-    configPath: getVapiPaths().config,
+    configPath: paths.config,
     ...(dependencies.hostname === undefined ? {} : { hostname: dependencies.hostname() }),
   });
   const bearer = await trustedLinkBearer({

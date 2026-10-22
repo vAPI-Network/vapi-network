@@ -517,8 +517,11 @@ export type WalletTarget = {
 };
 
 /** Opens the wallet store for this home, migrating a 0.2.x layout on the way. */
-export async function openWalletStore(dependencies: CliDependencies): Promise<WalletStore> {
-  return await WalletStore.open(getVapiPaths().directory, {
+export async function openWalletStore(
+  dependencies: CliDependencies,
+  home = getVapiPaths().directory,
+): Promise<WalletStore> {
+  return await WalletStore.open(home, {
     secrets: getSecretStore(dependencies),
     env: getEnvironment(dependencies),
     ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
@@ -547,8 +550,9 @@ async function selectWallet(
 export async function targetWallet(
   parsed: { one(name: string): string | undefined },
   dependencies: CliDependencies,
+  home = getVapiPaths().directory,
 ): Promise<WalletTarget> {
-  return await selectWallet(await openWalletStore(dependencies), parsed, dependencies);
+  return await selectWallet(await openWalletStore(dependencies, home), parsed, dependencies);
 }
 
 /** The OS secret store this run uses: the machine's, or the one a test injects. */

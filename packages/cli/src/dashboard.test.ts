@@ -4,7 +4,9 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { WalletStore, type SecretStore } from "@vapi-network/core";
+import { WalletStore, writeDefaultConfig, type SecretStore } from "@vapi-network/core";
+
+import type { pollDeviceLink, startDeviceLink } from "@vapi-network/core/agent-link";
 
 import { runCli, type CliDependencies, type CliIo } from "./cli.js";
 import { dashboardUrl, offerDashboardLink } from "./dashboard.js";
@@ -52,6 +54,7 @@ for (const command of commands) {
         false,
         expect.anything(),
         fixture.dependencies,
+        { home: fixture.home },
       );
       expect(fixture.stdout).toContain(
         "See it on your dashboard: https://console.example/tenant/agents",
@@ -185,29 +188,128 @@ describe("dashboard link helper", () => {
     expect(fixture.dependencies.openUrl).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])("never prompts for another MCP home (json=%s)", async (json) => {
-    const fixture = await setup();
-    const otherHome = join(fixture.home, "other home");
-    const store = await WalletStore.open(otherHome, { secrets: fixture.dependencies.secretStore });
-    await store.create("main", "");
-    const flow = vi.spyOn(login, "runLoginFlow");
-    expect(
-      await runCli(
-        ["mcp", "install", "cursor", "--home", otherHome, ...(json ? ["--json"] : [])],
-        fixture.io,
-        fixture.dependencies,
-      ),
-    ).toBe(0);
-    expect(fixture.line).not.toHaveBeenCalled();
-    expect(flow).not.toHaveBeenCalled();
-    const command = `VAPI_HOME='${otherHome}' vapi login --account main`;
-    if (json) {
-      expect(fixture.stdout).toHaveLength(1);
-      expect(JSON.parse(fixture.stdout[0]!)).toMatchObject({ linked: false, next: [{ command }] });
-    } else {
-      expect(fixture.stdout).toContain(`Run \`${command}\` to see this wallet on your dashboard.`);
-    }
-  });
+  it.each([
+    { otherHome: false, override: true, denied: false },
+    { otherHome: true, override: false, denied: false },
+    { otherHome: true, override: true, denied: false },
+    { otherHome: true, override: true, denied: true },
+  ])(
+    "uses the install context (home=$otherHome, registry=$override, denied=$denied)",
+    async ({ otherHome, override, denied }) => {
+      const fixture = await setup();
+      const home = otherHome ? join(fixture.home, "other home") : fixture.home;
+      const store = await WalletStore.open(home, { secrets: fixture.dependencies.secretStore });
+      if (otherHome) await store.create("main", "");
+      await writeDefaultConfig(join(home, "config.json"), {
+        VAPI_REGISTRY_URL: "https://home.example/tenant",
+      });
+      const registry = override ? "https://console.example/tenant" : "https://home.example/tenant";
+      if (override) process.env.VAPI_REGISTRY_URL = "https://environment.example";
+      const environment = { home: process.env.VAPI_HOME, registry: process.env.VAPI_REGISTRY_URL };
+      const agentLink = deviceLink(registry);
+      if (denied) agentLink.pollDeviceLink.mockRejectedValue(new Error("Device grant denied"));
+      const dependencies = { ...fixture.dependencies, agentLink };
+
+      expect(
+        await runCli(
+          [
+            "mcp",
+            "install",
+            "cursor",
+            "--home",
+            home,
+            ...(override ? ["--registry", registry] : []),
+          ],
+          fixture.io,
+          dependencies,
+        ),
+      ).toBe(0);
+
+      expect(fixture.line).toHaveBeenCalledExactlyOnceWith(
+        "Link main to your vAPI dashboard? [Y/n] ",
+      );
+      expect(agentLink.startDeviceLink).toHaveBeenCalledWith(
+        expect.objectContaining({
+          apiBase: registry,
+          account: expect.objectContaining({ address: await store.readAddress("main") }),
+        }),
+      );
+      expect(agentLink.pollDeviceLink).toHaveBeenCalledWith(
+        expect.objectContaining({ apiBase: registry }),
+      );
+      await store.reload();
+      if (denied) {
+        expect(store.entry("main")?.link).toBeUndefined();
+        expect(fixture.stderr).toContain("Link not completed: Device grant denied");
+        expect(fixture.stdout).toContain(
+          `Run \`VAPI_HOME='${home}' VAPI_REGISTRY_URL='${registry}' vapi login --account main\` to see this wallet on your dashboard.`,
+        );
+      } else {
+        expect(store.entry("main")?.link?.apiBase).toBe(registry);
+        expect(fixture.stdout).toContain(`See it on your dashboard: ${dashboardUrl(registry)}`);
+        expect(JSON.parse(await readFile(join(home, "config.json"), "utf8"))).toHaveProperty(
+          "device",
+        );
+      }
+      if (otherHome) {
+        const originalStore = await WalletStore.open(fixture.home, {
+          secrets: fixture.dependencies.secretStore,
+        });
+        expect(originalStore.entry("main")?.link).toBeUndefined();
+        await expect(readFile(join(fixture.home, "config.json"), "utf8")).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      }
+      const installed = JSON.parse(
+        await readFile(join(fixture.home, ".cursor", "mcp.json"), "utf8"),
+      );
+      expect(installed.mcpServers.vapi.env).toEqual({
+        VAPI_HOME: home,
+        VAPI_REGISTRY_URL: registry,
+      });
+      expect(process.env.VAPI_HOME).toBe(environment.home);
+      expect(process.env.VAPI_REGISTRY_URL).toBe(environment.registry);
+    },
+  );
+
+  it.each([
+    { mode: "non-TTY", args: [], interactive: false, env: {} },
+    { mode: "JSON", args: ["--json"], interactive: true, env: {} },
+    { mode: "--no-link", args: ["--no-link"], interactive: true, env: {} },
+    { mode: "agent", args: [], interactive: true, env: { CLAUDECODE: "1" } },
+    { mode: "declined", args: [], interactive: true, env: {} },
+  ])(
+    "preserves alternate-home and registry hints when $mode",
+    async ({ mode, args, interactive, env }) => {
+      const fixture = await setup(true, mode === "declined" ? "n" : "yes");
+      const home = join(fixture.home, "other home");
+      const registry = "https://console.example/tenant";
+      const store = await WalletStore.open(home, { secrets: fixture.dependencies.secretStore });
+      await store.create("main", "");
+      const flow = vi.spyOn(login, "runLoginFlow");
+      expect(
+        await runCli(
+          ["mcp", "install", "cursor", "--home", home, "--registry", registry, ...args],
+          fixture.io,
+          { ...fixture.dependencies, interactive, env },
+        ),
+      ).toBe(0);
+      expect(fixture.line).toHaveBeenCalledTimes(mode === "declined" ? 1 : 0);
+      expect(flow).not.toHaveBeenCalled();
+      const command = `VAPI_HOME='${home}' VAPI_REGISTRY_URL='${registry}' vapi login --account main`;
+      if (mode === "JSON") {
+        expect(fixture.stdout).toHaveLength(1);
+        expect(JSON.parse(fixture.stdout[0]!)).toMatchObject({
+          linked: false,
+          next: [{ command }],
+        });
+      } else {
+        expect(fixture.stdout).toContain(
+          `Run \`${command}\` to see this wallet on your dashboard.`,
+        );
+      }
+    },
+  );
 
   it("leaves MCP output unchanged when the default account is linked", async () => {
     const fixture = await setup();
@@ -403,4 +505,28 @@ async function setLink(home: string, name: string, dependencies: CliDependencies
 
 function hint(name: string): string {
   return `Run \`vapi login --account ${name}\` to see this wallet on your dashboard.`;
+}
+
+function deviceLink(apiBase: string) {
+  return {
+    startDeviceLink: vi.fn<typeof startDeviceLink>(async () => ({
+      clientId: "agent_main",
+      deviceCode: "test-device-code",
+      userCode: "BCDF-GHJK",
+      verificationUri: `${apiBase}/link`,
+      verificationUriComplete: `${apiBase}/link?code=BCDF-GHJK`,
+      expiresIn: 600,
+      interval: 5,
+      autoApproved: false,
+    })),
+    pollDeviceLink: vi.fn<typeof pollDeviceLink>(async () => ({
+      owner: OWNER,
+      tokens: {
+        accessToken: "test-access",
+        refreshToken: "test-refresh",
+        expiresAt: 2_000_000_000_000,
+        scopes: ["mcp:call"],
+      },
+    })),
+  };
 }

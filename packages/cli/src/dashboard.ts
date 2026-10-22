@@ -32,6 +32,7 @@ export async function offerDashboardLink({
   io,
   dependencies,
   home = getVapiPaths().directory,
+  apiBase,
 }: {
   name: string;
   json: boolean;
@@ -39,9 +40,10 @@ export async function offerDashboardLink({
   io: CliIo;
   dependencies: CliDependencies;
   home?: string;
+  apiBase?: string;
 }): Promise<DashboardLink> {
   const otherHome = resolve(home) !== resolve(getVapiPaths().directory);
-  const command = `${otherHome ? `VAPI_HOME=${shellQuote(home)} ` : ""}vapi login --account ${name}`;
+  const command = `${otherHome ? `VAPI_HOME=${shellQuote(home)} ` : ""}${apiBase === undefined ? "" : `VAPI_REGISTRY_URL=${shellQuote(apiBase)} `}vapi login --account ${name}`;
   const unlinked: DashboardLink = {
     linked: false,
     next: [{ kind: "link", account: name, command }],
@@ -59,7 +61,6 @@ export async function offerDashboardLink({
     if (store.entry(name)?.link !== undefined) return { linked: true };
     if (
       noLink ||
-      otherHome ||
       json ||
       !isInteractive(dependencies) ||
       activeAgentMarker(getEnvironment(dependencies)) !== undefined
@@ -71,7 +72,10 @@ export async function offerDashboardLink({
     ).trim();
     if (!/^(?:y|yes)?$/iu.test(answer)) return hint();
 
-    await runLoginFlow(["--account", name, "--label", name], false, io, dependencies);
+    await runLoginFlow(["--account", name, "--label", name], false, io, dependencies, {
+      home,
+      ...(apiBase === undefined ? {} : { apiBase }),
+    });
     // The login flow opens its own store; reload before reading its saved link.
     await store.reload();
     const link = store.entry(name)?.link;
