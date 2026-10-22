@@ -309,7 +309,7 @@ describe("vapi mcp install", () => {
     const missing = captureIo();
     const unknown = captureIo();
     const usage =
-      "Usage: vapi mcp install <claude|cursor|codex> [--home <dir>] [--registry <url>] [--json]";
+      "Usage: vapi mcp install <claude|cursor|codex> [--home <dir>] [--registry <url>] [--no-link] [--json]";
 
     expect(await runCli(["mcp", "install"], missing.io, fixture.dependencies)).toBe(2);
     expect(missing.stderr).toEqual([usage]);

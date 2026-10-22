@@ -1760,7 +1760,7 @@ describe("custody at creation", () => {
     const captured = captureIo();
 
     expect(
-      await runCli(["init"], captured.io, {
+      await runCli(["init", "--no-link"], captured.io, {
         ...HUMAN,
         fetchImpl: zeroBalanceRpc(),
         prompts: prompts.prompts,

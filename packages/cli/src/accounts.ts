@@ -50,6 +50,7 @@ import {
   type CliDependencies,
   type CliIo,
 } from "./cli.js";
+import { offerDashboardLink } from "./dashboard.js";
 import { runLoginFlow } from "./login.js";
 import { accountNameWidth, collectStatus, formatAccountLine } from "./status.js";
 
@@ -287,6 +288,7 @@ export async function accountsAddCommand(
   json: boolean,
   io: CliIo,
   dependencies: CliDependencies,
+  options: { link: "always" | "offer" } = { link: "always" },
 ): Promise<void> {
   const parsed = parseArguments(argv, {
     valueOptions: new Set(["--label"]),
@@ -304,6 +306,19 @@ export async function accountsAddCommand(
   });
   await recordAudit(dependencies, "wallet.create", { wallet: created.account });
   const address = created.address;
+
+  if (options.link === "offer") {
+    if (!json) io.stdout(`Account ${created.account} derived: ${address}`);
+    const link = await offerDashboardLink({
+      name: created.account,
+      json,
+      noLink: parsed.has("--no-link"),
+      io,
+      dependencies,
+    });
+    if (json) io.stdout(JSON.stringify({ account: created.account, address, ...link }));
+    return;
+  }
 
   if (parsed.has("--no-link")) {
     output(
