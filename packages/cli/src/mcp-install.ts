@@ -2,17 +2,21 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir as systemHomedir } from "node:os";
 import { dirname, posix, win32 } from "node:path";
 
-import { getVapiPaths, isMissingFile, resolveRegistryUrl } from "@vapi-network/core";
+import { getVapiPaths, isMissingFile, resolveRegistryUrl, WalletStore } from "@vapi-network/core";
 
 import {
   UsageError,
   output,
   parseArguments,
+  getEnvironment,
+  getSecretStore,
   readConfig,
   registryBaseUrl,
   type CliDependencies,
   type CliIo,
 } from "./cli.js";
+
+import { offerDashboardLink } from "./dashboard.js";
 
 type McpInstallApp = "claude" | "cursor" | "codex";
 
@@ -26,7 +30,7 @@ type McpServerEntry = {
 };
 
 const MCP_INSTALL_USAGE =
-  "Usage: vapi mcp install <claude|cursor|codex> [--home <dir>] [--registry <url>] [--json]";
+  "Usage: vapi mcp install <claude|cursor|codex> [--home <dir>] [--registry <url>] [--no-link] [--json]";
 const APPS = new Set<McpInstallApp>(["claude", "cursor", "codex"]);
 const NEXT_STEP: Record<McpInstallApp, string> = {
   claude: 'Restart Claude Desktop, then ask it: "Search vAPI for a weather API."',
@@ -82,6 +86,7 @@ export async function mcpInstallCommand(
 ): Promise<void> {
   const parsed = parseArguments(argv, {
     valueOptions: new Set(["--home", "--registry"]),
+    booleanOptions: new Set(["--no-link"]),
     maximumPositionals: 1,
   });
   const appValue = parsed.positionals[0];
@@ -108,13 +113,45 @@ export async function mcpInstallCommand(
   const entry = serverEntry(home, registry);
   const created = await writeMcpConfig(target, entry);
 
+  const name = await unlinkedDefaultAccount(home, dependencies);
+  const offerLink = (name: string) =>
+    offerDashboardLink({
+      name,
+      json,
+      noLink: parsed.has("--no-link"),
+      io,
+      dependencies,
+      home,
+      apiBase: parsed.one("--registry"),
+    });
+  const link = json && name !== undefined ? await offerLink(name) : {};
   output(
     io,
     json,
-    { command: "mcp install", app: appValue, path: target.path, created, home, registry },
+    { ...link, command: "mcp install", app: appValue, path: target.path, created, home, registry },
     `${created ? "Wrote" : "Updated"} ${target.path}.`,
   );
-  if (!json) io.stdout(NEXT_STEP[appValue]);
+  if (!json) {
+    io.stdout(NEXT_STEP[appValue]);
+    if (name !== undefined) await offerLink(name);
+  }
+}
+
+async function unlinkedDefaultAccount(
+  home: string,
+  dependencies: CliDependencies,
+): Promise<string | undefined> {
+  try {
+    const store = await WalletStore.open(home, {
+      secrets: getSecretStore(dependencies),
+      env: getEnvironment(dependencies),
+    });
+    const name = store.defaultName;
+    if (name !== undefined && store.resolve({ name }).entry.link === undefined) return name;
+  } catch {
+    // MCP installation also works before a wallet is available.
+  }
+  return undefined;
 }
 
 function isMcpInstallApp(value: string): value is McpInstallApp {

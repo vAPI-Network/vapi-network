@@ -3,6 +3,17 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## 0.9.5 (2026-10-22)
+
+### Added
+
+- `vapi dashboard [--account <name>] [--no-browser] [--json]` opens or prints the My agents page on your vAPI dashboard and offers to link an unlinked account.
+
+### Changed
+
+- `vapi init`, `vapi wallet create` and `vapi mcp install` offer to link the new or default wallet to your vAPI dashboard in an interactive terminal. Press Enter to accept, or use `--no-link` to skip the prompt.
+- Non-interactive runs print a login hint; JSON results include `linked: false` and a `next` link step when the wallet is unlinked. A failed link never fails wallet creation or MCP installation.
+
 ## 0.9.4 (2026-10-15)
 
 ### Added

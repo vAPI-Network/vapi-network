@@ -146,10 +146,11 @@ import {
   type runSwarm,
 } from "@vapi-network/mcp";
 import { detectColorLevel, renderBanner } from "./brand.js";
-import { accountsCapsCommand, accountsCommand } from "./accounts.js";
+import { accountsAddCommand, accountsCapsCommand, accountsCommand } from "./accounts.js";
 import { autoUploadBackup, cloudBackupCommand } from "./cloud-backup.js";
 import { checkX402, formatCheckReport } from "./check.js";
 import { docsCommand } from "./docs.js";
+import { dashboardCommand, offerDashboardLink } from "./dashboard.js";
 import { agentCommand, type AgentCommandDependencies } from "./agent.js";
 import { formatIdentityLines } from "./identity.js";
 import { loginCommand, logoutCommand, whoamiCommand } from "./login.js";
@@ -195,7 +196,7 @@ const HELP_HEADING = "vAPI Network";
 export const HELP = `${HELP_HEADING}
 
 Usage:
-  vapi init [--networks <base,arc>] [--json]
+  vapi init [--networks <base,arc>] [--no-link] [--json]
   vapi setup [--no-cloud-backup] [--accounts <n>] [--json]
   vapi accounts [--all] [--json]
   vapi accounts add <name> [--label <text>] [--no-link] [--json]
@@ -242,6 +243,7 @@ Usage:
   vapi agent pause <name> [--json]
   vapi agent resume <name> [--json]
   vapi agent revoke <name> [--json]
+  vapi dashboard [--account <name>] [--no-browser] [--json]
   vapi login [--account <name>] [--label <name>] [--publish] [--no-browser] [--json]
   vapi logout [--account <name>] [--json]
   vapi whoami [--account <name>] [--json]
@@ -292,10 +294,12 @@ Usage:
   vapi publish list [--json]
   vapi claim <origin> [--account <name>] [--json]
   vapi mcp [--account <name>] [--json]
-  vapi mcp install <claude|cursor|codex> [--home <dir>] [--registry <url>] [--json]
+  vapi mcp install <claude|cursor|codex> [--home <dir>] [--registry <url>] [--no-link] [--json]
   vapi serve [--json]
   vapi version [--json]
   vapi help [--json]
+
+\`vapi init\`, \`vapi wallet create\` and \`vapi mcp install\` offer to link the wallet to your vAPI dashboard. Use \`--no-link\` to skip the prompt.
 
 Every command that touches a wallet takes \`--account <name>\`, falls back to \`VAPI_WALLET\`, then to the default account set by \`vapi accounts use\`, and names the wallet it used on its first line.
 
@@ -513,8 +517,11 @@ export type WalletTarget = {
 };
 
 /** Opens the wallet store for this home, migrating a 0.2.x layout on the way. */
-export async function openWalletStore(dependencies: CliDependencies): Promise<WalletStore> {
-  return await WalletStore.open(getVapiPaths().directory, {
+export async function openWalletStore(
+  dependencies: CliDependencies,
+  home = getVapiPaths().directory,
+): Promise<WalletStore> {
+  return await WalletStore.open(home, {
     secrets: getSecretStore(dependencies),
     env: getEnvironment(dependencies),
     ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
@@ -543,8 +550,9 @@ async function selectWallet(
 export async function targetWallet(
   parsed: { one(name: string): string | undefined },
   dependencies: CliDependencies,
+  home = getVapiPaths().directory,
 ): Promise<WalletTarget> {
-  return await selectWallet(await openWalletStore(dependencies), parsed, dependencies);
+  return await selectWallet(await openWalletStore(dependencies, home), parsed, dependencies);
 }
 
 /** The OS secret store this run uses: the machine's, or the one a test injects. */
@@ -813,6 +821,10 @@ export async function runCli(
       case "agent":
         exitCode = await agentCommand(args.slice(1), json, runIo, dependencies);
         break;
+      case "dashboard":
+        await dashboardCommand(args.slice(1), json, io, dependencies);
+        exitCode = 0;
+        break;
       case "login":
         await loginCommand(args.slice(1), json, io, dependencies);
         exitCode = 0;
@@ -1059,6 +1071,7 @@ async function initCommand(
 ): Promise<void> {
   const parsed = parseArguments(argv, {
     valueOptions: new Set(["--networks"]),
+    booleanOptions: new Set(["--no-link"]),
     maximumPositionals: 0,
   });
   const networks = parseInitNetworks(parsed.one("--networks") ?? "base");
@@ -1111,7 +1124,14 @@ async function initCommand(
     nextSteps: buildNextSteps(account.address),
   };
   if (json) {
-    io.stdout(JSON.stringify(result));
+    const link = await offerDashboardLink({
+      name: created.name,
+      json,
+      noLink: parsed.has("--no-link"),
+      io,
+      dependencies,
+    });
+    io.stdout(JSON.stringify({ ...result, ...link }));
     return;
   }
 
@@ -1133,6 +1153,13 @@ async function initCommand(
   io.stdout(formatAccounts(accounts));
   io.stdout("");
   io.stdout(result.nextSteps.join("\n"));
+  await offerDashboardLink({
+    name: created.name,
+    json,
+    noLink: parsed.has("--no-link"),
+    io,
+    dependencies,
+  });
 }
 
 const INIT_ALREADY_DONE = "This machine already has a wallet, so vapi init created nothing.";
@@ -1185,12 +1212,11 @@ async function walletCommand(
       `Unknown wallet subcommand ${JSON.stringify(subcommand)}. ${WALLET_USAGE}`,
     );
   }
-  await accountsCommand(
-    [mapped, ...rest, ...(subcommand === "create" ? ["--no-link"] : [])],
-    json,
-    io,
-    dependencies,
-  );
+  if (subcommand === "create") {
+    await accountsAddCommand(rest, json, io, dependencies, { link: "offer" });
+    return;
+  }
+  await accountsCommand([mapped, ...rest], json, io, dependencies);
 }
 
 /**
