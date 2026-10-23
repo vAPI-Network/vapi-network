@@ -3,6 +3,12 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## 0.9.6 (2026-10-23)
+
+### Fixed
+
+- The MCP server sees accounts created in a terminal while it runs. `wallet.list` re-reads `wallets.json`, and `wallet.use`, `call.pay` and the other account tools look again before they refuse an unknown name, so a new account works without restarting the MCP client. The session's active account and the default in `wallets.json` are unchanged.
+
 ## 0.9.5 (2026-10-22)
 
 ### Added
