@@ -352,6 +352,23 @@ export class WalletStore {
   }
 
   /**
+   * Re-reads `wallets.json` for a long-running process such as the MCP server.
+   * Unlike `reload`, it never zeroes the cached vault key, because a payment in
+   * flight may still be signing with it. When accounts were added elsewhere the
+   * cached vault is forgotten, so the next unlock reads the vault file again.
+   */
+  async refreshRegistry(): Promise<WalletRegistry> {
+    const registry = await this.readRegistry();
+    const known = new Set(this.names());
+    if (Object.keys(registry.wallets).some((name) => !known.has(name))) {
+      this.cachedVault = undefined;
+      this.vaultKey = undefined;
+    }
+    this.registry = registry;
+    return this.snapshot();
+  }
+
+  /**
    * Picks the wallet a command acts on: an explicit name first, then
    * `VAPI_WALLET`, then the registry default.
    */

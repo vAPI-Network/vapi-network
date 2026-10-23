@@ -117,9 +117,24 @@ export class WalletSession {
     return { name: only };
   }
 
+  /**
+   * `resolve`, after re-reading `wallets.json` when the name is not known yet.
+   * An account created in a terminal while this server runs works at once; the
+   * session's active account and the human's default stay as they were.
+   */
+  async resolveLatest(name?: string): Promise<SessionWallet> {
+    const store = this.options.store;
+    const requested = name?.trim();
+    const selection = requested && requested.length > 0 ? requested : this.#active;
+    if (store && selection !== undefined && !store.has(assertWalletName(selection))) {
+      await store.refreshRegistry();
+    }
+    return this.resolve(name);
+  }
+
   /** The addresses of an account, read from the vault or a legacy keystore header. */
   async addressesFor(name?: string): Promise<{ wallet: SessionWallet } & WalletAddresses> {
-    const wallet = this.resolve(name);
+    const wallet = await this.resolveLatest(name);
     const store = this.options.store;
     if (!store) {
       const account = this.options.account;
@@ -152,7 +167,7 @@ export class WalletSession {
     account: VapiPaymentAccount;
     spendCaps?: SpendCaps;
   }> {
-    const wallet = this.resolve(name);
+    const wallet = await this.resolveLatest(name);
     const store = this.options.store;
     if (!store || wallet.path === undefined) {
       return { wallet, account: this.options.account };
@@ -163,7 +178,10 @@ export class WalletSession {
     return { wallet, account, spendCaps: await spendCapsForWallet(store, wallet.name) };
   }
 
-  /** Every account this machine knows, with the session's own marker on one. */
+  /**
+   * Every account this machine knows, with the session's own marker on one.
+   * `wallets.json` is re-read first, so accounts made in a terminal show up.
+   */
   async list(): Promise<SessionWalletInfo[]> {
     const store = this.options.store;
     const active = this.#active;
@@ -180,6 +198,7 @@ export class WalletSession {
         },
       ];
     }
+    await store.refreshRegistry();
     return (await store.list()).map((info) => ({
       name: info.name,
       ...(info.address === undefined ? {} : { address: info.address }),
@@ -202,7 +221,7 @@ export class WalletSession {
     address?: string;
     previous: WalletName | null;
   }> {
-    const wallet = this.resolve(assertWalletName(name));
+    const wallet = await this.resolveLatest(assertWalletName(name));
     const previous = this.#active ?? null;
     this.#active = wallet.name;
     let address: string | undefined;

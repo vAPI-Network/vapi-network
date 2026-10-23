@@ -489,6 +489,25 @@ describe("wallet selection", () => {
 });
 
 describe("wallet store", () => {
+  it("refreshes the registry without zeroing a vault key a signer may still hold", async () => {
+    const home = await makeHome();
+    const server = await openStore(home);
+    await server.create("main", "");
+    await server.unlock("main", "");
+    const heldKey = (server as unknown as { vaultKey?: Uint8Array }).vaultKey;
+    expect(heldKey?.some((byte) => byte !== 0)).toBe(true);
+
+    const terminal = await openStore(home);
+    await terminal.create("fresh", "");
+    await server.refreshRegistry();
+
+    expect(server.has("fresh")).toBe(true);
+    expect(heldKey?.some((byte) => byte !== 0)).toBe(true);
+    const fresh = await server.unlock("fresh", "");
+    const main = await server.unlock("main", "");
+    expect(fresh.address).not.toBe(main.address);
+  });
+
   it("reports only accounts stored in the vault", async () => {
     const home = await makeHome();
     const store = await openStore(home);

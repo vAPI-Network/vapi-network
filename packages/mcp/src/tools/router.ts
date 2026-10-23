@@ -161,6 +161,7 @@ export function createRouterTools(options: RouterToolsOptions): {
     },
 
     async usage(input) {
+      await options.session.resolveLatest(input.wallet);
       const deps = routerDeps(options, input.wallet);
       const [usage, stake] = await Promise.all([readUsage(deps), readStake(deps)]);
       return toolResult({
@@ -175,6 +176,7 @@ export function createRouterTools(options: RouterToolsOptions): {
 
     async chat(input) {
       const parsed = routerChatInputSchema.parse(input);
+      await options.session.resolveLatest(parsed.wallet);
       const result = await chat(routerDeps(options, parsed.wallet, unlockedWallet), {
         model: parsed.model,
         messages: parsed.messages,

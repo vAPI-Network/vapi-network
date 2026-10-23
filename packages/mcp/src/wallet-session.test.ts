@@ -184,6 +184,129 @@ describe("wallet.use", () => {
   });
 });
 
+describe("accounts made while the server runs", () => {
+  /** What `vapi wallet create` in a terminal does: a second store writes the account. */
+  async function createInTerminal(home: string, name: string): Promise<void> {
+    const terminal = await WalletStore.open(home, { secrets: secretsFor(home) });
+    await terminal.create(name, "");
+  }
+
+  it("lists a new account without a restart and keeps the session on its account", async () => {
+    const home = await walletHome("vapi-mcp-new-list-");
+    const registryPath = join(home, "wallets.json");
+    const { server } = await servedHome(home, zeroBalanceFetch());
+    await server.callTool({ name: "wallet.list" });
+
+    await createInTerminal(home, "test-3");
+    const before = await readFile(registryPath, "utf8");
+    const listed = await server.callTool({ name: "wallet.list" });
+    const still = await server.callTool({ name: "wallet.address" });
+
+    const wallets = (listed.structuredContent as { wallets: { name: string; isActive: boolean }[] })
+      .wallets;
+    expect(wallets.map((wallet) => wallet.name).sort()).toEqual(["agent", "main", "test-3"]);
+    expect(wallets.find((wallet) => wallet.isActive)?.name).toBe("main");
+    expect(still.structuredContent).toMatchObject({ wallet: "main" });
+    expect(await readFile(registryPath, "utf8")).toBe(before);
+    expect(JSON.parse(before)).toMatchObject({ default: "main" });
+    await server.close();
+  });
+
+  it("switches to a new account without a restart", async () => {
+    const home = await walletHome("vapi-mcp-new-use-");
+    const { server } = await servedHome(home, zeroBalanceFetch());
+    await server.callTool({ name: "wallet.address" });
+
+    await createInTerminal(home, "test-3");
+    const used = await server.callTool({ name: "wallet.use", arguments: { name: "test-3" } });
+    const address = await server.callTool({ name: "wallet.address" });
+
+    expect(used.isError).not.toBe(true);
+    expect(used.structuredContent).toMatchObject({
+      active: "test-3",
+      previous: "main",
+      address: await addressOf(home, "test-3"),
+    });
+    expect(address.structuredContent).toMatchObject({ wallet: "test-3" });
+    await server.close();
+  });
+
+  it("pays from a new account without a restart and leaves the session where it was", async () => {
+    const home = await walletHome("vapi-mcp-new-pay-");
+    const receiptsPath = join(home, "receipts.jsonl");
+    const { server } = await servedHome(home, paidResource("5000"), { receiptsPath });
+    await server.callTool({ name: "wallet.address" });
+
+    await createInTerminal(home, "test-3");
+    const paid = await server.callTool({
+      name: "call.pay",
+      arguments: { url: "https://93.184.216.34/paid", maxPriceUsd: "0.01", wallet: "test-3" },
+    });
+    const still = await server.callTool({ name: "wallet.address" });
+
+    expect(paid.isError).not.toBe(true);
+    expect(paid.structuredContent).toMatchObject({ wallet: "test-3", status: 200 });
+    expect(still.structuredContent).toMatchObject({ wallet: "main" });
+    const lines = (await readFile(receiptsPath, "utf8")).trim().split("\n");
+    expect(lines.map((line) => (JSON.parse(line) as { wallet?: string }).wallet)).toEqual([
+      "test-3",
+    ]);
+    await server.close();
+  });
+
+  it("reports the default wallets.json holds now, consistent with the rows", async () => {
+    const home = await walletHome("vapi-mcp-new-default-");
+    const { server } = await servedHome(home, zeroBalanceFetch());
+    await server.callTool({ name: "wallet.list" });
+
+    const terminal = await WalletStore.open(home, { secrets: secretsFor(home) });
+    await terminal.create("test-3", "");
+    await terminal.setDefault("test-3");
+    const listed = await server.callTool({ name: "wallet.list" });
+
+    const content = listed.structuredContent as {
+      wallet: string;
+      default: string;
+      wallets: { name: string; isDefault: boolean }[];
+    };
+    expect(content.default).toBe("test-3");
+    expect(content.wallets.find((wallet) => wallet.isDefault)?.name).toBe("test-3");
+    // The session keeps paying from the account it started on.
+    expect(content.wallet).toBe("main");
+    await server.close();
+  });
+
+  it("filters local receipts by an account created after the server started", async () => {
+    const home = await walletHome("vapi-mcp-new-receipts-");
+    const { server } = await servedHome(home, zeroBalanceFetch());
+
+    await createInTerminal(home, "test-3");
+    const receipts = await server.callTool({
+      name: "receipts.list",
+      arguments: { wallet: "test-3" },
+    });
+
+    expect(receipts.isError).not.toBe(true);
+    expect(receipts.structuredContent).toMatchObject({ wallet: "test-3", receipts: [] });
+    await server.close();
+  });
+
+  it("still refuses a name that exists nowhere, after looking again", async () => {
+    const home = await walletHome("vapi-mcp-new-unknown-");
+    const { server } = await servedHome(home, zeroBalanceFetch());
+
+    await createInTerminal(home, "test-3");
+    const result = await server.callTool({ name: "wallet.use", arguments: { name: "nobody" } });
+    const still = await server.callTool({ name: "wallet.address" });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain("No account named nobody");
+    expect(JSON.stringify(result.content)).toContain("agent, main, test-3");
+    expect(still.structuredContent).toMatchObject({ wallet: "main" });
+    await server.close();
+  });
+});
+
 describe("the wallet argument", () => {
   it("puts the argument above the session wallet, and the session above the default", async () => {
     const home = await walletHome("vapi-mcp-wallet-pay-");

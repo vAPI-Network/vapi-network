@@ -3,7 +3,7 @@
   "name": "io.github.vAPI-Network/vapi-network",
   "title": "vAPI Network",
   "description": "vAPI Network: local, non-custodial MCP server to discover and pay x402 APIs in USDC on Base.",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "websiteUrl": "https://vapinetwork.ai",
   "repository": {
     "url": "https://github.com/vAPI-Network/vapi-network",
@@ -14,7 +14,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "vapi-network",
-      "version": "0.9.5",
+      "version": "0.9.6",
       "transport": {
         "type": "stdio"
       },

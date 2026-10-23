@@ -174,7 +174,7 @@ export function createAuthTools(options: AuthToolsOptions): {
       requireSafeSecretStore(options.secrets);
       requireWalletStore(options.wallets);
 
-      const wallet = options.session.resolve(input.account).name;
+      const wallet = (await options.session.resolveLatest(input.account)).name;
       const existing = pending.get(wallet);
       if (existing !== undefined) return linkResult(wallet, existing);
 
