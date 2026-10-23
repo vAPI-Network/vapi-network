@@ -127,7 +127,7 @@ export class WalletSession {
     const requested = name?.trim();
     const selection = requested && requested.length > 0 ? requested : this.#active;
     if (store && selection !== undefined && !store.has(assertWalletName(selection))) {
-      await store.reload();
+      await store.refreshRegistry();
     }
     return this.resolve(name);
   }
@@ -198,7 +198,7 @@ export class WalletSession {
         },
       ];
     }
-    await store.reload();
+    await store.refreshRegistry();
     return (await store.list()).map((info) => ({
       name: info.name,
       ...(info.address === undefined ? {} : { address: info.address }),

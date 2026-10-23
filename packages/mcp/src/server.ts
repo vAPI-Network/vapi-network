@@ -1023,13 +1023,17 @@ export function createVapiServer(options: VapiServerOptions = {}) {
       outputSchema: walletListToolResultSchema,
     },
     async () =>
-      asStructuredToolResult(async () => ({
-        wallet: session.activeName ?? null,
-        default: session.store?.defaultName ?? session.activeName ?? null,
-        wallets: await Promise.all(
-          (await session.list()).map((info) => describeWallet(info, config, guardedFetch)),
-        ),
-      })),
+      asStructuredToolResult(async () => {
+        // list() re-reads wallets.json, so read the default after it.
+        const accounts = await session.list();
+        return {
+          wallet: session.activeName ?? null,
+          default: session.store?.defaultName ?? session.activeName ?? null,
+          wallets: await Promise.all(
+            accounts.map((info) => describeWallet(info, config, guardedFetch)),
+          ),
+        };
+      }),
   );
   server.registerTool(
     "wallet.use",
@@ -1093,8 +1097,11 @@ export function createVapiServer(options: VapiServerOptions = {}) {
   );
 
   /** The wallet a ledger view is filtered by, or null for every wallet. */
-  const ledgerWallet = (input: { wallet?: string; allWallets?: boolean }): string | null =>
-    input.allWallets === true ? null : session.resolve(input.wallet).name;
+  const ledgerWallet = async (input: {
+    wallet?: string;
+    allWallets?: boolean;
+  }): Promise<string | null> =>
+    input.allWallets === true ? null : (await session.resolveLatest(input.wallet)).name;
 
   server.registerTool(
     "receipts.list",
@@ -1110,7 +1117,7 @@ export function createVapiServer(options: VapiServerOptions = {}) {
     },
     async (input) =>
       asStructuredToolResult(async () => {
-        const wallet = ledgerWallet(input);
+        const wallet = await ledgerWallet(input);
         return {
           wallet,
           receipts: await readReceipts(options.receiptsPath ?? getVapiPaths().receipts, {
@@ -1134,7 +1141,7 @@ export function createVapiServer(options: VapiServerOptions = {}) {
     async (input) =>
       asStructuredToolResult(async () => {
         const paths = getVapiPaths();
-        const wallet = ledgerWallet(input);
+        const wallet = await ledgerWallet(input);
         return {
           wallet,
           ...aggregateStats({

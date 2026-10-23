@@ -7,7 +7,9 @@ scoped packages. The packages share one version and are released together.
 
 ### Fixed
 
-- The MCP server sees accounts created in a terminal while it runs. `wallet.list` re-reads `wallets.json`, and `wallet.use`, `call.pay` and the other account tools look again before they refuse an unknown name, so a new account works without restarting the MCP client. The session's active account and the default in `wallets.json` are unchanged.
+- The MCP server sees accounts created in a terminal while it runs. `wallet.list` re-reads `wallets.json`, and `wallet.use`, `call.pay`, `router.usage`, `router.chat`, `receipts.list`, `receipts.stats` and the other account tools look again before they refuse an unknown name, so a new account works without restarting the MCP client. The session's active account and the default in `wallets.json` are unchanged.
+- `wallet.list` reports the current default from `wallets.json`, matching the `isDefault` marker on its rows.
+- Re-reading the account list never wipes the vault key an in-flight payment is still signing with.
 
 ## 0.9.5 (2026-10-22)
 

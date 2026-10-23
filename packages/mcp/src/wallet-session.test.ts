@@ -254,6 +254,43 @@ describe("accounts made while the server runs", () => {
     await server.close();
   });
 
+  it("reports the default wallets.json holds now, consistent with the rows", async () => {
+    const home = await walletHome("vapi-mcp-new-default-");
+    const { server } = await servedHome(home, zeroBalanceFetch());
+    await server.callTool({ name: "wallet.list" });
+
+    const terminal = await WalletStore.open(home, { secrets: secretsFor(home) });
+    await terminal.create("test-3", "");
+    await terminal.setDefault("test-3");
+    const listed = await server.callTool({ name: "wallet.list" });
+
+    const content = listed.structuredContent as {
+      wallet: string;
+      default: string;
+      wallets: { name: string; isDefault: boolean }[];
+    };
+    expect(content.default).toBe("test-3");
+    expect(content.wallets.find((wallet) => wallet.isDefault)?.name).toBe("test-3");
+    // The session keeps paying from the account it started on.
+    expect(content.wallet).toBe("main");
+    await server.close();
+  });
+
+  it("filters local receipts by an account created after the server started", async () => {
+    const home = await walletHome("vapi-mcp-new-receipts-");
+    const { server } = await servedHome(home, zeroBalanceFetch());
+
+    await createInTerminal(home, "test-3");
+    const receipts = await server.callTool({
+      name: "receipts.list",
+      arguments: { wallet: "test-3" },
+    });
+
+    expect(receipts.isError).not.toBe(true);
+    expect(receipts.structuredContent).toMatchObject({ wallet: "test-3", receipts: [] });
+    await server.close();
+  });
+
   it("still refuses a name that exists nowhere, after looking again", async () => {
     const home = await walletHome("vapi-mcp-new-unknown-");
     const { server } = await servedHome(home, zeroBalanceFetch());

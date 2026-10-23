@@ -112,6 +112,19 @@ describe("vAPI Router MCP tools", () => {
     await server.close();
   });
 
+  it("reads usage for an account created after the server started", async () => {
+    const routerUsage = vi.fn<NonNullable<RouterOverrides["routerUsage"]>>(async () => usage());
+    const { server, store, vaultSecrets } = await routerServer({ routerUsage });
+    const terminal = await WalletStore.open(store.home, { secrets: vaultSecrets });
+    await terminal.create("fresh", "");
+
+    const result = await server.callTool({ name: "router.usage", arguments: { wallet: "fresh" } });
+
+    expect(result.isError).not.toBe(true);
+    expect(routerUsage.mock.calls.map(([deps]) => deps.wallet)).toEqual(["fresh"]);
+    await server.close();
+  });
+
   it("returns chat content, model and usage without core-only Router fields", async () => {
     const routerChat = vi.fn<NonNullable<RouterOverrides["routerChat"]>>(async () => chatResult());
     const { server } = await routerServer({ routerChat });
