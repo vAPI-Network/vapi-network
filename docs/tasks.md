@@ -11,6 +11,9 @@ The task SDK in `@vapi-network/core/tasks` talks to the vAPI task API and builds
 | `post`              | Posts a task, bounty or pool, optionally funding with the vault.             | Only with `--fund`     |
 | `propose`           | Proposes terms for a task.                                                   | No                     |
 | `submit`            | Submits proof for an open bounty.                                            | No                     |
+| `milestone`         | Submit, approve, reject or finalize a zero-based V2 milestone                | On approve/finalize    |
+| `cancel`            | Cancel a V2 offer, unpaid remainder or expire                                | Refunds only           |
+| `claim`             | Pay a stored pool claim as its verifier                                      | Yes                    |
 | `award`             | Awards a proposal or submission.                                             | No                     |
 | `sign`              | Signs the task scope.                                                        | No                     |
 | `fund`              | Locks USDC in escrow.                                                        | Yes                    |
@@ -168,6 +171,9 @@ The CLI and MCP share the same policy and core functions. Each CLI verb maps to 
 | `post`              | `tasks.post`              |
 | `propose`           | `tasks.propose`           |
 | `submit`            | `tasks.submit`            |
+| `milestone`         | `tasks.milestone`         |
+| `cancel`            | `tasks.cancel`            |
+| `claim`             | `tasks.claim`             |
 | `award`             | `tasks.award`             |
 | `sign`              | `tasks.sign`              |
 | `fund`              | `tasks.fund`              |
@@ -189,3 +195,82 @@ vapi task fund <id>
 ```
 
 Approval never bypasses a cap. Per-task and per-day refusals return `ok:false` with `reason` set to `policy.perTask` or `policy.perDay` without touching the spend ledger. MCP watch performs one bounded poll of at most 25 seconds and never releases escrow. See the [MCP tool reference](mcp.md#tools) for inputs, results, wallet linking and server limits.
+
+## V2 participant writes
+
+Hosted V2 writes are off by default. No deployed V2 tuple or live write has been
+verified for these commands. Wire contracts follow vapi-app `tasks-v1`, PR #490
+(T11) and integration PR #493. V1 proposal awards, scope signing and escrow
+operations keep their existing path when the hosted API selects V1.
+
+```sh
+vapi task milestone <id> --index 0 submit --proof https://example.com/delivery
+vapi task milestone <id> --index 0 submit --file ./delivery.txt --note "Ready for review"
+vapi task milestone <id> --index 0 approve
+vapi task milestone <id> --index 0 reject --reason "Include the requested proof"
+vapi task milestone <id> --index 0 finalize
+vapi task cancel <id> offer
+vapi task cancel <id> remainder
+vapi task cancel <id> expire
+vapi task sign <id> --action award-consent
+vapi task award <id> --worker 0x...
+vapi task award <id> --winners 0x...,0x...
+vapi task sign <id> --action split-consent --index 0 --to-worker 12000000
+vapi task dispute <id> --action split --index 0 --to-worker 12000000
+vapi task fund <id>
+vapi task refund <id>
+vapi task dispute <id> --index 0 --evidence "Evidence text"
+vapi task counter-evidence <id> --index 0 --evidence "Counter-evidence text"
+vapi task resolve-unmatched <id> --index 0
+vapi task claim <id> --claimant 0x...
+vapi task status <id> --operation <uuid> --step v2-fund --recover
+vapi task status <id> --operation <uuid> --step v2-fund --abandon
+```
+
+Action indices are **zero-based C0 indices (0–4)**. Posted milestone declarations
+remain one-based. `--to-worker` takes exact USDC base units (six decimals), not
+USD. Milestone submission accepts repeated HTTPS `--proof` and local `--file`
+arguments as submission does; `--proof-json <file>` accepts the hosted preset
+ProofFill array for text, media, PR and onchain transaction proofs. Rejection
+requires a reason. A bounty award sends the entire winners list in one
+`awardBounty` plan. Pool `claim --claimant` pays an existing signed claim as the
+pool verifier; claim admission is separate.
+
+The worker signs `award-consent` before the poster awards the task. A negotiated
+split requires the other party's `split-consent` with the same index and amount.
+The CLI and SDK sign the exact EIP-712 data returned by the API, confirm that
+signature with the API, and follow its returned transaction plans. They construct
+no calldata. The existing vault stores and signs locally. Before any funding or
+dispute fee signature, the CLI checks `maxPerTaskUsd`, approval thresholds and
+the daily cap, then reserves the amount the wallet pays with `reserveSpend`.
+Escrow payouts do not charge that amount again. MCP cannot grant human approval;
+the CLI accepts `--yes` under the existing policy rules.
+
+Human output shows gross · fee · net before signing. JSON stdout contains one
+result; the money line goes to stderr and the result includes `money`,
+`lifecycle`, `nextAction`, and the operation ID/state. For running orders the fee
+comes from the hosted immutable V2 snapshot. Missing required money data refuses
+the action. Stable hosted errors such as `v2_writes_disabled`,
+`chain_preflight_unavailable`, `v2_binding_mismatch`,
+`v2_funding_snapshot_unavailable` and `v1_order` retain their codes.
+
+Approval, pool creation and action steps run in sequence. A failed step stops the
+sequence. Signed transaction bytes and preparation keys persist in the local
+pending journal; retrying the original command resumes its hosted operation.
+The CLI and SDK poll order-level confirm/reconcile and recover responses without
+requiring a milestone row, and reports completion only after hosted confirmation.
+V2 always waits for that confirmation, including when legacy `--no-wait` was
+supplied. Bounded polling returns `operation_pending` if it cannot confirm; it
+never prints a completion line on that path. `status --operation --step` resumes
+hosted recovery scans; a prepared result means rerun the original action to sign
+the remaining plan. Abandon scans until the API permits abandonment or returns a
+recovered operation. It never clears local signed bytes or spend reservations.
+
+The corresponding local tools are `tasks.milestone {id,action,i,proof?,reason?}`,
+`tasks.cancel {id,scope}`, `tasks.award {id,worker|winners}`,
+`tasks.sign {id,action,i?,toWorker?}`, `tasks.claim {id,action:"pay",claimant}`,
+and the existing money tools with V2 indices/evidence where applicable.
+`tasks.status {id,operationId,step,abandon?}` handles journal recovery. All tools
+have plain top-level object schemas. The SDK exposes `prepareV2`, `signV2`,
+`confirmV2Signature`, `operationV2`, `executeTaskV2` and `recoverTaskV2`; custom
+legacy transport and signing adapters can keep the original interface.
