@@ -18,7 +18,6 @@ import {
   awardTask,
   createPendingTransactions,
   createTasksChain,
-  createTasksClient,
   createScopeBindings,
   createTasksRpcFor,
   deliverTaskOperation,
@@ -27,12 +26,17 @@ import {
   resolveUnmatchedTaskOperation,
   taskFeeReservationKey,
   fundTaskOperation,
+  fundTaskWithX402,
+  taskMoneySnapshot,
   messageTask,
   missingTasksChain,
   nextTaskEvents,
   parseTaskDuration,
   parseUsdToBaseUnits,
   postTask,
+  prepareTaskPost,
+  taskTermsFields,
+  checkinInputSchema,
   proposeTask,
   publicNotFoundFetch,
   readTaskFile,
@@ -59,6 +63,7 @@ import {
 } from "@vapi-network/core/tasks";
 import { z } from "zod";
 
+import { createHostedTasksClient } from "../tasks-client.js";
 import { walletArgument } from "../actions/call.js";
 import { registeredAgentProfileSchema } from "../actions/register.js";
 import type { WalletSession } from "../wallet-session.js";
@@ -120,13 +125,31 @@ export const tasksShowTool = descriptor(
   "Does not move money. Read the private task order and receipts when signed in, otherwise the public task card.",
   participant,
 );
+export const tasksPendingTool = descriptor(
+  "Does not move money. Read the acting wallet's pending task actions, amounts, due times and deep links.",
+  { ...walletArgument, role: z.enum(["poster", "worker"]).optional() },
+);
+export const tasksCheckinTool = descriptor(
+  "Does not move money. Record the worker's check-in status, note and optional link.",
+  { ...participant, ...checkinInputSchema.shape, note: checkinInputSchema.shape.note.optional() },
+);
 export const tasksPostTool = descriptor(
-  "Does not move money. Post a task with its market budget, deadline, intake, award limit and optional webhook.",
+  "Posts a task with a budget. Optional fund uses the local vault within the configured task and daily policy; amounts requiring human approval return approval:true. Fresh posts may return a funding error until the hosted signing path is available.",
   {
     ...walletArgument,
     title: z.string().trim().min(TASK_LIMITS.titleMin).max(TASK_LIMITS.titleMax),
     brief: z.string().trim().min(TASK_LIMITS.briefMin).max(TASK_LIMITS.briefMax),
-    amountUsd: positiveUsd,
+    ...taskTermsFields,
+    fund: z.boolean().optional(),
+    amountUsd: positiveUsd.optional(),
+    winners: z.number().int().min(1).max(50).optional(),
+    rewardPerWinner: positiveUsd.optional(),
+    choiceWindowSeconds: z.number().int().positive().optional(),
+    rewardPerClaim: positiveUsd.optional(),
+    budget: positiveUsd.optional(),
+    gate: z.enum(["open", "proven"]).optional(),
+    verifier: z.enum(["poster", "vapi"]).optional(),
+    openCheck: z.enum(["allowlist", "invite"]).optional(),
     deadline: z.string(),
     intake: z.enum(["proposals", "submissions"]).optional(),
     maxAwards: z
@@ -140,7 +163,7 @@ export const tasksPostTool = descriptor(
       .string()
       .regex(/^0x[0-9a-fA-F]{40}$/u)
       .describe(
-        "Optional 0x address of a vendor to invite directly; the task is addressed to that wallet and shows up for them. Anyone may still propose.",
+        "Optional 0x address of a worker to invite directly; the task is addressed to that wallet and shows up for them. Anyone may still propose.",
       )
       .optional(),
   },
@@ -155,10 +178,12 @@ export const tasksProposeTool = descriptor(
   },
 );
 export const tasksSubmitTool = descriptor(
-  "Does not move money. Sign task submission terms locally with HTTPS proof and optional local files.",
+  "Does not move money. Sign task submission terms locally with HTTPS proof and optional local files, or withdraw an existing bounty submission without a signature.",
   {
     ...participant,
-    proofUrls: z.array(httpsUrl).min(1),
+    proofUrls: z.array(httpsUrl).min(1).optional(),
+    withdraw: z.boolean().optional(),
+    proposalId: id.optional(),
     files: z.array(localPath).optional(),
   },
 );
@@ -302,6 +327,14 @@ function lazyTasksChain(
       return address;
     },
     createEscrow: async (input) => (await get()).createEscrow(input),
+    validateFunding: async (input) => {
+      const initialized = await get();
+      if (!initialized.validateFunding)
+        throw new TasksChainError("Local funding verification is unavailable.", false, {
+          authorizationExposed: false,
+        });
+      await initialized.validateFunding(input);
+    },
     fund: async (input) => {
       let initialized: TasksChain;
       try {
@@ -369,7 +402,7 @@ export function createTasksTools(options: TasksToolsOptions) {
     const client =
       typeof injected === "function"
         ? injected(clientOptions)
-        : (injected ?? createTasksClient(clientOptions));
+        : (injected ?? createHostedTasksClient(clientOptions));
     return {
       client,
       chain:
@@ -488,25 +521,91 @@ export function createTasksTools(options: TasksToolsOptions) {
       const ctx = await context(input.wallet, publicOnly);
       return taskResult(await showTask(ctx, { id: input.id, signedIn: Boolean(ctx.token) }));
     },
+    async pending(input: Input<typeof tasksPendingTool>) {
+      const ctx = await acting(input.wallet);
+      const result = await taskRequest("pending", "pending", () => ctx.client.pending(), ctx);
+      return taskResult({
+        pendingActions: input.role
+          ? result.pendingActions.filter((item) => item.role === input.role)
+          : result.pendingActions,
+      });
+    },
+    async checkin(input: Input<typeof tasksCheckinTool>) {
+      const ctx = await acting(input.wallet);
+      const body = checkinInputSchema.parse({
+        status: input.status,
+        note: input.note ?? input.status.replaceAll("-", " "),
+        ...(input.link === undefined ? {} : { link: input.link }),
+      });
+      return taskResult(
+        await taskRequest(
+          "checkin",
+          "checkin",
+          () => ctx.client.checkin(input.id, body, { idempotencyKey: ctx.randomUUID() }),
+          ctx,
+        ),
+      );
+    },
     async post(input: Input<typeof tasksPostTool>) {
       const postedAt = now();
-      const deadlineDuration = parseTaskDuration(input.deadline, postedAt);
-      if (deadlineDuration < TASK_LIMITS.postDeadlineMinMs)
-        throw new TaskInputError("deadline must be at least 10 minutes from now.");
+      const prepared = prepareTaskPost(input, postedAt);
       const ctx = await acting(input.wallet);
       const outcome = await postTask(ctx, {
         order: {
           title: input.title,
           description: input.brief,
           policyFamily: "general-digital",
+          ...(input.shape !== undefined || input.milestones || input.proofSpec || input.checkin
+            ? prepared.terms
+            : {}),
           ...(input.vendor === undefined ? {} : { invitedProviderAddress: input.vendor }),
         },
-        amount: parseUsdToBaseUnits(input.amountUsd),
-        deadlineAt: new Date(postedAt.getTime() + deadlineDuration).toISOString(),
+        amount: prepared.amount,
+        deadlineAt: prepared.deadlineAt,
+        ...(input.fund ? { fund: true } : {}),
         ...(input.intake === undefined ? {} : { intake: input.intake }),
         ...(input.maxAwards === undefined ? {} : { maxAwards: input.maxAwards }),
         ...(input.webhookUrl === undefined ? {} : { webhook: input.webhookUrl }),
       });
+      if (input.fund) {
+        if (outcome.funding?.error)
+          return taskResult(
+            { ...outcome.result, ok: false, funding: outcome.funding, postingMovesMoney: false },
+            true,
+          );
+        try {
+          const policy = await taskPolicyForWallet({
+            directory: home,
+            wallet: ctx.selected.name,
+            schema: registeredAgentProfileSchema,
+          });
+          const funding = await fundTaskOperation(ctx, {
+            fundingIntent: outcome.funding,
+            expectedGrossBaseUnits: prepared.escrowAmount,
+            id: outcome.result.workOrder.id,
+            policy,
+            caps: await spendCapsForWallet(options.wallets!, ctx.selected.name),
+            wallet: ctx.selected.name,
+            ledgerPath: options.ledgerPath ?? getVapiPaths(home).ledger,
+            now,
+            approval: { granted: false },
+          });
+          const wait = funding.ok
+            ? await waitAfterChain(
+                ctx,
+                outcome.result.workOrder.id,
+                funding.result.milestone.id,
+                "locked",
+              )
+            : null;
+          return taskResult(
+            { ...outcome.result, ...funding, funding, wait, postingMovesMoney: funding.ok },
+            !funding.ok,
+          );
+        } catch (error) {
+          return tasksErrorResult(error, { ...outcome.result, funding: { state: "unknown" } });
+        }
+      }
       return taskResult({
         ...outcome.result,
         money: outcome.money,
@@ -535,12 +634,27 @@ export function createTasksTools(options: TasksToolsOptions) {
       );
     },
     async submit(input: Input<typeof tasksSubmitTool>) {
+      if (input.withdraw && (input.proofUrls?.length || input.files?.length))
+        throw new TaskInputError("withdraw cannot be combined with proof or files.");
+      if (!input.withdraw && !input.proofUrls?.length)
+        throw new TaskInputError("submit needs proofUrls or withdraw:true.");
+      if (!input.withdraw && input.proposalId)
+        throw new TaskInputError("proposalId requires withdraw:true.");
       const files = await Promise.all((input.files ?? []).map(readTaskFile));
       const ctx = await acting(input.wallet);
       return taskResult(
         await submitTask(ctx, {
           id: input.id,
-          proof: input.proofUrls.map((value) => ({ kind: "url", value })),
+          ...(input.withdraw
+            ? {
+                withdraw: true,
+                ...(input.proposalId
+                  ? {}
+                  : { address: (await options.session.addressesFor(ctx.selected.name)).address }),
+              }
+            : {}),
+          ...(input.proposalId ? { proposalId: input.proposalId } : {}),
+          proof: (input.proofUrls ?? []).map((value) => ({ kind: "url", value })),
           files,
           unlock: unlock(ctx.selected.name),
         }),
@@ -598,8 +712,31 @@ export function createTasksTools(options: TasksToolsOptions) {
         wallet: ctx.selected.name,
         schema: registeredAgentProfileSchema,
       });
+      const snapshot = await taskMoneySnapshot(ctx.client, input.id, undefined, ctx);
+      const payment = await fundTaskWithX402(ctx, {
+        id: input.id,
+        ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
+        snapshot,
+        policy,
+        caps: await spendCapsForWallet(options.wallets!, ctx.selected.name),
+        wallet: ctx.selected.name,
+        ledgerPath: options.ledgerPath ?? getVapiPaths(home).ledger,
+        config: await loadConfig(getVapiPaths(home).config),
+        now,
+        unlock: async () => (await options.session.payment(ctx.selected.name)).account,
+        fetchImpl: options.fetchImpl,
+        approval: { granted: false },
+      });
+      if (payment) {
+        const wait =
+          input.wait && payment.ok
+            ? await waitAfterChain(ctx, input.id, payment.milestoneId, "locked")
+            : null;
+        return taskResult({ ...payment, wait }, !payment.ok);
+      }
       const outcome = await fundTaskOperation(ctx, {
         id: input.id,
+        snapshot,
         ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
         policy,
         caps: await spendCapsForWallet(options.wallets!, ctx.selected.name),

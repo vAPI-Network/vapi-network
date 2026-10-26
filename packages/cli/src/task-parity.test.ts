@@ -16,6 +16,8 @@ describe("task interface parity", () => {
     expect(TASKS_CLIENT_VERBS).toEqual([
       "search",
       "show",
+      "pending",
+      "checkin",
       "post",
       "propose",
       "submit",

@@ -11,6 +11,8 @@ import { agentSecretAccounts } from "@vapi-network/core/agent-link";
 import { createTasksClient, TasksClientError } from "@vapi-network/core/tasks";
 import {
   canonicalJson,
+  checkinResponseSchema,
+  pendingActionsResponseSchema,
   createPendingTransactions,
   freezeScopeTerms,
   missingTasksChain,
@@ -943,6 +945,7 @@ describe("vapi task", () => {
     const [id, input, options] = vi.mocked(client.submit).mock.calls[0]!;
     expect(id).toBe(ID);
     expect(options).toEqual({ idempotencyKey: KEY });
+    if (!("signedPayload" in input)) throw new Error("Expected signed submission");
     expect(input.signedPayload.kind).toBe("submission");
     expect(input.signedPayload.proof).toEqual([
       { kind: "url", value: "https://example.com/a" },
@@ -1451,6 +1454,7 @@ describe("vapi task", () => {
       (await invoke(["submit", ID, "--proof", "https://example.com/proof"], dependencies)).code,
     ).toBe(0);
     const input = vi.mocked(client.submit).mock.calls[0]![1];
+    if (!("signedPayload" in input)) throw new Error("Expected signed submission");
     expect(
       await verifyMessage({
         address: input.signedPayload.providerAddress as `0x${string}`,
@@ -3081,6 +3085,407 @@ describe("vapi task", () => {
 
     it("keeps task copy in the product vocabulary", () => {
       expect(TASK_HELP).not.toMatch(/\b(?:gig|job|freelance|vendor|client)\b|—|!/iu);
+    });
+  });
+});
+
+describe("Tasks v2 terminal verbs", () => {
+  const postArgs = ["post", "--title", "Build a page", "--brief", "-", "--deadline", "7d"];
+  it("parses task milestones, all proof presets and cadence without losing base units", async () => {
+    const { dependencies, client } = await fixture();
+    dependencies.readStdin = async () => BRIEF;
+    const result = await invoke(
+      [
+        ...postArgs,
+        "--shape",
+        "task",
+        "--amount",
+        "100",
+        "--milestone",
+        "30|Shortlist approved|3d",
+        "--milestone",
+        "70|Intros completed|2026-10-15T12:00:00Z",
+        "--proof",
+        "x-post:vAPI: Tasks",
+        "--proof",
+        "pr:approved",
+        "--checkin",
+        "24h",
+      ],
+      dependencies,
+    );
+    expect(result.code).toBe(0);
+    expect(client.createOrder).toHaveBeenCalledWith(
+      expect.objectContaining({
+        shape: "task",
+        milestones: [
+          {
+            index: 1,
+            amountBaseUnits: "30000000",
+            acceptance: "Shortlist approved",
+            deadlineAt: "2026-10-11T12:00:00.000Z",
+          },
+          {
+            index: 2,
+            amountBaseUnits: "70000000",
+            acceptance: "Intros completed",
+            deadlineAt: "2026-10-15T12:00:00.000Z",
+          },
+        ],
+        proofSpec: [
+          { preset: "x-post", mustContain: "vAPI: Tasks" },
+          { preset: "pr", mustContain: "approved" },
+        ],
+        checkin: "24h",
+      }),
+      { idempotencyKey: KEY },
+    );
+  });
+  it("parses bounty rewards, winner count and choice window", async () => {
+    const { dependencies, client } = await fixture();
+    dependencies.readStdin = async () => BRIEF;
+    const result = await invoke(
+      [
+        ...postArgs,
+        "--shape",
+        "bounty",
+        "--winners",
+        "3",
+        "--reward-per-winner",
+        "25.000001",
+        "--choice-window",
+        "3600",
+      ],
+      dependencies,
+    );
+    expect(result.code).toBe(0);
+    expect(client.createOrder).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bounty: {
+          winners: 3,
+          rewardPerWinnerBaseUnits: "25000001",
+          deadlineAt: "2026-10-15T12:00:00.000Z",
+          choiceWindowSeconds: 3600,
+        },
+        market: expect.objectContaining({
+          budget: expect.objectContaining({ amountBaseUnits: "25000001" }),
+        }),
+      }),
+      expect.any(Object),
+    );
+  });
+  it.each(["proven", "open"])("parses pool budget, reward, gate %s and verifier", async (gate) => {
+    const { dependencies, client } = await fixture();
+    dependencies.readStdin = async () => BRIEF;
+    expect(
+      (
+        await invoke(
+          [
+            ...postArgs,
+            "--shape",
+            "pool",
+            "--reward-per-claim",
+            "5",
+            "--budget",
+            "100",
+            "--gate",
+            gate,
+            "--verifier",
+            "vapi",
+            ...(gate === "open" ? ["--open-check", "allowlist"] : []),
+          ],
+          dependencies,
+        )
+      ).code,
+    ).toBe(0);
+    expect(client.createOrder).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pool: {
+          rewardPerClaimBaseUnits: "5000000",
+          budgetBaseUnits: "100000000",
+          gate,
+          verifier: "vapi",
+          ...(gate === "open" ? { openCheck: "allowlist" } : {}),
+        },
+      }),
+      expect.any(Object),
+    );
+  });
+  it.each([
+    ["--shape", "other", "--amount", "1"],
+    ["--amount", "1", "--checkin", "1h"],
+    ["--amount", "6", ...Array.from({ length: 6 }, () => ["--milestone", "1|Done|3d"]).flat()],
+    ["--amount", "1", "--proof", "file:contains"],
+    ["--shape", "bounty", "--reward-per-winner", "1", "--winners", "0"],
+    ["--shape", "bounty", "--reward-per-winner", "1", "--choice-window", "0"],
+    ["--shape", "pool", "--reward-per-claim", "1", "--budget", "2", "--gate", "invalid"],
+    ["--shape", "pool", "--reward-per-claim", "1", "--budget", "2", "--verifier", "invalid"],
+  ])("rejects invalid v2 flags before posting %#", async (flags) => {
+    const { dependencies, client } = await fixture();
+    dependencies.readStdin = async () => BRIEF;
+    expect((await invoke([...postArgs, ...flags], dependencies)).code).toBe(1);
+    expect(client.createOrder).not.toHaveBeenCalled();
+  });
+  it("keeps canonical lifecycle and nextAction in the show JSON snapshot", async () => {
+    const { v2Terms, v2Lifecycle, v2NextAction } =
+      await import("../../core/src/tasks/fixtures/tasks-v2.js");
+    const value = tasksResponseSchemas.getOrder.parse({
+      ...order(),
+      workOrder: { ...order().workOrder, terms: v2Terms },
+      lifecycle: v2Lifecycle,
+      nextAction: v2NextAction,
+    });
+    const { dependencies } = await fixture(true, fakeClient({ show: vi.fn(async () => value) }));
+    const result = await invoke(["show", ID], dependencies);
+    expect({
+      command: result.value!.command,
+      lifecycle: result.value!.lifecycle,
+      nextAction: result.value!.nextAction,
+    }).toMatchInlineSnapshot(`
+      {
+        "command": "task show",
+        "lifecycle": {
+          "milestones": [
+            {
+              "amountBaseUnits": "30000000",
+              "dueAt": "2026-10-11T12:00:00.000Z",
+              "id": "22222222-2222-4222-8222-222222222222",
+              "status": "pending",
+            },
+          ],
+          "shape": "task",
+          "state": "Active",
+          "substate": "Stalled",
+        },
+        "nextAction": {
+          "action": "checkin",
+          "dueAt": "2026-10-08T11:00:00.000Z",
+        },
+      }
+    `);
+    const human = await invoke(["show", ID], dependencies, false);
+    expect(human.stdout.join("\n")).toContain("Active / Stalled");
+    expect(human.stdout.join("\n")).toContain("1 | 30.00 | Shortlist approved");
+    expect(human.stdout.join("\n")).toContain("Next action: checkin");
+  });
+  it.each(["on-track", "blocked", "need-input"])(
+    "records %s check-ins and supplies an optional-note default",
+    async (status) => {
+      const { v2Checkins } = await import("../../core/src/tasks/fixtures/tasks-v2.js");
+      const client = fakeClient({
+        checkin: vi.fn(async () => checkinResponseSchema.parse(v2Checkins)),
+      });
+      const { dependencies } = await fixture(true, client);
+      expect(
+        (
+          await invoke(
+            ["checkin", ID, "--status", status, "--link", "https://example.com/proof"],
+            dependencies,
+          )
+        ).code,
+      ).toBe(0);
+      expect(client.checkin).toHaveBeenCalledWith(
+        ID,
+        { status, note: status.replaceAll("-", " "), link: "https://example.com/proof" },
+        { idempotencyKey: KEY },
+      );
+      expect(
+        (await invoke(["checkin", ID, "--status", status, "--note", "Please review"], dependencies))
+          .code,
+      ).toBe(0);
+    },
+  );
+  it("renders one pending line with amount, due time and deep link", async () => {
+    const { v2Pending } = await import("../../core/src/tasks/fixtures/tasks-v2.js");
+    const client = fakeClient({
+      pending: vi.fn(async () => pendingActionsResponseSchema.parse(v2Pending)),
+    });
+    const { dependencies } = await fixture(true, client);
+    const result = await invoke(["pending"], dependencies, false);
+    expect(result.stdout.at(-1)).toBe(
+      `Build a page · deliver · $30.00 USDC · due 2026-10-11T12:00:00.000Z · https://api.vapinetwork.ai/orders/${ID}`,
+    );
+  });
+  it("withdraws the selected submission without unlocking or signing", async () => {
+    const { dependencies, client, store } = await fixture();
+    const unlock = vi.spyOn(store, "unlock");
+    expect(
+      (await invoke(["submit", ID, "--withdraw", "--proposal-id", PROPOSAL_ID], dependencies)).code,
+    ).toBe(0);
+    expect(client.submit).toHaveBeenCalledWith(
+      ID,
+      { withdraw: true, proposalId: PROPOSAL_ID },
+      { idempotencyKey: KEY },
+    );
+    expect(unlock).not.toHaveBeenCalled();
+    expect(
+      (await invoke(["submit", ID, "--withdraw", "--proof", "https://example.com"], dependencies))
+        .code,
+    ).toBe(1);
+  });
+  it("guards post --fund with maxPerTaskUsd before signing and without reserving spend", async () => {
+    const created = milestoneOrder();
+    const client = fakeClient({
+      post: vi.fn(async () => ({
+        task: tasksResponseSchemas.createOrder.parse(created),
+        funding: { kind: "eip712" as const },
+      })),
+      getOrder: vi.fn(async () => created),
+    });
+    const { dependencies, home } = await fixture(true, client);
+    dependencies.readStdin = async () => BRIEF;
+    await writeProfile(home, { maxPerTaskUsd: 99 });
+    const chain = fakeChain();
+    dependencies.tasks!.chain = chain;
+    const result = await invoke(
+      [...postArgs, "--amount", "100", "--fund", "--yes", "--no-wait"],
+      dependencies,
+    );
+    expect(result.code).toBe(2);
+    expect(result.value).toMatchObject({
+      ok: false,
+      reason: "policy.perTask",
+      funding: { reason: "policy.perTask" },
+    });
+    expect(chain.fund).not.toHaveBeenCalled();
+    expect(await readFile(join(home, "spend-ledger.json"), "utf8").catch(() => null)).toBeNull();
+  });
+  it("preserves the created task when T7 cannot yet fund a fresh post", async () => {
+    const { v2FundingUnavailable } = await import("../../core/src/tasks/fixtures/tasks-v2.js");
+    const client = fakeClient({
+      post: vi.fn(async () => ({
+        task: tasksResponseSchemas.createOrder.parse(order()),
+        funding: v2FundingUnavailable,
+      })),
+    });
+    const { dependencies } = await fixture(true, client);
+    dependencies.readStdin = async () => BRIEF;
+    const result = await invoke([...postArgs, "--amount", "100", "--fund"], dependencies);
+    expect(result.code).toBe(1);
+    expect(result.value).toMatchObject({
+      workOrder: { id: ID },
+      funding: v2FundingUnavailable,
+      postingMovesMoney: false,
+    });
+  });
+  it("streams every recorded v2 event and prints the judging prompt", async () => {
+    const { v2Events } = await import("../../core/src/tasks/fixtures/tasks-v2.js");
+    const events = v2Events.map((event, index) => ({
+      ...event,
+      sequence: index + 1,
+      at: NOW.toISOString(),
+      actor: ADDRESS,
+    }));
+    const client = fakeClient({
+      events: vi.fn(async () => ({ events, nextAfter: events.length })),
+    });
+    const { dependencies } = await fixture(true, client);
+    const json = await invoke(["watch", ID, "--until", "released"], dependencies, true, true);
+    expect(json.code).toBe(0);
+    expect(json.values.filter((item) => item.event).map((item) => item.event)).toEqual(events);
+    const human = await invoke(["watch", ID, "--until", "released"], dependencies, false);
+    expect(human.stdout.join("\n")).toContain("deadline passed, 3 submissions, pick winners");
+  });
+  it("does not announce funding when --no-wait skips hosted confirmation", async () => {
+    const { dependencies, home } = await fixture(
+      true,
+      fakeClient({ getOrder: async () => milestoneOrder() }),
+    );
+    await writeProfile(home);
+    dependencies.tasks!.chain = fakeChain();
+    const result = await invoke(["fund", ID, "--yes", "--no-wait"], dependencies, false);
+    expect(result.code).toBe(0);
+    expect(result.stdout.join("\n")).not.toMatch(/escrow funded/iu);
+  });
+});
+
+describe("post-and-fund confirmation", () => {
+  it("reserves the escrow amount before signing the returned intent and announces only hosted confirmation", async () => {
+    const { readSpendLedger } = await import("@vapi-network/core");
+    const created = tasksResponseSchemas.createOrder.parse(milestoneOrder());
+    const intent = {
+      kind: "eip712" as const,
+      operationId: "sig_recorded",
+      typedData: { message: { value: "100000000" } },
+    };
+    let funded = false;
+    const client = fakeClient({
+      post: vi.fn(async () => ({ task: created, funding: intent })),
+      getOrder: vi.fn(async () => milestoneOrder({ escrowState: funded ? "locked" : "created" })),
+    });
+    const { dependencies, home } = await fixture(true, client);
+    dependencies.readStdin = async () => BRIEF;
+    await writeProfile(home);
+    const chain = fakeChain({
+      fund: vi.fn(async (input) => {
+        expect(input.fundingIntent).toEqual(intent);
+        expect(
+          (await readSpendLedger(join(home, "spend-ledger.json"), NOW, "worker")).spentAtomic,
+        ).toBe("100000000");
+        funded = true;
+        return chainResult();
+      }),
+    });
+    dependencies.tasks!.chain = chain;
+    const result = await invoke(
+      [
+        "post",
+        "--title",
+        "Build a page",
+        "--brief",
+        "-",
+        "--amount",
+        "100",
+        "--deadline",
+        "7d",
+        "--fund",
+        "--yes",
+      ],
+      dependencies,
+      false,
+    );
+    expect(result.code).toBe(0);
+    expect(client.post).toHaveBeenCalledOnce();
+    expect(chain.fund).toHaveBeenCalledOnce();
+    expect(result.stdout).toContain("escrow funded");
+  });
+  it("preserves the created task when local funding fails", async () => {
+    const created = tasksResponseSchemas.createOrder.parse(milestoneOrder());
+    const client = fakeClient({
+      post: vi.fn(async () => ({ task: created, funding: { kind: "eip712" as const } })),
+      getOrder: vi.fn(async () => milestoneOrder()),
+    });
+    const { dependencies, home } = await fixture(true, client);
+    dependencies.readStdin = async () => BRIEF;
+    await writeProfile(home);
+    dependencies.tasks!.chain = fakeChain({
+      fund: vi.fn(async () => {
+        throw new TasksChainError("The recorded local scope is unavailable.", false, {
+          authorizationExposed: false,
+        });
+      }),
+    });
+    const result = await invoke(
+      [
+        "post",
+        "--title",
+        "Build a page",
+        "--brief",
+        "-",
+        "--amount",
+        "100",
+        "--deadline",
+        "7d",
+        "--fund",
+        "--yes",
+      ],
+      dependencies,
+    );
+    expect(result.code).toBe(1);
+    expect(result.value).toMatchObject({
+      workOrder: { id: ID },
+      ok: false,
+      funding: { state: "unknown" },
     });
   });
 });

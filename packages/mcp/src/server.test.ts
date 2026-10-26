@@ -213,6 +213,8 @@ describe("Agent Cash MCP marketplace tools", () => {
       "router.buy",
       "tasks.search",
       "tasks.show",
+      "tasks.pending",
+      "tasks.checkin",
       "tasks.post",
       "tasks.propose",
       "tasks.submit",

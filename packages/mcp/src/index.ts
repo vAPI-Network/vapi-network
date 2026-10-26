@@ -162,3 +162,5 @@ export {
   type SwarmDelegateResult,
 } from "./actions/swarm-agent.js";
 export { createAccountsPort, type CreateAccountsPortOptions } from "./tools/accounts.js";
+
+export { createHostedTasksClient } from "./tasks-client.js";
