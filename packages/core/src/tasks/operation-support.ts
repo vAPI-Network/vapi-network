@@ -28,6 +28,7 @@ export class TaskOperationError extends Error {
     readonly code: string,
     message: string,
     readonly manifestHash?: `0x${string}`,
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "TaskOperationError";

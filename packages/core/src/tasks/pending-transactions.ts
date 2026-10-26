@@ -14,6 +14,8 @@ import {
   type ReconcileOperationResponse,
 } from "./types.js";
 
+import { taskV2StepSchema } from "./v2-write.js";
+
 export type PendingTransaction = {
   chainId: number;
   txHash: Hex;
@@ -76,19 +78,22 @@ const hash = z
   .string()
   .regex(/^0x[0-9a-fA-F]{64}$/)
   .transform((v) => v as Hex);
-const step = z.enum([
-  "create-escrow",
-  "approve-usdc",
-  "deposit-funds",
-  "fund-with-authorization",
-  "submit-delivery",
-  "release-funds",
-  "refund-buyer",
-  "raise-dispute",
-  "submit-counter-evidence",
-  "resolve-unmatched-dispute",
-  "timeout-refund",
-  "finalize",
+const step = z.union([
+  taskV2StepSchema,
+  z.enum([
+    "create-escrow",
+    "approve-usdc",
+    "deposit-funds",
+    "fund-with-authorization",
+    "submit-delivery",
+    "release-funds",
+    "refund-buyer",
+    "raise-dispute",
+    "submit-counter-evidence",
+    "resolve-unmatched-dispute",
+    "timeout-refund",
+    "finalize",
+  ]),
 ]);
 const operationStepKey = z.string().refine((key) => {
   const separator = key.indexOf(":");

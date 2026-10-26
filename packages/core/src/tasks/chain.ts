@@ -41,6 +41,8 @@ import {
 } from "./chain-verification.js";
 import type { CreateEscrowResponse, DeploymentResponse, GetOrderResponse } from "./types.js";
 
+import { createTaskV2Executor } from "./v2-execution.js";
+
 type PrivateOrder = Extract<GetOrderResponse["workOrder"], { version: "work-order-view-v1" }>;
 type Deployment = Extract<DeploymentResponse, { configured: true }>;
 type Prepared = CreateEscrowResponse;
@@ -737,6 +739,7 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
 
   return {
     available: true,
+    executeV2: createTaskV2Executor(options),
     signingAddress: account.address,
     getSigningAddress: async () => account.address,
     bindScope: async (binding) => {

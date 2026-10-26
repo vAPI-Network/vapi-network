@@ -46,6 +46,7 @@ export type TasksEscrowOperation = {
  * plan.from, and operation.expectedActor, and checks the frozen funding amount.
  */
 export interface TasksChain {
+  executeV2?: ReturnType<typeof import("./v2-execution.js").createTaskV2Executor>;
   readonly available: boolean;
   readonly signingAddress?: Address;
   /** Resolve the trusted local wallet identity without signing. */
