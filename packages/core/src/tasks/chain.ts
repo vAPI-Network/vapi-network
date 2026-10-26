@@ -25,6 +25,7 @@ import { TasksValidationError, safeTasksChainError } from "./chain-error.js";
 import type { ScopeBindings } from "./scope-bindings.js";
 import type { TasksDurationOverrides } from "./trusted-deployments.js";
 import { getTrustedTasksFactory } from "./trusted-deployments.js";
+import { taskFundingIntentNonce } from "./funding-intent.js";
 import { TasksClientError, type TasksClient } from "./client.js";
 import { freezeDeliveryManifest, sha256Hex } from "./delivery-manifest.js";
 import { taskFeeReservationKey } from "./dispute-fee.js";
@@ -800,6 +801,60 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
         );
         return resumedFromServer ? { ...result, resumedFromServer: true } : result;
       }),
+    async validateFunding(input) {
+      const { selected } = await milestone(input);
+      const ready = await deployment();
+      if (BigInt(selected.amountBaseUnits) !== input.grossBaseUnits)
+        throw new TasksValidationError(
+          "The task funding amount does not match the frozen milestone amount.",
+        );
+      const expected = await expectation(
+        selected,
+        ready,
+        "fund",
+        ["deposit-funds"],
+        input.counterparty,
+      );
+      await verifyClone(rpcFor(ready.chainId), expected, true);
+      return {
+        network: expected.milestone.network,
+        asset: ready.usdc,
+        payTo: expected.milestone.escrowContract,
+        amount: expected.milestone.amountBaseUnits,
+        poster: expected.buyer,
+      };
+    },
+    async fundingAuthorizationState(input) {
+      const chainId = Number(input.network.split(":")[1]);
+      const rpc = rpcFor(chainId);
+      if ((await rpc.getChainId()) !== chainId)
+        throw new TasksValidationError(
+          "The authorization RPC chain does not match the stored funding network.",
+        );
+      const block = await rpc.getBlock({ blockTag: "latest" });
+      if (block.number === null || block.timestamp <= BigInt(input.validBefore))
+        throw new TasksValidationError(
+          "The funding authorization has not expired on the trusted chain.",
+        );
+      return rpc.readContract({
+        blockNumber: block.number,
+        address: input.asset,
+        abi: [
+          {
+            type: "function",
+            name: "authorizationState",
+            stateMutability: "view",
+            inputs: [
+              { name: "authorizer", type: "address" },
+              { name: "nonce", type: "bytes32" },
+            ],
+            outputs: [{ type: "bool" }],
+          },
+        ],
+        functionName: "authorizationState",
+        args: [input.poster, input.nonce],
+      });
+    },
     async fund(input) {
       let exposed = true;
       try {
@@ -831,6 +886,17 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
         if (savedAuthorization || ready.capabilities.erc3009Funding) {
           const domain = ready.eip3009Domain!;
           const validBefore = expected.offerDeadline! + 1n;
+          const intentNonce =
+            input.fundingIntent === undefined
+              ? undefined
+              : taskFundingIntentNonce(input.fundingIntent, {
+                  domain,
+                  types: authorizationTypes,
+                  from: account.address,
+                  to: getAddress(selected.escrowContract),
+                  value: input.grossBaseUnits,
+                  validBefore,
+                });
           const messageFor = (nonce: Hex) => ({
             from: getAddress(account.address),
             to: getAddress(selected.escrowContract),
@@ -854,7 +920,18 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
                 throw new TasksValidationError(
                   "Funding authorization randomness must contain 32 bytes.",
                 );
-              const nonce = `0x${Buffer.from(bytes).toString("hex")}` as Hex;
+              const nonce = intentNonce ?? (`0x${Buffer.from(bytes).toString("hex")}` as Hex);
+              await input.beforeFundingSignature?.({
+                coordinates: {
+                  network: expected.milestone.network,
+                  asset: ready.usdc,
+                  payTo: getAddress(selected.escrowContract),
+                  amount: input.grossBaseUnits.toString(),
+                  poster: expected.buyer,
+                },
+                nonce,
+                validBefore: validBefore.toString(),
+              });
               const signature = await account.signTypedData({
                 domain,
                 types: authorizationTypes,
@@ -867,6 +944,7 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
           // A saved authorization is exposure even if the process crashed before the explicit marker.
           exposed = true;
           if (
+            (intentNonce !== undefined && authorization.nonce.toLowerCase() !== intentNonce) ||
             authorization.validAfter !== "0" ||
             authorization.validBefore !== validBefore.toString() ||
             !isAddressEqual(

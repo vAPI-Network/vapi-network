@@ -328,6 +328,7 @@ describe("task funding", () => {
       escrowId: ESCROW,
       grossBaseUnits: 100000000n,
       idempotencyKey: KEY,
+      beforeFundingSignature: expect.any(Function),
     });
   });
 
@@ -345,7 +346,7 @@ describe("task funding", () => {
     );
   });
 
-  it("retries an exposed funding reservation with the same key and no double count", async () => {
+  it("blocks an unresolved exposed funding reservation without double counting", async () => {
     const args = await funding();
     const pending = createPendingTransactions(join(args.ledgerPath, ".."));
     args.chain.fund
@@ -360,20 +361,16 @@ describe("task funding", () => {
     expect(await readSpendLedger(args.ledgerPath, new Date(NOW))).toMatchObject({
       spentAtomic: "100000000",
     });
-    await expect(
-      fundTask({ ...args, pending, approval: { granted: true } }),
-    ).resolves.toMatchObject({
-      outcome: "done",
-    });
+    await expect(fundTask({ ...args, pending, approval: { granted: true } })).rejects.toMatchObject(
+      { code: "funding_unresolved" },
+    );
     expect(await readSpendLedger(args.ledgerPath, new Date(NOW))).toMatchObject({
       spentAtomic: "100000000",
     });
-    expect(args.chain.fund.mock.calls[0]![0].idempotencyKey).toBe(
-      args.chain.fund.mock.calls[1]![0].idempotencyKey,
-    );
+    expect(args.chain.fund).toHaveBeenCalledOnce();
   });
 
-  it("reuses one real pending reservation after authorization exposure without double counting", async () => {
+  it("retains one real pending reservation and blocks another authorization after exposure", async () => {
     const args = await funding();
     const home = join(args.ledgerPath, "..");
     vi.stubEnv("VAPI_HOME", home);
@@ -412,15 +409,13 @@ describe("task funding", () => {
         idempotencyKey: generatedKeys,
         approval: { granted: true },
       }),
-    ).resolves.toMatchObject({ outcome: "done" });
+    ).rejects.toMatchObject({ code: "funding_unresolved" });
     const secondLedger = JSON.parse(await readFile(args.ledgerPath, "utf8"));
     expect(secondLedger.spentAtomic).toBe("100000000");
     expect(secondLedger.reservations).toHaveLength(1);
     expect(secondLedger.reservations[0].id).toBe(firstLedger.reservations[0].id);
     expect(await reopenedPending.existingReservationId!(ESCROW)).toBe(KEY);
-    expect(args.chain.fund.mock.calls[1]![0].idempotencyKey).toBe(
-      args.chain.fund.mock.calls[0]![0].idempotencyKey,
-    );
+    expect(args.chain.fund).toHaveBeenCalledOnce();
     expect(generatedKeys).toHaveBeenCalledOnce();
   });
 
@@ -477,12 +472,14 @@ describe("task funding", () => {
       active -= 1;
       return chainResult();
     });
-    await Promise.all([
+    const results = await Promise.allSettled([
       fundTask({ ...args, pending: firstPending, approval: { granted: true } }),
       fundTask({ ...args, pending: secondPending, approval: { granted: true } }),
     ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
     expect(highest).toBe(1);
-    expect(args.chain.fund).toHaveBeenCalledTimes(2);
+    expect(args.chain.fund).toHaveBeenCalledOnce();
     expect(await readSpendLedger(args.ledgerPath, new Date(NOW))).toMatchObject({
       spentAtomic: "100000000",
     });
@@ -537,7 +534,7 @@ describe("task funding", () => {
     expect(await stored.retainedReservation?.(ESCROW)).toMatchObject({ invalidated: true });
   });
 
-  it("persists reservation metadata before the chain call and resumes it across UTC days", async () => {
+  it("persists reservation metadata and blocks an unresolved retry across UTC days", async () => {
     const args = await funding();
     const home = join(args.ledgerPath, "..");
     const pending = createPendingTransactions(home);
@@ -561,7 +558,8 @@ describe("task funding", () => {
     args.chain.fund.mockResolvedValueOnce(chainResult());
     await expect(
       fundTask({ ...args, pending, now: () => nextDay, approval: { granted: true } }),
-    ).resolves.toMatchObject({ outcome: "done" });
+    ).rejects.toMatchObject({ code: "funding_unresolved" });
+    expect(args.chain.fund).toHaveBeenCalledOnce();
     expect(await readSpendLedger(args.ledgerPath, nextDay)).toMatchObject({
       spentAtomic: "200000000",
     });
@@ -610,15 +608,15 @@ describe("task funding", () => {
       spentAtomic: "100000000",
       reservations: [{ id: KEY, amountAtomic: "100000000", kind: "escrow-funding" }],
     });
-    expect(
-      await fundTask({
+    await expect(
+      fundTask({
         ...args,
         caps: { ...args.caps, perDayAtomic: "199999999" },
         policy: { ...args.policy, maxPerTaskUsd: 200 },
         approval: { granted: true },
         idempotencyKey: () => CREATE_KEY,
       }),
-    ).toMatchObject({ outcome: "refused", reason: "policy.perDay" });
+    ).rejects.toMatchObject({ code: "funding_unresolved" });
     expect(args.chain.fund).toHaveBeenCalledTimes(1);
   });
 
@@ -731,9 +729,9 @@ describe("task funding", () => {
     const policy = { ...args.policy, maxPerTaskUsd: 200 };
     await fundTask({ ...args, policy, approval: { granted: true } });
     const bytes = await readFile(args.ledgerPath, "utf8");
-    await expect(fundTask({ ...args, policy, approval: { granted: true } })).rejects.toThrow(
-      "already exists",
-    );
+    await expect(fundTask({ ...args, policy, approval: { granted: true } })).rejects.toMatchObject({
+      code: "funding_unresolved",
+    });
     expect(args.chain.fund).toHaveBeenCalledTimes(1);
     expect(await readFile(args.ledgerPath, "utf8")).toBe(bytes);
   });

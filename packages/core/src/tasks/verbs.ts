@@ -2,6 +2,8 @@
 export const TASKS_CLIENT_VERBS = [
   "search",
   "show",
+  "pending",
+  "checkin",
   "post",
   "propose",
   "submit",

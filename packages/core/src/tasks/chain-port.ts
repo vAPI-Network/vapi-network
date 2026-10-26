@@ -16,6 +16,18 @@ export type TasksChainResult = {
   blockNumber?: string;
 };
 
+export type VerifiedFundingCoordinates = {
+  network: string;
+  asset: Address;
+  payTo: Address;
+  amount: string;
+  poster: Address;
+};
+export type FundingAuthorization = {
+  coordinates: VerifiedFundingCoordinates;
+  nonce: `0x${string}`;
+  validBefore: string;
+};
 export type TasksEscrowOperation = {
   escrowId: string;
   idempotencyKey: string;
@@ -44,13 +56,27 @@ export interface TasksChain {
     idempotencyKey: string;
     counterparty?: string;
   }): Promise<TasksChainResult>;
+  /** Read-only verification shared with standard x402 funding; never signs or broadcasts. */
+  validateFunding?(
+    input: TasksEscrowOperation & { grossBaseUnits: bigint },
+  ): Promise<VerifiedFundingCoordinates>;
+  /** Verify expiry and nonce state at the same trusted chain block. Never infer expiry from the local clock alone. */
+  fundingAuthorizationState?(
+    input: VerifiedFundingCoordinates & { nonce: `0x${string}`; validBefore: string },
+  ): Promise<boolean>;
   /**
    * Sign EIP-3009 ReceiveWithAuthorization locally BEFORE preparing funding.
    * Once the authorization may have left the machine, failures must retain the
    * spend reservation even if no transaction was broadcast. Only a typed error
    * with broadcast:false and authorizationExposed:false permits rollback.
    */
-  fund(input: TasksEscrowOperation & { grossBaseUnits: bigint }): Promise<TasksChainResult>;
+  fund(
+    input: TasksEscrowOperation & {
+      grossBaseUnits: bigint;
+      fundingIntent?: unknown;
+      beforeFundingSignature?: (authorization: FundingAuthorization) => Promise<void>;
+    },
+  ): Promise<TasksChainResult>;
   /** Prepare with manifest file IDs and exact note; verify the server's hash before broadcasting. */
   deliver(
     input: TasksEscrowOperation & { manifest: FrozenDeliveryManifest; note: string },

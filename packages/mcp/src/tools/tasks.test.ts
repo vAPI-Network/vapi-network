@@ -1495,6 +1495,10 @@ describe("task MCP tools", () => {
         ) {
           expect(tool.description).toMatch(/^Executes the user's own /u);
           expect(tool.description).toContain("nothing is custodial");
+        } else if (verb === "post") {
+          expect(tool.description).toContain("Posts a task with a budget");
+          expect(tool.description).toContain("local vault");
+          expect(tool.description).toContain("policy");
         } else {
           expect(tool.description).toContain("Does not move money");
         }
@@ -1847,6 +1851,13 @@ describe("task MCP tools", () => {
           "message needs sign-in. Call auth.link for the acting wallet.",
         );
         const ledgerBeforeRefusal = await readFile(ledgerPath);
+        // Policy checks use a fresh milestone: the funded one must refuse another attempt.
+        const policyId = "44444444-4444-4444-8444-444444444444";
+        const policyOrder = structuredClone(moneyOrder);
+        policyOrder.workOrder.id = policyId;
+        policyOrder.workOrder.milestones[0]!.id = "55555555-5555-4555-8555-555555555555";
+        policyOrder.workOrder.milestones[0]!.workOrderId = policyId;
+        policyOrder.workOrder.milestones[0]!.escrowState = "created";
         await mkdir(join(home, "agents"));
         await writeFile(
           join(home, "agents", "strict.json"),
@@ -1861,9 +1872,10 @@ describe("task MCP tools", () => {
             createdAt: "2026-10-08T00:00:00.000Z",
           }),
         );
+        getOrder.mockResolvedValueOnce(policyOrder);
         const refused = await behaviorServer.callTool({
           name: "tasks.fund",
-          arguments: { id: ID },
+          arguments: { id: policyId },
         });
         expect(refused).toMatchObject({
           isError: true,
@@ -1890,9 +1902,10 @@ describe("task MCP tools", () => {
             createdAt: "2026-10-08T00:00:00.000Z",
           }),
         );
+        getOrder.mockResolvedValueOnce(policyOrder);
         const approval = await behaviorServer.callTool({
           name: "tasks.fund",
-          arguments: { id: ID },
+          arguments: { id: policyId },
         });
         expect(approval).toMatchObject({
           isError: true,
@@ -1921,9 +1934,10 @@ describe("task MCP tools", () => {
           }),
         );
         await store.setSpendCaps("main", { perCallAtomic: "1000000", perDayAtomic: "99999" });
+        getOrder.mockResolvedValueOnce(policyOrder);
         const perDay = await behaviorServer.callTool({
           name: "tasks.fund",
-          arguments: { id: ID },
+          arguments: { id: policyId },
         });
         expect(perDay).toMatchObject({
           isError: true,
@@ -2015,9 +2029,10 @@ describe("task MCP tools", () => {
           },
         });
         try {
+          getOrder.mockResolvedValueOnce(policyOrder);
           const missingFund = await noChainServer.callTool({
             name: "tasks.fund",
-            arguments: { id: ID },
+            arguments: { id: policyId },
           });
           expect(missingFund).toMatchObject({ isError: true });
           expect(JSON.parse(missingFund.content[0]!.text)).toEqual({
@@ -2106,5 +2121,185 @@ describe("task MCP tools", () => {
     } finally {
       await server.close();
     }
+  });
+});
+
+describe("Tasks v2 local MCP parity", () => {
+  it("posts native v2 terms, records check-ins, filters pending actions and withdraws without signing", async () => {
+    const { v2Terms, v2Checkins, v2Pending } =
+      await import("../../../core/src/tasks/fixtures/tasks-v2.js");
+    const client = {
+      deployment: vi.fn(async () => ({ configured: true, network: "eip155:8453", feeBp: 0 })),
+      createOrder: vi.fn(async () => ({ workOrder: { id: ID } })),
+      checkin: vi.fn(async () => v2Checkins),
+      pending: vi.fn(async () => v2Pending),
+      submit: vi.fn(async () => ({ proposal: { id: ESCROW, state: "withdrawn" } })),
+    } as unknown as TasksClient;
+    const chain = { ...missingTasksChain, signScopeMessage: vi.fn() };
+    const { server } = await watchServer({
+      client,
+      chain,
+      now: () => new Date(NOW),
+      randomUUID: () => ID,
+    });
+    const posted = await server.callTool({
+      name: "tasks.post",
+      arguments: {
+        ...v2Terms,
+        title: "Build a page",
+        brief: "Build a working page with tests.",
+        amountUsd: "100",
+        deadline: "7d",
+      },
+    });
+    expect(posted.isError, JSON.stringify(posted)).not.toBe(true);
+    expect(client.createOrder).toHaveBeenCalledWith(expect.objectContaining(v2Terms), {
+      idempotencyKey: ID,
+    });
+    for (const status of ["on-track", "blocked", "need-input"]) {
+      const checkin = await server.callTool({
+        name: "tasks.checkin",
+        arguments: { id: ID, status, note: "Shortlist ready", link: "https://example.com/proof" },
+      });
+      expect(checkin.isError, JSON.stringify(checkin)).not.toBe(true);
+      expect(client.checkin).toHaveBeenLastCalledWith(
+        ID,
+        { status, note: "Shortlist ready", link: "https://example.com/proof" },
+        { idempotencyKey: ID },
+      );
+    }
+    const pending = await server.callTool({ name: "tasks.pending", arguments: { role: "worker" } });
+    expect(pending.structuredContent).toMatchObject(v2Pending);
+    expect(
+      (await server.callTool({ name: "tasks.pending", arguments: { role: "poster" } }))
+        .structuredContent,
+    ).toMatchObject({ pendingActions: [] });
+    const withdrawn = await server.callTool({
+      name: "tasks.submit",
+      arguments: { id: ID, withdraw: true, proposalId: ESCROW },
+    });
+    expect(withdrawn.isError, JSON.stringify(withdrawn)).not.toBe(true);
+    expect(client.submit).toHaveBeenCalledWith(
+      ID,
+      { withdraw: true, proposalId: ESCROW },
+      { idempotencyKey: ID },
+    );
+    expect(chain.signScopeMessage).not.toHaveBeenCalled();
+    expect(
+      (
+        await server.callTool({
+          name: "tasks.submit",
+          arguments: { id: ID, withdraw: true, proofUrls: ["https://example.com/proof"] },
+        })
+      ).isError,
+    ).toBe(true);
+  });
+  it("preserves the canonical hosted lifecycle and all recorded deck watch payloads", async () => {
+    const { v2Events, v2Lifecycle, v2NextAction } =
+      await import("../../../core/src/tasks/fixtures/tasks-v2.js");
+    const events = v2Events.map((event, i) => ({
+      ...event,
+      sequence: i + 1,
+      at: NOW,
+      actor: privateKeyToAccount(PRIVATE_KEY).address,
+    }));
+    const client = {
+      show: vi.fn(async () => ({
+        workOrder: { id: ID, title: "Task", version: "work-order-view-v1", milestones: [] },
+        lifecycle: v2Lifecycle,
+        nextAction: v2NextAction,
+      })),
+      events: vi.fn(async () => ({ events, nextAfter: events.length })),
+    } as unknown as TasksClient;
+    const { server } = await watchServer({ client, now: () => new Date(NOW) });
+    const shown = await server.callTool({ name: "tasks.show", arguments: { id: ID } });
+    expect(shown.structuredContent).toMatchObject({
+      lifecycle: v2Lifecycle,
+      nextAction: v2NextAction,
+    });
+    const watched = await server.callTool({
+      name: "tasks.watch",
+      arguments: { id: ID, waitSeconds: 1, until: "released" },
+    });
+    expect(watched.isError, JSON.stringify(watched)).not.toBe(true);
+    expect(watched.structuredContent).toMatchObject({ events, nextCursor: events.length });
+  });
+  it("keeps the posted task when T7 funding is unavailable", async () => {
+    const { v2FundingUnavailable } = await import("../../../core/src/tasks/fixtures/tasks-v2.js");
+    const client = {
+      deployment: vi.fn(async () => ({ configured: true, network: "eip155:8453", feeBp: 0 })),
+      post: vi.fn(async () => ({ task: { workOrder: { id: ID } }, funding: v2FundingUnavailable })),
+    } as unknown as TasksClient;
+    const { server } = await watchServer({ client, now: () => new Date(NOW) });
+    const result = await server.callTool({
+      name: "tasks.post",
+      arguments: {
+        title: "Build a page",
+        brief: "Build a working page.",
+        amountUsd: "100",
+        deadline: "7d",
+        fund: true,
+      },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      workOrder: { id: ID },
+      funding: v2FundingUnavailable,
+    });
+  });
+  it("never accepts model-supplied approval for post-and-fund", async () => {
+    const client = {
+      deployment: vi.fn(async () => ({ configured: true, network: "eip155:8453", feeBp: 0 })),
+      post: vi.fn(async () => ({ task: { workOrder: { id: ID } }, funding: { kind: "eip712" } })),
+      getOrder: vi.fn(async () => ({
+        workOrder: {
+          version: "work-order-view-v1",
+          id: ID,
+          milestones: [
+            {
+              id: ESCROW,
+              workOrderId: ID,
+              amountBaseUnits: "1000000",
+              escrowContract: "0x2222222222222222222222222222222222222222",
+            },
+          ],
+        },
+      })),
+    } as unknown as TasksClient;
+    const chain = { ...missingTasksChain, available: true, fund: vi.fn() };
+    const { server, home } = await watchServer({ client, chain, now: () => new Date(NOW) });
+    const result = await server.callTool({
+      name: "tasks.post",
+      arguments: {
+        title: "Build a page",
+        brief: "Build a working page.",
+        amountUsd: "1",
+        deadline: "7d",
+        fund: true,
+      },
+    });
+    expect(result.structuredContent).toMatchObject({ ok: false, approval: true });
+    expect(chain.fund).not.toHaveBeenCalled();
+    expect(await readFile(join(home, "spend-ledger.json"), "utf8").catch(() => null)).toBeNull();
+    const attemptedApproval = await server.callTool({
+      name: "tasks.post",
+      arguments: {
+        title: "Build a page",
+        brief: "Build a working page.",
+        amountUsd: "1",
+        deadline: "7d",
+        fund: true,
+        yes: true,
+      },
+    });
+    expect(attemptedApproval.isError).toBe(true);
+    expect(chain.fund).not.toHaveBeenCalled();
+  });
+  it("keeps tool descriptions free of the hosted guard phrase", async () => {
+    const { server } = await watchServer({ now: () => new Date(NOW) });
+    for (const tool of (await server.listTools()).tools.filter((tool) =>
+      tool.name.startsWith("tasks."),
+    ))
+      expect(tool.description).not.toMatch(/fund transfer/iu);
   });
 });

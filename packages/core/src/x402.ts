@@ -578,6 +578,8 @@ export async function buildX402Payment(args: {
   nowSeconds?: number;
   maximumValidBeforeSeconds?: number;
   nonce?: Hex;
+  beforeSign?: (typedData: X402TypedData) => Promise<void>;
+  onSigned?: () => void;
   fetchImpl?: typeof fetch;
   paymentId?: string;
 }): Promise<{
@@ -638,7 +640,9 @@ export async function buildX402Payment(args: {
       ? {}
       : { maximumValidBeforeSeconds: args.maximumValidBeforeSeconds }),
   });
+  await args.beforeSign?.(typedData);
   const signature = await args.signer.signTypedData(typedData);
+  args.onSigned?.();
   const payload: X402PaymentPayload = {
     x402Version: 2,
     resource: args.quote.resource,
@@ -662,6 +666,8 @@ export async function buildCompatibleX402Payment(args: {
   nowSeconds?: number;
   maximumValidBeforeSeconds?: number;
   nonce?: Hex;
+  beforeSign?: (typedData: X402TypedData) => Promise<void>;
+  onSigned?: () => void;
   fetchImpl?: typeof fetch;
   paymentId?: string;
 }): Promise<{
@@ -672,6 +678,8 @@ export async function buildCompatibleX402Payment(args: {
   const payment = await buildX402Payment({
     signer: args.account,
     quote: args.quote,
+    ...(args.beforeSign ? { beforeSign: args.beforeSign } : {}),
+    ...(args.onSigned ? { onSigned: args.onSigned } : {}),
     ...(args.nowSeconds === undefined ? {} : { nowSeconds: args.nowSeconds }),
     ...(args.maximumValidBeforeSeconds === undefined
       ? {}

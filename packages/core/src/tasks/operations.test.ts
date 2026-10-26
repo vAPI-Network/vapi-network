@@ -308,7 +308,7 @@ describe("taskStatus", () => {
     const client = { publicTask: vi.fn().mockResolvedValue(task) } as unknown as TasksClient;
     await expect(
       taskStatus({ ...operationFixture(), client }, { id: ORDER, signedIn: false }),
-    ).resolves.toEqual({ task });
+    ).resolves.toEqual({ task, lifecycle: null, nextAction: { action: "none" } });
   });
 
   it("returns signed chain state and sorted events", async () => {
@@ -883,5 +883,18 @@ describe("signTaskScope local role derivation", () => {
       code: "wrong_role",
       message: "A proposer cannot sign this task scope.",
     });
+  });
+});
+
+describe("post-and-fund amount binding", () => {
+  it("rejects an escrow whose amount differs from the posted total before reservation or signing", async () => {
+    const f = await fundingFixture("100000000");
+    await expect(
+      fundTaskOperation(f.context, { ...f.input, expectedGrossBaseUnits: 10_000_000n }),
+    ).rejects.toMatchObject({ code: "invalid_response" });
+    expect(f.context.chain.fund).not.toHaveBeenCalled();
+    expect((await readSpendLedger(f.input.ledgerPath, f.input.now(), "main")).spentAtomic).toBe(
+      "0",
+    );
   });
 });
