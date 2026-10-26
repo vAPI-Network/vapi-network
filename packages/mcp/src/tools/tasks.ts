@@ -27,6 +27,7 @@ import {
   taskFeeReservationKey,
   fundTaskOperation,
   fundTaskWithX402,
+  requireTaskMethod,
   taskMoneySnapshot,
   messageTask,
   missingTasksChain,
@@ -333,7 +334,15 @@ function lazyTasksChain(
         throw new TasksChainError("Local funding verification is unavailable.", false, {
           authorizationExposed: false,
         });
-      await initialized.validateFunding(input);
+      return initialized.validateFunding(input);
+    },
+    fundingAuthorizationState: async (input) => {
+      const initialized = await get();
+      if (!initialized.fundingAuthorizationState)
+        throw new TasksChainError("Authorization state verification is unavailable.", false, {
+          authorizationExposed: false,
+        });
+      return initialized.fundingAuthorizationState(input);
     },
     fund: async (input) => {
       let initialized: TasksChain;
@@ -523,7 +532,12 @@ export function createTasksTools(options: TasksToolsOptions) {
     },
     async pending(input: Input<typeof tasksPendingTool>) {
       const ctx = await acting(input.wallet);
-      const result = await taskRequest("pending", "pending", () => ctx.client.pending(), ctx);
+      const result = await taskRequest(
+        "pending",
+        "pending",
+        () => requireTaskMethod(ctx.client, "pending")(),
+        ctx,
+      );
       return taskResult({
         pendingActions: input.role
           ? result.pendingActions.filter((item) => item.role === input.role)
@@ -541,7 +555,10 @@ export function createTasksTools(options: TasksToolsOptions) {
         await taskRequest(
           "checkin",
           "checkin",
-          () => ctx.client.checkin(input.id, body, { idempotencyKey: ctx.randomUUID() }),
+          () =>
+            requireTaskMethod(ctx.client, "checkin")(input.id, body, {
+              idempotencyKey: ctx.randomUUID(),
+            }),
           ctx,
         ),
       );
@@ -741,7 +758,7 @@ export function createTasksTools(options: TasksToolsOptions) {
         policy,
         caps: await spendCapsForWallet(options.wallets!, ctx.selected.name),
         wallet: ctx.selected.name,
-        ledgerPath: options.ledgerPath ?? getVapiPaths().ledger,
+        ledgerPath: options.ledgerPath ?? getVapiPaths(home).ledger,
         now,
         // Stdio has no human approval channel. Model arguments cannot grant approval.
         approval: { granted: false },

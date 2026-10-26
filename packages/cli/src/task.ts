@@ -23,6 +23,7 @@ import {
   resolveUnmatchedTaskOperation,
   fundTaskOperation,
   fundTaskWithX402,
+  requireTaskMethod,
   formatBaseUnitsUsd,
   messageTask,
   missingTasksChain,
@@ -241,7 +242,15 @@ function lazyTasksChain(
         throw new TasksChainError("Local funding verification is unavailable.", false, {
           authorizationExposed: false,
         });
-      await initialized.validateFunding(input);
+      return initialized.validateFunding(input);
+    },
+    fundingAuthorizationState: async (input) => {
+      const initialized = await get();
+      if (!initialized.fundingAuthorizationState)
+        throw new TasksChainError("Authorization state verification is unavailable.", false, {
+          authorizationExposed: false,
+        });
+      return initialized.fundingAuthorizationState(input);
     },
     fund: async (input) => {
       let initialized: TasksChain;
@@ -817,7 +826,9 @@ async function taskCommandInner(
     const context = await taskContext(parsed, io, dependencies);
     signedIn(context);
     if (verb === "pending") {
-      const result = await taskRequest(verb, "pending", () => context.client.pending());
+      const result = await taskRequest(verb, "pending", () =>
+        requireTaskMethod(context.client, "pending")(),
+      );
       taskOutput(
         io,
         json,
@@ -840,7 +851,9 @@ async function taskCommandInner(
       });
       if (!input.success) throw new UsageError(input.error.issues[0]!.message);
       const result = await taskRequest(verb, "checkin", () =>
-        context.client.checkin(id!, input.data, { idempotencyKey: context.randomUUID() }),
+        requireTaskMethod(context.client, "checkin")(id!, input.data, {
+          idempotencyKey: context.randomUUID(),
+        }),
       );
       taskOutput(io, json, context, verb, result, [`Check-in recorded: ${status}.`]);
     }

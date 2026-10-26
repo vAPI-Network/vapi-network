@@ -23,6 +23,7 @@ import {
   X402Error,
   type X402NetworkConfig,
   type X402Quote,
+  type X402TypedData,
   type X402SettlementOutcome,
 } from "./x402.js";
 
@@ -121,7 +122,12 @@ export type CompleteX402PaymentArgs<T = undefined> = {
   maxPriceUsd?: number | string;
   preferNetworks?: string[];
   /** Escrow funding shares the task cap and daily ledger with the signed-intent path. */
-  taskFunding?: { taskKey: string; maxPerTaskAtomic: bigint };
+  taskFunding?: {
+    taskKey: string;
+    maxPerTaskAtomic: bigint;
+    beforeSign?: (data: X402TypedData, reservation: { id: string; date: string }) => Promise<void>;
+    onUnsent?: () => Promise<void>;
+  };
   requiredNetwork?: string;
   expectedPayTo?: string;
   paymentId?: string;
@@ -275,15 +281,21 @@ export async function completeX402Payment<T = undefined>(
     ...(args.wallet === undefined ? {} : { wallet: args.wallet }),
     ...(args.taskFunding === undefined
       ? {}
-      : { kind: "escrow-funding" as const, ...args.taskFunding }),
+      : {
+          kind: "escrow-funding" as const,
+          taskKey: args.taskFunding.taskKey,
+          maxPerTaskAtomic: args.taskFunding.maxPerTaskAtomic,
+        }),
   };
   let reservationId: string | undefined;
   let reservedOn: string | undefined;
   if (args.runBudget === undefined) {
-    await reserveSpend(quote.amountAtomic, args.caps, {
+    if (args.taskFunding) reservationId = args.paymentId ?? randomUUID();
+    const reservation = await reserveSpend(quote.amountAtomic, args.caps, {
       ...spendReservation,
-      ...(args.taskFunding ? { reservationId: args.paymentId ?? randomUUID() } : {}),
+      ...(reservationId ? { reservationId } : {}),
     });
+    reservedOn = reservation.date;
   } else {
     reservationId = args.paymentId ?? `x402_${randomBytes(12).toString("hex")}`;
     const reservation = await reserveSpend(quote.amountAtomic, args.caps, {
@@ -301,10 +313,21 @@ export async function completeX402Payment<T = undefined>(
 
   const signStarted = nowMs();
   let payment: Awaited<ReturnType<typeof buildCompatibleX402Payment>>;
+  let authorizationProduced = false;
   try {
     payment = await buildCompatibleX402Payment({
       account: args.account,
       quote,
+      ...(args.taskFunding
+        ? {
+            beforeSign: async (data: X402TypedData) => {
+              await args.taskFunding?.beforeSign?.(data, { id: reservationId!, date: reservedOn! });
+            },
+            onSigned: () => {
+              authorizationProduced = true;
+            },
+          }
+        : {}),
       fetchImpl:
         args.fetchImpl ??
         createPublicFetch({
@@ -328,14 +351,22 @@ export async function completeX402Payment<T = undefined>(
       }
     }
   } catch (error) {
-    if (args.runBudget !== undefined && reservationId !== undefined && reservedOn !== undefined) {
+    if (
+      (args.runBudget !== undefined || args.taskFunding !== undefined) &&
+      !authorizationProduced &&
+      reservationId !== undefined &&
+      reservedOn !== undefined
+    ) {
       const released = await releaseUnsentReservation(
         args,
         quote.amountAtomic,
         reservationId,
         reservedOn,
       );
-      if (released) args.runBudget.release(reservationId);
+      if (released) {
+        args.runBudget?.release(reservationId);
+        await args.taskFunding?.onUnsent?.();
+      }
     }
     throw error;
   } finally {

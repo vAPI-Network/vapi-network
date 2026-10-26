@@ -15,6 +15,7 @@ export * from "./operation-support.js";
 export { createTasksClient, TasksClientError } from "./client.js";
 export type {
   TasksClient,
+  TasksClientV2,
   TasksClientOptions,
   PostTaskResponse,
   TasksRequestOptions,

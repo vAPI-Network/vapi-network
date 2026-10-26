@@ -5,7 +5,7 @@ import {
   TasksClientError,
   taskReadResponseSchema,
   taskPostResponseSchema,
-  type TasksClient,
+  type TasksClientV2,
   type TasksClientOptions,
   type TasksRequestOptions,
 } from "@vapi-network/core/tasks";
@@ -13,7 +13,7 @@ import {
 /** Enrich the HTTP SDK with the hosted canonical views and unsigned post intent.
  * MCP belongs to this interface package; signing and policy remain in core.
  */
-export function createHostedTasksClient(options: TasksClientOptions): TasksClient {
+export function createHostedTasksClient(options: TasksClientOptions): TasksClientV2 {
   const client = createTasksClient(options);
   const baseUrl = new URL(options.baseUrl).href.replace(/\/+$/u, "");
   const fetchImpl = options.fetch ?? createPublicFetch({ allowPrivateNetwork: false });

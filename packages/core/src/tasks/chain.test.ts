@@ -3349,3 +3349,92 @@ describe("hosted post-and-fund intent", () => {
     },
   );
 });
+
+describe("funding coordinate verification", () => {
+  it("returns the exact coordinates verified against the accepted scope and trusted RPC", async () => {
+    const api = fakeClient({ getOrder: vi.fn(async () => ({ workOrder: buyerOrder })) });
+    const chain = createTasksChain({
+      client: api,
+      account,
+      rpcFor: () => rpcHarness("success", [], undefined, true, { clone: { state: 1 } }).client,
+      pending: memoryPending(),
+      now: () => new Date("2026-01-01T00:00:00.000Z"),
+    });
+    expect(
+      await chain.validateFunding!({
+        orderId,
+        escrowId: milestoneId,
+        grossBaseUnits: 1_000_000n,
+        idempotencyKey: key,
+      }),
+    ).toEqual({
+      network: "eip155:84532",
+      asset: usdc,
+      payTo: escrow,
+      amount: "1000000",
+      poster: account.address,
+    });
+  });
+  it("checks nonce use on the recorded token and network instead of refreshed hosted metadata", async () => {
+    const readContract = vi.fn(async () => false);
+    const rpc = {
+      getChainId: async () => 84532,
+      getBlock: async () => ({ number: 1n, timestamp: 2n }),
+      readContract,
+    } as unknown as import("viem").PublicClient;
+    const api = fakeClient();
+    const chain = createTasksChain({
+      client: api,
+      account,
+      rpcFor: () => rpc,
+      pending: memoryPending(),
+    });
+    const nonce = `0x${"ab".repeat(32)}` as Hex;
+    expect(
+      await chain.fundingAuthorizationState!({
+        network: "eip155:84532",
+        asset: usdc,
+        payTo: escrow,
+        amount: "1000000",
+        poster: account.address,
+        nonce,
+        validBefore: "1",
+      }),
+    ).toBe(false);
+    expect(readContract).toHaveBeenCalledWith(
+      expect.objectContaining({
+        address: usdc,
+        functionName: "authorizationState",
+        args: [account.address, nonce],
+      }),
+    );
+    expect(api.deployment).not.toHaveBeenCalled();
+  });
+});
+
+it("does not treat an unused nonce as releasable before its onchain expiry", async () => {
+  const readContract = vi.fn(async () => false);
+  const rpc = {
+    getChainId: async () => 84532,
+    getBlock: async () => ({ number: 1n, timestamp: 1n }),
+    readContract,
+  } as unknown as import("viem").PublicClient;
+  const chain = createTasksChain({
+    client: fakeClient(),
+    account,
+    rpcFor: () => rpc,
+    pending: memoryPending(),
+  });
+  await expect(
+    chain.fundingAuthorizationState!({
+      network: "eip155:84532",
+      asset: usdc,
+      payTo: escrow,
+      amount: "1000000",
+      poster: account.address,
+      nonce: `0x${"ab".repeat(32)}`,
+      validBefore: "2",
+    }),
+  ).rejects.toThrow("not expired");
+  expect(readContract).not.toHaveBeenCalled();
+});

@@ -1851,6 +1851,13 @@ describe("task MCP tools", () => {
           "message needs sign-in. Call auth.link for the acting wallet.",
         );
         const ledgerBeforeRefusal = await readFile(ledgerPath);
+        // Policy checks use a fresh milestone: the funded one must refuse another attempt.
+        const policyId = "44444444-4444-4444-8444-444444444444";
+        const policyOrder = structuredClone(moneyOrder);
+        policyOrder.workOrder.id = policyId;
+        policyOrder.workOrder.milestones[0]!.id = "55555555-5555-4555-8555-555555555555";
+        policyOrder.workOrder.milestones[0]!.workOrderId = policyId;
+        policyOrder.workOrder.milestones[0]!.escrowState = "created";
         await mkdir(join(home, "agents"));
         await writeFile(
           join(home, "agents", "strict.json"),
@@ -1865,9 +1872,10 @@ describe("task MCP tools", () => {
             createdAt: "2026-10-08T00:00:00.000Z",
           }),
         );
+        getOrder.mockResolvedValueOnce(policyOrder);
         const refused = await behaviorServer.callTool({
           name: "tasks.fund",
-          arguments: { id: ID },
+          arguments: { id: policyId },
         });
         expect(refused).toMatchObject({
           isError: true,
@@ -1894,9 +1902,10 @@ describe("task MCP tools", () => {
             createdAt: "2026-10-08T00:00:00.000Z",
           }),
         );
+        getOrder.mockResolvedValueOnce(policyOrder);
         const approval = await behaviorServer.callTool({
           name: "tasks.fund",
-          arguments: { id: ID },
+          arguments: { id: policyId },
         });
         expect(approval).toMatchObject({
           isError: true,
@@ -1925,9 +1934,10 @@ describe("task MCP tools", () => {
           }),
         );
         await store.setSpendCaps("main", { perCallAtomic: "1000000", perDayAtomic: "99999" });
+        getOrder.mockResolvedValueOnce(policyOrder);
         const perDay = await behaviorServer.callTool({
           name: "tasks.fund",
-          arguments: { id: ID },
+          arguments: { id: policyId },
         });
         expect(perDay).toMatchObject({
           isError: true,
@@ -2019,9 +2029,10 @@ describe("task MCP tools", () => {
           },
         });
         try {
+          getOrder.mockResolvedValueOnce(policyOrder);
           const missingFund = await noChainServer.callTool({
             name: "tasks.fund",
-            arguments: { id: ID },
+            arguments: { id: policyId },
           });
           expect(missingFund).toMatchObject({ isError: true });
           expect(JSON.parse(missingFund.content[0]!.text)).toEqual({

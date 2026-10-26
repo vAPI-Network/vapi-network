@@ -816,6 +816,44 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
         input.counterparty,
       );
       await verifyClone(rpcFor(ready.chainId), expected, true);
+      return {
+        network: expected.milestone.network,
+        asset: ready.usdc,
+        payTo: expected.milestone.escrowContract,
+        amount: expected.milestone.amountBaseUnits,
+        poster: expected.buyer,
+      };
+    },
+    async fundingAuthorizationState(input) {
+      const chainId = Number(input.network.split(":")[1]);
+      const rpc = rpcFor(chainId);
+      if ((await rpc.getChainId()) !== chainId)
+        throw new TasksValidationError(
+          "The authorization RPC chain does not match the stored funding network.",
+        );
+      const block = await rpc.getBlock({ blockTag: "latest" });
+      if (block.number === null || block.timestamp <= BigInt(input.validBefore))
+        throw new TasksValidationError(
+          "The funding authorization has not expired on the trusted chain.",
+        );
+      return rpc.readContract({
+        blockNumber: block.number,
+        address: input.asset,
+        abi: [
+          {
+            type: "function",
+            name: "authorizationState",
+            stateMutability: "view",
+            inputs: [
+              { name: "authorizer", type: "address" },
+              { name: "nonce", type: "bytes32" },
+            ],
+            outputs: [{ type: "bool" }],
+          },
+        ],
+        functionName: "authorizationState",
+        args: [input.poster, input.nonce],
+      });
     },
     async fund(input) {
       let exposed = true;
@@ -883,6 +921,17 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
                   "Funding authorization randomness must contain 32 bytes.",
                 );
               const nonce = intentNonce ?? (`0x${Buffer.from(bytes).toString("hex")}` as Hex);
+              await input.beforeFundingSignature?.({
+                coordinates: {
+                  network: expected.milestone.network,
+                  asset: ready.usdc,
+                  payTo: getAddress(selected.escrowContract),
+                  amount: input.grossBaseUnits.toString(),
+                  poster: expected.buyer,
+                },
+                nonce,
+                validBefore: validBefore.toString(),
+              });
               const signature = await account.signTypedData({
                 domain,
                 types: authorizationTypes,

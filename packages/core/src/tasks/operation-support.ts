@@ -566,3 +566,16 @@ export function taskEventLine(event: {
                 : event.type;
   return `${event.sequence}: ${label}`;
 }
+
+export function requireTaskMethod<K extends keyof TasksClient>(
+  client: TasksClient,
+  name: K,
+): NonNullable<TasksClient[K]> {
+  const method = client[name];
+  if (typeof method !== "function")
+    throw new TaskOperationError(
+      "not_supported",
+      `Task method ${name} is not supported by this SDK adapter.`,
+    );
+  return method.bind(client) as NonNullable<TasksClient[K]>;
+}

@@ -47,6 +47,7 @@ export interface PendingTransactions {
   bindPreparationOperation(milestoneId: string, verb: string, operationId: string): Promise<void>;
   completePreparation(milestoneId: string, verb: string): Promise<void>;
   reservationId(escrowId: string, generate: () => string): Promise<string>;
+  clearExpiredFunding?(escrowId: string, reservationId: string): Promise<void>;
   existingReservationId?(escrowId: string): Promise<string | undefined>;
   retainedReservation?(escrowId: string): Promise<RetainedSpendReservation | undefined>;
   bindReservation?(escrowId: string, reservation: RetainedSpendReservation): Promise<void>;
@@ -303,6 +304,19 @@ export function createPendingTransactions(home: string): PendingTransactions {
         highest = Math.max(highest, nonce);
       }
       return highest + 1;
+    },
+    async clearExpiredFunding(milestoneId, reservationId) {
+      await locked(async (state) => {
+        milestoneKey(milestoneId);
+        if (state.reservations[milestoneId] && state.reservations[milestoneId] !== reservationId)
+          throw new Error("A different reservation owns the expired funding attempt.");
+        delete state.authorizations[milestoneId];
+        delete state.exposures[milestoneId];
+        delete state.reservations[milestoneId];
+        delete state.retainedReservations[milestoneId];
+        delete state.preparations[preparationKey(milestoneId, "fund")];
+        await save(state);
+      });
     },
     async exposure(milestoneId) {
       milestoneKey(milestoneId);

@@ -98,7 +98,7 @@ const serverErrorSchema = z.object({
 /** HTTP transport for Tasks; OAuth reads use tasks:read and writes use tasks:write.
  * Signing happens outside this client.
  */
-export function createTasksClient(options: TasksClientOptions): TasksClient {
+export function createTasksClient(options: TasksClientOptions): TasksClientV2 {
   let base: URL;
   try {
     base = new URL(options.baseUrl);
@@ -693,21 +693,21 @@ export type PostTaskResponse =
       };
     };
 export type TasksClient = {
-  fundingChallenge(
+  fundingChallenge?(
     id: string,
     call?: TasksRequestOptions,
   ): Promise<{ request: Request; response: Response } | null>;
-  show(id: string, call?: TasksRequestOptions): Promise<TaskResponse<"getOrder">>;
-  post(
+  show?(id: string, call?: TasksRequestOptions): Promise<TaskResponse<"getOrder">>;
+  post?(
     input: CreateOrderInput & { fund?: boolean },
     call: TasksMutationOptions,
   ): Promise<PostTaskResponse>;
-  checkin(
+  checkin?(
     id: string,
     input: CheckinInput,
     call: TasksMutationOptions,
   ): Promise<import("./v2.js").CheckinResponse>;
-  pending(call?: TasksRequestOptions): Promise<import("./v2.js").PendingActionsResponse>;
+  pending?(call?: TasksRequestOptions): Promise<import("./v2.js").PendingActionsResponse>;
   /** Public scope is anonymous; the server defaults to private scope.
    */
   listOrders(
@@ -830,3 +830,7 @@ export type TasksClient = {
     call?: TasksRequestOptions,
   ): Promise<TaskResponse<"configureWebhook">>;
 };
+
+/** Factory-created clients implement v2; old adapters only need the original interface. */
+export type TasksClientV2 = TasksClient &
+  Required<Pick<TasksClient, "fundingChallenge" | "show" | "post" | "checkin" | "pending">>;

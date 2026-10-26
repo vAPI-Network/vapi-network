@@ -25,7 +25,7 @@ The task SDK in `@vapi-network/core/tasks` talks to the vAPI task API and builds
 | `watch`             | Watches task events and moves money only when auto-release is on.            | Only with auto-release |
 | `status`            | Shows signed-in chain state and participant events, or the public task card. | No                     |
 
-The local CLI and MCP share these verbs. Hosted API availability can lag the client; unsupported operations report the server error without claiming success.
+The local CLI and MCP share these verbs. Hosted API availability can lag the local tools; unsupported operations report the server error without claiming success.
 
 ## CLI
 
@@ -151,7 +151,7 @@ Signed-in `show` reads the hosted canonical lifecycle and next action; JSON pres
 
 The T7 hosted implementation returns the created task plus `funding.error` for fresh posts until create-and-fund is available: `funding_requires_accepted_scope`, `bounty_funding_not_available_yet` or `pool_funding_not_available_yet`. CLI JSON retains both the task and that error and exits `1`; local MCP returns the same error with the task. No success is invented for unsupported funding. The existing task path remains award → sign → worker creates escrow → fund.
 
-`task fund` first probes `GET /v1/tasks/:id/fund`. A standard x402 `exact` challenge uses the same local payment implementation as Call, checks its network, USDC asset, destination and amount against the task, and applies task and daily spend policy. Local scope and escrow verification still apply. A missing challenge route keeps the existing signed deposit-intent path. Once a payment may have been exposed, spend stays reserved and the CLI refuses a second payment while the hosted state is uncertain. x402 funding is tested with recorded responses; the live T26 route has not been verified.
+`task fund` first probes `GET /v1/tasks/:id/fund`. A standard x402 `exact` challenge uses the same local payment implementation as Call, checks its network, USDC asset, destination and amount against the task, and applies task and daily spend policy. Local scope and escrow verification still apply. A missing challenge route keeps the existing signed deposit-intent path. Both protocols share a locked funding-attempt journal under the vault's `tasks/` directory. Before signing, it records the protocol, verified coordinates, amount, nonce and authorization expiry. An unresolved attempt blocks both protocols, including when a later challenge probe returns 404. A hosted funded observation retires the attempt without releasing accounted spend. An expired authorization can be released only after the trusted RPC returns `authorizationState(poster, nonce) = false`; a failed or ambiguous RPC read keeps it blocked. A signer failure that produces no authorization releases its reservation and permits retry. x402 funding is tested with recorded responses; the live T26 route has not been verified.
 
 Both funding paths poll the hosted escrow state unless `--no-wait` is supplied. They print `escrow funded` only after a hosted funded observation. `--no-wait` and an indexing timeout retain a pending result; payment acknowledgement alone is insufficient. `watch` also understands `task.checkin`, `task.stalled`, `task.claimed`, `task.judging`, `task.milestone` and `task.released`. Judging prints `deadline passed, N submissions, pick winners`; event JSON retains the original payload.
 

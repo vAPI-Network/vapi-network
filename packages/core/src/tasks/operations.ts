@@ -19,6 +19,7 @@ export {
   taskMoneySnapshot,
   taskPolicyForWallet,
   taskRequest,
+  requireTaskMethod,
   taskStateMatches,
   validTaskBrief,
 } from "./operation-support.js";
@@ -63,6 +64,7 @@ import {
   proposalTerms,
   taskMoneySnapshot,
   taskRequest,
+  requireTaskMethod,
   validTaskBrief,
   type MoneySnapshot,
   type TaskOperationContext,
@@ -143,7 +145,7 @@ export async function postTask(
     "post",
     input.fund ? "post" : "createOrder",
     () =>
-      (input.fund ? context.client.post : context.client.createOrder)(
+      (input.fund ? requireTaskMethod(context.client, "post") : context.client.createOrder)(
         {
           ...(input.fund ? { fund: true } : {}),
           ...input.order,
