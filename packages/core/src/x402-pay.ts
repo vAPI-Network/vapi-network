@@ -120,6 +120,8 @@ export type CompleteX402PaymentArgs<T = undefined> = {
   maxAtomic?: bigint;
   maxPriceUsd?: number | string;
   preferNetworks?: string[];
+  /** Escrow funding shares the task cap and daily ledger with the signed-intent path. */
+  taskFunding?: { taskKey: string; maxPerTaskAtomic: bigint };
   requiredNetwork?: string;
   expectedPayTo?: string;
   paymentId?: string;
@@ -271,11 +273,17 @@ export async function completeX402Payment<T = undefined>(
     ledgerPath: args.ledgerPath ?? getVapiPaths().ledger,
     now: args.now,
     ...(args.wallet === undefined ? {} : { wallet: args.wallet }),
+    ...(args.taskFunding === undefined
+      ? {}
+      : { kind: "escrow-funding" as const, ...args.taskFunding }),
   };
   let reservationId: string | undefined;
   let reservedOn: string | undefined;
   if (args.runBudget === undefined) {
-    await reserveSpend(quote.amountAtomic, args.caps, spendReservation);
+    await reserveSpend(quote.amountAtomic, args.caps, {
+      ...spendReservation,
+      ...(args.taskFunding ? { reservationId: args.paymentId ?? randomUUID() } : {}),
+    });
   } else {
     reservationId = args.paymentId ?? `x402_${randomBytes(12).toString("hex")}`;
     const reservation = await reserveSpend(quote.amountAtomic, args.caps, {

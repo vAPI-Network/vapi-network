@@ -1209,3 +1209,79 @@ describe("tasks storage upload", () => {
     expect(recorder.requests[1]!.redirect).toBe("manual");
   });
 });
+
+describe("recorded Tasks v2 boundaries (hosted T7)", () => {
+  it("preserves v2 terms, lifecycle and next action supplied by an HTTP read", async () => {
+    const { v2Terms, v2Lifecycle, v2NextAction } = await import("./fixtures/tasks-v2.js");
+    const value = {
+      workOrder: { ...privateOrder, terms: v2Terms },
+      lifecycle: v2Lifecycle,
+      nextAction: v2NextAction,
+    };
+    const recorder = recordedFetch(json(value));
+    expect(
+      await createTasksClient({ baseUrl: "https://tasks.example", fetch: recorder.fetch }).show(ID),
+    ).toEqual(value);
+    expect(recorder.requests[0]!.method).toBe("GET");
+  });
+  it("posts v2 HTTP terms and leaves one-call preparation to the interface adapter", async () => {
+    const recorder = recordedFetch(json({ workOrder: privateOrder }));
+    const client = createTasksClient({ baseUrl: "https://tasks.example", fetch: recorder.fetch });
+    const input = {
+      title: "Build a page",
+      description: "Build a working page",
+      policyFamily: "general-digital" as const,
+      shape: "task" as const,
+    };
+    expect(await client.post(input, { idempotencyKey: KEY })).toEqual({ workOrder: privateOrder });
+    expect(await requestBody(recorder.requests[0]!)).toEqual(input);
+    await expect(
+      client.post({ ...input, fund: true }, { idempotencyKey: KEY }),
+    ).rejects.toMatchObject({ code: "invalid_input" });
+    expect(recorder.requests).toHaveLength(1);
+  });
+  it("records check-ins, reads pending actions and withdraws without a signature", async () => {
+    const { v2Checkins, v2Pending } = await import("./fixtures/tasks-v2.js");
+    const withdrawn = { ...proposal, state: "withdrawn" };
+    const recorder = recordedFetch(
+      json(v2Checkins),
+      json(v2Pending),
+      json({ proposal: withdrawn }),
+    );
+    const client = createTasksClient({
+      baseUrl: "https://tasks.example",
+      token: "token",
+      fetch: recorder.fetch,
+    });
+    expect(
+      await client.checkin(
+        ID,
+        { status: "on-track", note: "Shortlist ready" },
+        { idempotencyKey: KEY },
+      ),
+    ).toEqual(v2Checkins);
+    expect(await client.pending()).toEqual(v2Pending);
+    expect(
+      await client.submit(ID, { withdraw: true, proposalId: OTHER_ID }, { idempotencyKey: KEY }),
+    ).toEqual({ proposal: withdrawn });
+    expect(recorder.requests.map((r) => [r.method, new URL(r.url).pathname])).toEqual([
+      ["POST", `/v1/work-orders/${ID}/checkins`],
+      ["GET", "/v1/me/pending-actions"],
+      ["DELETE", `/v1/work-orders/${ID}/proposals/${OTHER_ID}`],
+    ]);
+    expect(recorder.requests[2]!.headers.get("idempotency-key")).toBe(KEY);
+    expect(await recorder.requests[2]!.text()).toBe("");
+  });
+  it("recognizes the standard fund challenge and falls back for an unavailable route", async () => {
+    const recorder = recordedFetch(
+      json({ accepts: [] }, { status: 402 }),
+      json({}, { status: 404 }),
+      new Response(null, { status: 302, headers: { location: "http://127.0.0.1/" } }),
+    );
+    const client = createTasksClient({ baseUrl: "https://tasks.example", fetch: recorder.fetch });
+    expect((await client.fundingChallenge(ID))?.response.status).toBe(402);
+    expect(await client.fundingChallenge(ID)).toBeNull();
+    await expect(client.fundingChallenge(ID)).rejects.toMatchObject({ status: 302 });
+    expect(recorder.requests[0]!.redirect).toBe("manual");
+  });
+});

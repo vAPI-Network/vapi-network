@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { taskTermsFields, taskViewFields } from "./v2.js";
 
 import {
   milestoneTermsSchema,
@@ -107,6 +108,7 @@ export const proposalSigningPayloadSchema = z
 
 export const createOrderInputSchema = z
   .object({
+    ...taskTermsFields,
     title: z.string().trim().min(3).max(120),
     description: z.string().trim().min(10).max(8_000),
     policyFamily: workPolicyFamilySchema,
@@ -142,13 +144,18 @@ export const proposeInputSchema = z.object({
   signature: signatureSchema,
 });
 
-export const submitInputSchema = z.object({
+const signedSubmitInputSchema = z.object({
   signedPayload: proposalSigningPayloadSchema.safeExtend({
     kind: z.literal("submission"),
     proof: z.array(submissionProofSchema),
   }),
   signature: signatureSchema,
 });
+
+export const submitInputSchema = z.union([
+  signedSubmitInputSchema,
+  z.strictObject({ withdraw: z.literal(true), proposalId: uuidSchema }),
+]);
 
 export const acceptProposalInputSchema = z.object({ proposalId: uuidSchema });
 
@@ -310,7 +317,7 @@ const proposalResponseSchema = z.looseObject({
   id: uuidSchema,
   workOrderId: uuidSchema,
   providerAddress: addressSchema,
-  state: z.enum(["pending", "accepted", "rejected"]),
+  state: z.enum(["pending", "accepted", "rejected", "withdrawn"]),
   signedPayload: proposalSigningPayloadSchema.loose(),
   signature: signatureSchema,
   signatureHash: bytes32Schema,
@@ -561,6 +568,7 @@ const milestoneResponseSchema = z
   });
 
 const publicOrderSchema = z.looseObject({
+  ...taskViewFields,
   version: z.undefined().optional(),
   id: uuidSchema,
   state: z.literal("open"),
@@ -599,6 +607,7 @@ const eventResponseSchema = z.looseObject({
 });
 
 const privateOrderSchema = z.looseObject({
+  ...taskViewFields,
   version: z.literal("work-order-view-v1"),
   id: uuidSchema,
   state: z.enum(["open", "awarded", "completed", "cancelled"]),
@@ -805,6 +814,7 @@ const publicTaskStateSchema = z.enum([
 ]);
 
 export const publicTaskCardSchema = z.looseObject({
+  ...taskViewFields,
   id: z.string(),
   title: z.string(),
   brief: z.string(),
@@ -952,7 +962,11 @@ const proposalMutationResponseSchema = z.looseObject({ proposal: proposalRespons
 // Mirrors the server response boundaries in Tasks while allowing additive fields.
 export const tasksResponseSchemas = {
   listOrders: z.looseObject({ workOrders: z.array(orderSchema), page: pageSchema }),
-  getOrder: z.looseObject({ workOrder: orderSchema }),
+  getOrder: z.looseObject({
+    workOrder: orderSchema,
+    lifecycle: taskViewFields.lifecycle,
+    nextAction: taskViewFields.nextAction,
+  }),
   createOrder: z.looseObject({ workOrder: privateOrderSchema }),
   propose: proposalMutationResponseSchema,
   submit: proposalMutationResponseSchema,
@@ -1068,13 +1082,29 @@ export const tasksResponseSchemas = {
 export type ListOrdersQuery = z.input<typeof listOrdersQuerySchema>;
 export type ListMessagesQuery = z.input<typeof listMessagesQuerySchema>;
 export type SendMessageInput = z.input<typeof sendMessageInputSchema>;
+/** Shared interface boundaries; protocol adapters live outside core. */
+export const taskReadResponseSchema = tasksResponseSchemas.getOrder;
+export const taskPostResponseSchema = z.union([
+  z.object({
+    task: tasksResponseSchemas.createOrder,
+    funding: z.looseObject({
+      error: z.string().optional(),
+      kind: z.enum(["eip712", "transaction"]).optional(),
+      next: z.unknown().optional(),
+    }),
+  }),
+  tasksResponseSchemas.createOrder,
+]);
+
 export type CreateOrderInput = z.input<typeof createOrderInputSchema>;
 export type OperationMutationInput = z.input<typeof operationMutationInputSchema>;
 export type OperationStepInput = z.input<typeof operationStepInputSchema>;
 export type ConfigureWebhookInput = z.input<typeof configureWebhookInputSchema>;
 export type ProposeInput = z.input<typeof proposeInputSchema>;
 export type SubmissionProof = z.input<typeof submissionProofSchema>;
-export type SubmitInput = z.input<typeof submitInputSchema>;
+export type SubmitInput = z.input<typeof signedSubmitInputSchema>;
+export type WithdrawSubmissionInput = { withdraw: true; proposalId: string };
+export type TaskSubmissionInput = SubmitInput | WithdrawSubmissionInput;
 export type EventsQuery = z.input<typeof eventsQuerySchema>;
 export type BoardQuery = z.input<typeof boardQuerySchema>;
 export type FeedQuery = z.input<typeof feedQuerySchema>;

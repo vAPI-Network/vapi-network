@@ -49,6 +49,10 @@ export const PENDING_SERVER_ROUTES: ReadonlySet<TaskRoute> = new Set([
   "events",
   "submit",
   "feed",
+  "show",
+  "post",
+  "checkin",
+  "pending",
 ]);
 
 export function isMissingTaskEntity(code: unknown, message: unknown): boolean {
@@ -363,6 +367,11 @@ export const TASK_WATCH_STATES = [
   "closed",
   "completed",
   "cancelled",
+  "checkin",
+  "stalled",
+  "claimed",
+  "judging",
+  "milestone",
 ] as const;
 export function taskEventState(event: { type: string; payload: Record<string, unknown> }): string {
   return typeof event.payload.state === "string"
@@ -534,3 +543,26 @@ export type TaskUnlock = () => Promise<{
   address: `0x${string}`;
   signMessage(message: string): Promise<`0x${string}`>;
 }>;
+
+/** Human alert copy; event JSON stays byte-for-value intact. */
+export function taskEventLine(event: {
+  sequence: number;
+  type: string;
+  payload: Record<string, unknown>;
+}): string {
+  const label =
+    event.type === "task.judging"
+      ? `deadline passed, ${event.payload.submissionCount} submissions, pick winners`
+      : event.type === "task.claimed"
+        ? "first submission received"
+        : event.type === "task.checkin"
+          ? `check-in: ${event.payload.status ?? "received"}`
+          : event.type === "task.stalled"
+            ? "task stalled"
+            : event.type === "task.milestone"
+              ? "milestone updated"
+              : event.type === "task.released"
+                ? "escrow released"
+                : event.type;
+  return `${event.sequence}: ${label}`;
+}

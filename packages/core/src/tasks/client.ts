@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+import {
+  checkinInputSchema,
+  checkinResponseSchema,
+  pendingActionsResponseSchema,
+  type CheckinInput,
+} from "./v2.js";
 import { createPublicFetch } from "../net-guard.js";
 import {
   boardQuerySchema,
@@ -33,7 +39,7 @@ import type {
   ProposeScopeInput,
   SendMessageInput,
   SignScopeInput,
-  SubmitInput,
+  TaskSubmissionInput,
   UploadFileInput,
 } from "./types.js";
 
@@ -123,7 +129,7 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
   // Every API call and storage PUT shares transport, timeout, and error handling.
   async function request<T>(
     path: string,
-    method: "GET" | "POST" | "PUT",
+    method: "GET" | "POST" | "PUT" | "DELETE",
     schema: z.ZodType<T>,
     call: RequestOptions = {},
   ): Promise<T> {
@@ -290,6 +296,57 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
   }
 
   const client = {
+    /** Probe the optional standard x402 Tasks route without signing or following redirects. */
+    async fundingChallenge(id: string, call: TasksRequestOptions = {}) {
+      const timeout = AbortSignal.timeout(timeoutMs);
+      try {
+        const request = new Request(`${baseUrl}/v1/tasks/${segment(id)}/fund`, {
+          headers: {
+            Accept: "application/json",
+            ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
+          },
+          redirect: "manual",
+          signal: call.signal ? AbortSignal.any([call.signal, timeout]) : timeout,
+        });
+        const response = await fetchImpl(request);
+        if (response.status === 402) return { request, response };
+        await response.body?.cancel();
+        if ([200, 204, 404, 405].includes(response.status)) return null;
+        throw new TasksClientError(
+          "http",
+          `Task funding probe returned HTTP ${response.status}.`,
+          response.status,
+        );
+      } catch (error) {
+        if (error instanceof TasksClientError) throw error;
+        if (timeout.aborted)
+          throw new TasksClientError("timeout", "The task funding probe timed out.");
+        throw new TasksClientError("network", "The task funding probe failed.");
+      }
+    },
+    /** Read the task view; interface adapters may add canonical lifecycle fields. */
+    show(id: string, call: TasksRequestOptions = {}) {
+      return client.getOrder(id, call);
+    },
+    /** Post terms through HTTP. One-call preparation is supplied by an interface adapter. */
+    async post(order: CreateOrderInput & { fund?: boolean }, call: TasksMutationOptions) {
+      const { fund, ...body } = order;
+      if (fund)
+        throw new TasksClientError(
+          "invalid_input",
+          "One-call funding preparation is unavailable in the HTTP transport. Use a task preparation adapter.",
+        );
+      return client.createOrder(body, call);
+    },
+    checkin(id: string, values: CheckinInput, call: TasksMutationOptions) {
+      return request(`/v1/work-orders/${segment(id)}/checkins`, "POST", checkinResponseSchema, {
+        ...call,
+        body: input(checkinInputSchema, values),
+      });
+    },
+    pending(call: TasksRequestOptions = {}) {
+      return request("/v1/me/pending-actions", "GET", pendingActionsResponseSchema, call);
+    },
     /** Use scope: "public" for anonymous reads; the server defaults to "private".
      */
     listOrders(input: ListOrdersQuery = {}, call: TasksRequestOptions = {}) {
@@ -323,8 +380,16 @@ export function createTasksClient(options: TasksClientOptions): TasksClient {
         { ...call, body: proposal },
       );
     },
-    async submit(id: string, submission: SubmitInput, call: TasksMutationOptions) {
+    async submit(id: string, submission: TaskSubmissionInput, call: TasksMutationOptions) {
       input(submitInputSchema, submission);
+      if ("withdraw" in submission) {
+        return request(
+          `/v1/work-orders/${segment(id)}/proposals/${segment(submission.proposalId)}`,
+          "DELETE",
+          tasksResponseSchemas.submit,
+          call,
+        );
+      }
       return request(
         `/v1/work-orders/${segment(id)}/proposals`,
         "POST",
@@ -616,7 +681,33 @@ type TaskResponse<Method extends keyof typeof tasksResponseSchemas> = z.infer<
   (typeof tasksResponseSchemas)[Method]
 >;
 
+export type PostTaskResponse =
+  | TaskResponse<"createOrder">
+  | {
+      task: TaskResponse<"createOrder">;
+      funding: {
+        error?: string;
+        kind?: "eip712" | "transaction";
+        next?: unknown;
+        [key: string]: unknown;
+      };
+    };
 export type TasksClient = {
+  fundingChallenge(
+    id: string,
+    call?: TasksRequestOptions,
+  ): Promise<{ request: Request; response: Response } | null>;
+  show(id: string, call?: TasksRequestOptions): Promise<TaskResponse<"getOrder">>;
+  post(
+    input: CreateOrderInput & { fund?: boolean },
+    call: TasksMutationOptions,
+  ): Promise<PostTaskResponse>;
+  checkin(
+    id: string,
+    input: CheckinInput,
+    call: TasksMutationOptions,
+  ): Promise<import("./v2.js").CheckinResponse>;
+  pending(call?: TasksRequestOptions): Promise<import("./v2.js").PendingActionsResponse>;
   /** Public scope is anonymous; the server defaults to private scope.
    */
   listOrders(
@@ -637,7 +728,7 @@ export type TasksClient = {
   ): Promise<TaskResponse<"propose">>;
   submit(
     id: string,
-    input: SubmitInput,
+    input: TaskSubmissionInput,
     call: TasksMutationOptions,
   ): Promise<TaskResponse<"submit">>;
   events(

@@ -80,3 +80,14 @@ function parseBaseUnits(value: bigint | string): bigint {
   if (atomic < 0n) throw new Error("Task base units must be a non-negative integer.");
   return atomic;
 }
+
+/** Floor policy USD to atomic units, including scientific notation, never round a cap up. */
+export function taskPolicyAtomic(value: number): bigint {
+  if (!Number.isFinite(value) || value < 0)
+    throw new Error("Task policy USD amounts must be finite and non-negative.");
+  const [mantissa = "0", exponent = "0"] = value.toString().split("e");
+  const [whole = "0", fraction = ""] = mantissa.split(".");
+  const digits = BigInt(whole + fraction);
+  const scale = 6 + Number(exponent) - fraction.length;
+  return scale >= 0 ? digits * 10n ** BigInt(scale) : digits / 10n ** BigInt(-scale);
+}

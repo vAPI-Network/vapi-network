@@ -38,7 +38,13 @@ import {
   sha256Hex,
   type FrozenDeliveryManifest,
 } from "./delivery-manifest.js";
-import { formatBaseUnitsUsd, parseFeeBp, taskMoney, type TaskMoney } from "./money.js";
+import {
+  taskPolicyAtomic as policyAtomic,
+  formatBaseUnitsUsd,
+  parseFeeBp,
+  taskMoney,
+  type TaskMoney,
+} from "./money.js";
 import { freezeScopeTerms } from "./scope-terms.js";
 import { createScopeBindings, type ScopeBinding, type ScopeBindings } from "./scope-bindings.js";
 import {
@@ -64,6 +70,7 @@ export type TaskFundingApproval =
   { granted: true } | { granted: false } | { ask: (summary: FundingSummary) => Promise<boolean> };
 
 export type FundTaskInput = TaskActionInput & {
+  fundingIntent?: unknown;
   pending?: PendingTransactions;
   policy: { maxPerTaskUsd: number; approveAboveUsd: number };
   caps: SpendCaps;
@@ -167,6 +174,7 @@ export async function fundTask(input: FundTaskInput): Promise<FundTaskOutcome> {
         orderId: milestone.workOrderId,
         escrowId: milestone.id,
         grossBaseUnits: grossAtomic,
+        ...(input.fundingIntent === undefined ? {} : { fundingIntent: input.fundingIntent }),
         ...(input.counterparty ? { counterparty: input.counterparty } : {}),
         idempotencyKey,
       };
@@ -925,15 +933,4 @@ function mayHaveBroadcast(error: unknown): boolean {
   return (
     typeof error === "object" && error !== null && "broadcast" in error && error.broadcast === true
   );
-}
-
-/** Floor policy USD to atomic units, including scientific notation, never round a cap up. */
-function policyAtomic(value: number): bigint {
-  if (!Number.isFinite(value) || value < 0)
-    throw new Error("Task policy USD amounts must be finite and non-negative.");
-  const [mantissa = "0", exponent = "0"] = value.toString().split("e");
-  const [whole = "0", fraction = ""] = mantissa.split(".");
-  const digits = BigInt(whole + fraction);
-  const scale = 6 + Number(exponent) - fraction.length;
-  return scale >= 0 ? digits * 10n ** BigInt(scale) : digits / 10n ** BigInt(-scale);
 }

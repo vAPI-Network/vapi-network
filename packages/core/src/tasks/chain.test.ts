@@ -3275,3 +3275,77 @@ describe("V2 dispute executor", () => {
     expect(signTransaction).toHaveBeenCalledOnce();
   });
 });
+
+describe("hosted post-and-fund intent", () => {
+  it.each([false, true])(
+    "validates the returned intent before signing (forged: %s)",
+    async (forged) => {
+      const authDeployment = {
+        ...deployment,
+        capabilities: { erc3009Funding: true, vapiVerify: false },
+        eip3009Domain: { name: "USDC", version: "2", chainId: 84532, verifyingContract: usdc },
+      } satisfies Extract<DeploymentResponse, { configured: true }>;
+      const signTypedData = vi.fn(account.signTypedData.bind(account));
+      const api = fakeClient({
+        deployment: vi.fn(async () => authDeployment),
+        getOrder: vi.fn(async () => ({ workOrder: buyerOrder })),
+        fundEscrow: vi.fn(async () => {
+          throw new TasksClientError("http", "Recorded stop after authorization", 503);
+        }),
+      });
+      const chain = createTasksChain({
+        client: api,
+        account: { ...account, signTypedData } as LocalAccount,
+        rpcFor: () => rpcHarness("success", [], undefined, true, { clone: { state: 1 } }).client,
+        pending: memoryPending(),
+        now: () => new Date("2026-01-01T00:00:00.000Z"),
+      });
+      const fundingIntent = {
+        kind: "eip712",
+        signer: account.address,
+        typedData: {
+          domain: authDeployment.eip3009Domain,
+          primaryType: "ReceiveWithAuthorization",
+          types: {
+            ReceiveWithAuthorization: [
+              { name: "from", type: "address" },
+              { name: "to", type: "address" },
+              { name: "value", type: "uint256" },
+              { name: "validAfter", type: "uint256" },
+              { name: "validBefore", type: "uint256" },
+              { name: "nonce", type: "bytes32" },
+            ],
+          },
+          message: {
+            from: account.address,
+            to: forged ? buyer : escrow,
+            value: "1000000",
+            validAfter: "0",
+            validBefore: (BigInt(Date.parse(milestone.offerDeadlineAt!) / 1000) + 1n).toString(),
+            nonce: `0x${"ab".repeat(32)}`,
+          },
+        },
+      };
+      await expect(
+        chain.fund({
+          escrowId: milestoneId,
+          orderId,
+          grossBaseUnits: 1_000_000n,
+          idempotencyKey: key,
+          fundingIntent,
+        }),
+      ).rejects.toMatchObject({ broadcast: false, authorizationExposed: !forged });
+      if (forged) {
+        expect(signTypedData).not.toHaveBeenCalled();
+        expect(api.fundEscrow).not.toHaveBeenCalled();
+      } else {
+        expect(signTypedData).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: expect.objectContaining({ nonce: fundingIntent.typedData.message.nonce }),
+          }),
+        );
+        expect(api.fundEscrow).toHaveBeenCalledOnce();
+      }
+    },
+  );
+});

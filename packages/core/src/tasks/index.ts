@@ -16,6 +16,7 @@ export { createTasksClient, TasksClientError } from "./client.js";
 export type {
   TasksClient,
   TasksClientOptions,
+  PostTaskResponse,
   TasksRequestOptions,
   TasksMutationOptions,
 } from "./client.js";
@@ -39,6 +40,8 @@ export {
   publicTaskDetailSchema,
   submissionProofSchema,
   submitInputSchema,
+  taskReadResponseSchema,
+  taskPostResponseSchema,
 } from "./types.js";
 export type * from "./types.js";
 
@@ -47,3 +50,9 @@ export { safeTasksChainError } from "./chain-error.js";
 export { TasksPartiesNotBoundError } from "./chain-verification.js";
 
 export * from "./dispute-fee.js";
+
+export * from "./v2.js";
+
+export * from "./post-options.js";
+
+export * from "./x402-funding.js";
