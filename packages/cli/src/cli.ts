@@ -2915,6 +2915,7 @@ function toListingEndpoint(
     ...optionalStringField(operation, "responseContentType"),
     ...optionalStringField(operation, "pathTemplate"),
     ...(operation.pathParameters === undefined ? {} : { pathParameters: operation.pathParameters }),
+    ...optionalStringField(operation, "metadataEvidence"),
   };
 }
 

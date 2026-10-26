@@ -12,6 +12,7 @@ import {
   readProbeOperations,
   readProbeRejection,
   RegistryApiError,
+  type ProbeOperation,
   type ProbeResult,
 } from "./publish-client.js";
 
@@ -233,6 +234,25 @@ describe("reading a probe", () => {
   it("keeps only the operations that carry a name", () => {
     expect(readProbeOperations(probe).map((operation) => operation.name)).toEqual(["forecast"]);
     expect(readProbeOperations({})).toEqual([]);
+  });
+
+  it("reads a single payable endpoint the registry answers in `endpoint`", () => {
+    const endpoint = {
+      name: "GET weather.example/f",
+      method: "GET",
+      url: "https://weather.example/f",
+    };
+    expect(readProbeOperations({ endpoint, operations: [] })).toEqual([endpoint]);
+    expect(
+      readProbeOperations({
+        endpoint: { url: "https://weather.example/f" } as unknown as ProbeOperation,
+      }),
+    ).toEqual([]);
+    expect(
+      readProbeOperations({ endpoint, operations: [{ name: "forecast" }] }).map(
+        (operation) => operation.name,
+      ),
+    ).toEqual(["forecast"]);
   });
 
   it("formats whatever shape the steps arrive in", () => {
