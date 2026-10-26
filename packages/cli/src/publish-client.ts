@@ -19,7 +19,7 @@ import type { Address } from "viem";
 export const LISTING_CATEGORIES = ["ai", "data", "crypto", "compute", "search"] as const;
 export type ListingCategory = (typeof LISTING_CATEGORIES)[number];
 
-/** How the registry should read the URL it was handed. Left out, it decides. */
+/** A hint for how to read the URL. The registry detects the kind itself either way. */
 export const PROBE_MODES = ["origin", "endpoint", "openapi"] as const;
 export type ProbeMode = (typeof PROBE_MODES)[number];
 

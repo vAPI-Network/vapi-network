@@ -3,6 +3,14 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## 0.9.7 (2026-10-26)
+
+### Fixed
+
+- `vapi publish <url>` lists a URL that is itself one payable endpoint. The registry answers such a URL in `endpoint` with no `operations`, which publish used to report as "no callable endpoint".
+- `vapi publish` sends each endpoint's `metadataEvidence` from the probe back with the listing, so an endpoint with a request schema is no longer refused with HTTP 422.
+- `--mode` is a hint: the registry accepts it and detects the kind of URL itself. Registries before 2026-10-26 refused it with HTTP 400 "Unrecognized key: mode".
+
 ## 0.9.6 (2026-10-23)
 
 ### Fixed
