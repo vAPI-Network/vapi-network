@@ -67,6 +67,8 @@ export type ProbeRejection = Readonly<{
 /** The console's `VendorProbeResult`, read tolerantly. */
 export type ProbeResult = Readonly<{
   operations?: readonly ProbeOperation[];
+  /** A URL that is itself one payable endpoint answers here, with `operations` empty. */
+  endpoint?: ProbeOperation;
   accepts?: readonly unknown[];
   diagnostics?: Readonly<{
     steps?: readonly unknown[];
@@ -106,6 +108,8 @@ export type ListingEndpointInput = {
   responseContentType?: string;
   pathTemplate?: string;
   pathParameters?: unknown;
+  /** The probe's signature over the metadata above; publish refuses metadata without it. */
+  metadataEvidence?: string;
 };
 
 export type CreateListingInput = {
@@ -341,13 +345,19 @@ export function buildPayoutSiweMessage(args: {
   );
 }
 
-/** The operations a probe found, normalized to the fields a listing needs. */
+/**
+ * The operations a probe found, normalized to the fields a listing needs. A URL
+ * that is itself one payable endpoint comes back in `endpoint` rather than in
+ * `operations`, so that one is the operation.
+ */
 export function readProbeOperations(probe: ProbeResult): ProbeOperation[] {
-  const operations = probe.operations;
-  if (!Array.isArray(operations)) return [];
-  return operations.filter((operation): operation is ProbeOperation => {
-    return isRecord(operation) && typeof operation.name === "string" && operation.name.length > 0;
-  });
+  const operations = (Array.isArray(probe.operations) ? probe.operations : []).filter(isOperation);
+  if (operations.length > 0) return operations;
+  return isOperation(probe.endpoint) ? [probe.endpoint] : [];
+}
+
+function isOperation(operation: unknown): operation is ProbeOperation {
+  return isRecord(operation) && typeof operation.name === "string" && operation.name.length > 0;
 }
 
 /** The rejection a probe carries, or undefined when the URL passed. */

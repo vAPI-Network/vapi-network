@@ -527,6 +527,57 @@ describe("vapi publish <url>", () => {
     });
   });
 
+  it("lists a single payable endpoint and echoes its metadata evidence", async () => {
+    await initializedHome("vapi-publish-single-endpoint-");
+    process.env.VAPI_API_KEY = KEY;
+    const endpoint = {
+      name: "POST weather.example/forecast",
+      method: "POST",
+      url: "https://weather.example/forecast",
+      description: "Current forecast for one place.",
+      requestContentType: "application/json",
+      requestSchema: { type: "object" },
+      responseSchema: { type: "object" },
+      metadataEvidence: "evidence-1",
+    };
+    const registry = happyRegistry({
+      "POST /api/call/listings/probe": {
+        body: { ...PROBE_BODY, kind: "x402", endpoint, operations: [] },
+      },
+    });
+    const captured = captureIo();
+
+    expect(
+      await runCli(
+        [
+          "publish",
+          "https://weather.example/forecast",
+          "--method",
+          "POST",
+          "--yes",
+          "--category",
+          "ai",
+          "--json",
+        ],
+        captured.io,
+        { ...AGENT, fetchImpl: registry.fetchImpl, prompts: refusingPrompts() },
+      ),
+    ).toBe(0);
+
+    const created = registry.calls[2]?.body as { endpoints: Record<string, unknown>[] };
+    expect(created.endpoints).toEqual([
+      {
+        name: "POST weather.example/forecast",
+        method: "POST",
+        url: "https://weather.example/forecast",
+        description: "Current forecast for one place.",
+        requestContentType: "application/json",
+        requestSchema: { type: "object" },
+        metadataEvidence: "evidence-1",
+      },
+    ]);
+  });
+
   it("refuses a mode the registry does not have", async () => {
     await initializedHome("vapi-publish-bad-mode-");
     process.env.VAPI_API_KEY = KEY;
