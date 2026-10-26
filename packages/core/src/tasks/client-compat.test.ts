@@ -55,3 +55,41 @@ it("accepts the previous SDK interface and reports unsupported v2 verbs clearly"
       expect.objectContaining({ code: "not_supported" }),
     );
 });
+
+it("preserves the receiver of an optional method requested through the compatibility helper", async () => {
+  class ReceiverDependentPendingAdapter {
+    private readonly pendingActions = [
+      {
+        orderId: "task",
+        title: "Review proof",
+        role: "poster" as const,
+        action: "release" as const,
+        clientVerb: "release",
+        deepLink: "/orders/task",
+      },
+    ];
+
+    transport() {
+      return { pendingActions: this.pendingActions };
+    }
+
+    async pending() {
+      return this.transport();
+    }
+  }
+  const adapter = Object.assign(new ReceiverDependentPendingAdapter(), previousImplementation);
+  const pending = requireTaskMethod(adapter, "pending");
+
+  expect(await pending()).toEqual({
+    pendingActions: [
+      {
+        orderId: "task",
+        title: "Review proof",
+        role: "poster",
+        action: "release",
+        clientVerb: "release",
+        deepLink: "/orders/task",
+      },
+    ],
+  });
+});

@@ -56,7 +56,7 @@ export async function fundTaskWithX402(
       const challenge = await taskRequest(
         "fund",
         "fundingChallenge",
-        () => probe(input.id),
+        () => probe.call(context.client, input.id),
         context,
       );
       if (!challenge) return null;

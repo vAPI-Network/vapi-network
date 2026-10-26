@@ -147,7 +147,44 @@ async function fixture(
   return { context, input, sign, fetchImpl, verified, snapshot, account, legacyInput, offer };
 }
 
+class ReceiverDependentFundingAdapter {
+  constructor(private readonly underlying: TasksClient) {}
+
+  transport(id: string) {
+    return this.underlying.fundingChallenge!(id);
+  }
+
+  fundingChallenge(id: string) {
+    return this.transport(id);
+  }
+
+  getOrder(id: string) {
+    return this.underlying.getOrder(id);
+  }
+}
+
 describe("standard x402 task funding (recorded T26 contract)", () => {
+  it.each([402, 404])(
+    "preserves an SDK adapter's receiver for a funding probe returning %s",
+    async (status) => {
+      const f = await fixture({ status });
+      const adapter = new ReceiverDependentFundingAdapter(f.context.client);
+      const transport = vi.spyOn(adapter, "transport");
+      f.context.client = adapter as unknown as TasksClient;
+
+      const result = await fundTaskWithX402(f.context, f.input);
+
+      expect(transport).toHaveBeenCalledExactlyOnceWith(ID);
+      if (status === 402) {
+        expect(result).toMatchObject({ ok: true, method: "x402" });
+        expect(f.sign).toHaveBeenCalledOnce();
+      } else {
+        expect(result).toBeNull();
+        expect(f.sign).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it("signs using Call's payment client after policy reservation and local scope verification", async () => {
     const f = await fixture();
     f.sign.mockImplementationOnce(async (args) => {
