@@ -1499,6 +1499,8 @@ describe("task MCP tools", () => {
           expect(tool.description).toContain("Posts a task with a budget");
           expect(tool.description).toContain("local vault");
           expect(tool.description).toContain("policy");
+        } else if (["award", "milestone", "cancel", "claim"].includes(verb)) {
+          expect(tool.description).toMatch(/hosted-prepared/u);
         } else {
           expect(tool.description).toContain("Does not move money");
         }
@@ -2301,5 +2303,105 @@ describe("Tasks v2 local MCP parity", () => {
       tool.name.startsWith("tasks."),
     ))
       expect(tool.description).not.toMatch(/fund transfer/iu);
+  });
+});
+
+describe("hosted-prepared V2 participant tools", () => {
+  const worker = `0x${"33".repeat(20)}`;
+  it.each([
+    [
+      "milestone",
+      { action: "submit", i: 0, proof: [{ preset: "link", value: "https://example.test/proof" }] },
+      {
+        write: {
+          action: "submit",
+          i: 0,
+          proof: [{ preset: "link", value: "https://example.test/proof" }],
+        },
+      },
+    ],
+    [
+      "milestone",
+      { action: "reject", i: 0, reason: "Missing proof" },
+      { write: { action: "reject", i: 0, reason: "Missing proof" } },
+    ],
+    ["cancel", { scope: "remainder" }, { write: { action: "cancel-remainder" } }],
+    ["award", { worker }, { write: { action: "award", worker } }],
+    ["award", { winners: [worker] }, { write: { action: "award-bounty", winners: [worker] } }],
+    ["sign", { action: "award-consent" }, { consent: { action: "award-consent" } }],
+    [
+      "sign",
+      { action: "split-consent", i: 0, toWorker: "1000000" },
+      { consent: { action: "split-consent", i: 0, toWorker: "1000000" } },
+    ],
+    [
+      "claim",
+      { action: "pay", claimant: worker },
+      { write: { action: "pay-claim", claimant: worker } },
+    ],
+    [
+      "dispute",
+      { i: 0, evidence: "Proof text" },
+      { write: { action: "raise-dispute", i: 0, evidence: "Proof text" } },
+    ],
+    [
+      "counter-evidence",
+      { i: 0, evidence: "Counter proof" },
+      { write: { action: "counter-evidence", i: 0, evidence: "Counter proof" } },
+    ],
+  ])(
+    "dispatches %s through the shared executor without granting approval",
+    async (verb, fields, expected) => {
+      const executeV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        orderId: ID,
+        operation: { id: ESCROW, state: "confirmed" },
+        lifecycle: { shape: "task", state: "Active" },
+        nextAction: { action: "none" },
+      });
+      const { server } = await watchServer({
+        client: {} as TasksClient,
+        chain: { ...missingTasksChain, executeV2 },
+        now: () => new Date(NOW),
+      });
+      const result = await server.callTool({
+        name: `tasks.${verb}`,
+        arguments: { id: ID, ...fields },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(executeV2).toHaveBeenCalledWith(
+        expect.objectContaining({ id: ID, approval: { granted: false }, ...expected }),
+      );
+      expect(result.structuredContent).toMatchObject({
+        operation: { state: "confirmed" },
+        lifecycle: { state: "Active" },
+        nextAction: { action: "none" },
+      });
+    },
+  );
+  it("rejects an out-of-range C0 index and incompatible award fields before signing", async () => {
+    const executeV2 = vi.fn();
+    const { server } = await watchServer({
+      client: {} as TasksClient,
+      chain: { ...missingTasksChain, executeV2 },
+      now: () => new Date(NOW),
+    });
+    expect(
+      (
+        await server.callTool({
+          name: "tasks.milestone",
+          arguments: { id: ID, action: "approve", i: 5 },
+        })
+      ).isError,
+    ).toBe(true);
+    expect(
+      (
+        await server.callTool({
+          name: "tasks.award",
+          arguments: { id: ID, worker, winners: [worker] },
+        })
+      ).isError,
+    ).toBe(true);
+    expect(executeV2).not.toHaveBeenCalled();
   });
 });

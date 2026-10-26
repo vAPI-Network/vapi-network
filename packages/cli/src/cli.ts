@@ -951,6 +951,7 @@ export async function runCli(
         runIo.stdout(
           JSON.stringify({
             ok: false,
+            ...(error instanceof TaskCommandError ? error.details : {}),
             error: {
               code:
                 error instanceof UsageError ? "usage_error" : (errorCodeOf(error) ?? "task_error"),

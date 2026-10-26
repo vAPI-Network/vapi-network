@@ -100,6 +100,9 @@ import {
   tasksPostTool,
   tasksProposeTool,
   tasksSubmitTool,
+  tasksMilestoneTool,
+  tasksCancelTool,
+  tasksClaimTool,
   tasksAwardTool,
   tasksSignTool,
   tasksFundTool,
@@ -594,6 +597,9 @@ export function createVapiServer(options: VapiServerOptions = {}) {
   server.registerTool("tasks.post", tasksPostTool, tasks.post);
   server.registerTool("tasks.propose", tasksProposeTool, tasks.propose);
   server.registerTool("tasks.submit", tasksSubmitTool, tasks.submit);
+  server.registerTool("tasks.milestone", tasksMilestoneTool, tasks.milestone);
+  server.registerTool("tasks.cancel", tasksCancelTool, tasks.cancel);
+  server.registerTool("tasks.claim", tasksClaimTool, tasks.claim);
   server.registerTool("tasks.award", tasksAwardTool, tasks.award);
   server.registerTool("tasks.sign", tasksSignTool, tasks.sign);
   server.registerTool("tasks.fund", tasksFundTool, tasks.fund);
