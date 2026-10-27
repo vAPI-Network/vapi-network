@@ -7,6 +7,8 @@ export type TasksV2Deployment = {
   usdc: Address;
   usdcName: string;
   usdcVersion: string;
+  offerTtlSeconds?: number;
+  choiceWindowSeconds?: number;
 };
 export type TasksV2DeploymentOverrides = Partial<Record<number, TasksV2Deployment>>;
 
@@ -25,7 +27,10 @@ export function getTrustedTasksV2Deployment(
   const env = options.env ?? process.env;
   const names = ["ESCROW_FACTORY", "POOL_FACTORY", "USDC", "USDC_NAME", "USDC_VERSION"] as const;
   const values = names.map((name) => env[`VAPI_TASKS_V2_${name}_${chainId}`]);
-  const anyEnv = values.some((v) => v !== undefined);
+  const anyEnv =
+    values.some((v) => v !== undefined) ||
+    env[`VAPI_TASKS_V2_OFFER_TTL_SECONDS_${chainId}`] !== undefined ||
+    env[`VAPI_TASKS_V2_CHOICE_WINDOW_SECONDS_${chainId}`] !== undefined;
   let configured = options.overrides?.[chainId];
   if (anyEnv && !configured) {
     if (values.some((v) => !v?.trim()))
@@ -39,6 +44,12 @@ export function getTrustedTasksV2Deployment(
       usdc: values[2]! as Address,
       usdcName: values[3]!,
       usdcVersion: values[4]!,
+      ...(env[`VAPI_TASKS_V2_OFFER_TTL_SECONDS_${chainId}`] !== undefined
+        ? { offerTtlSeconds: Number(env[`VAPI_TASKS_V2_OFFER_TTL_SECONDS_${chainId}`]) }
+        : {}),
+      ...(env[`VAPI_TASKS_V2_CHOICE_WINDOW_SECONDS_${chainId}`] !== undefined
+        ? { choiceWindowSeconds: Number(env[`VAPI_TASKS_V2_CHOICE_WINDOW_SECONDS_${chainId}`]) }
+        : {}),
     };
   }
   const tuple = configured ?? TRUSTED_TASKS_V2_DEPLOYMENTS[chainId];
@@ -56,6 +67,9 @@ export function getTrustedTasksV2Deployment(
   if (
     [normalized.escrowFactoryV2, normalized.bountyPoolFactoryV1, normalized.usdc].includes(
       zeroAddress,
+    ) ||
+    [tuple.offerTtlSeconds, tuple.choiceWindowSeconds].some(
+      (value) => value !== undefined && (!Number.isSafeInteger(value) || value <= 0),
     ) ||
     !tuple.usdcName ||
     !tuple.usdcVersion

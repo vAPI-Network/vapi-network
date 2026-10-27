@@ -292,8 +292,23 @@ VAPI_TASKS_V2_USDC_VERSION_84532=2
 Cloud inputs use the `VAPI_NETWORK_` prefix. Every override is logged to stderr as
 “untrusted override”; SDK callers can supply `trustedV2Deployments` and
 `onV2UntrustedOverride` in the chain options. Factory membership, poster, token,
-amounts and on-chain terms are checked through the configured RPC. Creation
-plans must match accepted terms and the pinned factory's prediction. A hosted
+amounts and on-chain terms are checked through the configured RPC. Every
+registered-target action must match the order's accepted terms hash and the
+pinned factory's prediction with that order's salt. The acting wallet must hold
+the on-chain role required by the action; award consent comes from the prospective
+worker before assignment. The money confirmation preview includes the verified
+escrow address.
+
+Fresh approval-first funding predicts the recipient from accepted order terms
+and local defaults before approving the pinned factory. The later creation step
+must use exactly those inputs. Offer TTL and bounty choice window default to
+604800 seconds; staging can explicitly set
+`VAPI_TASKS_V2_OFFER_TTL_SECONDS_<chainId>` and
+`VAPI_TASKS_V2_CHOICE_WINDOW_SECONDS_<chainId>`, or the SDK pin's
+`offerTtlSeconds` and `choiceWindowSeconds`. The review window uses the existing
+local trusted duration setting. These are local decisions, never hosted
+readiness values. Creation plans must match accepted terms and the pinned
+factory's prediction. A hosted
 signature intent lacks the frozen creation arguments needed to verify an
 undeployed recipient, so that authorization is refused until the recipient can
 be independently verified. Pool funding also requires its on-chain verifier to

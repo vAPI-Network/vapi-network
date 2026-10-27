@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   encodeFunctionData,
+  decodeFunctionData,
   keccak256,
   parseAbi,
   type Hex,
@@ -71,6 +72,7 @@ const PIN = {
   usdc: USDC,
   usdcName: "USD Coin",
   usdcVersion: "2",
+  offerTtlSeconds: 86400,
 };
 const state = {
   escrow: v2WritePrepared.operation.plan.to,
@@ -177,7 +179,11 @@ async function fixture(step: TaskV2OperationResponse["operation"]["step"] = "v2-
     getBlock: vi.fn(async () => ({ timestamp: NOW_SECONDS })),
     getLogs: vi.fn(async () => [{ args: { raisedBy: WORKER } }]),
     readContract: vi.fn(
-      async (call: { functionName: string; args?: readonly unknown[] }): Promise<unknown> => {
+      async (call: {
+        functionName: string;
+        args?: readonly unknown[];
+        address?: string;
+      }): Promise<unknown> => {
         switch (call.functionName) {
           case "isEscrow":
           case "isPool":
@@ -311,6 +317,55 @@ async function fixture(step: TaskV2OperationResponse["operation"]["step"] = "v2-
   };
 }
 
+function freshFunding(f: Awaited<ReturnType<typeof fixture>>) {
+  f.prepared.operation.plan.to = USDC;
+  f.prepared.operation.plan.data = encodeFunctionData({
+    abi: parseAbi(["function approve(address,uint256) returns (bool)"]),
+    functionName: "approve",
+    args: [FACTORY, 100000000n],
+  });
+  let registered = false;
+  const registrations: boolean[] = [];
+  const original = f.rpc.readContract.getMockImplementation()!;
+  f.rpc.readContract.mockImplementation(async (call) => {
+    if (call.functionName === "isEscrow") {
+      registrations.push(registered);
+      return registered;
+    }
+    if (!registered && call.address?.toLowerCase() === state.escrow.toLowerCase())
+      throw new Error("Cannot read the escrow before creation");
+    return original(call);
+  });
+  f.rpc.waitForTransactionReceipt.mockImplementation(async () => {
+    if (f.rpc.sendRawTransaction.mock.calls.length === 2) registered = true;
+    return { status: "success" };
+  });
+  let current = f.prepared;
+  f.client.operationV2.mockImplementation(async (_id, mode, body) => {
+    if (mode === "recover") return { ...current, recovered: false, scanComplete: true };
+    if (mode === "reconcile" && current.operation.step === "v2-approve-usdc") {
+      current = {
+        ...current,
+        operation: {
+          ...current.operation,
+          step: "v2-fund",
+          plan: { ...current.operation.plan, step: "v2-fund", to: FACTORY, data: FUND_DATA() },
+        },
+      };
+      return current;
+    }
+    return {
+      ...current,
+      operation: {
+        ...current.operation,
+        state: mode === "transaction" ? "submitted" : "confirmed",
+        transactionHash: body.transactionHash,
+      },
+    };
+  });
+  return { registrations, registered: () => registered };
+}
+
 describe("recorded T11 operation boundaries", () => {
   it("parses confirm, recover and abandon without a milestone", () => {
     expect(taskV2PreparedSchema.parse(v2WritePrepared)).toEqual(v2WritePrepared);
@@ -382,6 +437,12 @@ describe("local V2 execution", () => {
       operation: { state: "confirmed" },
       money: { gross: { usd: "100.00" }, fee: { usd: "5.00" }, net: { usd: "95.00" } },
     });
+    expect(money).toHaveBeenCalledWith(
+      expect.objectContaining({
+        escrow: state.escrow,
+        line: expect.stringContaining(state.escrow),
+      }),
+    );
     expect(reconciles).toBe(3);
     expect(f.sign).toHaveBeenCalledTimes(1);
     expect(money.mock.invocationCallOrder[0]).toBeLessThan(f.sign.mock.invocationCallOrder[0]!);
@@ -535,6 +596,15 @@ describe("local V2 execution", () => {
 describe("hosted EIP-712 consent", () => {
   it("signs only the returned consent and confirms it without broadcasting", async () => {
     const f = await fixture("v2-award");
+    f.view.workOrder.clientAddress = WORKER;
+    const original = f.rpc.readContract.getMockImplementation()!;
+    f.rpc.readContract.mockImplementation(async (call) =>
+      call.functionName === "poster"
+        ? WORKER
+        : call.functionName === "worker"
+          ? `0x${"00".repeat(20)}`
+          : original(call),
+    );
     const typedData = {
       domain: {
         name: "vAPI EscrowV2",
@@ -588,6 +658,15 @@ describe("hosted EIP-712 consent", () => {
   });
   it("refuses a consent naming another wallet", async () => {
     const f = await fixture();
+    f.view.workOrder.clientAddress = WORKER;
+    const original = f.rpc.readContract.getMockImplementation()!;
+    f.rpc.readContract.mockImplementation(async (call) =>
+      call.functionName === "poster"
+        ? WORKER
+        : call.functionName === "worker"
+          ? `0x${"00".repeat(20)}`
+          : original(call),
+    );
     f.client.signV2.mockResolvedValue({
       kind: "eip712",
       signer: USDC,
@@ -993,6 +1072,24 @@ describe("review: settlement and refund previews", () => {
         dispute: undefined,
       }));
       f.view.workOrder.v2State.totalBaseUnits = "150000000";
+      f.view.workOrder.market.budget.amountBaseUnits = "150000000";
+      f.view.workOrder.terms.milestones = f.view.workOrder.v2State.milestones.map((m, i) => ({
+        index: i + 1,
+        amountBaseUnits: m.amountBaseUnits,
+        acceptance: "A useful proof",
+        deadlineAt: DEADLINE,
+      }));
+      if (action === "refund") {
+        f.view.workOrder.clientAddress = WORKER;
+        const original = f.rpc.readContract.getMockImplementation()!;
+        f.rpc.readContract.mockImplementation(async (call) =>
+          call.functionName === "worker"
+            ? account.address
+            : call.functionName === "poster"
+              ? WORKER
+              : original(call),
+        );
+      }
       f.prepared.operation.plan.data =
         action === "refund"
           ? encodeFunctionData({ abi: escrowV2Abi, functionName: "refundRemainder" })
@@ -1007,12 +1104,7 @@ describe("review: settlement and refund previews", () => {
 
 it("resumes the supplied post funding operation after approval refusal without preparing again", async () => {
   const f = await fixture("v2-approve-usdc");
-  f.prepared.operation.plan.to = USDC;
-  f.prepared.operation.plan.data = encodeFunctionData({
-    abi: parseAbi(["function approve(address,uint256) returns (bool)"]),
-    functionName: "approve",
-    args: [FACTORY, 100000000n],
-  });
+  const fresh = freshFunding(f);
   const postKey = "33333333-3333-4333-8333-333333333333";
   const policy = { maxPerTaskUsd: 200, approveAboveUsd: 50 };
   expect(
@@ -1032,29 +1124,6 @@ it("resumes the supplied post funding operation after approval refusal without p
   f.client.prepareV2.mockRejectedValue(
     new TasksClientError("http", "already prepared", 409, "operation_in_progress"),
   );
-  let current = f.prepared;
-  f.client.operationV2.mockImplementation(async (_id, mode, body) => {
-    if (mode === "recover") return { ...current, recovered: false, scanComplete: true };
-    if (mode === "reconcile" && current.operation.step === "v2-approve-usdc") {
-      current = {
-        ...current,
-        operation: {
-          ...current.operation,
-          step: "v2-fund",
-          plan: { ...current.operation.plan, step: "v2-fund", to: FACTORY, data: FUND_DATA() },
-        },
-      };
-      return current;
-    }
-    return {
-      ...current,
-      operation: {
-        ...current.operation,
-        state: mode === "transaction" ? "submitted" : "confirmed",
-        transactionHash: body.transactionHash,
-      },
-    };
-  });
   const context = {
     client: f.client as unknown as TasksClient,
     chain: { ...missingTasksChain, executeV2: f.execute },
@@ -1073,6 +1142,8 @@ it("resumes the supplied post funding operation after approval refusal without p
   ).toMatchObject({ ok: true, operation: { state: "confirmed" } });
   expect(f.client.prepareV2).not.toHaveBeenCalled();
   expect(f.sign).toHaveBeenCalledTimes(2);
+  expect(fresh.registrations.every((value) => !value)).toBe(true);
+  expect(fresh.registered()).toBe(true);
 });
 
 it.each(["bounty", "pool"] as const)(
@@ -1094,16 +1165,20 @@ it.each(["bounty", "pool"] as const)(
               verifier: "poster",
             },
           };
-    f.client.getOrder.mockResolvedValue({
-      ...f.view,
-      workOrder: { ...f.view.workOrder, terms },
-    } as unknown as ReturnType<typeof fullView>);
+    Object.assign(f.view.workOrder, {
+      terms,
+      market: { ...f.view.workOrder.market, deadlineAt: DEADLINE },
+    });
     const original = f.rpc.readContract.getMockImplementation()!;
-    f.rpc.readContract.mockImplementation(async (call) =>
-      ["rewardPerWinner", "rewardPerClaim"].includes(call.functionName)
-        ? 30000000n
-        : original(call),
-    );
+    f.rpc.readContract.mockImplementation(async (call) => {
+      if (["rewardPerWinner", "rewardPerClaim"].includes(call.functionName)) return 30000000n;
+      if (call.functionName === "shape") return 1;
+      if (call.functionName === "winners") return 5;
+      if (call.functionName === "verifier") return account.address;
+      if (call.functionName === "gate") return 0;
+      if (call.functionName === "deadline") return BigInt(Date.parse(DEADLINE) / 1000);
+      return original(call);
+    });
     f.prepared.operation.plan.data =
       shape === "bounty"
         ? encodeFunctionData({ abi: escrowV2Abi, functionName: "awardBounty", args: [[WORKER]] })
@@ -1116,8 +1191,201 @@ it.each(["bounty", "pool"] as const)(
       shape === "bounty"
         ? { action: "award-bounty" as const, winners: [WORKER] }
         : { action: "pay-claim" as const, claimant: WORKER };
-    await expect(f.execute({ ...f.input, write })).rejects.toThrow("reward differs");
+    await expect(f.execute({ ...f.input, write })).rejects.toThrow(/accepted|reward differs/u);
     expect(f.sign).not.toHaveBeenCalled();
     expect(f.rpc.sendRawTransaction).not.toHaveBeenCalled();
+  },
+);
+
+describe("repair2: bind every registered action to its accepted order and role", () => {
+  it.each(["different terms", "identical terms, different order salt"])(
+    "refuses task A approval routed to registered escrow B with %s and the same poster",
+    async (attack) => {
+      const f = await fixture();
+      const other = `0x${"ab".repeat(20)}` as const;
+      f.view.workOrder.v2State.escrow = other;
+      f.prepared.operation.plan.to = other;
+      const original = f.rpc.readContract.getMockImplementation()!;
+      f.rpc.readContract.mockImplementation(async (call) => {
+        if (
+          call.functionName === "termsHash" &&
+          call.address?.toLowerCase() === other.toLowerCase() &&
+          attack === "different terms"
+        )
+          return `0x${"ff".repeat(32)}`;
+        // Both escrows are registered and have the same poster and money snapshot.
+        return original(call);
+      });
+      await expect(f.execute(f.input)).rejects.toMatchObject({ code: "v2_plan_mismatch" });
+      expect(f.sign).not.toHaveBeenCalled();
+      expect(f.typedSign).not.toHaveBeenCalled();
+      expect(f.rpc.sendRawTransaction).not.toHaveBeenCalled();
+      await expect(readFile(f.input.ledgerPath)).rejects.toMatchObject({ code: "ENOENT" });
+    },
+  );
+
+  it.each([
+    { action: "approve", i: 0 },
+    { action: "reject", i: 0, reason: "Revise the proof" },
+    { action: "award", worker: WORKER },
+    { action: "cancel-remainder" },
+    { action: "submit", i: 0, proof: [{ preset: "text", value: "Proof text" }] },
+    { action: "refund" },
+    { action: "raise-dispute", i: 0, evidence: "Proof text" },
+    { action: "counter-evidence", i: 0, evidence: "Proof text" },
+    { action: "split", i: 0, toWorker: "1000000" },
+  ] satisfies NonNullable<TaskV2ExecutionInput["write"]>[])(
+    "refuses $action from a wallet without the required on-chain role",
+    async (write) => {
+      const f = await fixture();
+      if (!["submit", "refund"].includes(write.action)) {
+        f.view.workOrder.clientAddress = USDC;
+        const original = f.rpc.readContract.getMockImplementation()!;
+        f.rpc.readContract.mockImplementation(async (call) =>
+          call.functionName === "poster" ? USDC : original(call),
+        );
+      }
+      await expect(f.execute({ ...f.input, write })).rejects.toThrow("on-chain role");
+      expect(f.sign).not.toHaveBeenCalled();
+      expect(f.typedSign).not.toHaveBeenCalled();
+      expect(f.rpc.sendRawTransaction).not.toHaveBeenCalled();
+    },
+  );
+
+  it("checks the on-chain party before signing split consent", async () => {
+    const f = await fixture();
+    f.view.workOrder.clientAddress = USDC;
+    const original = f.rpc.readContract.getMockImplementation()!;
+    f.rpc.readContract.mockImplementation(async (call) =>
+      call.functionName === "poster" ? USDC : original(call),
+    );
+    f.client.signV2.mockResolvedValue({
+      kind: "eip712",
+      signer: account.address,
+      operationId: "sig_split",
+      typedData: {
+        domain: {
+          name: "vAPI EscrowV2",
+          version: "1",
+          chainId: 84532,
+          verifyingContract: state.escrow,
+        },
+        types: {},
+        primaryType: "SplitConsent",
+        message: {},
+      },
+    });
+    await expect(
+      f.execute({
+        ...f.input,
+        write: undefined,
+        consent: { action: "split-consent", i: 0, toWorker: "1" },
+      }),
+    ).rejects.toThrow("on-chain role");
+    expect(f.typedSign).not.toHaveBeenCalled();
+  });
+});
+
+describe("repair2: fresh approval-first funding", () => {
+  it("approves the pinned factory then creates and funds while the target is unregistered until creation", async () => {
+    const f = await fixture("v2-approve-usdc");
+    const fresh = freshFunding(f);
+    f.client.getOrder.mockResolvedValue({
+      ...f.view,
+      workOrder: { ...f.view.workOrder, v2State: undefined },
+    } as unknown as ReturnType<typeof fullView>);
+    expect(await f.execute({ ...f.input, write: { action: "fund" } })).toMatchObject({
+      ok: true,
+      operation: { step: "v2-fund", state: "confirmed" },
+      money: { escrow: state.escrow },
+    });
+    expect(fresh.registrations.length).toBeGreaterThanOrEqual(3);
+    expect(fresh.registrations.every((value) => !value)).toBe(true);
+    expect(fresh.registered()).toBe(true);
+    expect(f.sign).toHaveBeenCalledTimes(2);
+    const [approval, creation] = f.sign.mock.calls.map(([tx]) => tx);
+    expect(approval!.to).toBe(USDC);
+    expect(creation!.to).toBe(FACTORY);
+    expect(decodeFunctionData({ abi: escrowFactoryV2Abi, data: creation!.data! })).toMatchObject({
+      functionName: "createAndFund",
+      args: creationArgs(),
+    });
+    expect(
+      (await readSpendLedger(f.input.ledgerPath, new Date("2026-10-26T12:00:00Z"), f.input.wallet))
+        .spentAtomic,
+    ).toBe("100000000");
+    expect(f.typedSign).not.toHaveBeenCalled();
+  });
+
+  it.each(["offer TTL", "choice window"])(
+    "refuses a later createAndFund that changes the locally accepted %s",
+    async (changed) => {
+      const f = await fixture("v2-approve-usdc");
+      freshFunding(f);
+      const original = f.client.operationV2.getMockImplementation()!;
+      f.client.operationV2.mockImplementation(async (...args) => {
+        const response = taskV2OperationResponseSchema.passthrough().parse(await original(...args));
+        if (response.operation.step === "v2-fund") {
+          const creation = creationArgs();
+          response.operation.plan.data = encodeFunctionData({
+            abi: escrowFactoryV2Abi,
+            functionName: "createAndFund",
+            args: [
+              {
+                ...creation[0],
+                ...(changed === "offer TTL" ? { offerTtl: 1n } : { choiceWindow: 1n }),
+              },
+              creation[1],
+              creation[2],
+            ],
+          });
+        }
+        return response;
+      });
+      await expect(f.execute({ ...f.input, write: { action: "fund" } })).rejects.toMatchObject({
+        code: "v2_plan_mismatch",
+      });
+      expect(f.sign).toHaveBeenCalledTimes(1);
+      expect(f.rpc.sendRawTransaction).toHaveBeenCalledTimes(1);
+      expect(f.typedSign).not.toHaveBeenCalled();
+    },
+  );
+});
+
+it.each(["poster", "vapi"] as const)(
+  "preserves a registered pool payout by its %s verifier with accepted terms",
+  async (verifier) => {
+    const f = await fixture("v2-pay-claim");
+    if (verifier === "vapi") f.view.workOrder.clientAddress = WORKER;
+    Object.assign(f.view.workOrder, {
+      terms: {
+        shape: "pool",
+        pool: {
+          rewardPerClaimBaseUnits: "20000000",
+          budgetBaseUnits: "100000000",
+          gate: "proven",
+          verifier,
+        },
+      },
+      market: { ...f.view.workOrder.market, deadlineAt: DEADLINE },
+    });
+    const original = f.rpc.readContract.getMockImplementation()!;
+    f.rpc.readContract.mockImplementation(async (call) => {
+      if (call.functionName === "poster") return f.view.workOrder.clientAddress;
+      if (call.functionName === "verifier") return account.address;
+      if (call.functionName === "rewardPerClaim") return 20000000n;
+      if (call.functionName === "deadline") return BigInt(Date.parse(DEADLINE) / 1000);
+      if (call.functionName === "gate") return 0;
+      return original(call);
+    });
+    f.prepared.operation.plan.data = encodeFunctionData({
+      abi: bountyPoolV1Abi,
+      functionName: "payClaim",
+      args: [WORKER, `0x${"12".repeat(32)}`],
+    });
+    expect(
+      await f.execute({ ...f.input, write: { action: "pay-claim", claimant: WORKER } }),
+    ).toMatchObject({ ok: true, money: { gross: { usd: "20.00" }, escrow: state.escrow } });
+    expect(f.sign).toHaveBeenCalledTimes(1);
   },
 );

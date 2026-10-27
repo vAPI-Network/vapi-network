@@ -58,7 +58,7 @@ export type TaskV2ExecutionInput = {
   wallet: WalletName;
   ledgerPath: string;
   approval?: TaskFundingApproval;
-  onMoney?: (money: TaskMoney) => void | Promise<void>;
+  onMoney?: (money: TaskMoney & { escrow: string }) => void | Promise<void>;
 };
 const uint = z.string().regex(/^\d+$/u);
 const stateSchema = z.object({
@@ -262,7 +262,12 @@ export function createTaskV2Executor(options: TasksChainOptions) {
         fail("Hosted V2 fee snapshot is unavailable; refusing to sign.");
       if (input.expectedGrossBaseUnits !== undefined && gross !== input.expectedGrossBaseUnits)
         fail("Hosted funding amount differs from the posted budget.");
-      const money = taskMoney(gross, feeBp ?? 0);
+      const quote = taskMoney(gross, feeBp ?? 0);
+      const money = {
+        ...quote,
+        escrow: target.escrow,
+        line: `${quote.line} · escrow ${target.escrow}`,
+      };
       const initialOperation = taskV2OperationResponseSchema.safeParse(current);
       let progress = {
         orderId: input.id,

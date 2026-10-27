@@ -3593,7 +3593,8 @@ function v2TestMoney() {
     fee: { usd: "5.00", baseUnits: "5000000" },
     net: { usd: "95.00", baseUnits: "95000000" },
     feeBp: 500,
-    line: "$100.00 gross · $5.00 fee · $95.00 net",
+    escrow: ESCROW as `0x${string}`,
+    line: `$100.00 gross · $5.00 fee · $95.00 net · escrow ${ESCROW}`,
   };
 }
 function v2TestOperation(): import("@vapi-network/core/tasks").TaskV2Operation {

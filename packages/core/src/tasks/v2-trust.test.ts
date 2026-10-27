@@ -44,4 +44,27 @@ describe("local V2 trust anchors", () => {
       ).toThrow();
     }
   });
+  it("accepts explicit local prediction windows without consulting readiness", () => {
+    expect(
+      getTrustedTasksV2Deployment(84532, {
+        env: {
+          ...env,
+          VAPI_TASKS_V2_OFFER_TTL_SECONDS_84532: "86400",
+          VAPI_TASKS_V2_CHOICE_WINDOW_SECONDS_84532: "172800",
+        },
+        notice: vi.fn(),
+      }),
+    ).toMatchObject({ offerTtlSeconds: 86400, choiceWindowSeconds: 172800 });
+  });
+  it.each(["0", "-1", "1.5", "invalid", "9007199254740992"])(
+    "refuses invalid local prediction window %s",
+    (value) => {
+      expect(() =>
+        getTrustedTasksV2Deployment(84532, {
+          env: { ...env, VAPI_TASKS_V2_CHOICE_WINDOW_SECONDS_84532: value },
+          notice: vi.fn(),
+        }),
+      ).toThrow();
+    },
+  );
 });

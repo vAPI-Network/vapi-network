@@ -10,6 +10,7 @@ import {
   type Address,
   type Hex,
   type PublicClient,
+  zeroAddress,
 } from "viem";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
@@ -192,6 +193,7 @@ function verifyAcceptedCreation(
   creationArgs: readonly unknown[],
   pool: boolean,
   chainId: number,
+  requirePosterVerifier = true,
 ) {
   const order = view.workOrder;
   const terms = z
@@ -218,8 +220,8 @@ function verifyAcceptedCreation(
   if (!pool && terms.reviewWindow !== acceptedReviewWindow)
     return v2GuardFailure("Funding review window differs from the locally accepted default.");
   const poster = address.parse(order.clientAddress);
-  if (!same(terms.poster, poster) || !same(poster, options.account.address))
-    return v2GuardFailure("Funding poster differs from the acting wallet.");
+  if (!same(terms.poster, poster))
+    return v2GuardFailure("The registered poster differs from the accepted order.");
   if (String(creationArgs.at(-1)).toLowerCase() !== keccak256(toHex(order.id)))
     return v2GuardFailure("Funding salt differs from the requested order.");
   const total = pool ? terms.budget : terms.total;
@@ -229,7 +231,9 @@ function verifyAcceptedCreation(
     total !== budget ||
     terms.termsHash !== acceptedV2TermsHash(view, pin, pool ? 0n : acceptedReviewWindow)
   )
-    return v2GuardFailure("Funding calldata differs from accepted order terms.");
+    return v2GuardFailure(
+      "The registered target or funding calldata differs from accepted order terms.",
+    );
   if (!pool) {
     const expected = declared?.bounty
       ? [
@@ -259,11 +263,115 @@ function verifyAcceptedCreation(
           Date.parse(z.object({ deadlineAt: z.string() }).parse(order.market).deadlineAt) / 1000,
         ),
       ) ||
-    declared.pool.verifier !== "poster" ||
-    !same(terms.verifier, poster)
+    (requirePosterVerifier && declared.pool.verifier !== "poster") ||
+    (declared.pool.verifier === "poster" && !same(terms.verifier, poster))
   )
     return v2GuardFailure(
       "Pool funding requires the accepted reward, gate and locally accepted poster verifier.",
+    );
+}
+
+/** Prediction inputs only: participant transaction calldata always comes from the API. */
+function acceptedCreationArgs(
+  options: TasksChainOptions,
+  view: GetOrderResponse,
+  pin: TasksV2Deployment,
+  chainId: number,
+): readonly unknown[] {
+  const order = view.workOrder;
+  const terms = z.object(taskTermsFields).parse(order.terms);
+  const poster = address.parse(order.clientAddress);
+  const total = z.object({ budget: z.object({ amountBaseUnits: uint }) }).parse(order.market)
+    .budget.amountBaseUnits;
+  const salt = keccak256(toHex(order.id));
+  const reviewWindow = BigInt(
+    getTrustedTasksDurations(chainId, options.trustedDurations).reviewWindowSeconds ??
+      DEFAULT_ACCEPTANCE_WINDOW_SECONDS,
+  );
+  if (terms.shape === "pool") {
+    if (!terms.pool || terms.pool.verifier !== "poster")
+      return v2GuardFailure("Pool funding requires a locally accepted poster verifier.");
+    return [
+      {
+        poster,
+        rewardPerClaim: BigInt(terms.pool.rewardPerClaimBaseUnits),
+        budget: total,
+        deadline: BigInt(
+          Math.floor(
+            Date.parse(z.object({ deadlineAt: z.string() }).parse(order.market).deadlineAt) / 1000,
+          ),
+        ),
+        termsHash: acceptedV2TermsHash(view, pin, 0n),
+        gate: terms.pool.gate === "proven" ? 0 : 1,
+        verifier: poster,
+      },
+      salt,
+    ];
+  }
+  const milestones = terms.bounty
+    ? [{ amount: total, deadline: BigInt(Math.floor(Date.parse(terms.bounty.deadlineAt) / 1000)) }]
+    : terms.milestones?.map((m) => ({
+        amount: BigInt(m.amountBaseUnits),
+        deadline: BigInt(Math.floor(Date.parse(m.deadlineAt) / 1000)),
+      }));
+  if (!milestones?.length) return v2GuardFailure("Accepted V2 milestones are unavailable.");
+  return [
+    {
+      shape: terms.shape === "bounty" ? 1 : 0,
+      poster,
+      termsHash: acceptedV2TermsHash(view, pin, reviewWindow),
+      total,
+      offerTtl: BigInt(pin.offerTtlSeconds ?? 604800),
+      reviewWindow,
+      choiceWindow: BigInt(pin.choiceWindowSeconds ?? 604800),
+      winners: terms.bounty?.winners ?? 0,
+      rewardPerWinner: BigInt(terms.bounty?.rewardPerWinnerBaseUnits ?? 0),
+    },
+    milestones,
+    salt,
+  ];
+}
+
+function verifyActor(
+  action: TaskV2Action | TaskV2Consent,
+  signer: Address,
+  poster: Address,
+  worker?: Address,
+  verifier?: Address,
+) {
+  const isPoster = same(signer, poster);
+  const isWorker = worker !== undefined && same(signer, worker);
+  let permitted = true;
+  switch (action.action) {
+    case "fund":
+    case "award":
+    case "award-bounty":
+    case "approve":
+    case "reject":
+    case "cancel-remainder":
+      permitted = isPoster;
+      break;
+    case "submit":
+    case "refund":
+      permitted = isWorker;
+      break;
+    case "raise-dispute":
+    case "counter-evidence":
+    case "split":
+    case "split-consent":
+      permitted = isPoster || isWorker;
+      break;
+    case "pay-claim":
+      permitted = verifier !== undefined && same(signer, verifier);
+      break;
+    case "award-consent":
+      // Award consent is signed by the prospective worker before assignment.
+      permitted = !isPoster && (worker === zeroAddress || isWorker);
+      break;
+  }
+  if (!permitted)
+    v2GuardFailure(
+      "The acting wallet does not have the on-chain role required for this V2 action.",
     );
 }
 
@@ -326,6 +434,28 @@ export async function verifyV2Target(
       ),
     );
   }
+  if (
+    action.action === "fund" &&
+    operation.success &&
+    operation.data.operation.plan.step === "v2-approve-usdc"
+  ) {
+    creationArgs = acceptedCreationArgs(options, view, pin, chainId);
+    verifyAcceptedCreation(options, view, pin, creationArgs, pool, chainId);
+    const predicted = address.parse(
+      await v2Read(
+        rpc,
+        factory,
+        pool ? bountyPoolFactoryV1Abi : escrowFactoryV2Abi,
+        pool ? "predictPool" : "predictEscrow",
+        creationArgs,
+      ),
+    );
+    if (candidate && !same(candidate, predicted))
+      return v2GuardFailure(
+        "The funding target differs from the prediction for accepted creation terms.",
+      );
+    candidate = predicted;
+  }
   if (!candidate)
     return v2GuardFailure(
       "The V2 target cannot be independently verified from this response. A registered target or verifiable funding creation terms are required.",
@@ -340,8 +470,12 @@ export async function verifyV2Target(
   if (registered !== true) {
     // The hosted signature intent has no frozen creation arguments: never sign
     // a redeemable authorization to its unverified predicted address.
-    if (action.action !== "fund" || !creationArgs)
+    if (action.action !== "fund" || !operation.success || !creationArgs)
       return v2GuardFailure("The V2 target is not registered by the locally pinned factory.");
+    const expectedCreation = acceptedCreationArgs(options, view, pin, chainId);
+    if (argumentJson(creationArgs) !== argumentJson(expectedCreation))
+      return v2GuardFailure("Fresh funding inputs differ from locally accepted creation terms.");
+    verifyActor(action, options.account.address, address.parse(order.clientAddress));
     const t = z
       .object({ poster: address, total: uint.optional(), budget: uint.optional(), termsHash: hash })
       .parse(creationArgs[0]);
@@ -390,12 +524,15 @@ export async function verifyV2Target(
           .parse(await v2Read(rpc, candidate, abi, "milestone", [i])),
       );
   }
-  if (action.action === "fund") {
+  {
     const suppliedCreation = creationArgs;
     const read = (name: string) => v2Read(rpc, candidate!, abi, name);
     if (pool) {
       const verifier = address.parse(await read("verifier"));
-      if (order.terms?.pool?.verifier !== "poster" || !same(verifier, poster))
+      if (
+        action.action === "fund" &&
+        (order.terms?.pool?.verifier !== "poster" || !same(verifier, poster))
+      )
         return v2GuardFailure("Pool funding requires a locally accepted poster verifier.");
       creationArgs = [
         {
@@ -426,7 +563,15 @@ export async function verifyV2Target(
         keccak256(toHex(order.id)),
       ];
     }
-    verifyAcceptedCreation(options, view, pin, creationArgs, pool, chainId);
+    verifyAcceptedCreation(
+      options,
+      view,
+      pin,
+      creationArgs,
+      pool,
+      chainId,
+      action.action === "fund",
+    );
     if (suppliedCreation && argumentJson(suppliedCreation) !== argumentJson(creationArgs))
       return v2GuardFailure("Funding inputs differ from the registered escrow's frozen terms.");
     const predicted = await v2Read(
@@ -438,9 +583,12 @@ export async function verifyV2Target(
     );
     if (!same(predicted, candidate))
       return v2GuardFailure(
-        "The funding recipient differs from the pinned factory's prediction for the requested order.",
+        "The V2 target differs from the pinned factory's prediction for the requested order.",
       );
   }
+  const worker = !pool ? address.parse(await v2Read(rpc, candidate, abi, "worker")) : undefined;
+  const verifier = pool ? address.parse(await v2Read(rpc, candidate, abi, "verifier")) : undefined;
+  verifyActor(action, options.account.address, poster, worker, verifier);
   return {
     chainId,
     pin,
@@ -456,7 +604,7 @@ export async function verifyV2Target(
     creationArgs,
     ...(!pool
       ? {
-          worker: address.parse(await v2Read(rpc, candidate, abi, "worker")),
+          worker,
           termsDigest: hash.parse(await v2Read(rpc, candidate, abi, "termsDigest")),
         }
       : {}),
