@@ -57,3 +57,9 @@ export * from "./v2.js";
 export * from "./post-options.js";
 
 export * from "./x402-funding.js";
+
+export * from "./v2-write.js";
+
+export * from "./v2-execution.js";
+
+export * from "./v2-trust.js";

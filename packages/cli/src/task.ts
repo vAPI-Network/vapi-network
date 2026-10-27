@@ -10,6 +10,9 @@ import {
   spendCapsForWallet,
 } from "@vapi-network/core";
 import {
+  executeTaskV2,
+  taskUsesV2,
+  taskV2PreparedSchema,
   autoReleaseDecision,
   awardTask,
   cachedMoneyClient,
@@ -91,6 +94,8 @@ import {
   type WalletTarget,
 } from "./cli.js";
 
+import { taskV2Command } from "./task-v2.js";
+
 export type TasksCommandDependencies = {
   client?: TasksClient | ((options: TasksClientOptions) => TasksClient);
   chain?: TasksChain;
@@ -106,22 +111,25 @@ export const TASK_HELP = `Usage:
   vapi task post --title <text> --brief <file|-> --deadline <duration|ISO> [--shape task|bounty|pool] [--amount <usd>] [--milestone "amount|acceptance|deadline"...] [--proof <preset>[:mustContain]...] [--checkin none|6h|24h|72h|7d] [--winners <n> --reward-per-winner <usd> --choice-window <sec>] [--reward-per-claim <usd> --budget <usd> --gate open|proven --verifier poster|vapi --open-check allowlist|invite] [--fund] [--yes] [--no-wait] [--timeout 120s] [--intake proposals|submissions] [--max-awards <k>] [--webhook <https-url>] [--account <name>] [--json]
   vapi task propose <id> --price <usd> --duration <duration> --note <text> [--account <name>] [--json]
   vapi task submit <id> [--proof <https-url>...] [--file <path>...] [--withdraw] [--proposal-id <id>] [--account <name>] [--json]
-  vapi task award <id> <proposalId> [--account <name>] [--json]
-  vapi task sign <id> [--yes] [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task milestone <id> --index N submit|approve|reject|finalize [--proof <https-url>...] [--file <path>...] [--proof-json <file>] [--note <text>] [--reason <text>] [--json]
+  vapi task cancel <id> offer|remainder|expire [--json]
+  vapi task claim <id> --claimant <addr> [--json]
+  vapi task award <id> [<proposalId>|--worker <addr>|--winners a,b,c] [--account <name>] [--json]
+  vapi task sign <id> [--action award-consent|split-consent --index N --to-worker <base-units>] [--yes] [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task fund <id> [--yes] [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task deliver <id> --files <path...> --note <text> [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task release <id> [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task refund <id> [--counterparty <0x…>] [--account <name>] [--json]
-  vapi task dispute <id> --evidence-hash <0x + 64 hex> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
-  vapi task counter-evidence <id> --evidence-hash <0x + 64 hex> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
-  vapi task resolve-unmatched <id> [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task dispute <id> [--evidence-hash <0x + 64 hex>|--index N --evidence <text>] [--action raise|resolve-unmatched|split --to-worker <base-units>] [--yes] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task counter-evidence <id> [--evidence-hash <0x + 64 hex>|--index N --evidence <text>] [--yes] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task resolve-unmatched <id> [--index N] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task message <id> <text> [--account <name>] [--json]
   vapi task thread <id> [--after <cursor>] [--account <name>] [--json]
   vapi task watch <id> [--until <state>] [--auto-release] [--timeout 7d] [--interval 5s] [--counterparty <0x…>] [--account <name>] [--json]
-  vapi task status <id> [--account <name>] [--json]
+  vapi task status <id> [--operation <uuid> --step <v2-step> --recover|--abandon] [--account <name>] [--json]
 
 Durations: 5s, 10m, 48h, 7d, or an ISO-8601 timestamp. Posting and proposal terms require at least 10 minutes.
-Dispute accepts a precomputed evidence hash only; evidence-file hashing is still undecided upstream.
+V1 dispute accepts a precomputed evidence hash. V2 dispute accepts --index with --evidence text. C0 action indices are zero-based; declared milestone indices remain one-based.
 Watch requires an interval of at least 1s and a positive timeout. Auto-release uses the acting wallet's agent profile, or defaults, and releases only amounts strictly below the threshold.
 Posting without --fund moves no money. --fund applies task and daily caps before signing. Task reads require tasks:read and writes require tasks:write; write access includes reads.
 The thread cursor is the previous page's nextBeforeSeq; --after reads older messages using beforeSeq.
@@ -146,6 +154,7 @@ export class TaskCommandError extends Error {
     message: string,
     readonly manifestHash?: `0x${string}`,
     readonly prefixCode = false,
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "TaskCommandError";
@@ -155,7 +164,7 @@ export class TaskCommandError extends Error {
 function mapTaskError(error: unknown): unknown {
   if (error instanceof TaskInputError) return new UsageError(error.message);
   if (error instanceof TaskOperationError)
-    return new TaskCommandError(error.code, error.message, error.manifestHash, true);
+    return new TaskCommandError(error.code, error.message, error.manifestHash, true, error.details);
   return error;
 }
 
@@ -223,6 +232,12 @@ function lazyTasksChain(
   }
   return {
     available: true,
+    executeV2: async (input) => {
+      const initialized = await get();
+      if (!initialized.executeV2)
+        throw new TaskOperationError("chain_unavailable", "V2 signing is unavailable.");
+      return initialized.executeV2(input);
+    },
     ...(signingAddress === undefined ? {} : { signingAddress }),
     getSigningAddress: async () => {
       const initialized = await get();
@@ -344,6 +359,8 @@ export async function taskContext(
               client,
               account,
               trustedFactories: config.tasksEscrowFactoryOverrides,
+              env,
+              onV2UntrustedOverride: io.stderr,
               trustedDurations: config.tasksEscrowDurationOverrides,
               bindings: createScopeBindings(getVapiPaths().directory),
               rpcFor: createTasksRpcFor(config, {
@@ -449,6 +466,17 @@ async function taskCommandInner(
   const parsed = parseArguments(commandArguments, {
     valueOptions: new Set([
       "--wallet",
+      ...(["milestone", "dispute", "counter-evidence", "resolve-unmatched", "sign"].includes(verb!)
+        ? ["--index"]
+        : []),
+      ...(verb === "milestone"
+        ? ["--reason", "--proof", "--file", "--files", "--note", "--proof-json"]
+        : []),
+      ...(verb === "award" ? ["--worker", "--winners"] : []),
+      ...(["sign", "dispute"].includes(verb!) ? ["--action", "--to-worker"] : []),
+      ...(["dispute", "counter-evidence"].includes(verb!) ? ["--evidence"] : []),
+      ...(verb === "claim" ? ["--claimant"] : []),
+      ...(verb === "status" ? ["--operation", "--step"] : []),
       ...([
         "sign",
         "fund",
@@ -506,6 +534,9 @@ async function taskCommandInner(
     ]),
     booleanOptions: new Set([
       ...(verb === "search" ? ["--open"] : []),
+      ...(verb === "status" ? ["--abandon", "--recover"] : []),
+      ...(verb === "release" ? ["--finalize"] : []),
+      ...(["milestone", "cancel", "award", "claim"].includes(verb!) ? ["--yes"] : []),
       ...(verb === "post" ? ["--fund", "--yes", "--no-wait"] : []),
       ...(verb === "submit" ? ["--withdraw"] : []),
       ...(["sign", "fund", "dispute", "counter-evidence"].includes(verb!) ? ["--yes"] : []),
@@ -513,19 +544,24 @@ async function taskCommandInner(
       ...(verb === "watch" ? ["--auto-release"] : []),
     ]),
     repeatableOptions: new Set([
-      ...(verb === "submit" ? ["--proof", "--file"] : []),
+      ...(["submit", "milestone"].includes(verb!) ? ["--proof", "--file"] : []),
+      ...(verb === "milestone" ? ["--files"] : []),
       ...(verb === "deliver" ? ["--files"] : []),
       ...(verb === "post" ? ["--milestone", "--proof"] : []),
     ]),
     maximumPositionals: ["search", "post", "pending"].includes(verb!)
       ? 0
-      : ["award", "message"].includes(verb!)
+      : ["award", "message", "milestone", "cancel"].includes(verb!)
         ? 2
         : 1,
   });
   const id = ["search", "post", "pending"].includes(verb!)
     ? undefined
     : taskId(parsed.positionals[0]);
+  if (id !== undefined) {
+    const v2 = await taskV2Command(verb!, id, parsed, json, io, dependencies);
+    if (v2 !== null) return v2;
+  }
   if (
     [
       "sign",
@@ -664,6 +700,43 @@ async function taskCommandInner(
           schema: registeredAgentProfileSchema,
           warn: io.stderr,
         });
+        const v2Prepared = taskV2PreparedSchema.safeParse(outcome.funding);
+        if (v2Prepared.success && (await taskUsesV2(context, outcome.result.workOrder.id))) {
+          const funding = await executeTaskV2(context, {
+            id: outcome.result.workOrder.id,
+            write: { action: "fund" },
+            prepared: v2Prepared.data,
+            preparationKey: outcome.fundingIdempotencyKey,
+            expectedGrossBaseUnits: prepared.escrowAmount,
+            policy,
+            caps: await spendCapsForWallet(target.store, target.name),
+            wallet: target.name,
+            ledgerPath: getVapiPaths().ledger,
+            approval: { granted: parsed.has("--yes") },
+            onMoney: (money) => {
+              io.stderr(money.line);
+            },
+          });
+          taskOutput(
+            io,
+            json,
+            context,
+            verb,
+            {
+              ...outcome.result,
+              ...funding,
+              funding,
+              postingMovesMoney: funding.ok,
+            },
+            [
+              `Posted task ${outcome.result.workOrder.id}.`,
+              funding.ok
+                ? "Hosted funding confirmed."
+                : "Funding requires policy approval or was refused.",
+            ],
+          );
+          return funding.ok ? undefined : "approval" in funding ? 3 : 2;
+        }
         const funding = await fundTaskOperation(context, {
           fundingIntent: outcome.funding,
           expectedGrossBaseUnits: prepared.escrowAmount,

@@ -98,7 +98,8 @@ describe("action register", () => {
     const names = tools.map((tool) => tool.name);
     expect(names).not.toContain("accounts.cancel");
     expect(names).not.toContain("accounts.distribute");
-    expect(names.every((name) => !name.includes("cancel"))).toBe(true);
+    // Task escrow cancellation is a participant action, separate from account movements.
+    expect(names.filter((name) => name.includes("cancel"))).toEqual(["tasks.cancel"]);
     const schemas = JSON.stringify(tools.map((tool) => tool.inputSchema));
     expect(schemas).not.toContain('"cancel"');
     expect(schemas).not.toContain('"replaceExpiredRestored"');

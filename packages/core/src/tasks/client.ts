@@ -43,6 +43,20 @@ import type {
   UploadFileInput,
 } from "./types.js";
 
+import {
+  taskV2ActionSchema,
+  taskV2ConsentSchema,
+  taskV2PreparedSchema,
+  taskV2SignatureResponseSchema,
+  taskV2OperationResponseSchema,
+  taskV2RecoverySchema,
+  taskV2AbandonSchema,
+  taskV2StepSchema,
+  type TaskV2Action,
+  type TaskV2Consent,
+  type TaskV2Prepared,
+} from "./v2-write.js";
+
 const publicFetch = createPublicFetch({ allowPrivateNetwork: false });
 
 export type TasksClientOptions = {
@@ -296,6 +310,66 @@ export function createTasksClient(options: TasksClientOptions): TasksClientV2 {
   }
 
   const client = {
+    prepareV2(id: string, write: TaskV2Action, call: TasksMutationOptions) {
+      return request(`/v1/work-orders/${segment(id)}/writes`, "POST", taskV2PreparedSchema, {
+        ...call,
+        body: { mode: "prepare", write: input(taskV2ActionSchema, write) },
+      });
+    },
+    signV2(id: string, consent: TaskV2Consent, call: TasksMutationOptions) {
+      return request(`/v1/work-orders/${segment(id)}/writes`, "POST", taskV2PreparedSchema, {
+        ...call,
+        body: {
+          mode: "sign",
+          consent: {
+            ...input(taskV2ConsentSchema, consent),
+            workOrderId: id,
+            idempotencyKey: call.idempotencyKey,
+          },
+        },
+      });
+    },
+    confirmV2Signature(
+      id: string,
+      operationId: string,
+      signature: string,
+      call: TasksMutationOptions,
+    ) {
+      return request(
+        `/v1/work-orders/${segment(id)}/writes`,
+        "POST",
+        taskV2SignatureResponseSchema,
+        { ...call, body: { mode: "confirm-signature", operationId, signature } },
+      );
+    },
+    operationV2(
+      id: string,
+      mode: "transaction" | "reconcile" | "recover" | "abandon",
+      body: { step: string; transactionHash?: string },
+      call: TasksMutationOptions,
+    ) {
+      input(taskV2StepSchema, body.step);
+      const route = mode === "transaction" ? "transactions" : mode;
+
+      if (mode === "abandon")
+        return request(`/v1/work-operations/${segment(id)}/${route}`, "POST", taskV2AbandonSchema, {
+          ...call,
+          body,
+        });
+      if (mode === "recover")
+        return request(
+          `/v1/work-operations/${segment(id)}/${route}`,
+          "POST",
+          taskV2RecoverySchema,
+          { ...call, body },
+        );
+      return request(
+        `/v1/work-operations/${segment(id)}/${route}`,
+        "POST",
+        taskV2OperationResponseSchema,
+        { ...call, body },
+      );
+    },
     /** Probe the optional standard x402 Tasks route without signing or following redirects. */
     async fundingChallenge(id: string, call: TasksRequestOptions = {}) {
       const timeout = AbortSignal.timeout(timeoutMs);
@@ -693,6 +767,25 @@ export type PostTaskResponse =
       };
     };
 export type TasksClient = {
+  prepareV2?(id: string, write: TaskV2Action, call: TasksMutationOptions): Promise<TaskV2Prepared>;
+  signV2?(id: string, consent: TaskV2Consent, call: TasksMutationOptions): Promise<TaskV2Prepared>;
+  confirmV2Signature?(
+    id: string,
+    operationId: string,
+    signature: string,
+    call: TasksMutationOptions,
+  ): Promise<z.infer<typeof taskV2SignatureResponseSchema>>;
+  operationV2?(
+    id: string,
+    mode: "transaction" | "reconcile" | "recover" | "abandon",
+    body: { step: string; transactionHash?: string },
+    call: TasksMutationOptions,
+  ): Promise<
+    | z.infer<typeof taskV2OperationResponseSchema>
+    | z.infer<typeof taskV2RecoverySchema>
+    | z.infer<typeof taskV2AbandonSchema>
+  >;
+
   fundingChallenge?(
     id: string,
     call?: TasksRequestOptions,
@@ -833,4 +926,17 @@ export type TasksClient = {
 
 /** Factory-created clients implement v2; old adapters only need the original interface. */
 export type TasksClientV2 = TasksClient &
-  Required<Pick<TasksClient, "fundingChallenge" | "show" | "post" | "checkin" | "pending">>;
+  Required<
+    Pick<
+      TasksClient,
+      | "fundingChallenge"
+      | "show"
+      | "post"
+      | "checkin"
+      | "pending"
+      | "prepareV2"
+      | "signV2"
+      | "confirmV2Signature"
+      | "operationV2"
+    >
+  >;

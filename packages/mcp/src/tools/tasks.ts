@@ -9,6 +9,17 @@ import {
   type WalletStore,
 } from "@vapi-network/core";
 import {
+  taskV2PreparedSchema,
+  executeTaskV2,
+  taskUsesV2,
+  recoverTaskV2,
+  taskV2ActionSchema,
+  taskV2ConsentSchema,
+  taskV2IndexSchema,
+  taskV2ProofSchema,
+  taskV2StepSchema,
+  type TaskV2Action,
+  type TaskV2Consent,
   TASK_LIMITS,
   TASK_WATCH_STATES,
   TaskInputError,
@@ -188,13 +199,49 @@ export const tasksSubmitTool = descriptor(
     files: z.array(localPath).optional(),
   },
 );
+export const tasksMilestoneTool = descriptor(
+  "Execute a hosted-prepared V2 milestone action. C0 index i is zero-based (0–4). Returns hosted operation state and gross · fee · net; local spend policy applies.",
+  {
+    ...participant,
+    action: z.enum(["submit", "approve", "reject", "finalize"]),
+    i: taskV2IndexSchema,
+    proof: taskV2ProofSchema.optional(),
+    reason: z.string().min(1).max(8000).optional(),
+  },
+);
+export const tasksCancelTool = descriptor(
+  "Execute the hosted-prepared V2 cancellation: offer, unpaid remainder or expiry. Refunds have no fee.",
+  { ...participant, scope: z.enum(["offer", "remainder", "expire"]) },
+);
+export const tasksClaimTool = descriptor(
+  "Pay a stored pool claim as its verifier through the hosted-prepared V2 payout plan. Returns gross · fee · net. Admission remains separate.",
+  { ...participant, action: z.literal("pay"), claimant: z.string().regex(/^0x[0-9a-fA-F]{40}$/u) },
+);
 export const tasksAwardTool = descriptor(
-  "Does not move money. Award a proposal for the poster's task.",
-  { ...participant, proposalId: id },
+  "Award a V1 proposal, select a V2 worker, or pay V2 bounty winners in one hosted-prepared transaction. Returns gross · fee · net.",
+  {
+    ...participant,
+    proposalId: id.optional(),
+    worker: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{40}$/u)
+      .optional(),
+    winners: z
+      .array(z.string().regex(/^0x[0-9a-fA-F]{40}$/u))
+      .min(1)
+      .max(50)
+      .optional(),
+  },
 );
 export const tasksSignTool = descriptor(
   "Signs the user's own task scope locally with the user's vault wallet after the human confirms the money direction via counterparty; a worker may also create the unfunded escrow; nothing is custodial. Does not move money. Waits up to 60 seconds for vAPI to index a created escrow by default.",
-  { ...moneyParticipant, wait: waitForIndexer },
+  {
+    ...moneyParticipant,
+    wait: waitForIndexer,
+    action: z.enum(["award-consent", "split-consent"]).optional(),
+    i: taskV2IndexSchema.optional(),
+    toWorker: z.string().regex(/^\d+$/u).optional(),
+  },
 );
 export const tasksFundTool = descriptor(
   "Executes the user's own funding of this task from the user's vault wallet, within the spend policy the user configured; nothing is custodial. MCP cannot grant human approval; amounts above the approval threshold are refused with approval:true. Waits up to 60 seconds for vAPI to index the locked escrow by default.",
@@ -205,16 +252,22 @@ export const tasksDeliverTool = descriptor(
   {
     ...moneyParticipant,
     wait: waitForIndexer,
-    files: z.array(localPath).min(TASK_LIMITS.deliveryFilesMin).max(TASK_LIMITS.deliveryFilesMax),
+    files: z
+      .array(localPath)
+      .min(TASK_LIMITS.deliveryFilesMin)
+      .max(TASK_LIMITS.deliveryFilesMax)
+      .optional(),
+    proof: taskV2ProofSchema.optional(),
     note: z
       .string()
       .max(TASK_LIMITS.deliveryNoteMax)
-      .refine((value) => value.trim().length > 0),
+      .refine((value) => value.trim().length > 0)
+      .optional(),
   },
 );
 export const tasksReleaseTool = descriptor(
   "Executes the user's own payment to the worker from task escrow with the user's vault wallet; nothing is custodial. Returns gross · fee · net using the deployed fee. Waits up to 60 seconds for vAPI to index the release by default.",
-  { ...moneyParticipant, wait: waitForIndexer },
+  { ...moneyParticipant, wait: waitForIndexer, finalize: z.boolean().optional() },
 );
 export const tasksRefundTool = descriptor(
   "Executes the user's own refund of escrowed USDC to the poster with the user's vault wallet; nothing is custodial. Returns gross · fee · net using the deployed fee.",
@@ -224,16 +277,25 @@ export const tasksDisputeTool = descriptor(
   "Executes the user's own approval of the verified dispute fee and raises a dispute with the user's vault wallet; nothing is custodial. Applies task and daily caps; MCP refuses human approval with approval:true. Accepts a precomputed evidence hash.",
   {
     ...moneyParticipant,
-    evidenceHash: z.string().regex(TASK_LIMITS.disputeEvidenceHash),
+    evidenceHash: z.string().regex(TASK_LIMITS.disputeEvidenceHash).optional(),
+    i: taskV2IndexSchema.optional(),
+    evidence: z.string().min(1).max(8000).optional(),
+    action: z.enum(["raise", "resolve-unmatched", "split"]).optional(),
+    toWorker: z.string().regex(/^\d+$/u).optional(),
   },
 );
 export const tasksCounterEvidenceTool = descriptor(
   "Executes the user's own counter-evidence submission and approval of the verified dispute fee with the user's vault wallet as the non-opener before the onchain deadline; nothing is custodial. Applies task and daily caps; MCP refuses human approval with approval:true.",
-  { ...moneyParticipant, evidenceHash: z.string().regex(TASK_LIMITS.disputeEvidenceHash) },
+  {
+    ...moneyParticipant,
+    evidenceHash: z.string().regex(TASK_LIMITS.disputeEvidenceHash).optional(),
+    i: taskV2IndexSchema.optional(),
+    evidence: z.string().min(1).max(8000).optional(),
+  },
 );
 export const tasksResolveUnmatchedTool = descriptor(
   "Executes the user's own resolution of an unmatched dispute with the user's vault wallet after the onchain counter-evidence deadline when no counter-evidence was submitted; nothing is custodial.",
-  moneyParticipant,
+  { ...moneyParticipant, i: taskV2IndexSchema.optional() },
 );
 export const tasksMessageTool = descriptor(
   "Does not move money. Send task thread text as the acting wallet.",
@@ -261,7 +323,12 @@ export const tasksWatchTool = descriptor(
 );
 export const tasksStatusTool = descriptor(
   "Does not move money. Read signed-in chain state and participant events, or the public task card without sign-in.",
-  participant,
+  {
+    ...participant,
+    operationId: z.uuid().optional(),
+    step: taskV2StepSchema.optional(),
+    abandon: z.boolean().optional(),
+  },
 );
 
 export type TasksOverrides = {
@@ -316,6 +383,12 @@ function lazyTasksChain(
   }
   return {
     available: true,
+    executeV2: async (input) => {
+      const initialized = await get();
+      if (!initialized.executeV2)
+        throw new TaskOperationError("chain_unavailable", "V2 signing is unavailable.");
+      return initialized.executeV2(input);
+    },
     getSigningAddress: async () => {
       const initialized = await get();
       const address = initialized.signingAddress ?? (await initialized.getSigningAddress?.());
@@ -499,7 +572,7 @@ export function createTasksTools(options: TasksToolsOptions) {
       verb === "dispute" ? disputeTaskOperation : counterEvidenceTaskOperation
     )(ctx, {
       id: input.id,
-      evidenceHash: input.evidenceHash,
+      evidenceHash: input.evidenceHash!,
       ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
       policy,
       caps: await spendCapsForWallet(options.wallets!, ctx.selected.name),
@@ -511,6 +584,42 @@ export function createTasksTools(options: TasksToolsOptions) {
     return taskResult(outcome, !outcome.ok);
   }
 
+  async function v2(
+    input: { id: string; wallet?: string },
+    write?: TaskV2Action,
+    consent?: TaskV2Consent,
+  ) {
+    const ctx = await acting(input.wallet);
+    const result = await executeTaskV2(ctx, {
+      id: input.id,
+      ...(write ? { write } : {}),
+      ...(consent ? { consent } : {}),
+      policy: await taskPolicyForWallet({
+        directory: home,
+        wallet: ctx.selected.name,
+        schema: registeredAgentProfileSchema,
+      }),
+      caps: await spendCapsForWallet(options.wallets!, ctx.selected.name),
+      wallet: ctx.selected.name,
+      ledgerPath: options.ledgerPath ?? getVapiPaths(home).ledger,
+      approval: { granted: false },
+    });
+    return taskResult(result, !result.ok);
+  }
+  async function maybeV2(input: { id: string; wallet?: string }, write: TaskV2Action) {
+    const ctx = await acting(input.wallet);
+    if (!(await taskUsesV2(ctx, input.id))) return null;
+    try {
+      return await v2(input, write);
+    } catch (error) {
+      if (
+        error instanceof TaskOperationError &&
+        ["v1_order", "v2_writes_disabled"].includes(error.code)
+      )
+        return null;
+      throw error;
+    }
+  }
   return {
     async search(input: Input<typeof tasksSearchTool>) {
       return taskResult(
@@ -596,6 +705,30 @@ export function createTasksTools(options: TasksToolsOptions) {
             wallet: ctx.selected.name,
             schema: registeredAgentProfileSchema,
           });
+          const v2Prepared = taskV2PreparedSchema.safeParse(outcome.funding);
+          if (v2Prepared.success && (await taskUsesV2(ctx, outcome.result.workOrder.id))) {
+            const funding = await executeTaskV2(ctx, {
+              id: outcome.result.workOrder.id,
+              write: { action: "fund" },
+              prepared: v2Prepared.data,
+              preparationKey: outcome.fundingIdempotencyKey,
+              expectedGrossBaseUnits: prepared.escrowAmount,
+              policy,
+              caps: await spendCapsForWallet(options.wallets!, ctx.selected.name),
+              wallet: ctx.selected.name,
+              ledgerPath: options.ledgerPath ?? getVapiPaths(home).ledger,
+              approval: { granted: false },
+            });
+            return taskResult(
+              {
+                ...outcome.result,
+                ...funding,
+                funding,
+                postingMovesMoney: funding.ok,
+              },
+              !funding.ok,
+            );
+          }
           const funding = await fundTaskOperation(ctx, {
             fundingIntent: outcome.funding,
             expectedGrossBaseUnits: prepared.escrowAmount,
@@ -677,12 +810,56 @@ export function createTasksTools(options: TasksToolsOptions) {
         }),
       );
     },
+    async milestone(input: Input<typeof tasksMilestoneTool>) {
+      return v2(
+        input,
+        taskV2ActionSchema.parse({
+          action: input.action,
+          i: input.i,
+          ...(input.action === "submit" ? { proof: input.proof } : {}),
+          ...(input.action === "reject" ? { reason: input.reason } : {}),
+        }),
+      );
+    },
+    async cancel(input: Input<typeof tasksCancelTool>) {
+      return v2(
+        input,
+        taskV2ActionSchema.parse({
+          action: input.scope === "expire" ? "expire" : `cancel-${input.scope}`,
+        }),
+      );
+    },
+    async claim(input: Input<typeof tasksClaimTool>) {
+      return v2(input, taskV2ActionSchema.parse({ action: "pay-claim", claimant: input.claimant }));
+    },
     async award(input: Input<typeof tasksAwardTool>) {
+      if (input.worker || input.winners) {
+        if (input.proposalId || Boolean(input.worker) === Boolean(input.winners))
+          throw new TaskInputError("Choose worker, winners or proposalId.");
+        return v2(
+          input,
+          taskV2ActionSchema.parse(
+            input.worker
+              ? { action: "award", worker: input.worker }
+              : { action: "award-bounty", winners: input.winners },
+          ),
+        );
+      }
+      if (!input.proposalId) throw new TaskInputError("proposalId, worker or winners is required.");
       return taskResult(
         await awardTask(await acting(input.wallet), { id: input.id, proposalId: input.proposalId }),
       );
     },
     async sign(input: Input<typeof tasksSignTool>) {
+      if (input.action)
+        return v2(
+          input,
+          undefined,
+          taskV2ConsentSchema.parse({
+            action: input.action,
+            ...(input.action === "split-consent" ? { i: input.i, toWorker: input.toWorker } : {}),
+          }),
+        );
       if (input.counterparty === undefined)
         return tasksErrorResult(
           new TaskOperationError(
@@ -723,6 +900,8 @@ export function createTasksTools(options: TasksToolsOptions) {
       }
     },
     async fund(input: Input<typeof tasksFundTool>) {
+      const prepared = await maybeV2(input, { action: "fund" });
+      if (prepared) return prepared;
       const ctx = await acting(input.wallet);
       const policy = await taskPolicyForWallet({
         directory: getVapiPaths(options.session.home).directory,
@@ -770,10 +949,28 @@ export function createTasksTools(options: TasksToolsOptions) {
       return taskResult({ ...outcome, wait }, !outcome.ok);
     },
     async deliver(input: Input<typeof tasksDeliverTool>) {
+      const ctx = await acting(input.wallet);
+      if (input.proof || (await taskUsesV2(ctx, input.id))) {
+        const view = await ctx.client.getOrder(input.id);
+        if (view.workOrder.terms?.milestones?.length !== 1)
+          throw new TaskInputError("Use tasks.milestone for multiple milestones.");
+        const proof =
+          input.proof ??
+          (await Promise.all(
+            (input.files ?? []).map(async (path) => {
+              const file = await readTaskFile(path);
+              const uploaded = await ctx.client.uploadFile(file);
+              return { preset: "file" as const, value: uploaded.file.sha256 };
+            }),
+          ));
+        const result = await maybeV2(input, { action: "submit", i: 0, proof });
+        if (result) return result;
+      }
+      if (!input.files?.length || !input.note)
+        throw new TaskInputError("Delivery files and note are required.");
       const files = (await Promise.all(input.files.map(readTaskFile))).map(
         ({ fileName: name, bytes, contentType }) => ({ name, bytes, contentType }),
       );
-      const ctx = await acting(input.wallet);
       const outcome = await deliverTaskOperation(ctx, {
         id: input.id,
         ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
@@ -787,6 +984,16 @@ export function createTasksTools(options: TasksToolsOptions) {
     },
     async release(input: Input<typeof tasksReleaseTool>) {
       const ctx = await acting(input.wallet);
+      if (await taskUsesV2(ctx, input.id)) {
+        const view = await ctx.client.getOrder(input.id);
+        if (view.workOrder.terms?.milestones?.length !== 1)
+          throw new TaskInputError("Use tasks.milestone for multiple milestones.");
+        const result = await maybeV2(input, {
+          action: input.finalize ? "finalize" : "approve",
+          i: 0,
+        });
+        if (result) return result;
+      }
       const outcome = await releaseTaskOperation(ctx, {
         id: input.id,
         ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
@@ -797,6 +1004,8 @@ export function createTasksTools(options: TasksToolsOptions) {
       return taskResult({ ...outcome, wait });
     },
     async refund(input: Input<typeof tasksRefundTool>) {
+      const prepared = await maybeV2(input, { action: "refund" });
+      if (prepared) return prepared;
       return taskResult(
         await refundTaskOperation(await acting(input.wallet), {
           id: input.id,
@@ -805,12 +1014,44 @@ export function createTasksTools(options: TasksToolsOptions) {
       );
     },
     async dispute(input: Input<typeof tasksDisputeTool>) {
+      if (input.i !== undefined)
+        return v2(
+          input,
+          taskV2ActionSchema.parse({
+            action:
+              input.action === "split"
+                ? "split"
+                : input.action === "resolve-unmatched"
+                  ? "resolve-unmatched"
+                  : "raise-dispute",
+            i: input.i,
+            ...(input.action === "split"
+              ? { toWorker: input.toWorker }
+              : input.action === "resolve-unmatched"
+                ? {}
+                : { evidence: input.evidence }),
+          }),
+        );
+      if (!input.evidenceHash)
+        throw new TaskInputError("V1 evidenceHash or V2 i and evidence is required.");
       return feeAction("dispute", input);
     },
     async counterEvidence(input: Input<typeof tasksCounterEvidenceTool>) {
+      if (input.i !== undefined)
+        return v2(
+          input,
+          taskV2ActionSchema.parse({
+            action: "counter-evidence",
+            i: input.i,
+            evidence: input.evidence,
+          }),
+        );
+      if (!input.evidenceHash)
+        throw new TaskInputError("V1 evidenceHash or V2 i and evidence is required.");
       return feeAction("counter-evidence", input);
     },
     async resolveUnmatched(input: Input<typeof tasksResolveUnmatchedTool>) {
+      if (input.i !== undefined) return v2(input, { action: "resolve-unmatched", i: input.i });
       return taskResult(
         await resolveUnmatchedTaskOperation(await acting(input.wallet), {
           id: input.id,
@@ -862,6 +1103,20 @@ export function createTasksTools(options: TasksToolsOptions) {
       }
     },
     async status(input: Input<typeof tasksStatusTool>) {
+      if (input.operationId) {
+        if (!input.step) throw new TaskInputError("A V2 step is required with operationId.");
+        return taskResult(
+          await recoverTaskV2(
+            { ...(await acting(input.wallet)), ...(options.sleep ? { sleep: options.sleep } : {}) },
+            {
+              id: input.id,
+              operationId: input.operationId,
+              step: input.step,
+              abandon: input.abandon,
+            },
+          ),
+        );
+      }
       await options.wallets?.reload();
       const publicOnly =
         input.wallet === undefined &&
@@ -942,6 +1197,7 @@ export function tasksErrorResult(error: unknown, extra: Record<string, unknown> 
   const value = {
     code,
     message: error instanceof Error ? error.message : String(error),
+    ...(error instanceof TaskOperationError ? error.details : {}),
     ...(error instanceof TaskOperationError && error.manifestHash
       ? { manifestHash: error.manifestHash }
       : {}),

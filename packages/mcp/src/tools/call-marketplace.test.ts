@@ -43,10 +43,17 @@ describe("Agent Cash marketplace call boundary", () => {
       vi.useFakeTimers();
       const directory = await mkdtemp(join(tmpdir(), "vapi-paid-timeout-"));
       temporaryDirectories.push(directory);
+      let paidFetchStarted!: () => void;
+      const paidFetch = new Promise<void>((resolve) => {
+        paidFetchStarted = resolve;
+      });
       const fetchImpl = vi
         .fn<typeof fetch>()
         .mockResolvedValueOnce(paymentRequired(PAY_TO, offerSeconds))
-        .mockImplementationOnce(async (input) => await abortedFetch(input));
+        .mockImplementationOnce(async (input) => {
+          paidFetchStarted();
+          return await abortedFetch(input);
+        });
 
       const call = callService({
         input: {
@@ -62,7 +69,15 @@ describe("Agent Cash marketplace call boundary", () => {
         receiptsPath: join(directory, "receipts.jsonl"),
         ...(internalTimeoutMs === undefined ? {} : { timeoutMs: internalTimeoutMs }),
       });
-      await waitForFetchCalls(fetchImpl, 2);
+      // Actual filesystem I/O must finish before advancing the fake paid timer.
+      // Surface an early failure instead of leaving the handshake unresolved.
+      await Promise.race([
+        paidFetch,
+        call.then(() => {
+          throw new Error("Expected the paid fetch before completion.");
+        }),
+      ]);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
       let rejected = false;
       void call.catch(() => {
         rejected = true;
@@ -1152,16 +1167,6 @@ async function abortedFetch(input: RequestInfo | URL): Promise<Response> {
   return await new Promise<Response>((_resolve, reject) => {
     request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
   });
-}
-
-async function waitForFetchCalls(
-  fetchImpl: ReturnType<typeof vi.fn<typeof fetch>>,
-  count: number,
-): Promise<void> {
-  for (let attempt = 0; attempt < 1_000 && fetchImpl.mock.calls.length < count; attempt += 1) {
-    await vi.advanceTimersByTimeAsync(0);
-  }
-  expect(fetchImpl).toHaveBeenCalledTimes(count);
 }
 
 function signInRequired() {

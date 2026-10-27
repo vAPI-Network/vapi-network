@@ -3489,3 +3489,193 @@ describe("post-and-fund confirmation", () => {
     });
   });
 });
+
+describe("Tasks V2 prepared write arguments", () => {
+  const worker = "0x3333333333333333333333333333333333333333";
+  const cases: Array<[string[], object]> = [
+    [
+      ["milestone", ID, "submit", "--index", "0", "--proof", "https://proof.example/result"],
+      {
+        write: {
+          action: "submit",
+          i: 0,
+          proof: [{ preset: "link", value: "https://proof.example/result" }],
+        },
+      },
+    ],
+    [["milestone", ID, "approve", "--index", "0"], { write: { action: "approve", i: 0 } }],
+    [
+      ["milestone", ID, "reject", "--index", "4", "--reason", "Missing the requested proof"],
+      { write: { action: "reject", i: 4, reason: "Missing the requested proof" } },
+    ],
+    [["milestone", ID, "finalize", "--index", "1"], { write: { action: "finalize", i: 1 } }],
+    [["cancel", ID, "offer"], { write: { action: "cancel-offer" } }],
+    [["cancel", ID, "remainder"], { write: { action: "cancel-remainder" } }],
+    [["cancel", ID, "expire"], { write: { action: "expire" } }],
+    [["award", ID, "--worker", worker], { write: { action: "award", worker } }],
+    [
+      ["award", ID, "--winners", `${worker},${ADDRESS}`],
+      { write: { action: "award-bounty", winners: [worker, ADDRESS] } },
+    ],
+    [["sign", ID, "--action", "award-consent"], { consent: { action: "award-consent" } }],
+    [
+      ["sign", ID, "--action", "split-consent", "--index", "0", "--to-worker", "12000000"],
+      { consent: { action: "split-consent", i: 0, toWorker: "12000000" } },
+    ],
+    [
+      ["dispute", ID, "--index", "0", "--evidence", "proof text"],
+      { write: { action: "raise-dispute", i: 0, evidence: "proof text" } },
+    ],
+    [
+      ["dispute", ID, "--action", "split", "--index", "0", "--to-worker", "12000000"],
+      { write: { action: "split", i: 0, toWorker: "12000000" } },
+    ],
+    [
+      ["counter-evidence", ID, "--index", "0", "--evidence", "counter proof"],
+      { write: { action: "counter-evidence", i: 0, evidence: "counter proof" } },
+    ],
+    [["resolve-unmatched", ID, "--index", "0"], { write: { action: "resolve-unmatched", i: 0 } }],
+    [["claim", ID, "--claimant", worker], { write: { action: "pay-claim", claimant: worker } }],
+  ];
+  it.each(cases)(
+    "parses %j and retains lifecycle and operation in JSON",
+    async (args, expected) => {
+      const f = await fixture();
+      const executeV2 = vi.fn(async () => ({
+        ok: true as const,
+        money: v2TestMoney(),
+        orderId: ID,
+        operation: v2TestOperation(),
+        lifecycle: { shape: "task" as const, state: "Active" as const, milestones: [] },
+        nextAction: { action: "none" as const },
+      }));
+      f.dependencies.tasks!.chain = { ...missingTasksChain, available: true, executeV2 };
+      const result = await invoke(args, f.dependencies);
+      expect(result.code).toBe(0);
+      expect(executeV2).toHaveBeenCalledWith(expect.objectContaining({ id: ID, ...expected }));
+      expect(result.values[0]).toMatchObject({
+        lifecycle: { state: "Active" },
+        nextAction: { action: "none" },
+        operation: { state: "confirmed" },
+      });
+    },
+  );
+  it.each(["-1", "5", "0.5", "x"])(
+    "refuses invalid zero-based index %s before signing",
+    async (index) => {
+      const f = await fixture();
+      const executeV2 = vi.fn();
+      f.dependencies.tasks!.chain = { ...missingTasksChain, executeV2 };
+      const result = await invoke(["milestone", ID, "approve", "--index", index], f.dependencies);
+      expect(result.code).toBe(1);
+      expect(executeV2).not.toHaveBeenCalled();
+    },
+  );
+  it("preserves a disabled-host error code and never prints success", async () => {
+    const f = await fixture();
+    f.dependencies.tasks!.chain = {
+      ...missingTasksChain,
+      executeV2: vi
+        .fn()
+        .mockRejectedValue(
+          new TasksClientError("http", "V2 writes disabled", 404, "v2_writes_disabled"),
+        ),
+    };
+    const result = await invoke(["cancel", ID, "offer"], f.dependencies);
+    expect(result.code).not.toBe(0);
+    expect(result.values[0]).toMatchObject({ error: { code: "v2_writes_disabled" } });
+  });
+});
+
+function v2TestMoney() {
+  return {
+    gross: { usd: "100.00", baseUnits: "100000000" },
+    fee: { usd: "5.00", baseUnits: "5000000" },
+    net: { usd: "95.00", baseUnits: "95000000" },
+    feeBp: 500,
+    escrow: ESCROW as `0x${string}`,
+    line: `$100.00 gross · $5.00 fee · $95.00 net · escrow ${ESCROW}`,
+  };
+}
+function v2TestOperation(): import("@vapi-network/core/tasks").TaskV2Operation {
+  return {
+    id: KEY,
+    kind: "tasks-v2-write" as const,
+    state: "confirmed" as const,
+    step: "v2-approve" as const,
+    expectedActor: ADDRESS,
+    transactionHash: `0x${"ab".repeat(32)}` as `0x${string}`,
+    plan: {
+      version: "work-transaction-plan-v2" as const,
+      operationId: KEY,
+      step: "v2-approve" as const,
+      chainId: 8453,
+      network: "eip155:8453",
+      from: ADDRESS,
+      to: ESCROW,
+      value: "0" as const,
+      data: "0x1234" as `0x${string}`,
+    },
+  };
+}
+
+it("passes the original post funding key and prepared operation through an approval refusal", async () => {
+  const created = tasksResponseSchemas.createOrder.parse(order());
+  created.workOrder.terms = {
+    shape: "task",
+    milestones: [
+      {
+        index: 1,
+        amountBaseUnits: "100000000",
+        acceptance: "A useful delivery",
+        deadlineAt: "2026-10-15T12:00:00.000Z",
+      },
+    ],
+  };
+  const prepared = {
+    orderId: ID,
+    operation: {
+      ...v2TestOperation(),
+      state: "prepared" as const,
+      step: "v2-fund" as const,
+      transactionHash: null,
+      plan: { ...v2TestOperation().plan, step: "v2-fund" as const },
+    },
+  };
+  const post = vi.fn(async () => ({
+    task: created,
+    funding: { kind: "transaction" as const, ...prepared },
+  }));
+  const client = fakeClient({ post, getOrder: vi.fn(async () => created), prepareV2: vi.fn() });
+  const f = await fixture(true, client);
+  f.dependencies.readStdin = async () => BRIEF;
+  const executeV2 = vi.fn().mockResolvedValue({
+    ok: false,
+    approval: true,
+    money: v2TestMoney(),
+    lifecycle: null,
+    nextAction: null,
+    ...prepared,
+  });
+  f.dependencies.tasks!.chain = { ...missingTasksChain, available: true, executeV2 };
+  const result = await invoke(
+    [
+      "post",
+      "--title",
+      "Build a page",
+      "--brief",
+      "-",
+      "--amount",
+      "100",
+      "--deadline",
+      "7d",
+      "--fund",
+    ],
+    f.dependencies,
+  );
+  expect(result.code).toBe(3);
+  expect(post).toHaveBeenCalledWith(expect.any(Object), { idempotencyKey: KEY });
+  expect(executeV2).toHaveBeenCalledWith(
+    expect.objectContaining({ preparationKey: KEY, prepared: expect.objectContaining(prepared) }),
+  );
+});

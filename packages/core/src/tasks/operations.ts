@@ -125,6 +125,7 @@ export async function postTask(
   feeUnavailable: boolean;
   unsupportedFields: string[];
   postingMovesMoney: false;
+  fundingIdempotencyKey?: string;
   funding?: { error?: string; kind?: "eip712" | "transaction"; [key: string]: unknown };
 }> {
   let deployment: Awaited<ReturnType<TasksClient["deployment"]>>;
@@ -141,6 +142,7 @@ export async function postTask(
   const feeUnavailable = feeBp === null;
   if (feeUnavailable) input.onFeeUnavailable?.();
   const money = taskMoney(input.amount, feeBp);
+  const postingKey = context.randomUUID();
   const response = await taskRequest(
     "post",
     input.fund ? "post" : "createOrder",
@@ -163,7 +165,7 @@ export async function postTask(
             ...input.order.market,
           },
         },
-        { idempotencyKey: context.randomUUID() },
+        { idempotencyKey: postingKey },
       ),
     context,
   );
@@ -205,7 +207,7 @@ export async function postTask(
     feeUnavailable,
     unsupportedFields: [],
     postingMovesMoney: false,
-    ...(funding === undefined ? {} : { funding }),
+    ...(funding === undefined ? {} : { funding, fundingIdempotencyKey: postingKey }),
   };
 }
 export async function proposeTask(
