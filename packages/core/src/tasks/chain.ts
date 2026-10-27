@@ -57,6 +57,9 @@ export type TasksChainOptions = {
   randomBytes?: (size: number) => Uint8Array;
   confirmations?: number;
   trustedFactories?: Record<string, string>;
+  trustedV2Deployments?: import("./v2-trust.js").TasksV2DeploymentOverrides;
+  env?: NodeJS.ProcessEnv;
+  onV2UntrustedOverride?: (message: string) => void;
   trustedDurations?: TasksDurationOverrides;
   bindings?: ScopeBindings;
 };

@@ -359,6 +359,8 @@ export async function taskContext(
               client,
               account,
               trustedFactories: config.tasksEscrowFactoryOverrides,
+              env,
+              onV2UntrustedOverride: io.stderr,
               trustedDurations: config.tasksEscrowDurationOverrides,
               bindings: createScopeBindings(getVapiPaths().directory),
               rpcFor: createTasksRpcFor(config, {
@@ -704,6 +706,7 @@ async function taskCommandInner(
             id: outcome.result.workOrder.id,
             write: { action: "fund" },
             prepared: v2Prepared.data,
+            preparationKey: outcome.fundingIdempotencyKey,
             expectedGrossBaseUnits: prepared.escrowAmount,
             policy,
             caps: await spendCapsForWallet(target.store, target.name),

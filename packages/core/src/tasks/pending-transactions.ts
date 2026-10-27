@@ -14,7 +14,7 @@ import {
   type ReconcileOperationResponse,
 } from "./types.js";
 
-import { taskV2StepSchema } from "./v2-write.js";
+import { taskV2PreparedSchema, type TaskV2Prepared, taskV2StepSchema } from "./v2-write.js";
 
 export type PendingTransaction = {
   chainId: number;
@@ -32,7 +32,12 @@ export type RetainedSpendReservation = {
   exposed?: boolean;
   invalidated?: boolean;
 };
-export type PendingPreparation = { idempotencyKey: string; inputs: unknown; operationId?: string };
+export type PendingPreparation = {
+  idempotencyKey: string;
+  inputs: unknown;
+  operationId?: string;
+  preparedV2?: TaskV2Prepared;
+};
 
 export interface PendingTransactions {
   get(operationId: string, step: string): Promise<PendingTransaction | undefined>;
@@ -46,6 +51,7 @@ export interface PendingTransactions {
   markExposure(milestoneId: string): Promise<void>;
   preparation(milestoneId: string, verb: string): Promise<PendingPreparation | undefined>;
   putPreparation(milestoneId: string, verb: string, preparation: PendingPreparation): Promise<void>;
+  bindPreparedV2?(milestoneId: string, verb: string, prepared: TaskV2Prepared): Promise<void>;
   bindPreparationOperation(milestoneId: string, verb: string, operationId: string): Promise<void>;
   completePreparation(milestoneId: string, verb: string): Promise<void>;
   reservationId(escrowId: string, generate: () => string): Promise<string>;
@@ -158,6 +164,7 @@ const stateSchema = z
             idempotencyKey: z.uuid(),
             inputs: z.unknown(),
             operationId: z.uuid().optional(),
+            preparedV2: taskV2PreparedSchema.optional(),
           })
           .strict(),
       )
@@ -352,6 +359,7 @@ export function createPendingTransactions(home: string): PendingTransactions {
             idempotencyKey: z.uuid(),
             inputs: z.unknown(),
             operationId: z.uuid().optional(),
+            preparedV2: taskV2PreparedSchema.optional(),
           })
           .strict()
           .parse(preparation);
@@ -366,6 +374,19 @@ export function createPendingTransactions(home: string): PendingTransactions {
           state.preparations[key] = parsed;
           await save(state);
         }
+      });
+    },
+    async bindPreparedV2(milestoneId, verb, prepared) {
+      await locked(async (state) => {
+        const key = preparationKey(milestoneId, verb);
+        const existing = state.preparations[key];
+        if (!existing)
+          throw new Error("A durable preparation is required before binding a V2 response.");
+        const parsed = taskV2PreparedSchema.parse(prepared);
+        if (existing.preparedV2 && canonicalJson(existing.preparedV2) !== canonicalJson(parsed))
+          throw new Error("The original V2 preparation response is immutable.");
+        existing.preparedV2 = parsed;
+        await save(state);
       });
     },
     async bindPreparationOperation(milestoneId, verb, operationId) {

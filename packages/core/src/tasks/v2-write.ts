@@ -160,14 +160,14 @@ export const taskV2AbandonSchema = z
     (v) => (v.outcome === "abandoned") === (v.operation === null),
     "Abandon outcome mismatch",
   );
-export const taskV2TypedDataSchema = z.object({
-  domain: z.object({
+export const taskV2TypedDataSchema = z.strictObject({
+  domain: z.strictObject({
     name: z.string(),
     version: z.string(),
     chainId: z.number().int().positive(),
     verifyingContract: address,
   }),
-  types: z.record(z.string(), z.array(z.object({ name: z.string(), type: z.string() }))),
+  types: z.record(z.string(), z.array(z.strictObject({ name: z.string(), type: z.string() }))),
   primaryType: z.string().min(1),
   message: z.record(z.string(), z.json()),
 });

@@ -3617,3 +3617,64 @@ function v2TestOperation(): import("@vapi-network/core/tasks").TaskV2Operation {
     },
   };
 }
+
+it("passes the original post funding key and prepared operation through an approval refusal", async () => {
+  const created = tasksResponseSchemas.createOrder.parse(order());
+  created.workOrder.terms = {
+    shape: "task",
+    milestones: [
+      {
+        index: 1,
+        amountBaseUnits: "100000000",
+        acceptance: "A useful delivery",
+        deadlineAt: "2026-10-15T12:00:00.000Z",
+      },
+    ],
+  };
+  const prepared = {
+    orderId: ID,
+    operation: {
+      ...v2TestOperation(),
+      state: "prepared" as const,
+      step: "v2-fund" as const,
+      transactionHash: null,
+      plan: { ...v2TestOperation().plan, step: "v2-fund" as const },
+    },
+  };
+  const post = vi.fn(async () => ({
+    task: created,
+    funding: { kind: "transaction" as const, ...prepared },
+  }));
+  const client = fakeClient({ post, getOrder: vi.fn(async () => created), prepareV2: vi.fn() });
+  const f = await fixture(true, client);
+  f.dependencies.readStdin = async () => BRIEF;
+  const executeV2 = vi.fn().mockResolvedValue({
+    ok: false,
+    approval: true,
+    money: v2TestMoney(),
+    lifecycle: null,
+    nextAction: null,
+    ...prepared,
+  });
+  f.dependencies.tasks!.chain = { ...missingTasksChain, available: true, executeV2 };
+  const result = await invoke(
+    [
+      "post",
+      "--title",
+      "Build a page",
+      "--brief",
+      "-",
+      "--amount",
+      "100",
+      "--deadline",
+      "7d",
+      "--fund",
+    ],
+    f.dependencies,
+  );
+  expect(result.code).toBe(3);
+  expect(post).toHaveBeenCalledWith(expect.any(Object), { idempotencyKey: KEY });
+  expect(executeV2).toHaveBeenCalledWith(
+    expect.objectContaining({ preparationKey: KEY, prepared: expect.objectContaining(prepared) }),
+  );
+});

@@ -274,3 +274,42 @@ and the existing money tools with V2 indices/evidence where applicable.
 have plain top-level object schemas. The SDK exposes `prepareV2`, `signV2`,
 `confirmV2Signature`, `operationV2`, `executeTaskV2` and `recoverTaskV2`; custom
 legacy transport and signing adapters can keep the original interface.
+
+V2 signing also requires a **local deployment trust anchor**. The V2 pin map is
+empty until the control room verifies the deployment ceremony. Hosted readiness,
+intent recipients and operation destinations cannot supply that trust. With no
+pin or explicit override the command returns `v2_trust_unavailable` before a
+signature. For staging, configure all five chain-specific variables, for example:
+
+```sh
+VAPI_TASKS_V2_ESCROW_FACTORY_84532=0x...
+VAPI_TASKS_V2_POOL_FACTORY_84532=0x...
+VAPI_TASKS_V2_USDC_84532=0x...
+VAPI_TASKS_V2_USDC_NAME_84532='USD Coin'
+VAPI_TASKS_V2_USDC_VERSION_84532=2
+```
+
+Cloud inputs use the `VAPI_NETWORK_` prefix. Every override is logged to stderr as
+“untrusted override”; SDK callers can supply `trustedV2Deployments` and
+`onV2UntrustedOverride` in the chain options. Factory membership, poster, token,
+amounts and on-chain terms are checked through the configured RPC. Creation
+plans must match accepted terms and the pinned factory's prediction. A hosted
+signature intent lacks the frozen creation arguments needed to verify an
+undeployed recipient, so that authorization is refused until the recipient can
+be independently verified. Pool funding also requires its on-chain verifier to
+be the accepted poster; an independently trusted delegated checker is not yet
+configured. Funding authorizations require the exact pinned USDC
+domain and schema, a 32-byte nonce and a chain-clock validity window of at most
+one hour.
+
+Every transaction selector, destination and requested index/amount is checked
+before signing. C0 task creation funding approves only the pinned escrow factory;
+pool funding and dispute fees approve only the verified clone, for the exact
+amount paid. Unmatched settlement requires a verified disputed milestone,
+resolver state, elapsed evidence window and opener event before its money
+preview. Voluntary refunds include pending and submitted milestones; cancelling
+an unpaid remainder includes pending milestones only.
+
+Post-with-funding persists its original unsigned operation or intent and
+idempotency key before an approval refusal. `task fund <id> --yes` resumes that
+preparation without creating a conflicting hosted operation.

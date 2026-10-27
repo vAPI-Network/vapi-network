@@ -1,12 +1,19 @@
+import { escrowV2Abi, bountyPoolV1Abi } from "./v2-abi.js";
+import {
+  v2Read,
+  verifyV2Target,
+  verifyV2Plan,
+  verifyV2TypedData,
+  verifyUnmatchedSettlement,
+  v2GuardFailure,
+} from "./v2-plan-guard.js";
 import { randomUUID } from "node:crypto";
 import {
-  decodeFunctionData,
   isAddressEqual,
   keccak256,
   parseAbi,
   parseTransaction,
   recoverTransactionAddress,
-  type Address,
   type TransactionSerializable,
   type TransactionSerialized,
 } from "viem";
@@ -44,6 +51,7 @@ export type TaskV2ExecutionInput = {
   write?: TaskV2Action;
   consent?: TaskV2Consent;
   prepared?: TaskV2Prepared;
+  preparationKey?: string;
   expectedGrossBaseUnits?: bigint;
   policy: { maxPerTaskUsd: number; approveAboveUsd: number };
   caps: SpendCaps;
@@ -59,10 +67,11 @@ const stateSchema = z.object({
   totalBaseUnits: uint,
   paidBaseUnits: uint,
   refundedBaseUnits: uint,
-  milestones: z.array(z.object({ amountBaseUnits: uint, status: z.string() })),
+  milestones: z.array(
+    z.object({ amountBaseUnits: uint, status: z.string(), dispute: z.unknown().optional() }),
+  ),
 });
 const feeAbi = parseAbi(["function disputeFee(uint8) view returns (uint256)"]);
-const approveAbi = parseAbi(["function approve(address spender,uint256 amount) returns (bool)"]);
 const fail = (message: string): never => {
   throw new TaskOperationError("invalid_response", message);
 };
@@ -95,12 +104,19 @@ export async function executeTaskV2(context: TaskOperationContext, input: TaskV2
       const prepare = async () => {
         let journal = await context.pending?.preparation(input.id, verb);
         if (!journal) {
-          journal = { idempotencyKey: context.randomUUID(), inputs: action };
+          journal = {
+            idempotencyKey: input.preparationKey ?? context.randomUUID(),
+            inputs: action,
+          };
           await context.pending?.putPreparation(input.id, verb, journal);
         }
-        return input.consent
+        const saved = journal.preparedV2;
+        if (saved) return saved;
+        const result = await (input.consent
           ? context.client.signV2!(input.id, input.consent, journal)
-          : context.client.prepareV2!(input.id, input.write!, journal);
+          : context.client.prepareV2!(input.id, input.write!, journal));
+        await context.pending?.bindPreparedV2?.(input.id, verb, result);
+        return result;
       };
       prepared = context.pending
         ? await context.pending.withFundingLock(input.id, prepare)
@@ -135,23 +151,34 @@ export function createTaskV2Executor(options: TasksChainOptions) {
     return pending.withFundingLock(input.id, async () => {
       let journal = await pending.preparation(input.id, verb);
       if (!journal) {
-        journal = { idempotencyKey: randomUUID(), inputs: action };
+        journal = { idempotencyKey: input.preparationKey ?? randomUUID(), inputs: action };
         await pending.putPreparation(input.id, verb, journal);
       }
       let current = taskV2PreparedSchema.parse(
         input.prepared ??
+          journal.preparedV2 ??
           (await (input.consent
             ? sign(input.id, input.consent, journal)
             : prepare(input.id, input.write!, journal))),
       );
+      // Retain the supplied hosted operation/intent before any refusal. A later
+      // fund command resumes it instead of preparing a conflicting operation.
+      if (!pending.bindPreparedV2) fail("Durable V2 preparation storage is unavailable.");
+      await pending.bindPreparedV2!(input.id, verb, current);
       const view = await client.getOrder(input.id);
       if (view.workOrder.id !== input.id) fail("The money view belongs to another task.");
       const terms = view.workOrder.terms;
       const state = stateSchema.safeParse(view.workOrder.v2State);
       const deployment = await client.deployment();
+      const target = await verifyV2Target(options, current, view, action);
+      if (
+        state.success &&
+        (BigInt(state.data.totalBaseUnits) !== target.total || state.data.feeBp !== target.feeBp)
+      )
+        v2GuardFailure("Hosted money snapshot differs from the verified V2 target.");
       let gross = 0n,
         pays = 0n;
-      let feeBp: number | null = state.success ? state.data.feeBp : (deployment.feeBp ?? null);
+      let feeBp: number | null = target.feeBp;
       const marketBudget = z
         .object({ budget: z.object({ amountBaseUnits: uint }) })
         .safeParse(view.workOrder.market);
@@ -167,26 +194,37 @@ export function createTaskV2Executor(options: TasksChainOptions) {
                 : undefined));
       if (["fund", "award", "award-consent"].includes(action.action)) {
         if (total === undefined) fail("Hosted task total is unavailable.");
-        gross = total!;
+        if (total !== target.total)
+          v2GuardFailure("Hosted funding total differs from the verified V2 target.");
+        gross = target.total;
         if (action.action === "fund") pays = gross;
       } else if (action.action === "award-bounty") {
         if (!terms?.bounty) fail("Hosted bounty terms are unavailable.");
-        gross = BigInt(terms!.bounty!.rewardPerWinnerBaseUnits) * BigInt(action.winners.length);
+        const reward = BigInt(
+          String(await v2Read(target.rpc, target.escrow, escrowV2Abi, "rewardPerWinner")),
+        );
+        if (reward !== BigInt(terms!.bounty!.rewardPerWinnerBaseUnits))
+          v2GuardFailure("Hosted bounty reward differs from its verified on-chain amount.");
+        gross = reward * BigInt(action.winners.length);
       } else if (action.action === "pay-claim") {
         if (!terms?.pool) fail("Hosted pool reward is unavailable.");
-        gross = BigInt(terms!.pool!.rewardPerClaimBaseUnits);
+        gross = BigInt(
+          String(await v2Read(target.rpc, target.escrow, bountyPoolV1Abi, "rewardPerClaim")),
+        );
+        if (gross !== BigInt(terms!.pool!.rewardPerClaimBaseUnits))
+          v2GuardFailure("Hosted pool reward differs from its verified on-chain amount.");
       } else if (action.action === "split" || action.action === "split-consent")
         gross = BigInt(action.toWorker);
       else if (action.action === "approve" || action.action === "finalize") {
         const milestone = state.success ? state.data.milestones[action.i] : undefined;
         if (!milestone) fail("Hosted milestone money is unavailable.");
-        gross = BigInt(milestone!.amountBaseUnits);
+        gross = target.milestones[action.i]!.amount;
       } else if (["refund", "cancel-remainder", "cancel-offer", "expire"].includes(action.action)) {
         if (state.success)
           gross = ["refund", "cancel-remainder"].includes(action.action)
-            ? state.data.milestones
-                .filter((m) => m.status === "pending")
-                .reduce((sum, m) => sum + BigInt(m.amountBaseUnits), 0n)
+            ? target.milestones
+                .filter((m) => m.status === 0 || (action.action === "refund" && m.status === 1))
+                .reduce((sum, m) => sum + m.amount, 0n)
             : BigInt(state.data.totalBaseUnits) -
               BigInt(state.data.paidBaseUnits) -
               BigInt(state.data.refundedBaseUnits);
@@ -195,13 +233,23 @@ export function createTaskV2Executor(options: TasksChainOptions) {
       } else if (action.action === "raise-dispute" || action.action === "counter-evidence") {
         if (!state.success || !deployment.configured)
           fail("Hosted dispute binding is unavailable.");
-        pays = gross = await rpcFor(deployment.chainId).readContract({
-          address: state.data!.escrow as Address,
+        pays = gross = await target.rpc.readContract({
+          address: target.escrow,
           abi: feeAbi,
           functionName: "disputeFee",
           args: [action.i],
         });
         feeBp = 0;
+      } else if (action.action === "resolve-unmatched") {
+        if (!state.success)
+          v2GuardFailure("Verified dispute settlement state is required before signing.");
+        const settlement = await verifyUnmatchedSettlement(
+          target,
+          action.i,
+          state.data!.milestones[action.i]?.dispute,
+        );
+        gross = settlement.gross;
+        feeBp = settlement.toWorker ? target.feeBp : 0;
       }
       if (gross > 0n && feeBp === null)
         fail("Hosted gross, fee and net are unavailable; refusing to sign.");
@@ -281,53 +329,17 @@ export function createTaskV2Executor(options: TasksChainOptions) {
         // Retain on all ambiguous failures; no authorization or broadcast can roll this back.
         reserved = true;
       };
+      let fundingAuthorization:
+        { message: Record<string, unknown>; signature: `0x${string}` } | undefined;
       try {
         if ("kind" in current && current.kind === "eip712") {
           const intent = taskV2IntentSchema.parse(current);
           const typed = intent.typedData;
-          if (!isAddressEqual(intent.signer, account.address))
-            fail("The hosted signing intent names another wallet.");
-          if ((await rpcFor(typed.domain.chainId).getChainId()) !== typed.domain.chainId)
-            fail("Signing chain mismatch.");
-          const expectedType =
-            action.action === "fund"
-              ? "ReceiveWithAuthorization"
-              : action.action === "award-consent"
-                ? "AwardConsent"
-                : action.action === "split-consent"
-                  ? "SplitConsent"
-                  : undefined;
-          if (!expectedType || typed.primaryType !== expectedType)
-            fail("Unexpected hosted typed data.");
-          if (action.action === "fund") {
-            if (
-              !deployment.configured ||
-              typed.domain.chainId !== deployment.chainId ||
-              !isAddressEqual(typed.domain.verifyingContract, deployment.usdc) ||
-              typed.message.from?.toString().toLowerCase() !== account.address.toLowerCase() ||
-              typed.message.value !== pays.toString() ||
-              typeof intent.escrow !== "string" ||
-              String(typed.message.to).toLowerCase() !== intent.escrow.toLowerCase()
-            )
-              fail("Funding typed data does not match hosted money and wallet.");
-          } else {
-            if (
-              !state.success ||
-              !isAddressEqual(typed.domain.verifyingContract, state.data.escrow as Address)
-            )
-              fail("Consent escrow binding mismatch.");
-            const signer = typed.message.worker ?? typed.message.signer;
-            if (typeof signer !== "string" || !isAddressEqual(signer as Address, account.address))
-              fail("Consent signer mismatch.");
-            if (
-              action.action === "split-consent" &&
-              (String(typed.message.milestone) !== String(action.i) ||
-                String(typed.message.toWorker) !== action.toWorker)
-            )
-              fail("Split consent amounts differ from the request.");
-          }
+          await verifyV2TypedData(target, intent, action, account.address, pays);
           await beforeSign();
           const signature = await account.signTypedData(typed);
+          if (action.action === "fund")
+            fundingAuthorization = { message: typed.message, signature };
           const response = await confirmSignature(input.id, intent.operationId, signature, key());
           if (taskV2ConsentResponseSchema.safeParse(response).success) {
             const consentResponse = taskV2ConsentResponseSchema.parse(response);
@@ -426,19 +438,20 @@ export function createTaskV2Executor(options: TasksChainOptions) {
           const plan = op.plan;
           if (!deployment.configured || plan.chainId !== deployment.chainId)
             fail("Hosted plan deployment mismatch.");
-          if (plan.step === "v2-approve-usdc") {
-            const decoded = decodeFunctionData({ abi: approveAbi, data: plan.data });
-            if (
-              !isAddressEqual(
-                plan.to,
-                z
-                  .string()
-                  .regex(/^0x[0-9a-fA-F]{40}$/u)
-                  .parse(deployment.usdc) as Address,
-              ) ||
-              decoded.args[1] !== pays
-            )
-              fail("USDC approval differs from the amount paid.");
+          const refreshed = await verifyV2Target(
+            options,
+            { orderId: input.id, operation: op },
+            view,
+            action,
+            target.escrow,
+          );
+          if (!isAddressEqual(refreshed.escrow, target.escrow))
+            v2GuardFailure("The continuation changed the verified V2 target.");
+          try {
+            await verifyV2Plan(refreshed, op, action, pays, fundingAuthorization);
+          } catch (error) {
+            if (error instanceof TaskOperationError) throw error;
+            v2GuardFailure("Unknown V2 selector or malformed ABI arguments.");
           }
           const rpc = rpcFor(plan.chainId);
           if ((await rpc.getChainId()) !== plan.chainId) fail("Transaction chain mismatch.");

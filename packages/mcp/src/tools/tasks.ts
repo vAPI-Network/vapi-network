@@ -711,6 +711,7 @@ export function createTasksTools(options: TasksToolsOptions) {
               id: outcome.result.workOrder.id,
               write: { action: "fund" },
               prepared: v2Prepared.data,
+              preparationKey: outcome.fundingIdempotencyKey,
               expectedGrossBaseUnits: prepared.escrowAmount,
               policy,
               caps: await spendCapsForWallet(options.wallets!, ctx.selected.name),
