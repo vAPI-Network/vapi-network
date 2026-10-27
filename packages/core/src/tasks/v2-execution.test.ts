@@ -317,12 +317,12 @@ async function fixture(step: TaskV2OperationResponse["operation"]["step"] = "v2-
   };
 }
 
-function freshFunding(f: Awaited<ReturnType<typeof fixture>>) {
+function freshFunding(f: Awaited<ReturnType<typeof fixture>>, fundData = FUND_DATA()) {
   f.prepared.operation.plan.to = USDC;
   f.prepared.operation.plan.data = encodeFunctionData({
     abi: parseAbi(["function approve(address,uint256) returns (bool)"]),
     functionName: "approve",
-    args: [FACTORY, 100000000n],
+    args: [FACTORY, BigInt(f.view.workOrder.v2State.totalBaseUnits)],
   });
   let registered = false;
   const registrations: boolean[] = [];
@@ -349,7 +349,7 @@ function freshFunding(f: Awaited<ReturnType<typeof fixture>>) {
         operation: {
           ...current.operation,
           step: "v2-fund",
-          plan: { ...current.operation.plan, step: "v2-fund", to: FACTORY, data: FUND_DATA() },
+          plan: { ...current.operation.plan, step: "v2-fund", to: FACTORY, data: fundData },
         },
       };
       return current;
@@ -1389,3 +1389,155 @@ it.each(["poster", "vapi"] as const)(
     expect(f.sign).toHaveBeenCalledTimes(1);
   },
 );
+
+// Hashes recorded from the hosted v2TermsFromOrder + freezeScopeTerms path on tasks-v1.
+// The market budget is $20 per award; the frozen budget/milestone is $20 × winners.
+const bountyTermsHashes = {
+  1: "0x893c9023b664935b7337a4d46361f7f5d12ffafca2c7a370fc9f208956c04a4e",
+  3: "0xcfaf5a1abdb1252d5656eab7058823f05cc746b1be842248b919e9f25b5cb160",
+} as const;
+async function bountyFixture(winners: 1 | 3, step: TaskV2OperationResponse["operation"]["step"]) {
+  const f = await fixture(step);
+  f.options.trustedV2Deployments = { 84532: { ...PIN, choiceWindowSeconds: 604800 } };
+  const total = BigInt(winners) * 20000000n;
+  Object.assign(f.view.workOrder, {
+    terms: {
+      shape: "bounty",
+      bounty: {
+        winners,
+        rewardPerWinnerBaseUnits: "20000000",
+        deadlineAt: DEADLINE,
+        choiceWindowSeconds: 86400,
+      },
+    },
+  });
+  f.view.workOrder.market.budget.amountBaseUnits = "20000000";
+  f.view.workOrder.v2State.totalBaseUnits = total.toString();
+  f.view.workOrder.v2State.milestones[0]!.amountBaseUnits = total.toString();
+  const args = [
+    {
+      ...creationArgs()[0],
+      shape: 1,
+      total,
+      winners,
+      rewardPerWinner: 20000000n,
+      choiceWindow: 86400n,
+      termsHash: bountyTermsHashes[winners],
+    },
+    [{ amount: total, deadline: BigInt(Date.parse(DEADLINE) / 1000) }],
+    keccak256(toHex(V2_WRITE_ORDER)),
+  ] as const;
+  const fundData = encodeFunctionData({
+    abi: escrowFactoryV2Abi,
+    functionName: "createAndFund",
+    args,
+  });
+  const original = f.rpc.readContract.getMockImplementation()!;
+  f.rpc.readContract.mockImplementation(async (call) => {
+    if (call.functionName === "shape") return 1;
+    if (call.functionName === "winners") return winners;
+    if (call.functionName === "rewardPerWinner") return 20000000n;
+    if (call.functionName === "choiceWindow") return 86400n;
+    if (call.functionName === "termsHash") return bountyTermsHashes[winners];
+    return original(call);
+  });
+  f.prepared.operation.plan.data = fundData;
+  return { ...f, args, fundData };
+}
+
+describe("repair3: accepted bounty windows and aggregate funding", () => {
+  it.each([1, 3] as const)(
+    "matches the hosted frozen aggregate-budget hash for %i winners",
+    async (winners) => {
+      const f = await bountyFixture(winners, "v2-fund");
+      expect(
+        acceptedV2TermsHash(
+          f.view as unknown as import("./types.js").GetOrderResponse,
+          PIN,
+          604800n,
+        ),
+      ).toBe(bountyTermsHashes[winners]);
+    },
+  );
+  it.each([1, 3] as const)(
+    "funds a registered bounty with %i winners and a per-award market budget",
+    async (winners) => {
+      const f = await bountyFixture(winners, "v2-fund");
+      expect(await f.execute({ ...f.input, write: { action: "fund" } })).toMatchObject({
+        ok: true,
+        money: { gross: { baseUnits: String(winners * 20000000) } },
+      });
+      expect(f.sign).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each([1, 3] as const)(
+    "awards a registered bounty with %i winners and a per-award market budget",
+    async (winners) => {
+      const f = await bountyFixture(winners, "v2-award-bounty");
+      const addresses = [WORKER, RESOLVER, USDC].slice(0, winners);
+      f.prepared.operation.plan.to = state.escrow;
+      f.prepared.operation.plan.data = encodeFunctionData({
+        abi: escrowV2Abi,
+        functionName: "awardBounty",
+        args: [addresses],
+      });
+      expect(
+        await f.execute({ ...f.input, write: { action: "award-bounty", winners: addresses } }),
+      ).toMatchObject({ ok: true, money: { gross: { baseUnits: String(winners * 20000000) } } });
+      expect(f.sign).toHaveBeenCalledTimes(1);
+    },
+  );
+  it.each([1, 3] as const)(
+    "fresh funding for %i winners preserves the accepted one-day choice window over the seven-day pin",
+    async (winners) => {
+      const f = await bountyFixture(winners, "v2-approve-usdc");
+      const fresh = freshFunding(f, f.fundData);
+      expect(await f.execute({ ...f.input, write: { action: "fund" } })).toMatchObject({
+        ok: true,
+      });
+      const prediction = f.rpc.readContract.mock.calls.find(
+        ([call]) => call.functionName === "predictEscrow",
+      )![0];
+      expect(prediction.args).toEqual(f.args);
+      expect(fresh.registrations.every((v) => !v)).toBe(true);
+      expect(fresh.registered()).toBe(true);
+      expect(f.sign).toHaveBeenCalledTimes(2);
+    },
+  );
+  it.each(["offerTtl", "reviewWindow", "choiceWindow"] as const)(
+    "refuses a registered bounty whose %s conflicts with accepted windows",
+    async (field) => {
+      const f = await bountyFixture(1, "v2-award-bounty");
+      const original = f.rpc.readContract.getMockImplementation()!;
+      f.rpc.readContract.mockImplementation(async (call) =>
+        call.functionName === field
+          ? field === "reviewWindow"
+            ? 86400n
+            : 604800n
+          : original(call),
+      );
+      f.prepared.operation.plan.to = state.escrow;
+      f.prepared.operation.plan.data = encodeFunctionData({
+        abi: escrowV2Abi,
+        functionName: "awardBounty",
+        args: [[WORKER]],
+      });
+      await expect(
+        f.execute({ ...f.input, write: { action: "award-bounty", winners: [WORKER] } }),
+      ).rejects.toMatchObject({ code: "v2_plan_mismatch" });
+      expect(f.sign).not.toHaveBeenCalled();
+    },
+  );
+  it("refuses a seven-day creation plan when the accepted bounty choice window is one day", async () => {
+    const f = await bountyFixture(1, "v2-fund");
+    f.prepared.operation.plan.data = encodeFunctionData({
+      abi: escrowFactoryV2Abi,
+      functionName: "createAndFund",
+      args: [{ ...f.args[0], choiceWindow: 604800n }, f.args[1], f.args[2]],
+    });
+    await expect(f.execute({ ...f.input, write: { action: "fund" } })).rejects.toMatchObject({
+      code: "v2_plan_mismatch",
+    });
+    expect(f.sign).not.toHaveBeenCalled();
+  });
+});

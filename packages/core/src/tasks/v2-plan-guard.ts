@@ -121,6 +121,34 @@ export type VerifiedV2Target = {
   creationArgs?: readonly unknown[];
 };
 
+function acceptedV2Total(view: GetOrderResponse): bigint {
+  const bounty = view.workOrder.terms?.bounty;
+  return bounty
+    ? BigInt(bounty.winners) * BigInt(bounty.rewardPerWinnerBaseUnits)
+    : z.object({ budget: z.object({ amountBaseUnits: uint }) }).parse(view.workOrder.market).budget
+        .amountBaseUnits;
+}
+
+function acceptedV2Windows(
+  options: TasksChainOptions,
+  view: GetOrderResponse,
+  pin: TasksV2Deployment,
+  chainId: number,
+) {
+  // The declared wire terms expose the bounty choice window. The other windows
+  // are unset in that contract, so only those use locally trusted defaults.
+  return {
+    offerTtl: BigInt(pin.offerTtlSeconds ?? 604800),
+    reviewWindow: BigInt(
+      getTrustedTasksDurations(chainId, options.trustedDurations).reviewWindowSeconds ??
+        DEFAULT_ACCEPTANCE_WINDOW_SECONDS,
+    ),
+    choiceWindow: BigInt(
+      view.workOrder.terms?.bounty?.choiceWindowSeconds ?? pin.choiceWindowSeconds ?? 604800,
+    ),
+  };
+}
+
 export function acceptedV2TermsHash(
   view: GetOrderResponse,
   pin: TasksV2Deployment,
@@ -166,7 +194,11 @@ export function acceptedV2TermsHash(
         plan[0]!.deadlineAt,
       ),
       acceptanceWindowSeconds: Number(reviewWindow),
-      budget: { ...market.budget, asset: `${market.budget.network}/erc20:${pin.usdc}` },
+      budget: {
+        ...market.budget,
+        amountBaseUnits: acceptedV2Total(view).toString(),
+        asset: `${market.budget.network}/erc20:${pin.usdc}`,
+      },
       escrow: { protocol: "escrow-v1", contract: pin.escrowFactoryV2 },
       evidenceRules: { acceptedInputs: ["text", "private-file"], exactCommitRequired: false },
     },
@@ -202,7 +234,9 @@ function verifyAcceptedCreation(
       termsHash: hash,
       total: uint.optional(),
       budget: uint.optional(),
+      offerTtl: uint.optional(),
       reviewWindow: uint.optional(),
+      choiceWindow: uint.optional(),
       shape: z.number().optional(),
       winners: z.number().optional(),
       rewardPerWinner: uint.optional(),
@@ -213,23 +247,26 @@ function verifyAcceptedCreation(
     })
     .parse(creationArgs[0]);
   const declared = order.terms;
-  const acceptedReviewWindow = BigInt(
-    getTrustedTasksDurations(chainId, options.trustedDurations).reviewWindowSeconds ??
-      DEFAULT_ACCEPTANCE_WINDOW_SECONDS,
-  );
-  if (!pool && terms.reviewWindow !== acceptedReviewWindow)
-    return v2GuardFailure("Funding review window differs from the locally accepted default.");
+  const windows = acceptedV2Windows(options, view, pin, chainId);
+  if (
+    !pool &&
+    (terms.offerTtl !== windows.offerTtl ||
+      terms.reviewWindow !== windows.reviewWindow ||
+      terms.choiceWindow !== windows.choiceWindow)
+  )
+    return v2GuardFailure(
+      "V2 creation windows differ from accepted terms or their locally trusted defaults.",
+    );
   const poster = address.parse(order.clientAddress);
   if (!same(terms.poster, poster))
     return v2GuardFailure("The registered poster differs from the accepted order.");
   if (String(creationArgs.at(-1)).toLowerCase() !== keccak256(toHex(order.id)))
     return v2GuardFailure("Funding salt differs from the requested order.");
   const total = pool ? terms.budget : terms.total;
-  const budget = z.object({ budget: z.object({ amountBaseUnits: uint }) }).parse(order.market)
-    .budget.amountBaseUnits;
+  const budget = acceptedV2Total(view);
   if (
     total !== budget ||
-    terms.termsHash !== acceptedV2TermsHash(view, pin, pool ? 0n : acceptedReviewWindow)
+    terms.termsHash !== acceptedV2TermsHash(view, pin, pool ? 0n : windows.reviewWindow)
   )
     return v2GuardFailure(
       "The registered target or funding calldata differs from accepted order terms.",
@@ -281,13 +318,9 @@ function acceptedCreationArgs(
   const order = view.workOrder;
   const terms = z.object(taskTermsFields).parse(order.terms);
   const poster = address.parse(order.clientAddress);
-  const total = z.object({ budget: z.object({ amountBaseUnits: uint }) }).parse(order.market)
-    .budget.amountBaseUnits;
+  const total = acceptedV2Total(view);
   const salt = keccak256(toHex(order.id));
-  const reviewWindow = BigInt(
-    getTrustedTasksDurations(chainId, options.trustedDurations).reviewWindowSeconds ??
-      DEFAULT_ACCEPTANCE_WINDOW_SECONDS,
-  );
+  const windows = acceptedV2Windows(options, view, pin, chainId);
   if (terms.shape === "pool") {
     if (!terms.pool || terms.pool.verifier !== "poster")
       return v2GuardFailure("Pool funding requires a locally accepted poster verifier.");
@@ -319,11 +352,9 @@ function acceptedCreationArgs(
     {
       shape: terms.shape === "bounty" ? 1 : 0,
       poster,
-      termsHash: acceptedV2TermsHash(view, pin, reviewWindow),
+      termsHash: acceptedV2TermsHash(view, pin, windows.reviewWindow),
       total,
-      offerTtl: BigInt(pin.offerTtlSeconds ?? 604800),
-      reviewWindow,
-      choiceWindow: BigInt(pin.choiceWindowSeconds ?? 604800),
+      ...windows,
       winners: terms.bounty?.winners ?? 0,
       rewardPerWinner: BigInt(terms.bounty?.rewardPerWinnerBaseUnits ?? 0),
     },

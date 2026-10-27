@@ -301,8 +301,9 @@ escrow address.
 
 Fresh approval-first funding predicts the recipient from accepted order terms
 and local defaults before approving the pinned factory. The later creation step
-must use exactly those inputs. Offer TTL and bounty choice window default to
-604800 seconds; staging can explicitly set
+must use exactly those inputs. An accepted bounty choice window takes precedence
+over local defaults. Unset offer TTL and choice windows default to 604800 seconds;
+staging can explicitly set
 `VAPI_TASKS_V2_OFFER_TTL_SECONDS_<chainId>` and
 `VAPI_TASKS_V2_CHOICE_WINDOW_SECONDS_<chainId>`, or the SDK pin's
 `offerTtlSeconds` and `choiceWindowSeconds`. The review window uses the existing
