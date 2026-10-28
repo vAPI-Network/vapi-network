@@ -202,7 +202,7 @@ vapi
 This screen comes from a vault restored from the BIP-39 test phrase into an empty home, so the account holds nothing and is not linked yet:
 
 ```text
-vAPI 0.9.7        home /tmp/vapi-docs-home        registry api.vapinetwork.ai
+vAPI 0.10.0        home /tmp/vapi-docs-home        registry api.vapinetwork.ai
 
 Owner      not linked   console: https://api.vapinetwork.ai/agents
 Vault      unlocked on this device (macOS Keychain)   backup: vapi backup
