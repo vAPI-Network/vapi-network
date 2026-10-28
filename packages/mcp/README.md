@@ -14,6 +14,18 @@ One entry point, `@vapi-network/mcp`, exporting `createVapiServer`,
 `startStdioServer`, `loadServerConfig`, `WalletSession` and the individual
 `callService`, `inspectService`, `searchMarketplace` and `getWallet` tools.
 
+## Interactive results in Claude Desktop
+
+`call.search` and `call.inspect` show marketplace results and listing details as interactive MCP Apps in Claude Desktop.
+The deprecated `search` and `inspect` aliases use the same views.
+
+On `initialize`, the server fetches each view's HTML from `<registry origin>/mcp/apps/<view>.html` with a 2-second timeout.
+Successfully fetched HTML is cached in memory for the process.
+The default origin is `https://api.vapinetwork.ai` and follows the configured registry.
+
+The server needs network access to that route; if loading fails, initialization still succeeds and tools return their normal text results.
+It exposes the views as `ui://vapi/call-search.html` and `ui://vapi/call-inspect.html` through `resources/list` and `resources/read`.
+
 ## Exports
 
 ### Runtime exports

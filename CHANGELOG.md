@@ -3,6 +3,14 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## Unreleased
+
+### Added
+
+- Every MCP tool has a title and annotations for read-only behavior, destructive actions, idempotency and open-world access.
+- The MCP server identifies itself as vAPI Network with a title, website URL and light/dark icons. `server.json` lists the same icons for the MCP Registry.
+- `call.search` and `call.inspect` support interactive MCP Apps results in Claude Desktop. Views load from the hosted asset route and fall back to text when offline.
+
 ## 0.9.7 (2026-10-26)
 
 ### Fixed
