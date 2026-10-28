@@ -6,6 +6,7 @@ import { z } from "zod";
 
 import { loopToolsForProfile } from "../agent/run.js";
 import { createVapiServer } from "../server.js";
+import { TOOL_PRESENTATION } from "../tool-presentation.js";
 import { accountsSend } from "./accounts.js";
 import type { ActionContext } from "./context.js";
 import { defineAction, type ActionMoney } from "./define.js";
@@ -24,7 +25,7 @@ beforeEach(() => {
 });
 
 describe("action register", () => {
-  it("publishes every action through MCP with object output schemas only", async () => {
+  it("publishes every action through MCP with presentation and object output schemas only", async () => {
     const server = createVapiServer({
       account: privateKeyToAccount(PRIVATE_KEY),
       config: getDefaultConfig(),
@@ -34,13 +35,37 @@ describe("action register", () => {
     const listed = (await server.listTools()).tools;
     for (const action of actions) {
       const tool = listed.find((candidate) => candidate.name === action.name);
-      const outputSchema = z.toJSONSchema(action.output);
-      expect(tool).toEqual({
+      const { outputSchema: publishedOutput, ...definition } = tool ?? {};
+      expect(definition).toEqual({
         name: action.name,
+        ...TOOL_PRESENTATION[action.name],
         description: action.description,
         inputSchema: z.toJSONSchema(action.input),
-        ...(outputSchema.type === "object" ? { outputSchema } : {}),
       });
+
+      const outputSchema = z.toJSONSchema(action.output);
+      if (outputSchema.type !== "object") {
+        expect(publishedOutput).toBeUndefined();
+        continue;
+      }
+      let publishedSchema = publishedOutput as typeof outputSchema;
+      if (action.name === "call.search" || action.name === "call.inspect") {
+        expect(publishedSchema).toMatchObject({
+          type: "object",
+          properties: {
+            _view: {
+              type: "object",
+              properties: { createdAt: { type: "number" }, seq: { type: "integer" } },
+              required: ["createdAt", "seq"],
+            },
+          },
+        });
+        expect(publishedSchema.required).not.toContain("_view");
+        const { _view, ...properties } = publishedSchema.properties ?? {};
+        expect(_view).toBeDefined();
+        publishedSchema = { ...publishedSchema, properties };
+      }
+      expect(publishedSchema).toEqual(outputSchema);
     }
     await server.close();
   });
@@ -66,6 +91,7 @@ describe("action register", () => {
     expect(listed[sendIndex + 1]?.name).toBe("call.search");
     expect(listed[sendIndex]).toEqual({
       name: accountsSend.name,
+      ...TOOL_PRESENTATION[accountsSend.name],
       description: accountsSend.description,
       inputSchema: z.toJSONSchema(accountsSend.input),
       outputSchema: z.toJSONSchema(accountsSend.output),
