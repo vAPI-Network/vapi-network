@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import {
   SOLANA_MAINNET_CAIP2,
+  VAPI_CLIENT_VERSION,
   createKeystore,
   getDefaultConfig,
   type MarketplaceDiscoveryPage,
@@ -14,6 +15,8 @@ import { type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import { createVapiServer, toolError } from "./server.js";
+import { SERVER_ICONS } from "./tool-presentation.js";
+import { MCP_APP_VIEWS, createViewLoader } from "./views.js";
 import { VapiCallError } from "./tools/call.js";
 
 const PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" as Hex;
@@ -405,7 +408,10 @@ describe("Agent Cash MCP marketplace tools", () => {
     expect(text.split("\n")[0]).toBe(
       "DEPRECATED: use call.search; this alias will be removed in a later release.",
     );
-    expect(result.structuredContent).toEqual(marketplacePage([workHit("research-brief")]));
+    expect(result.structuredContent).toEqual({
+      ...marketplacePage([workHit("research-brief")]),
+      _view: { createdAt: expect.any(Number), seq: 1 },
+    });
 
     await client.close();
     await server.close();
@@ -652,6 +658,7 @@ describe("Agent Cash MCP marketplace tools", () => {
     expect(searchResult.structuredContent).toEqual({
       ...page,
       items: page.items.map((item) => ({ ...item, verification: "none" })),
+      _view: { createdAt: expect.any(Number), seq: 1 },
     });
 
     const callResult = await client.callTool({
@@ -946,3 +953,503 @@ function workHit(ref: string): MarketplaceHit {
     action: { type: "start_engagement", href: `/work/listings/${ref}` },
   };
 }
+
+describe("MCP request dispatch", () => {
+  it("initializes with the vAPI identity and icons", async () => {
+    const server = createVapiServer();
+    try {
+      const response = await server.handleRequest({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-11-25" },
+      });
+      expect(response).toEqual({
+        jsonrpc: "2.0",
+        id: 1,
+        result: {
+          protocolVersion: "2025-11-25",
+          capabilities: { tools: {} },
+          serverInfo: {
+            name: "@vapi-network/mcp",
+            title: "vAPI Network",
+            version: VAPI_CLIENT_VERSION,
+            websiteUrl: "https://vapinetwork.ai",
+            icons: SERVER_ICONS,
+          },
+        },
+      });
+      expect(SERVER_ICONS.map((icon) => icon.theme)).toEqual(["light", "dark"]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("lists titles and all four annotation hints through the dispatcher", async () => {
+    const { server } = await connectedServer(vi.fn<typeof fetch>());
+    try {
+      const response = await server.handleRequest({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+      const expected = await server.listTools();
+      expect(response).toEqual({ jsonrpc: "2.0", id: 2, result: expected });
+      for (const tool of expected.tools) {
+        expect(tool.title).toEqual(expect.any(String));
+        expect(tool.annotations).toEqual({
+          readOnlyHint: expect.any(Boolean),
+          destructiveHint: expect.any(Boolean),
+          idempotentHint: expect.any(Boolean),
+          openWorldHint: expect.any(Boolean),
+        });
+      }
+      expect(expected.tools.find((tool) => tool.name === "call.pay")?.annotations).toMatchObject({
+        destructiveHint: true,
+        readOnlyHint: false,
+      });
+      expect(expected.tools.find((tool) => tool.name === "call.search")?.annotations).toMatchObject(
+        {
+          readOnlyHint: true,
+          openWorldHint: true,
+        },
+      );
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("drops notifications and requests without a string method", async () => {
+    const server = createVapiServer();
+    try {
+      expect(await server.handleRequest({ method: "initialize" })).toBeUndefined();
+      expect(await server.handleRequest({ id: 1, method: 42 })).toBeUndefined();
+      expect(await server.handleRequest({ id: 1 })).toBeUndefined();
+      expect(await server.handleRequest({ id: null, method: "ping" })).toEqual({
+        jsonrpc: "2.0",
+        id: null,
+        result: {},
+      });
+      expect(await server.handleRequest({ id: 0, method: "unknown" })).toEqual({
+        jsonrpc: "2.0",
+        id: 0,
+        error: { code: -32601, message: "Method not found: unknown" },
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("awaits tool calls and passes their parameters through", async () => {
+    const server = createVapiServer();
+    const result = { content: [{ type: "text" as const, text: "Tool result" }] };
+    const call = vi.spyOn(server, "callTool").mockImplementation(async () => {
+      await Promise.resolve();
+      return result;
+    });
+    try {
+      expect(
+        await server.handleRequest({
+          id: "call",
+          method: "tools/call",
+          params: { name: "docs.search", arguments: { query: "docs" } },
+        }),
+      ).toEqual({ jsonrpc: "2.0", id: "call", result });
+      expect(call).toHaveBeenCalledWith({ name: "docs.search", arguments: { query: "docs" } });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it.each([new Error("Dispatch failed"), "Dispatch failed"])(
+    "returns internal errors for rejected dispatch: %s",
+    async (error) => {
+      const server = createVapiServer();
+      vi.spyOn(server, "listTools").mockRejectedValue(error);
+      try {
+        expect(await server.handleRequest({ id: 1, method: "tools/list" })).toEqual({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32603, message: "Dispatch failed" },
+        });
+      } finally {
+        await server.close();
+      }
+    },
+  );
+
+  it("preserves stdio parse errors, silent notifications and newline responses", async () => {
+    const server = createVapiServer();
+    const write = vi.spyOn(process.stdout, "write").mockReturnValue(true);
+    try {
+      server.connectStdio();
+      process.stdin.emit(
+        "data",
+        Buffer.from('  \n{broken\n{"method":"ping"}\n{"id":7,"method":"ping"}\n'),
+      );
+      await vi.waitFor(() => {
+        expect(write.mock.calls.map(([message]) => message)).toEqual([
+          '{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}\n',
+          '{"jsonrpc":"2.0","id":7,"result":{}}\n',
+        ]);
+      });
+    } finally {
+      await server.close();
+      write.mockRestore();
+    }
+  });
+});
+
+describe("MCP App resources", () => {
+  const apiOrigin = new URL(getDefaultConfig().marketplaceDiscoveryUrl).origin;
+  const html = "<html>view</html>";
+  const mimeType = "text/html;profile=mcp-app";
+
+  function viewsFetch(status = 200) {
+    return vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.pathname.startsWith("/mcp/apps/")) return new Response(html, { status });
+      throw new Error(`Unexpected request to ${url.pathname}`);
+    });
+  }
+
+  it("warms both views on initialize, with no eager fetches or repeated successful fetches", async () => {
+    const fetchImpl = viewsFetch();
+    const { server } = await connectedServer(fetchImpl);
+    try {
+      expect(apiOrigin).toBe("https://api.vapinetwork.ai");
+      expect((await server.listTools()).tools.every((tool) => tool._meta === undefined)).toBe(true);
+      await server.handleRequest({ id: 0, method: "resources/list" });
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(
+        await server.handleRequest({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: { protocolVersion: "2025-11-25" },
+        }),
+      ).toMatchObject({ result: { capabilities: { tools: {}, resources: {} } } });
+      expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+        `${apiOrigin}/mcp/apps/call-search.html`,
+        `${apiOrigin}/mcp/apps/call-inspect.html`,
+      ]);
+      await server.handleRequest({ id: 2, method: "initialize" });
+      await server.handleRequest({ id: 3, method: "tools/list" });
+      await server.handleRequest({
+        id: 4,
+        method: "resources/read",
+        params: { uri: MCP_APP_VIEWS.search.uri },
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("advertises cached views only on Call search, inspect and their aliases with object schemas", async () => {
+    const { server } = await connectedServer(viewsFetch());
+    try {
+      await server.handleRequest({ id: 1, method: "initialize" });
+      const tools = await server.listTools();
+      expect(await server.handleRequest({ id: 2, method: "tools/list" })).toEqual({
+        jsonrpc: "2.0",
+        id: 2,
+        result: tools,
+      });
+      for (const tool of tools.tools) {
+        const view = Object.hasOwn(MCP_APP_VIEWS, tool.name)
+          ? MCP_APP_VIEWS[tool.name as keyof typeof MCP_APP_VIEWS]
+          : undefined;
+        if (!view) {
+          expect(tool).not.toHaveProperty("_meta");
+          continue;
+        }
+        expect(tool._meta).toEqual({ ui: { resourceUri: view.uri }, "ui/resourceUri": view.uri });
+        expect(tool._meta?.ui).not.toHaveProperty("domain");
+        const schema = tool.outputSchema as {
+          type: string;
+          properties: Record<string, unknown>;
+          required: string[];
+        };
+        expect(schema.type).toBe("object");
+        expect(schema.properties._view).toMatchObject({
+          type: "object",
+          properties: { createdAt: { type: "number" }, seq: { type: "integer" } },
+        });
+        expect(schema.required).not.toContain("_view");
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("falls back to text on 404 and returns a resource error without logging a retry twice", async () => {
+    const write = vi.spyOn(process.stderr, "write").mockReturnValue(true);
+    const fetchImpl = viewsFetch(404);
+    const { server } = await connectedServer(fetchImpl);
+    try {
+      expect(await server.handleRequest({ id: 1, method: "initialize" })).toHaveProperty(
+        "result.serverInfo",
+      );
+      expect((await server.listTools()).tools.every((tool) => tool._meta === undefined)).toBe(true);
+      expect(
+        await server.handleRequest({
+          id: 2,
+          method: "resources/read",
+          params: { uri: MCP_APP_VIEWS.search.uri },
+        }),
+      ).toEqual({
+        jsonrpc: "2.0",
+        id: 2,
+        error: { code: -32603, message: "view call-search is unavailable" },
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(3);
+      expect(write).toHaveBeenCalledTimes(2);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("lists two resources with their CSP and returns HTML and the same metadata", async () => {
+    const fetchImpl = viewsFetch();
+    const { server } = await connectedServer(fetchImpl);
+    const resources = [
+      {
+        uri: "ui://vapi/call-search.html",
+        name: "vapi-call-search",
+        title: "vAPI marketplace results",
+        description: "Interactive list of Call listings returned by call.search.",
+        mimeType,
+        _meta: {
+          ui: {
+            csp: {
+              connectDomains: [apiOrigin],
+              resourceDomains: ["https://assets.claude.ai", apiOrigin],
+            },
+            prefersBorder: false,
+          },
+        },
+      },
+      {
+        uri: "ui://vapi/call-inspect.html",
+        name: "vapi-call-inspect",
+        title: "vAPI listing inspector",
+        description: "Interactive request contract and price for one Call listing.",
+        mimeType,
+        _meta: {
+          ui: {
+            csp: {
+              connectDomains: [apiOrigin],
+              resourceDomains: ["https://assets.claude.ai", apiOrigin],
+            },
+            prefersBorder: true,
+          },
+        },
+      },
+    ];
+    try {
+      expect(await server.handleRequest({ id: 1, method: "resources/list" })).toEqual({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { resources },
+      });
+      expect(fetchImpl).not.toHaveBeenCalled();
+      for (const resource of resources) {
+        expect(
+          await server.handleRequest({
+            id: 2,
+            method: "resources/read",
+            params: { uri: resource.uri },
+          }),
+        ).toEqual({
+          jsonrpc: "2.0",
+          id: 2,
+          result: {
+            contents: [{ uri: resource.uri, mimeType, text: html, _meta: resource._meta }],
+          },
+        });
+      }
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      for (const uri of ["ui://vapi/nope.html", undefined, "toString"]) {
+        expect(
+          await server.handleRequest({ id: 3, method: "resources/read", params: { uri } }),
+        ).toEqual({
+          jsonrpc: "2.0",
+          id: 3,
+          error: { code: -32002, message: "resource not found" },
+        });
+      }
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("advertises only the view whose read succeeded, even before initialize", async () => {
+    const { server } = await connectedServer(viewsFetch());
+    try {
+      await server.handleRequest({
+        id: 1,
+        method: "resources/read",
+        params: { uri: MCP_APP_VIEWS.search.uri },
+      });
+      const { tools } = await server.listTools();
+      expect(tools.filter((tool) => tool._meta).map((tool) => tool.name)).toEqual([
+        "call.search",
+        "search",
+      ]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("keeps the docs-only server resource-free without any network access", async () => {
+    const fetchImpl = viewsFetch();
+    const server = createVapiServer({ fetchImpl });
+    try {
+      expect(await server.handleRequest({ id: 1, method: "resources/list" })).toEqual({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { resources: [] },
+      });
+      expect(
+        await server.handleRequest({
+          id: 2,
+          method: "resources/read",
+          params: { uri: MCP_APP_VIEWS.search.uri },
+        }),
+      ).toEqual({
+        jsonrpc: "2.0",
+        id: 2,
+        error: { code: -32002, message: "resource not found" },
+      });
+      await server.handleRequest({ id: 3, method: "initialize" });
+      expect((await server.listTools()).tools.every((tool) => tool._meta === undefined)).toBe(true);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("bounds initialize when the asset fetch never settles", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(() => new Promise(() => {}));
+    const { server } = await connectedServer(fetchImpl);
+    vi.useFakeTimers();
+    server.useViews(
+      createViewLoader({ registryUrl: apiOrigin, fetchImpl, timeoutMs: 10, log: vi.fn() }),
+    );
+    try {
+      const pending = server.handleRequest({ id: 1, method: "initialize" });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await pending).toHaveProperty("result.serverInfo");
+      expect((await server.listTools()).tools.every((tool) => tool._meta === undefined)).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      await server.close();
+    }
+  });
+
+  it.each([
+    {
+      discovery: "https://registry.example/prefix/api/call/discovery",
+      override: undefined,
+      expectedOrigin: "https://registry.example",
+    },
+    {
+      discovery: "https://registry.example/api/call/discovery",
+      override: "https://override.example/prefix",
+      expectedOrigin: "https://override.example",
+    },
+  ])(
+    "uses the configured API origin $expectedOrigin for assets and CSP",
+    async ({ discovery, override, expectedOrigin }) => {
+      const fetchImpl = viewsFetch();
+      const server = createVapiServer({
+        account: privateKeyToAccount(PRIVATE_KEY),
+        config: { ...getDefaultConfig(), marketplaceDiscoveryUrl: discovery },
+        fetchImpl,
+        ...(override ? { agentLink: { apiBase: override } } : {}),
+      });
+      try {
+        await server.handleRequest({ id: 1, method: "initialize" });
+        expect(fetchImpl.mock.calls.map(([url]) => String(url))).toEqual([
+          `${expectedOrigin}/mcp/apps/call-search.html`,
+          `${expectedOrigin}/mcp/apps/call-inspect.html`,
+        ]);
+        expect(await server.handleRequest({ id: 2, method: "resources/list" })).toMatchObject({
+          result: {
+            resources: [
+              {
+                _meta: {
+                  ui: {
+                    csp: {
+                      connectDomains: [expectedOrigin],
+                      resourceDomains: ["https://assets.claude.ai", expectedOrigin],
+                    },
+                  },
+                },
+              },
+              {
+                _meta: {
+                  ui: {
+                    csp: {
+                      connectDomains: [expectedOrigin],
+                      resourceDomains: ["https://assets.claude.ai", expectedOrigin],
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        });
+      } finally {
+        await server.close();
+      }
+    },
+  );
+
+  it("stamps successful search and inspect results and aliases without changing text or stamping errors", async () => {
+    const createdAt = 1_800_000_000_000;
+    vi.spyOn(Date, "now").mockReturnValue(createdAt);
+    const page = marketplacePage([externalApiHit("weather")]);
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const pathname = new URL(input instanceof Request ? input.url : String(input)).pathname;
+      if (pathname === "/api/call/discovery") return Response.json(page);
+      if (pathname === "/api/call/services") return Response.json({ services: [] });
+      throw new Error(`Unexpected request to ${pathname}`);
+    });
+    const { server } = await connectedServer(fetchImpl);
+    try {
+      const failed = await server.callTool({ name: "call.search", arguments: { limit: 0 } });
+      expect(failed.isError).toBe(true);
+      expect(failed.structuredContent).toBeUndefined();
+      const requests = [
+        { name: "call.search", arguments: { query: "weather" } },
+        { name: "call.search", arguments: { query: "weather" } },
+        { name: "search", arguments: { query: "weather" } },
+        { name: "call.inspect", arguments: { id: "weather" } },
+        { name: "inspect", arguments: { id: "weather" } },
+      ];
+      for (const [index, request] of requests.entries()) {
+        const result = await server.callTool(request);
+        expect(result.isError).not.toBe(true);
+        const { _view, ...payload } = result.structuredContent ?? {};
+        expect(_view).toEqual({ createdAt, seq: index + 1 });
+        const text = result.content[0]?.text ?? "";
+        const body = request.name.includes(".") ? text : text.slice(text.indexOf("\n") + 1);
+        expect(body).toBe(JSON.stringify(payload, null, 2));
+      }
+      const second = await connectedServer(fetchImpl);
+      try {
+        expect(
+          (await second.server.callTool({ name: "call.search", arguments: { query: "weather" } }))
+            .structuredContent?._view,
+        ).toEqual({ createdAt, seq: 1 });
+      } finally {
+        await second.server.close();
+      }
+      expect(fetchImpl.mock.calls.every(([input]) => !String(input).includes("/mcp/apps/"))).toBe(
+        true,
+      );
+    } finally {
+      await server.close();
+    }
+  });
+});

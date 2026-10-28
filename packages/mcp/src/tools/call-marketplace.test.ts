@@ -43,10 +43,17 @@ describe("Agent Cash marketplace call boundary", () => {
       vi.useFakeTimers();
       const directory = await mkdtemp(join(tmpdir(), "vapi-paid-timeout-"));
       temporaryDirectories.push(directory);
+      let markPaidRequestStarted!: () => void;
+      const paidRequestStarted = new Promise<void>((resolve) => {
+        markPaidRequestStarted = resolve;
+      });
       const fetchImpl = vi
         .fn<typeof fetch>()
         .mockResolvedValueOnce(paymentRequired(PAY_TO, offerSeconds))
-        .mockImplementationOnce(async (input) => await abortedFetch(input));
+        .mockImplementationOnce(async (input) => {
+          markPaidRequestStarted();
+          return await abortedFetch(input);
+        });
 
       const call = callService({
         input: {
@@ -62,7 +69,10 @@ describe("Agent Cash marketplace call boundary", () => {
         receiptsPath: join(directory, "receipts.jsonl"),
         ...(internalTimeoutMs === undefined ? {} : { timeoutMs: internalTimeoutMs }),
       });
-      await waitForFetchCalls(fetchImpl, 2);
+      // Ledger writes and signing use real asynchronous I/O. Wait for the paid
+      // request itself before advancing its fake clock or cleaning up its files.
+      await Promise.race([paidRequestStarted, call]);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
       let rejected = false;
       void call.catch(() => {
         rejected = true;
@@ -1152,16 +1162,6 @@ async function abortedFetch(input: RequestInfo | URL): Promise<Response> {
   return await new Promise<Response>((_resolve, reject) => {
     request.signal.addEventListener("abort", () => reject(request.signal.reason), { once: true });
   });
-}
-
-async function waitForFetchCalls(
-  fetchImpl: ReturnType<typeof vi.fn<typeof fetch>>,
-  count: number,
-): Promise<void> {
-  for (let attempt = 0; attempt < 1_000 && fetchImpl.mock.calls.length < count; attempt += 1) {
-    await vi.advanceTimersByTimeAsync(0);
-  }
-  expect(fetchImpl).toHaveBeenCalledTimes(count);
 }
 
 function signInRequired() {
