@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
 
-const EXPECTED_VERSION = "0.9.7";
+const EXPECTED_VERSION = "0.10.0";
 const EXPECTED_PACKAGES = new Set([
   "@vapi-network/core",
   "@vapi-network/sources",
