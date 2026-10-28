@@ -5,6 +5,20 @@
   "description": "vAPI Network: local, non-custodial MCP server to discover and pay x402 APIs in USDC on Base.",
   "version": "0.9.7",
   "websiteUrl": "https://vapinetwork.ai",
+  "icons": [
+    {
+      "src": "https://vapinetwork.ai/branding/kit/logos/vapi-app-icon-light.png",
+      "mimeType": "image/png",
+      "sizes": ["1024x1024"],
+      "theme": "light"
+    },
+    {
+      "src": "https://vapinetwork.ai/branding/kit/logos/vapi-app-icon-dark.png",
+      "mimeType": "image/png",
+      "sizes": ["1024x1024"],
+      "theme": "dark"
+    }
+  ],
   "repository": {
     "url": "https://github.com/vAPI-Network/vapi-network",
     "source": "github"

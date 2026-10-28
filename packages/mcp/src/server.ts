@@ -123,6 +123,7 @@ import {
 import { createSiblingsTool, vapiSiblingsTool } from "./tools/siblings.js";
 import { getWallet, type WalletBalance } from "./tools/wallet.js";
 import { createDocsTools, docsReadTool, docsSearchTool } from "./tools/docs.js";
+import { SERVER_ICONS, withPresentation, type ToolPresentation } from "./tool-presentation.js";
 import { WalletSession, type SessionWalletInfo } from "./wallet-session.js";
 
 export { callService, type CallToolInput, type CallToolResult };
@@ -323,6 +324,8 @@ type ToolResult = {
 };
 
 type ToolDefinition<Shape extends z.ZodRawShape> = {
+  title?: string;
+  annotations?: ToolPresentation["annotations"];
   description?: string;
   deprecatedReplacement?: string;
   inputSchema: Shape;
@@ -331,6 +334,8 @@ type ToolDefinition<Shape extends z.ZodRawShape> = {
 };
 
 type StoredTool = {
+  title: string;
+  annotations: ToolPresentation["annotations"];
   description?: string;
   deprecatedReplacement?: string;
   inputSchema: z.ZodObject<z.ZodRawShape>;
@@ -340,6 +345,8 @@ type StoredTool = {
 
 type ListedTool = {
   name: string;
+  title: string;
+  annotations: ToolPresentation["annotations"];
   description?: string;
   inputSchema: unknown;
   outputSchema?: unknown;
@@ -371,10 +378,16 @@ export class VapiMcpServer {
     definition: ToolDefinition<Shape>,
     handler: (input: z.infer<z.ZodObject<Shape>>) => Promise<ToolResult>,
   ): void {
+    const presentation =
+      definition.title !== undefined && definition.annotations !== undefined
+        ? { title: definition.title, annotations: definition.annotations }
+        : withPresentation({ name, ...definition });
     const inputSchema = definition.strictInput
       ? z.strictObject(definition.inputSchema)
       : z.object(definition.inputSchema);
     this.#tools.set(name, {
+      title: presentation.title,
+      annotations: presentation.annotations,
       ...(definition.description ? { description: definition.description } : {}),
       ...(definition.deprecatedReplacement
         ? { deprecatedReplacement: definition.deprecatedReplacement }
@@ -389,6 +402,8 @@ export class VapiMcpServer {
     return {
       tools: [...this.#tools].map(([name, tool]) => ({
         name,
+        title: tool.title,
+        annotations: tool.annotations,
         ...(tool.description ? { description: tool.description } : {}),
         inputSchema: z.toJSONSchema(tool.inputSchema),
         ...objectOutputSchema(tool.outputSchema),
@@ -447,6 +462,19 @@ export class VapiMcpServer {
       this.#write({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
       return;
     }
+    const response = await this.handleRequest(request);
+    if (response !== undefined) this.#write(response);
+  }
+
+  async handleRequest(request: Record<string, unknown>): Promise<
+    | {
+        jsonrpc: "2.0";
+        id: unknown;
+        result?: unknown;
+        error?: { code: number; message: string };
+      }
+    | undefined
+  > {
     const id = request.id;
     const method = request.method;
     if (typeof method !== "string" || id === undefined) return;
@@ -458,7 +486,13 @@ export class VapiMcpServer {
           protocolVersion:
             typeof params?.protocolVersion === "string" ? params.protocolVersion : "2025-11-25",
           capabilities: { tools: {} },
-          serverInfo: { name: "@vapi-network/mcp", version: VAPI_CLIENT_VERSION },
+          serverInfo: {
+            name: "@vapi-network/mcp",
+            title: "vAPI Network",
+            version: VAPI_CLIENT_VERSION,
+            websiteUrl: "https://vapinetwork.ai",
+            icons: SERVER_ICONS,
+          },
         };
       } else if (method === "tools/list") {
         result = await this.listTools();
@@ -471,20 +505,19 @@ export class VapiMcpServer {
       } else if (method === "ping") {
         result = {};
       } else {
-        this.#write({
+        return {
           jsonrpc: "2.0",
           id,
           error: { code: -32601, message: `Method not found: ${method}` },
-        });
-        return;
+        };
       }
-      this.#write({ jsonrpc: "2.0", id, result });
+      return { jsonrpc: "2.0", id, result };
     } catch (error) {
-      this.#write({
+      return {
         jsonrpc: "2.0",
         id,
         error: { code: -32603, message: error instanceof Error ? error.message : String(error) },
-      });
+      };
     }
   }
 
