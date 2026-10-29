@@ -124,6 +124,8 @@ describe("checkForUpdate", () => {
     ["non-TTY stderr", { stderrIsTTY: false }],
     ["JSON output", { argv: ["version", "--json"] }],
     ["MCP command", { argv: ["mcp"] }],
+    ["Claude launcher", { argv: ["claude", "--own"] }],
+    ["Codex launcher", { argv: ["codex", "resume", "--last"] }],
     ["CI value", { env: { CI: "true" } }],
     ["empty CI value", { env: { CI: "" } }],
     ["explicit opt-out", { env: { VAPI_NO_UPDATE_CHECK: "1" } }],

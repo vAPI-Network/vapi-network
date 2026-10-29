@@ -159,6 +159,7 @@ import { formatIdentityLines } from "./identity.js";
 import { loginCommand, logoutCommand, whoamiCommand } from "./login.js";
 import { mcpInstallCommand } from "./mcp-install.js";
 import { codeCommand } from "./code.js";
+import { claudeCommand, codexCommand } from "./code-launch.js";
 import { routerCommand } from "./router.js";
 import { sendCommand } from "./send.js";
 import { setupCommand } from "./setup.js";
@@ -250,6 +251,8 @@ Usage:
   vapi login [--account <name>] [--label <name>] [--publish] [--no-browser] [--json]
   vapi logout [--account <name>] [--json]
   vapi whoami [--account <name>] [--json]
+  vapi claude [--vapi|--own] [--model <m>] [--use-balance] [--account <name>] [<claude args>...]
+  vapi codex [--vapi|--own] [--model <id>] [--use-balance] [--account <name>] [<codex args>...]
   vapi code install [--yes] [--no-alias] [--account <name>] [--json]
   vapi code uninstall [--json]
   vapi router models [--account <name>] [--json]
@@ -411,6 +414,7 @@ export type CliDependencies = {
     selfPath?: string;
     spawn?: import("./code.js").CodeSpawn;
     usageTimeoutMs?: number;
+    processSignals?: import("./code-launch.js").CodeProcessSignals;
     login?: typeof import("./login.js").runLoginFlow;
   };
   /** MCP client locations, injected so installer tests never touch user config. */
@@ -734,6 +738,8 @@ export async function runCli(
   io: CliIo = processIo,
   dependencies: CliDependencies = {},
 ): Promise<number> {
+  const firstArgument = argv.find((argument) => argument !== "--json");
+  const codeLaunch = firstArgument === "claude" || firstArgument === "codex";
   let json = argv.includes("--json");
   const taskInvocation = argv.find((argument) => argument !== "--json") === "task";
   const resultFile = runResultFile(argv);
@@ -747,17 +753,19 @@ export async function runCli(
             io.stderr(redactDetachedRunText(message, getEnvironment(dependencies))),
         };
   try {
-    const parsedInvocation = removeJsonFlag(argv);
+    const parsedInvocation = removeJsonFlag(argv, codeLaunch);
     json = parsedInvocation.json;
-    const hasWalletOption = parsedInvocation.args.includes(WALLET_OPTION);
+    const hasWalletOption = !codeLaunch && parsedInvocation.args.includes(WALLET_OPTION);
     const hasAccountOption = parsedInvocation.args.includes(ACCOUNT_OPTION);
     if (hasWalletOption && hasAccountOption) {
       throw new UsageError("--wallet and --account cannot be used together.");
     }
     if (hasWalletOption) io.stderr(WALLET_OPTION_DEPRECATION);
-    const args = parsedInvocation.args.map((argument) =>
-      argument === WALLET_OPTION ? ACCOUNT_OPTION : argument,
-    );
+    const args = codeLaunch
+      ? parsedInvocation.args
+      : parsedInvocation.args.map((argument) =>
+          argument === WALLET_OPTION ? ACCOUNT_OPTION : argument,
+        );
     const command = args[0];
 
     if (command === "version" || command === "--version" || command === "-v") {
@@ -854,6 +862,12 @@ export async function runCli(
       case "whoami":
         await whoamiCommand(args.slice(1), json, io, dependencies);
         exitCode = 0;
+        break;
+      case "claude":
+        exitCode = await claudeCommand(args.slice(1), json, io, dependencies);
+        break;
+      case "codex":
+        exitCode = await codexCommand(args.slice(1), json, io, dependencies);
         break;
       case "code":
         exitCode = await codeCommand(args.slice(1), json, io, dependencies);
@@ -4129,11 +4143,16 @@ export function parseArguments(argv: string[], spec: ArgumentSpec) {
   };
 }
 
-function removeJsonFlag(argv: string[]): { args: string[]; json: boolean } {
+function removeJsonFlag(
+  argv: string[],
+  preserveForwarded = false,
+): { args: string[]; json: boolean } {
   let json = false;
   const args: string[] = [];
+  let forwarding = false;
   for (const argument of argv) {
-    if (argument !== "--json") {
+    if (preserveForwarded && argument === "--") forwarding = true;
+    if (argument !== "--json" || forwarding) {
       args.push(argument);
       continue;
     }
