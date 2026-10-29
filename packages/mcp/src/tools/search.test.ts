@@ -145,14 +145,21 @@ describe("Agent Cash marketplace discovery", () => {
     );
   });
 
-  it("passes the registry's group, fee, and any later field straight through", async () => {
+  it.each([
+    { bps: 0, label: "Outdated fee label", display: "No network fee" },
+    {
+      bps: 500,
+      label: "Network fee kept by this API's legacy payout splitter",
+      display: "Network fee kept by this API's legacy payout splitter (5%)",
+    },
+  ])("preserves metadata and displays $bps basis points", async ({ bps, label, display }) => {
     const page = {
       ...marketplacePage,
       items: [
         {
           ...marketplacePage.items[0],
           group: "vapi",
-          fee: { bps: 500, label: "5% network fee, paid by the API's splitter" },
+          fee: { bps, label },
           somethingTheRegistryAddedLater: "tolerated",
         },
       ],
@@ -165,7 +172,8 @@ describe("Agent Cash marketplace discovery", () => {
 
     expect(result.items[0]).toMatchObject({
       group: "vapi",
-      fee: { bps: 500, label: "5% network fee, paid by the API's splitter" },
+      fee: { bps, label },
+      feeDisplay: display,
       somethingTheRegistryAddedLater: "tolerated",
     });
   });

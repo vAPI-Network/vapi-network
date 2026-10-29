@@ -5,6 +5,7 @@ import {
   createRunId,
   formatUsdc,
   RunBudgetError,
+  SpendCapExceededError,
   type AgentProfile,
   type ChatMessage,
   type ChatRequest,
@@ -15,16 +16,23 @@ import {
 } from "@vapi-network/core";
 import { z } from "zod";
 
-import { inspectToolResultSchema } from "../actions/call.js";
+import {
+  callInspect,
+  callSearch,
+  callSearchOutputSchema,
+  inspectToolResultSchema,
+} from "../actions/call.js";
 import { callReadOutputSchema, type CallReadOutput } from "../actions/call-read.js";
 import {
   createRunState,
   inspectionCacheKey,
   type ActionContext,
   type ActionRunState,
+  type CallPort,
   type SwarmRunScope,
 } from "../actions/context.js";
 import type { Action } from "../actions/define.js";
+import { payHints } from "../actions/hints.js";
 import { exactUsdcPrice } from "../actions/policy.js";
 import { ActionDeclinedError, actions, runAction } from "../actions/register.js";
 import {
@@ -67,7 +75,13 @@ export type RunAgentDeps = {
   config: VapiConfig;
   home: string;
   chat: (req: ChatRequest) => Promise<ChatResult>;
-  search: (q: { query: string; network?: string; includeUnverified: boolean }) => Promise<
+  searchPage?: CallPort["search"];
+  search: (q: {
+    query: string;
+    network?: string;
+    includeUnverified: boolean;
+    includeOutage?: boolean;
+  }) => Promise<
     Array<{
       ref: string;
       name: string;
@@ -83,7 +97,7 @@ export type RunAgentDeps = {
     body?: unknown;
     maxPriceUsd: number;
   }) => Promise<{ ok: boolean; status: number; body: unknown; amountUsd: number; network: string }>;
-  caps: { perCallUsd: number };
+  caps: { perCallUsd: number; perDayUsd?: string };
   approve: (question: { ref: string; priceUsd: number; reason: string }) => Promise<boolean>;
   onEvent?: (event: AgentEvent) => void;
   tty?: boolean;
@@ -105,15 +119,20 @@ export type RunAgentResult = {
 };
 
 type ModelToolCall = ChatResult["toolCalls"][number];
-type ToolOutcome = { output: unknown; fatalDetail?: string };
+type ToolOutcome = {
+  output: unknown;
+  fatalDetail?: string;
+  fatalReason?: Extract<AgentEvent, { type: "stopped" }>["reason"];
+};
 type LoopSearchInput = {
   query: string;
   network?: string;
   includeUnverified: boolean;
+  includeOutage?: boolean;
 };
 type LoopInspectInput = { id: string };
 type LoopPayInput = { id: string; body?: string; maxPriceUsd: number };
-type LoopPayResult = { status: number; body: unknown };
+type LoopPayResult = { status: number; body: unknown; hints: string[] };
 type LoopReadInput = { url: string };
 type ParsedLoopSwarmAllocateInput = { amountUsd: string; reason?: string };
 type LoopSwarmAllocateInput = ParsedLoopSwarmAllocateInput & { requestId: string };
@@ -146,7 +165,11 @@ const loopSearchResultSchema = z.array(
     description: z.string().optional(),
   }),
 );
-const loopPayResultSchema = z.object({ status: z.number(), body: z.unknown() });
+const loopPayResultSchema = z.object({
+  status: z.number(),
+  body: z.unknown(),
+  hints: z.array(z.string()).max(4),
+});
 
 const LOOP_BINDINGS: Readonly<Record<string, LoopBinding>> = {
   "call.search": {
@@ -157,24 +180,35 @@ const LOOP_BINDINGS: Readonly<Record<string, LoopBinding>> = {
       properties: {
         query: { type: "string" },
         network: { type: ["string", "null"] },
+        includeOutage: { type: ["boolean", "null"] },
       },
-      required: ["query", "network"],
+      required: ["query", "network", "includeOutage"],
       additionalProperties: false,
     },
-    output: loopSearchResultSchema,
+    output: z.union([callSearchOutputSchema, loopSearchResultSchema]),
     summary: "Search completed.",
     parseArguments(value, deps) {
       const args = parseObjectArgs(value);
       const query = requiredString(args, "query");
       const network = searchNetwork(nullableString(args, "network"));
+      const includeOutage = args.includeOutage;
+      if (
+        includeOutage !== undefined &&
+        includeOutage !== null &&
+        typeof includeOutage !== "boolean"
+      ) {
+        throw new ToolInputError("includeOutage must be a boolean or null.");
+      }
       return {
         query,
         ...(network === null ? {} : { network }),
         includeUnverified: !deps.profile.verifiedOnly,
+        ...(includeOutage == null ? {} : { includeOutage }),
       } satisfies LoopSearchInput;
     },
     async run(input, ctx, execution) {
       const search = input as LoopSearchInput;
+      if (execution.deps.searchPage) return await callSearch.run(search, ctx);
       const rows = await execution.deps.search(search);
       for (const row of rows) ctx.caller.run?.searchedRefs.add(row.ref);
       return rows;
@@ -194,14 +228,8 @@ const LOOP_BINDINGS: Readonly<Record<string, LoopBinding>> = {
       const args = parseObjectArgs(value);
       return { id: requiredString(args, "ref") } satisfies LoopInspectInput;
     },
-    async run(input, ctx, execution) {
-      const { id } = input as LoopInspectInput;
-      const cacheKey = inspectionCacheKey({ id });
-      const cached = ctx.caller.run?.inspected.get(cacheKey);
-      if (cached) return cached;
-      const result = await execution.deps.inspect(id);
-      ctx.caller.run?.inspected.set(cacheKey, result);
-      return result;
+    async run(input, ctx) {
+      return await callInspect.run(input as LoopInspectInput, ctx);
     },
   },
   "call.pay": {
@@ -248,6 +276,7 @@ const LOOP_BINDINGS: Readonly<Record<string, LoopBinding>> = {
       return {
         status: execution.payment.status,
         body: execution.payment.body,
+        hints: payHints(execution.payment, { ref: id, surface: ctx.caller.surface }),
       } satisfies LoopPayResult;
     },
   },
@@ -414,7 +443,8 @@ export async function runAgent(task: string, deps: RunAgentDeps): Promise<RunAge
     config: deps.config,
     clock: deps.now ?? (() => new Date()),
     call: {
-      async search() {
+      async search(input) {
+        if (runDeps.searchPage) return await runDeps.searchPage(input);
         throw new Error("The agent loop uses its reduced search binding.");
       },
       async inspect({ id }) {
@@ -576,6 +606,21 @@ export async function runAgent(task: string, deps: RunAgentDeps): Promise<RunAge
           fatalDetail: "The local audit log could not be written.",
         };
       }
+      // Preflight cap checks run before the payment binding can wrap the error.
+      if (error instanceof SpendCapExceededError) {
+        const ref = paymentRef(input);
+        const reason = callRunBudgetReason(error, runDeps.budget) ?? callBudgetReason(error);
+        if (ref !== undefined && reason !== undefined) {
+          const outcome = await declineSafely(ref, reason);
+          return outcome.fatalDetail === undefined
+            ? {
+                ...outcome,
+                fatalDetail: reason,
+                ...(error.cap === "run_budget" ? { fatalReason: "run_budget" as const } : {}),
+              }
+            : outcome;
+        }
+      }
       if (error instanceof ActionDeclinedError) {
         const declinedRef = actionDeclineRef(action, input);
         if (declinedRef !== undefined) {
@@ -593,7 +638,10 @@ export async function runAgent(task: string, deps: RunAgentDeps): Promise<RunAge
         }
         const runBudgetReason = callRunBudgetReason(error.paymentError, runDeps.budget);
         if (runBudgetReason !== undefined) {
-          return await declineSafely(ref, runBudgetReason);
+          const outcome = await declineSafely(ref, runBudgetReason);
+          return spendCap(error.paymentError) === "run_budget"
+            ? { ...outcome, fatalDetail: runBudgetReason, fatalReason: "run_budget" }
+            : outcome;
         }
         const spendBudgetReason = callBudgetReason(error.paymentError);
         if (spendBudgetReason !== undefined) {
@@ -619,7 +667,11 @@ export async function runAgent(task: string, deps: RunAgentDeps): Promise<RunAge
     try {
       reply = await deps.chat({ model: profile.model, messages, tools, tool_choice: "auto" });
     } catch (error) {
-      if (error instanceof RunBudgetError || hasErrorCode(error, "run_budget_exceeded")) {
+      if (
+        error instanceof RunBudgetError ||
+        hasErrorCode(error, "run_budget_exceeded") ||
+        spendCap(error) === "run_budget"
+      ) {
         return await stop("run_budget", runBudgetDetail(runDeps.budget));
       }
       if (hasErrorCode(error, "budget_exhausted")) {
@@ -666,7 +718,9 @@ export async function runAgent(task: string, deps: RunAgentDeps): Promise<RunAge
         name: call.name,
         summary: toolSummary(call.name, loopActions),
       });
-      if (outcome.fatalDetail) return await stop("error", outcome.fatalDetail);
+      if (outcome.fatalDetail) {
+        return await stop(outcome.fatalReason ?? "error", outcome.fatalDetail);
+      }
     }
   }
   return await stop("max_steps");
@@ -790,6 +844,14 @@ function hasErrorCode(error: unknown, code: string): boolean {
 }
 
 function callBudgetReason(error: unknown): string | undefined {
+  const cap = spendCap(error);
+  if (cap !== undefined) {
+    if (cap === "per_call") return "This wallet's per-call Call budget is exhausted.";
+    if (cap === "per_day") return "This wallet's daily Call budget is exhausted.";
+    if (cap === "max_price") return "This call exceeds its maximum price.";
+    if (cap === "max_amount") return "This payment exceeds its maximum amount.";
+    return undefined;
+  }
   if (hasErrorCode(error, "per_call_cap_exceeded")) {
     return "This wallet's per-call Call budget is exhausted.";
   }
@@ -800,12 +862,29 @@ function callBudgetReason(error: unknown): string | undefined {
 }
 
 function callRunBudgetReason(error: unknown, budget: RunBudget | undefined): string | undefined {
-  if (!(error instanceof RunBudgetError) && !hasErrorCode(error, "run_budget_exceeded")) {
+  if (
+    !(error instanceof RunBudgetError) &&
+    spendCap(error) !== "run_budget" &&
+    !hasErrorCode(error, "run_budget_exceeded")
+  ) {
     return undefined;
   }
   return budget === undefined
     ? "The run budget is spent; this call was not paid."
     : `The run budget of $${formatUsdc(budget.limitAtomic)} is spent; this call was not paid.`;
+}
+
+function spendCap(error: unknown): SpendCapExceededError["cap"] | undefined {
+  if (error instanceof SpendCapExceededError) return error.cap;
+  if (!hasErrorCode(error, "spend_cap_exceeded")) return undefined;
+  const cap = Reflect.get(error as object, "cap");
+  return cap === "per_call" ||
+    cap === "per_day" ||
+    cap === "max_price" ||
+    cap === "max_amount" ||
+    cap === "run_budget"
+    ? cap
+    : undefined;
 }
 
 function runBudgetDetail(budget: RunBudget | undefined): string {

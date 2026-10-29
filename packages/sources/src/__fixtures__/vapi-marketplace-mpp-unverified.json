@@ -6,7 +6,7 @@
       "kind": "api",
       "provenance": "self_listed",
       "group": "added",
-      "fee": { "bps": 500, "label": "5% network fee, paid by the API's splitter" },
+      "fee": { "bps": 500, "label": "Network fee kept by this API's legacy payout splitter" },
       "verification": "none",
       "execution": { "mode": "direct", "payable": false },
       "card": {

@@ -185,7 +185,7 @@ describe("public Call discovery contract", () => {
     const listing = {
       ...validService,
       group: "vapi",
-      fee: { bps: 500, label: "5% network fee, paid by the API's splitter" },
+      fee: { bps: 500, label: "Network fee kept by this API's legacy payout splitter" },
     };
 
     expect(serviceSummarySchema.parse(listing)).toEqual({ ...listing, verification: "none" });

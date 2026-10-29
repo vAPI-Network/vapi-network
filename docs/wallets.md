@@ -143,6 +143,16 @@ vapi accounts distribute --resume <movement-id> [--replace-expired-restored] [--
 vapi accounts distribute --cancel <movement-id> [--replace-expired-restored]
 ```
 
+API payments stopped by per-call or daily caps return `spend_cap_exceeded`
+before signing. The error names the attempted amount, current limit and the
+terminal command that raises the cap. A daily limit must cover today's spend
+plus the attempted amount:
+
+```sh
+vapi accounts caps <name> --per-call <usd>
+vapi accounts caps <name> --per-day <usd>
+```
+
 Without `--to`, distribute selects every other linked, active account on this device. It splits whole cents in account order and puts remainder cents in the first account. The sender's balance, largest-leg per-call cap, and remaining per-day cap are checked before the first signature. Each leg is signed and relayed in order.
 
 A movement file records every leg, nonce, sender address and recipient address before signing. If the process stops, the next distribution refuses to start and prints the exact `vapi accounts distribute --resume <movement-id>` command. Resume reuses each recorded authorization and skips legs already sent. A failed leg remains open when it is retryable or its transfer journal proves that an authorization was signed. Every restored leg remains open until it is `sent` or `cancelled`, including a non-retryable failure without a receipt. Resume refuses when either saved account name now resolves to another address.
@@ -202,7 +212,7 @@ vapi
 This screen comes from a vault restored from the BIP-39 test phrase into an empty home, so the account holds nothing and is not linked yet:
 
 ```text
-vAPI 0.10.0        home /tmp/vapi-docs-home        registry api.vapinetwork.ai
+vAPI 0.11.0        home /tmp/vapi-docs-home        registry api.vapinetwork.ai
 
 Owner      not linked   console: https://api.vapinetwork.ai/agents
 Vault      unlocked on this device (macOS Keychain)   backup: vapi backup

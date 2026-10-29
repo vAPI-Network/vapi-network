@@ -11,9 +11,12 @@ a listing's request contract and the registry's last observed 402 quote for free
 
 `vapi search` tags each listing with its group, `[vapi]`, `[added]`,
 `[partner]` or `[external]`, and prints the network fee that is already inside
-the price. vAPI and added APIs carry a 5% network fee inside the quoted price;
-partner and external listings carry none. `vapi inspect` and `--json` return the
-same `group` and `fee` fields.
+the price. vAPI Call takes no fee. Providers are paid directly.
+New listings show `No network fee`. Legacy listings whose endpoints still pay an
+old payout splitter show the registry's label and the percentage computed from
+its basis points, for example `Network fee kept by this API's legacy payout splitter (5%)`.
+`vapi inspect` and `--json` return the same `group` and `fee` fields.
+MCP search and inspect also include `feeDisplay` alongside the unchanged wire fee.
 
 Listing on vAPI is permissionless, and verification is a tier on top of it. Each
 result also carries `[verified]`, `[requested]` or `[unverified]`, and a
@@ -25,6 +28,21 @@ automated x402 probe but were never reviewed. `vapi inspect` prints a
 listing it just paid is not verified, and `--json` carries `verification` on
 all three.
 
+API results can include `health` with `state`, `uptime7d`, `latencyP50Ms`,
+`latencyP95Ms` and `checks7d`. The state is `healthy`, `degraded`, `outage` or
+`unknown`. The hosted registry hides outage results by default; pass
+`--include-outage` to request them. It can also attach up to two `alternatives`,
+each with a listing `ref` and a `reason` of `cheaper` or `healthier`.
+The human search output's Health cell shows the state and p50 latency in
+milliseconds when supplied, or `-` when health is absent. Its Alternatives line
+lists the suggested references and reasons. Search JSON includes zero to four
+`hints` naming next actions.
+`uptime7d` is a fraction from 0 to 1; latency values are milliseconds.
+Uptime and latencies can be null when unavailable, and `checks7d` counts checks
+over the seven-day window.
+Partner results can carry the `failed_calls_free` badge, labelled
+`Provider failures aren't charged`.
+
 `vapi inspect` also says how a listing has behaved lately, when the registry
 has measured it: a `Liveness:` line with its uptime over the last seven days of
 hourly re-probes and its p50 and p95 latency, and a `Conformance:` line with the
@@ -32,6 +50,13 @@ x402 version its 402 declares, whether it follows that version, where the offer
 travels, and any issue codes, the same codes `vapi check` reports. A registry
 that has not measured a listing sends neither, and neither line is printed.
 `--json` carries them as `liveness` and `conformance`.
+
+The inspected endpoint can also carry a nested `requestSchema`, a
+`responseSchema`, and one `exampleRequest` with optional `query` and `body`
+fields. When health is supplied, human output shows its state, check count and
+available uptime and p50/p95 latencies. Inspect JSON includes optional `health` and up to
+four `hints`, including a suggested payment command based on the example or
+required fields. Fill any placeholders before running that command.
 
 When the registry knows it, `vapi inspect` also prints the listing's ERC-8004
 agent identity on Base and its reputation. The client reads these fields from
@@ -58,6 +83,50 @@ extension. When the API advertises `payment-identifier`, vAPI generates one id,
 sends it with the payment, records it as `paymentId` on the receipt, and shows
 it again in `vapi pay --resume`. `mcp --json` is accepted as a no-op, because
 the stdio transport is already JSON-RPC.
+
+Pay JSON results include zero to four `hints`. A successful response points to
+the saved receipt; a non-2xx result can suggest inspecting the request contract.
+These hints do not appear in the human payment output.
+
+Spend-cap refusals exit `1` with code `spend_cap_exceeded` before signing.
+JSON output includes the cap, attempted amount, limit and guidance for raising
+the limit when available. Amounts are decimal USD strings; `spentUsd` and
+`wallet` are optional. This illustrative example shows a daily cap refusal:
+
+```json
+{
+  "error": {
+    "code": "spend_cap_exceeded",
+    "cap": "per_day",
+    "amountUsd": "0.01",
+    "limitUsd": "1",
+    "spentUsd": "0.995",
+    "wallet": "researcher",
+    "command": "vapi accounts caps researcher --per-day 1.005",
+    "message": "Blocked by the per-day spend cap of account researcher: this payment of $0.01 would raise today's spend from $0.995 to $1.005, above $1. Nothing was signed. Raise it with: vapi accounts caps researcher --per-day 1.005"
+  },
+  "exitCode": 1
+}
+```
+
+| `cap`        | How to raise it                                                                          |
+| ------------ | ---------------------------------------------------------------------------------------- |
+| `per_call`   | Run the returned account-cap command with a per-call limit covering `amountUsd`.         |
+| `per_day`    | Run the returned account-cap command with a daily limit covering `spentUsd + amountUsd`. |
+| `max_price`  | Increase `--max` on the CLI payment or `maxPriceUsd` in MCP `call.pay`.                  |
+| `max_amount` | Increase the SDK payment's `maxAtomic` value in atomic USDC units; `command` is null.    |
+| `run_budget` | Increase `--budget` on the agent or swarm run to cover `spentUsd + amountUsd`.           |
+
+Only the terminal can raise account caps. The per-account errors return a full
+command; maximum-price and run-budget errors return a flag fragment:
+
+```bash
+vapi accounts caps <name> --per-call <usd>
+vapi accounts caps <name> --per-day <usd>
+vapi pay <ref> --max <usd>
+vapi agent run <name> "<task>" --budget <usd>
+vapi swarm run <name> "<task>" --budget <usd>
+```
 
 ## Check your API
 
@@ -129,7 +198,8 @@ answers x402, the listing exists, and you decide when it goes live.
 ```bash
 vapi auth set-key                        # paste the key from the console, once
 vapi publish https://weather.example     # probe, pick endpoints, sign the payout wallet
-vapi publish activate weather-call       # once the FeeSplitter is deployed
+# Set every endpoint's x402 payTo to the payout wallet you just signed with
+vapi publish activate weather-call       # checks that payTo matches your payout wallet
 vapi publish verify-request weather-call # ask for the review that ends the [unverified] tag
 vapi publish list
 ```
@@ -141,6 +211,18 @@ probe step; on a refusal it prints the code, the reason and the hint, and exits
 script names them with `--select forecast,alerts`, or takes all of them with
 `--yes`, and then has to supply `--name`, `--description` and `--category`
 itself.
+
+Agents choose between listings by the description, so the registry grades it
+against three questions: what one call does, what it takes, and when to use
+something else. A description that misses one is still published. `vapi
+publish` prints each finding with a hint, and `--json` returns them as
+`descriptionWarnings` on each listing, with codes `description_missing_purpose`,
+`description_missing_input` and `description_missing_alternative`. This one
+answers all three:
+
+```text
+Returns the 7-day forecast for one city. Takes city, a place name, or lat and lon. For past weather, use a historical weather API instead.
+```
 
 A listing holds at most 20 endpoints, so a larger catalog is published as
 several listings of up to 20, `Weather (1/4)`, `Weather (2/4)` and so on, in
@@ -157,10 +239,10 @@ so the registry knows where the money goes. It is an EIP-4361 message bound to
 the registry's own host and to Base: nothing is paid, nothing is approved, and
 no key leaves the machine.
 
-Payouts arrive through a FeeSplitter you own. Deploying it is a wallet
-transaction against the factory, so it stays in the console at
-`<registry>/providers`; `vapi publish` prints the address it will have on each
-network and the exact next step. An active listing answers
+Set every selected endpoint's x402 `payTo` to that signed payout wallet itself,
+then run `vapi publish activate <slug>` for each listing. `vapi publish` prints
+your payout wallet and the activation commands. vAPI Call takes no fee. Providers
+are paid directly. An active listing answers
 `vapi search --include-unverified`, and `vapi publish verify-request <slug>`
 asks for the review that puts it in the default search.
 

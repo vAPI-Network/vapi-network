@@ -69,14 +69,18 @@ describe("Agent Cash marketplace call boundary", () => {
         receiptsPath: join(directory, "receipts.jsonl"),
         ...(internalTimeoutMs === undefined ? {} : { timeoutMs: internalTimeoutMs }),
       });
-      // Ledger writes and signing use real asynchronous I/O. Wait for the paid
-      // request itself before advancing its fake clock or cleaning up its files.
-      await Promise.race([paidRequestStarted, call]);
-      expect(fetchImpl).toHaveBeenCalledTimes(2);
       let rejected = false;
-      void call.catch(() => {
-        rejected = true;
-      });
+      const earlyCompletion = call.then(
+        () => {
+          throw new Error("Paid call resolved before its request started.");
+        },
+        (error: unknown) => {
+          rejected = true;
+          throw error;
+        },
+      );
+      await Promise.race([paidRequestStarted, earlyCompletion]);
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
       await vi.advanceTimersByTimeAsync(expectedSeconds * 1_000 - 1);
       expect(rejected).toBe(false);
       await vi.advanceTimersByTimeAsync(1);

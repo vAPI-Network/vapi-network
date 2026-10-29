@@ -12,6 +12,10 @@ import {
   X402_SOLANA_MAINNET_CAIP2,
   apiMarketplaceHitSchema,
   isMirroredHit,
+  LISTING_HEALTH_STATES,
+  listingHealthSchema,
+  listingHealthStateSchema,
+  marketplaceAlternativeSchema,
   marketplaceDiscoveryInputSchema,
   marketplaceDiscoveryPageSchema,
   marketplaceHitSchema,
@@ -25,24 +29,120 @@ const fixture = JSON.parse(
 ) as unknown;
 
 describe("marketplace discovery wire contract", () => {
-  it("accepts the shared cross-runtime fixture", () => {
-    const page = marketplaceDiscoveryPageSchema.parse(fixture);
+  const apiHits = (fixture as { items: Record<string, unknown>[] }).items.slice(0, 2);
+  const health = {
+    state: "healthy",
+    uptime7d: 0.9941,
+    latencyP50Ms: 212.4,
+    latencyP95Ms: 480,
+    checks7d: 168,
+  };
 
-    expect(page.protocol).toBe(MARKETPLACE_DISCOVERY_PROTOCOL);
-    expect(page.rankingVersion).toBe(MARKETPLACE_RANKING_VERSION);
-    expect(page.items.map((item) => item.kind)).toEqual([
-      "api",
-      "api",
-      "service_offer",
-      "open_request",
-    ]);
+  it("exports and parses the registry's health states and summary", () => {
+    expect(LISTING_HEALTH_STATES).toEqual(["healthy", "degraded", "outage", "unknown"]);
+    for (const state of LISTING_HEALTH_STATES) {
+      expect(listingHealthStateSchema.parse(state)).toBe(state);
+      expect(listingHealthSchema.parse({ ...health, state })).toEqual({ ...health, state });
+    }
+    expect(listingHealthStateSchema.parse("recovering")).toBe("unknown");
+    expect(listingHealthSchema.parse({ ...health, state: "recovering" }).state).toBe("unknown");
     expect(
-      page.items.slice(0, 2).map((item) => ("provenance" in item ? item.provenance : null)),
-    ).toEqual(["self_listed", "indexed"]);
-    expect(
-      page.items.slice(0, 2).map((item) => (item.kind === "api" ? item.execution.mode : null)),
-    ).toEqual(["direct", "direct"]);
+      listingHealthSchema.parse({
+        state: "recovering",
+        uptime7d: 99,
+        latencyP50Ms: -1,
+        latencyP95Ms: "slow",
+        checks7d: 1.5,
+      }),
+    ).toEqual({
+      state: "unknown",
+      uptime7d: null,
+      latencyP50Ms: null,
+      latencyP95Ms: null,
+      checks7d: 0,
+    });
+    expect(listingHealthSchema.parse({})).toEqual({
+      state: "unknown",
+      uptime7d: null,
+      latencyP50Ms: null,
+      latencyP95Ms: null,
+      checks7d: 0,
+    });
   });
+
+  it.each(apiHits)("tolerates absent and malformed health on $provenance APIs", (hit) => {
+    expect(apiMarketplaceHitSchema.parse({ ...hit, health }).health).toEqual(health);
+    for (const malformed of [undefined, null, "outage", 42, []]) {
+      expect(apiMarketplaceHitSchema.parse({ ...hit, health: malformed }).health).toBeUndefined();
+    }
+    const older = apiMarketplaceHitSchema.parse(hit);
+    expect(older.health).toBeUndefined();
+    expect(older.alternatives).toBeUndefined();
+  });
+
+  it.each(apiHits)("filters, deduplicates and caps alternatives on $provenance APIs", (hit) => {
+    const cheaper = { ref: "cheaper-api", reason: "cheaper" };
+    const healthier = { ref: "healthier-api", reason: "healthier" };
+    expect(marketplaceAlternativeSchema.parse(cheaper)).toEqual(cheaper);
+    expect(
+      apiMarketplaceHitSchema.parse({
+        ...hit,
+        alternatives: [
+          null,
+          { ref: "", reason: "cheaper" },
+          { ref: "future", reason: "faster" },
+          cheaper,
+          { ref: "cheaper-api", reason: "healthier" },
+          healthier,
+          { ref: "third-api", reason: "cheaper" },
+        ],
+      }).alternatives,
+    ).toEqual([cheaper, healthier]);
+    for (const malformed of [undefined, null, "no alternatives", [], [{ ref: "missing-reason" }]]) {
+      expect(
+        apiMarketplaceHitSchema.parse({ ...hit, alternatives: malformed }).alternatives,
+      ).toBeUndefined();
+    }
+  });
+
+  it("keeps failed_calls_free and drops unknown badge codes", () => {
+    const hit = apiHits[0]!;
+    const badge = { code: "failed_calls_free", label: "Provider failures aren't charged" };
+    expect(
+      apiMarketplaceHitSchema.parse({
+        ...hit,
+        card: {
+          ...(hit.card as Record<string, unknown>),
+          badges: [badge, { code: "future_badge", label: "Future" }],
+        },
+      }).card.badges,
+    ).toEqual([badge]);
+  });
+
+  it.each([MARKETPLACE_RANKING_VERSION, "marketplace-ranking-v2", "marketplace-ranking-v9"])(
+    "accepts the shared cross-runtime fixture with %s",
+    (rankingVersion) => {
+      const page = marketplaceDiscoveryPageSchema.parse({
+        ...(fixture as Record<string, unknown>),
+        rankingVersion,
+      });
+
+      expect(page.protocol).toBe(MARKETPLACE_DISCOVERY_PROTOCOL);
+      expect(page.rankingVersion).toBe(rankingVersion);
+      expect(page.items.map((item) => item.kind)).toEqual([
+        "api",
+        "api",
+        "service_offer",
+        "open_request",
+      ]);
+      expect(
+        page.items.slice(0, 2).map((item) => ("provenance" in item ? item.provenance : null)),
+      ).toEqual(["self_listed", "indexed"]);
+      expect(
+        page.items.slice(0, 2).map((item) => (item.kind === "api" ? item.execution.mode : null)),
+      ).toEqual(["direct", "direct"]);
+    },
+  );
 
   it("exports a JSON Schema for MCP result registration", () => {
     expect(() => z.toJSONSchema(marketplaceDiscoveryPageSchema)).not.toThrow();
@@ -74,7 +174,7 @@ describe("marketplace discovery wire contract", () => {
         group: ["vapi", "external", "partner", "added"][index],
         fee:
           index === 0
-            ? { bps: 500, label: "5% network fee, paid by the API's splitter" }
+            ? { bps: 500, label: "Network fee kept by this API's legacy payout splitter" }
             : { bps: 0, label: "No network fee" },
       })),
     });
@@ -82,7 +182,7 @@ describe("marketplace discovery wire contract", () => {
     expect(page.items.map((item) => item.group)).toEqual(["vapi", "external", "partner", "added"]);
     expect(page.items[0]?.fee).toEqual({
       bps: 500,
-      label: "5% network fee, paid by the API's splitter",
+      label: "Network fee kept by this API's legacy payout splitter",
     });
     expect(page.items.map((item) => item.fee?.bps)).toEqual([500, 0, 0, 0]);
     // Unknown or malformed presentation disclosures are omitted safely.
@@ -349,6 +449,7 @@ describe("marketplace discovery wire contract", () => {
         network: "  eip155:8453 ",
         limit: 24,
         includeUnverified: true,
+        includeOutage: true,
       }),
     ).toEqual({
       q: "weather",
@@ -356,6 +457,7 @@ describe("marketplace discovery wire contract", () => {
       network: "eip155:8453",
       limit: 24,
       includeUnverified: true,
+      includeOutage: true,
     });
     expect(() => marketplaceDiscoveryInputSchema.parse({ kinds: ["api", "api"] })).toThrow();
     expect(() => marketplaceDiscoveryInputSchema.parse({ limit: 51 })).toThrow();
@@ -363,6 +465,7 @@ describe("marketplace discovery wire contract", () => {
     // The request this client builds stays strict: a garbage trust switch is a
     // client bug and must fail here, not travel to the registry.
     expect(() => marketplaceDiscoveryInputSchema.parse({ includeUnverified: "yes" })).toThrow();
+    expect(() => marketplaceDiscoveryInputSchema.parse({ includeOutage: "yes" })).toThrow();
     expect(marketplaceDiscoveryInputSchema.parse({})).toEqual({});
   });
 });

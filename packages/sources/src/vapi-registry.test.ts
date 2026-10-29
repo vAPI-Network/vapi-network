@@ -3,10 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { readSearchEvents } from "@vapi-network/core";
+import { discover, readSearchEvents } from "@vapi-network/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  findMarketplaceApiByRef,
   resolveServiceEndpoint,
   searchMarketplace,
   vapiRegistrySource,
@@ -357,6 +358,79 @@ describe("vAPI registry helpers", () => {
     expect(switches).toEqual([null, null, "true"]);
   });
 
+  it("keeps default URLs unchanged and sends includeOutage only for true", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (input) =>
+      Response.json({
+        ...marketplacePage,
+        rankingVersion:
+          new URL(input as URL).searchParams.get("includeOutage") === "true"
+            ? "marketplace-ranking-v2"
+            : marketplacePage.rankingVersion,
+      }),
+    );
+
+    await searchMarketplace({ query: "weather" }, config, fetchImpl);
+    await searchMarketplace({ query: "weather", includeOutage: false }, config, fetchImpl);
+    const page = await searchMarketplace(
+      { query: "weather", includeOutage: true },
+      config,
+      fetchImpl,
+    );
+    expect(page.rankingVersion).toBe("marketplace-ranking-v2");
+
+    const urls = fetchImpl.mock.calls.map((call) => new URL(call[0] as URL));
+    expect(urls.map((url) => url.searchParams.get("includeOutage"))).toEqual([null, null, "true"]);
+    expect(urls[0]!.href).toBe(urls[1]!.href);
+  });
+
+  it("rejects a non-boolean includeOutage before fetching", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    await expect(
+      searchMarketplace({ includeOutage: "yes" as unknown as boolean }, config, fetchImpl),
+    ).rejects.toThrow();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("forwards includeOutage through merged discovery and the source adapter", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => Response.json({ ...marketplacePage, items: [] }));
+    const source = vapiRegistrySource("https://console.vapinetwork.ai", { fetch: fetchImpl });
+
+    await discover([source], "weather");
+    await discover([source], "weather", { includeOutage: false });
+    await discover([source], "weather", { includeOutage: true });
+
+    expect(
+      fetchImpl.mock.calls.map((call) => new URL(call[0] as URL).searchParams.get("includeOutage")),
+    ).toEqual([null, null, "true"]);
+  });
+
+  it("includes outage listings in exact marketplace ref lookups", async () => {
+    const health = {
+      state: "outage",
+      uptime7d: 0.8,
+      latencyP50Ms: null,
+      latencyP95Ms: null,
+      checks7d: 5,
+    };
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      Response.json({
+        ...marketplacePage,
+        items: [{ ...marketplacePage.items[1], health }],
+      }),
+    );
+    await expect(
+      findMarketplaceApiByRef("external-price", config, fetchImpl),
+    ).resolves.toMatchObject({
+      ref: "external-price",
+      health,
+    });
+    expect(new URL(fetchImpl.mock.calls[0]![0] as URL).searchParams.get("includeOutage")).toBe(
+      "true",
+    );
+  });
+
   it("rejects a non-boolean includeUnverified before it reaches the registry", async () => {
     const fetchImpl = vi.fn<typeof fetch>();
 
@@ -411,6 +485,25 @@ describe("vAPI registry helpers", () => {
     expect(new URL(fetchImpl.mock.calls[0]![0] as URL).searchParams.get("includeUnverified")).toBe(
       "true",
     );
+    expect(new URL(fetchImpl.mock.calls[0]![0] as URL).searchParams.get("includeOutage")).toBe(
+      "true",
+    );
+  });
+
+  it("includes outage listings when source inspection falls back to a mirrored ref", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(Response.json({ services: [] }))
+      .mockResolvedValueOnce(Response.json(marketplacePage));
+    const source = vapiRegistrySource("https://console.vapinetwork.ai", { fetch: fetchImpl });
+
+    await expect(source.inspect("external-price")).resolves.toMatchObject({
+      resource: { url: "https://external.example/prices" },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(
+      fetchImpl.mock.calls.map((call) => new URL(call[0] as URL).searchParams.get("includeOutage")),
+    ).toEqual(["true", "true"]);
   });
 
   it("resolves executable endpoints through the compatibility API", async () => {

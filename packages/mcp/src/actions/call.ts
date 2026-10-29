@@ -7,6 +7,7 @@ import {
   listingConformanceSchema,
   listingFeeSchema,
   listingGroupSchema,
+  listingHealthSchema,
   listingIdentitySchema,
   listingLivenessSchema,
   listingVerificationSchema,
@@ -28,6 +29,7 @@ import { inspectService, type InspectToolInput } from "../tools/inspect.js";
 import { searchMarketplace, type MarketplaceSearchInput } from "../tools/search.js";
 import { inspectionCacheKey, type CallPort } from "./context.js";
 import { defineAction } from "./define.js";
+import { inspectHints, payHints, searchHints } from "./hints.js";
 
 export const MAX_CACHED_MARKETPLACE_REFS = 200;
 
@@ -40,6 +42,7 @@ export const walletArgument = {
 };
 
 export const callToolResultSchema = z.object({
+  hints: z.array(z.string()).max(4),
   wallet: z.string(),
   status: z.number().int(),
   body: z.unknown(),
@@ -67,6 +70,7 @@ export const callToolResultSchema = z.object({
 });
 
 export const inspectToolResultSchema = z.object({
+  hints: z.array(z.string()).max(4),
   name: z.string(),
   method: z.string().nullable(),
   url: z.url(),
@@ -75,13 +79,17 @@ export const inspectToolResultSchema = z.object({
   operationId: z.string().optional(),
   requestContentType: z.string().optional(),
   requestSchema: z.unknown().optional(),
+  responseSchema: discoveryEndpointSchema.shape.responseSchema,
+  exampleRequest: discoveryEndpointSchema.shape.exampleRequest,
   responseContentType: z.string().optional(),
   network: z.string().optional(),
   // Registry-owned listing disclosures, mirrored from call.search.
   group: listingGroupSchema.optional(),
   fee: listingFeeSchema.optional(),
+  feeDisplay: z.string().optional(),
   verification: listingVerificationSchema,
   liveness: listingLivenessSchema.optional(),
+  health: listingHealthSchema.optional().catch(undefined),
   conformance: listingConformanceSchema.optional(),
   identity: listingIdentitySchema.optional(),
   payment: discoveryEndpointSchema.shape.payment.unwrap().nullable(),
@@ -103,6 +111,12 @@ export const callSearchInputSchema = z.object({
     .optional()
     .describe(
       "Default results are vAPI-verified listings plus mirrored external catalogs; includeUnverified: true adds unverified self-listed APIs, which passed vAPI's automated x402 probe but were not reviewed.",
+    ),
+  includeOutage: z
+    .boolean()
+    .optional()
+    .describe(
+      "Default results hide listings whose recent health checks show an outage; includeOutage: true shows them.",
     ),
 });
 
@@ -150,15 +164,19 @@ export const callPayInputSchema = z.object({
     ),
 });
 
+export const callSearchOutputSchema = marketplaceDiscoveryPageSchema.extend({
+  hints: z.array(z.string()).max(4),
+});
+
 export const callSearch = defineAction<
   z.infer<typeof callSearchInputSchema>,
-  z.infer<typeof marketplaceDiscoveryPageSchema>
+  z.infer<typeof callSearchOutputSchema>
 >({
   name: "call.search",
   description:
     "Search the public vAPI Marketplace for APIs, services, and open requests. API results can be paid locally; other results continue at their web action. Search returns public cards, not request bodies — use call.inspect before call.pay whenever the request contract is not already known.",
   input: callSearchInputSchema,
-  output: marketplaceDiscoveryPageSchema,
+  output: callSearchOutputSchema,
   money: "none",
   grant: "call",
   async run(input, ctx) {
@@ -166,7 +184,13 @@ export const callSearch = defineAction<
     if (ctx.caller.run) {
       for (const item of page.items) ctx.caller.run.searchedRefs.add(item.ref);
     }
-    return page;
+    return {
+      ...page,
+      hints: searchHints(page, {
+        surface: ctx.caller.surface,
+        ...(input.includeOutage === undefined ? {} : { includeOutage: input.includeOutage }),
+      }),
+    };
   },
 });
 
@@ -184,16 +208,19 @@ export const callInspect = defineAction<
   async run(input, ctx) {
     const cacheKey = inspectionCacheKey(input);
     const cached = ctx.caller.run?.inspected.get(cacheKey);
-    if (cached) return cached as z.infer<typeof inspectToolResultSchema>;
-    const result = await ctx.call.inspect(input);
-    ctx.caller.run?.inspected.set(cacheKey, result);
-    return result as z.infer<typeof inspectToolResultSchema>;
+    const result = cached ?? (await ctx.call.inspect(input));
+    if (!cached) ctx.caller.run?.inspected.set(cacheKey, result);
+    return {
+      ...result,
+      payment: result.payment ?? null,
+      hints: inspectHints(result, { ref: input.id, surface: ctx.caller.surface }),
+    };
   },
 });
 
 export const callPay = defineAction<
   z.infer<typeof callPayInputSchema>,
-  { wallet: string } & CallToolResult
+  { wallet: string; hints: string[] } & CallToolResult
 >({
   name: "call.pay",
   description:
@@ -203,7 +230,15 @@ export const callPay = defineAction<
   money: "spends",
   grant: "call",
   async run(input, ctx) {
-    return await ctx.call.pay(input);
+    const result = await ctx.call.pay(input);
+    return {
+      ...result,
+      hints: payHints(result, {
+        surface: ctx.caller.surface,
+        ...(input.id === undefined ? {} : { ref: input.id }),
+        ...(input.url === undefined ? {} : { url: input.url }),
+      }),
+    };
   },
 });
 

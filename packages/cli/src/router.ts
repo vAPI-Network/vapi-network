@@ -1,5 +1,6 @@
 import {
   SpendCapError,
+  SpendCapExceededError,
   formatUsdc,
   getNetworkDefinition,
   getVapiPaths,
@@ -244,6 +245,9 @@ async function buyCommand(
       ),
     );
   } catch (error) {
+    // The shared error already carries the cap, amounts, wallet, and exact remedy
+    // that the top-level CLI serializes. Keep that structured context intact.
+    if (error instanceof SpendCapExceededError) throw error;
     if (error instanceof SpendCapError) {
       throw new Error(
         `Router balance purchase refused by the wallet spend policy: ${error.message} Review or change it with vapi accounts caps ${target.name}.`,

@@ -32,14 +32,6 @@ describe("action payment policy", () => {
       { kind: "deny", reason: "The listing has no exact USDC price." },
     ],
     [
-      "the per-call cap",
-      { listing: { price: "$1.01" }, caps: { perCallUsd: 1 } },
-      {
-        kind: "deny",
-        reason: "Price $1.01 is above this wallet's per-call cap $1.",
-      },
-    ],
-    [
       "verified-only mode",
       { listing: { verification: "none" as const } },
       { kind: "deny", reason: "This agent only pays verified listings." },
@@ -47,10 +39,23 @@ describe("action payment policy", () => {
   ] as const)("denies a payment rejected by %s", async (_label, setup, expected) => {
     const ctx = context({
       listing: setup.listing,
-      ...("caps" in setup ? { caps: setup.caps } : {}),
     });
 
     await expect(checkAction(callPay, payInput(), ctx)).resolves.toEqual(expected);
+  });
+
+  it("raises a typed terminal per-call error before asking or paying", async () => {
+    const ctx = context({ listing: { price: "$20" }, caps: { perCallUsd: 1, perDayUsd: "10" } });
+    await expect(runAction(callPay, payInput(), ctx)).rejects.toMatchObject({
+      code: "spend_cap_exceeded",
+      cap: "per_call",
+      amountUsd: "20",
+      limitUsd: "1",
+      wallet: ctx.caller.profile!.wallet,
+      retryable: false,
+      command: `vapi accounts caps ${ctx.caller.profile!.wallet} --per-call 20 --per-day 20`,
+    });
+    expect(ctx.call.pay).not.toHaveBeenCalled();
   });
 
   it("asks the owner when the ref was not searched in this run", async () => {
@@ -93,9 +98,11 @@ describe("action payment policy", () => {
   it("checks maxPriceUsd after an otherwise automatic payment", async () => {
     const ctx = context({ listing: { price: "$0.50" } });
 
-    await expect(checkAction(callPay, payInput({ maxPriceUsd: 0.25 }), ctx)).resolves.toEqual({
-      kind: "deny",
-      reason: "Requested maximum $0.25 is below the listing price $0.5.",
+    await expect(checkAction(callPay, payInput({ maxPriceUsd: 0.25 }), ctx)).rejects.toMatchObject({
+      code: "spend_cap_exceeded",
+      cap: "max_price",
+      amountUsd: "0.5",
+      limitUsd: "0.25",
     });
   });
 
@@ -110,9 +117,11 @@ describe("action payment policy", () => {
       kind: "ask_owner",
       reason: "weather was not found by call_search in this run.",
     });
-    await expect(checkAction(callPay, input, ctx, { ownerApproved: true })).resolves.toEqual({
-      kind: "deny",
-      reason: "Requested maximum $0.25 is below the listing price $0.5.",
+    await expect(checkAction(callPay, input, ctx, { ownerApproved: true })).rejects.toMatchObject({
+      code: "spend_cap_exceeded",
+      cap: "max_price",
+      amountUsd: "0.5",
+      limitUsd: "0.25",
     });
   });
 
@@ -155,7 +164,10 @@ describe("action payment policy", () => {
   it("reuses an action inspection from the context's single cache when paying", async () => {
     const ctx = context();
 
-    await expect(runAction(callInspect, { id: "weather" }, ctx)).resolves.toEqual(inspected());
+    await expect(runAction(callInspect, { id: "weather" }, ctx)).resolves.toEqual({
+      ...inspected(),
+      hints: expect.arrayContaining([expect.stringContaining("call_pay")]),
+    });
     await expect(checkAction(callPay, payInput(), ctx)).resolves.toEqual({ kind: "allow" });
 
     expect(ctx.call.inspect).toHaveBeenCalledTimes(1);
@@ -192,7 +204,7 @@ describe("action payment policy", () => {
       url: "https://weather.example/expensive",
       price: "$0.50",
     });
-    expect(cachedExpensive).toBe(expensive);
+    expect(cachedExpensive).toEqual(expensive);
     expect(inspect).toHaveBeenCalledTimes(2);
     expect(inspect).toHaveBeenNthCalledWith(1, { id: "weather", endpoint: "cheap" });
     expect(inspect).toHaveBeenNthCalledWith(2, { id: "weather", endpoint: "expensive" });
@@ -516,7 +528,7 @@ function context(
   options: {
     searched?: boolean;
     listing?: Partial<InspectToolResult>;
-    caps?: { perCallUsd: number };
+    caps?: ActionContext["caps"];
     profile?: Partial<AgentProfile> | undefined;
   } = {},
 ): ActionContext {

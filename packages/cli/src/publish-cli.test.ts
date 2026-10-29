@@ -86,21 +86,6 @@ const LISTING_BODY = {
   listing: { slug: "weather-call", status: "draft", verification: "none" },
 };
 
-const SPLITTERS_BODY = {
-  feeBp: 500,
-  networkStates: [
-    {
-      network: "eip155:8453",
-      name: "Base",
-      chainId: 8453,
-      factoryAddress: "0x2222222222222222222222222222222222222222",
-      splitterAddress: "0x3333333333333333333333333333333333333333",
-      deployed: false,
-      balanceWei: "0",
-    },
-  ],
-};
-
 type Reply = { status?: number; body?: unknown; headers?: Record<string, string> };
 type Recorded = { method: string; path: string; query: string; headers: Headers; body: unknown };
 
@@ -138,19 +123,18 @@ function registryFetch(routes: Record<string, Reply | ((call: Recorded) => Reply
   return { fetchImpl, calls, paths: () => calls.map((call) => `${call.method} ${call.path}`) };
 }
 
-/** The four routes a successful `vapi publish <url>` walks through. */
+/** The three routes a successful `vapi publish <url>` walks through. */
 function happyRegistry(overrides: Record<string, Reply> = {}) {
   return registryFetch({
     "POST /api/call/listings/probe": { body: PROBE_BODY },
     "GET /api/call/listings/payout-nonce": { body: NONCE_BODY },
     "POST /api/call/listings": { status: 201, body: LISTING_BODY },
-    "GET /api/call/listings/splitters": { body: SPLITTERS_BODY },
     ...overrides,
   });
 }
 
 describe("vapi publish <url>", () => {
-  it("probes, signs the payout line, creates the listing and reports the splitter", async () => {
+  it("probes, signs the payout line and creates without networkStates or a splitter lookup", async () => {
     await initializedHome("vapi-publish-json-");
     process.env.VAPI_API_KEY = KEY;
     const registry = happyRegistry();
@@ -175,7 +159,6 @@ describe("vapi publish <url>", () => {
       "POST /api/call/listings/probe",
       "GET /api/call/listings/payout-nonce",
       "POST /api/call/listings",
-      "GET /api/call/listings/splitters",
     ]);
     for (const call of registry.calls) {
       expect(call.headers.get("authorization")).toBe(`Bearer ${KEY}`);
@@ -249,7 +232,8 @@ describe("vapi publish <url>", () => {
         slug: "weather-call",
       },
     ]);
-    expect(value.splitters).toEqual(SPLITTERS_BODY);
+    expect(value).not.toHaveProperty("splitters");
+    expect(value).not.toHaveProperty("splittersError");
     expect(nonceWallet(registry)).toMatch(WALLET);
   });
 
@@ -295,35 +279,49 @@ describe("vapi publish <url>", () => {
     expect(text).toMatch(/^Wallet: main \(0x[0-9a-fA-F]{40}\)$/mu);
     expect(text).toContain("Listed Weather Call as weather-call with 1 endpoint.");
     expect(text).toContain("Status: draft · verification: none");
-    expect(text).toContain("Splitters (vAPI fee 5%):");
-    expect(text).toContain("0x3333333333333333333333333333333333333333");
-    expect(text).toContain("not deployed");
+    const payoutWallet = (registry.calls[2]?.body as { payoutWallet: string }).payoutWallet;
+    expect(text).toContain("vAPI Call takes no fee. Providers are paid directly.");
     expect(text).toContain(
-      "Deploy the FeeSplitter from your wallet in the console at https://api.vapinetwork.ai/providers, then run `vapi publish activate weather-call`.",
+      `Set each endpoint's payTo to your payout wallet ${payoutWallet}, then run:`,
     );
+    expect(text).toContain("vapi publish activate weather-call");
     expect(captured.stderr).toEqual([]);
   });
 
-  it("keeps the slug when the splitter lookup fails", async () => {
-    await initializedHome("vapi-publish-splitter-down-");
+  it("passes on the registry's description warnings once, without failing", async () => {
+    await initializedHome("vapi-publish-description-");
     process.env.VAPI_API_KEY = KEY;
     const registry = happyRegistry({
-      "GET /api/call/listings/splitters": { status: 503, body: { error: "upstream down" } },
+      "POST /api/call/listings": {
+        status: 201,
+        body: {
+          ...LISTING_BODY,
+          descriptionWarnings: [
+            {
+              code: "description_missing_alternative",
+              message: "The description does not say when to use something else.",
+              hint: "Say what it is not for, or what to use instead.",
+            },
+          ],
+        },
+      },
     });
     const captured = captureIo();
 
     expect(
       await runCli(
-        ["publish", "https://weather.example", "--yes", "--category", "data"],
+        ["publish", "https://weather.example", "--select", "forecast", "--category", "data"],
         captured.io,
         { ...AGENT, fetchImpl: registry.fetchImpl, prompts: refusingPrompts() },
       ),
     ).toBe(0);
 
     const text = captured.stdout.join("\n");
-    expect(text).toContain("Listed Weather Call as weather-call");
-    expect(text).toContain("Could not read your splitters:");
-    expect(text).toContain("vapi publish activate weather-call");
+    expect(text).toContain("Description check (the listing is published either way):");
+    expect(text).toContain(
+      "- The description does not say when to use something else. Say what it is not for, or what to use instead.",
+    );
+    expect(text.match(/Description check/gu)).toHaveLength(1);
   });
 
   it("stops at exit 2 on a probe the registry rejects, before anything is signed", async () => {
@@ -639,7 +637,6 @@ describe("vapi publish for a large catalog", () => {
           }
         );
       },
-      "GET /api/call/listings/splitters": { body: SPLITTERS_BODY },
       "GET /api/call/listings/mine": { body: { listings: mine } },
     });
   }
@@ -688,6 +685,10 @@ describe("vapi publish for a large catalog", () => {
     expect(text).toContain("  listed  op-45\tGET https://weather.example/op/45\tweather-call-3");
     expect(text.match(/^ {2}listed /gmu)).toHaveLength(45);
     expect(text).toContain("Listed Weather Call (3/3) as weather-call-3 with 5 endpoints.");
+    for (const slug of ["weather-call-1", "weather-call-2", "weather-call-3"]) {
+      expect(text).toContain(`vapi publish activate ${slug}`);
+    }
+    expect(registry.paths().some((path) => path.endsWith("/splitters"))).toBe(false);
     const audit = (await readAuditLog(home)).filter((entry) => entry.event === "listing.publish");
     expect(audit.map((entry) => entry.detail)).toEqual([
       "weather-call-1",
@@ -873,7 +874,7 @@ describe("vapi publish activate, verify-request and list", () => {
     const registry = registryFetch({
       "POST /api/call/listings/weather-call/status": {
         status: 409,
-        body: { error: "Deploy the FeeSplitter on Base before activating." },
+        body: { error: "Set every endpoint's payTo to your payout wallet before activating." },
       },
     });
     const captured = captureIo();
@@ -884,10 +885,12 @@ describe("vapi publish activate, verify-request and list", () => {
         fetchImpl: registry.fetchImpl,
       }),
     ).toBe(1);
-    expect(captured.stderr.join("\n")).toBe("Deploy the FeeSplitter on Base before activating.");
+    expect(captured.stderr.join("\n")).toBe(
+      "Set every endpoint's payTo to your payout wallet before activating.",
+    );
   });
 
-  it("lists what this key owns", async () => {
+  it("lists what this key owns without networkStates", async () => {
     await initializedHome("vapi-publish-list-");
     process.env.VAPI_API_KEY = KEY;
     const registry = registryFetch({

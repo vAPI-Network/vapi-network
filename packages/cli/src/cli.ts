@@ -24,6 +24,7 @@ import {
   enableDefaultNetwork,
   filterReceiptsByRange,
   formatLegacyRegistryRewrites,
+  formatListingFee,
   formatUsdc,
   fundingPageUrl,
   getArcGasHeadroomAtomic,
@@ -54,6 +55,7 @@ import {
   resolveRegistryUrl,
   secretStore,
   secretsAllowed,
+  SpendCapExceededError,
   spendCapsForWallet,
   staleStoredPassphraseMessage,
   swarmParentResolver,
@@ -76,6 +78,7 @@ import {
   type CeilingTransfer,
   type DistributeArgs,
   type ListingConformance,
+  type ListingHealth,
   type ListingLiveness,
   type ListingVerification,
   type MarketplaceDiscoveryPage,
@@ -187,7 +190,6 @@ import {
   type ProbeOperation,
   type ProbeRejection,
   type ProbeResult,
-  type SplitterStates,
 } from "./publish-client.js";
 import { CLI_VERSION } from "./version";
 
@@ -225,7 +227,7 @@ Usage:
   vapi docs "<question>" [--json]
   vapi docs search "<query>" [--json]
   vapi docs read <url-or-path> [--json]
-  vapi search [query] [--kind <kind>] [--network <caip2>] [--limit <n>] [--cursor <cursor>] [--include-unverified] [--json]
+  vapi search [query] [--kind <kind>] [--network <caip2>] [--limit <n>] [--cursor <cursor>] [--include-unverified] [--include-outage] [--json]
   vapi inspect <id> [--endpoint <name>] [--json]
   vapi pay <id-or-url> [--method <method>] [--endpoint <name>] [--body <json>] [--content-type <type>] [--network <caip2>] [--expected-pay-to <address>] [--max <amount>] [--timeout <seconds>] [--account <name>] [--json]
   vapi pay --resume <receipt-id> [--json]
@@ -294,7 +296,7 @@ Usage:
   vapi publish list [--json]
   vapi claim <origin> [--account <name>] [--json]
   vapi mcp [--account <name>] [--json]
-  vapi mcp install <claude|cursor|codex> [--home <dir>] [--registry <url>] [--no-link] [--json]
+  vapi mcp install <claude-code|claude-desktop|cursor|codex> [--home <dir>] [--registry <url>] [--no-link] [--json]
   vapi serve [--json]
   vapi version [--json]
   vapi help [--json]
@@ -321,13 +323,13 @@ Solana listings remain searchable; inspect and pay return \`unsupported_network\
 
 \`vapi backup\` and \`vapi export-key\` print a secret, so they run only on a real terminal, never for an agent, and ask you to type the wallet name first. \`vapi backup --cloud\` keeps an encrypted vault copy that only the owner can approve for recovery. \`vapi restore\` rebuilds the vault from the phrase and re-derives accounts until five consecutive addresses have no Base USDC, and reports the number scanned. Use \`--accounts <n>\` with restore or setup to recover a fixed count without querying balances. Set \`VAPI_NO_SECRETS=1\` to switch exports off entirely. Every export and every wallet change is logged to ~/.vapi/audit.log.
 
-\`vapi publish <url>\` lists an API you own. vAPI probes the URL — an origin, one endpoint, or an OpenAPI document — you choose which endpoints to list, and your wallet signs one line naming where the payouts go. Listing is permissionless: a listing that passed the probe goes live with \`vapi publish activate <slug>\`, and \`vapi publish verify-request <slug>\` asks for the review that puts it in the default search. Deploying the FeeSplitter that receives the payouts is a wallet transaction and stays in the console. A catalog of more than 20 endpoints is listed as several listings of up to 20, with one result line per endpoint; \`--resume\` skips every endpoint this key already lists.
+\`vapi publish <url>\` lists an API you own. vAPI probes the URL — an origin, one endpoint, or an OpenAPI document — you choose which endpoints to list, and your wallet signs one line naming where the payouts go. Listing is permissionless: a listing that passed the probe goes live with \`vapi publish activate <slug>\`, and \`vapi publish verify-request <slug>\` asks for the review that puts it in the default search. Set each endpoint's x402 payTo to the payout wallet you signed with before activation. vAPI Call takes no fee. Providers are paid directly. A catalog of more than 20 endpoints is listed as several listings of up to 20, with one result line per endpoint; \`--resume\` skips every endpoint this key already lists.
 
 \`vapi claim <origin>\` takes ownership of the listings vAPI indexed from your API. The wallet their payments go to signs one line, \`Claim the vAPI Call listings served from <origin>\`; the listings stay paid directly to that wallet, and \`vapi publish list\` shows them.
 
 \`vapi auth set-key\` types the registry API key once, on a terminal, into the same OS secret store as the passphrase. A key is a secret: it is never an argument, \`VAPI_API_KEY\` is the route for CI, and no agent or MCP tool can reach it.
 
-With no command, vapi shows the status screen; vapi help prints this text. The MCP server starts only with \`vapi mcp\`; \`vapi mcp install <app>\` writes that app's MCP config and prints the file it touched.`;
+With no command, vapi shows the status screen; vapi help prints this text. The MCP server starts only with \`vapi mcp\`; \`vapi mcp install claude-code\` runs Claude Code's installer, while the other install targets write the client's MCP config.`;
 
 export type CliIo = {
   stdout(message: string): void;
@@ -403,6 +405,7 @@ export type CliDependencies = {
     homedir?: string;
     cwd?: string;
     appData?: string;
+    runProcess?: import("./mcp-install.js").McpInstallProcessRunner;
   };
   /** Agent profile and run operations, injected so tests stay local and deterministic. */
   agent?: AgentCommandDependencies;
@@ -506,6 +509,7 @@ const SOLANA_VAULT_UNAVAILABLE = "Solana keys are not part of the device vault y
 
 /** The one trust switch `vapi search` exposes; see `searchCommand`. */
 const INCLUDE_UNVERIFIED_OPTION = "--include-unverified";
+const INCLUDE_OUTAGE_OPTION = "--include-outage";
 
 /** The wallet one invocation acts on, resolved before any passphrase is read. */
 export type WalletTarget = {
@@ -910,11 +914,11 @@ export async function runCli(
         break;
       case "mcp":
         if (args[1] === "install") {
-          await mcpInstallCommand(args.slice(2), json, io, dependencies);
+          exitCode = await mcpInstallCommand(args.slice(2), json, io, dependencies);
         } else {
           await mcpCommand(args.slice(1), dependencies);
+          exitCode = 0;
         }
-        exitCode = 0;
         break;
       case "serve":
         outputStub(io, json);
@@ -947,7 +951,9 @@ export async function runCli(
       ).catch(() => undefined);
     }
     if (json) {
-      if (taskInvocation) {
+      if (error instanceof SpendCapExceededError) {
+        runIo.stdout(JSON.stringify({ error: error.toJSON(), exitCode: 1 }));
+      } else if (taskInvocation) {
         runIo.stdout(
           JSON.stringify({
             ok: false,
@@ -1457,7 +1463,7 @@ async function searchCommand(
 ): Promise<void> {
   const parsed = parseArguments(argv, {
     valueOptions: new Set(["--kind", "--network", "--limit", "--cursor"]),
-    booleanOptions: new Set([INCLUDE_UNVERIFIED_OPTION]),
+    booleanOptions: new Set([INCLUDE_UNVERIFIED_OPTION, INCLUDE_OUTAGE_OPTION]),
     repeatableOptions: new Set(["--kind"]),
     maximumPositionals: 1,
   });
@@ -1473,6 +1479,7 @@ async function searchCommand(
     ...(parsed.one("--cursor") ? { cursor: parsed.one("--cursor") } : {}),
     // Only the opt-in travels: `false` is the registry default.
     ...(parsed.has(INCLUDE_UNVERIFIED_OPTION) ? { includeUnverified: true } : {}),
+    ...(parsed.has(INCLUDE_OUTAGE_OPTION) ? { includeOutage: true } : {}),
   };
   const call = createCallPort({
     config,
@@ -1623,12 +1630,14 @@ async function payCommand(
     cliActionContext(config, pinPayInput(call, input), dependencies),
   );
   void _resolvedWallet;
+  const { hints: _hints, ...humanResult } = result;
+  void _hints;
   outputForWallet(
     io,
     json,
     wallet,
     result as unknown as Record<string, unknown>,
-    [...verificationNotice(result.verification), JSON.stringify(result, null, 2)].join("\n"),
+    [...verificationNotice(result.verification), JSON.stringify(humanResult, null, 2)].join("\n"),
   );
   await (dependencies.ceiling?.drainCeilingSweeps ?? drainCeilingSweeps)(10_000).catch(
     () => undefined,
@@ -2491,17 +2500,6 @@ async function publishListingCommand(
     say(formatCreatedListing(listing, batch.name, payoutWallet, batch.endpoints.length));
   }
 
-  // The listings already exist, so a splitter lookup that fails is a line of
-  // advice the person loses, never the slug they need next.
-  let splitters: SplitterStates | undefined;
-  let splittersError: string | undefined;
-  if (created.length > 0) {
-    try {
-      splitters = await client.splitters(payoutWallet);
-    } catch (error) {
-      splittersError = error instanceof Error ? error.message : String(error);
-    }
-  }
   const failed = failures.length > 0;
   const resumeHint = `Run the same vapi publish command with ${RESUME_OPTION} to list the rest; it skips what is already listed.`;
 
@@ -2512,8 +2510,6 @@ async function publishListingCommand(
         probe,
         listings: created,
         results,
-        ...(splitters === undefined ? {} : { splitters }),
-        ...(splittersError === undefined ? {} : { splittersError }),
         ...(failed
           ? {
               error: [...new Set(failures.map((failure) => failure.message))].join("\n"),
@@ -2525,8 +2521,12 @@ async function publishListingCommand(
     return failed ? 1 : 0;
   }
   if (created.length > 0) {
-    const slug = created.length === 1 ? listingSlug(created[0]!) : undefined;
-    for (const line of formatSplitters(splitters, splittersError, slug, baseUrl)) io.stdout(line);
+    for (const line of formatDescriptionWarnings(created[0]!)) io.stdout(line);
+    io.stdout("vAPI Call takes no fee. Providers are paid directly.");
+    io.stdout(`Set each endpoint's payTo to your payout wallet ${payoutWallet}, then run:`);
+    for (const listing of created) {
+      io.stdout(`  vapi publish activate ${listingSlug(listing) ?? "<slug>"}`);
+    }
   }
   if (!failed) return 0;
   for (const message of new Set(failures.map((failure) => failure.message))) io.stderr(message);
@@ -2987,31 +2987,21 @@ function formatCreatedListing(
 }
 
 /**
- * Where the payouts land. Deploying the splitter is a wallet transaction
- * against the factory, so it stays in the console; this says which address the
- * money will sit behind and what to run once it exists.
+ * The registry grades the description agents read when they choose a listing:
+ * what one call does, what it takes, when to use something else. The findings
+ * never block, and every batch shares one description, so they print once.
  */
-function formatSplitters(
-  splitters: SplitterStates | undefined,
-  splittersError: string | undefined,
-  slug: string | undefined,
-  baseUrl: string,
-): string[] {
-  const nextStep = `Deploy the FeeSplitter from your wallet in the console at ${listingsUrl(baseUrl, "/providers").href}, then run \`vapi publish activate ${slug ?? "<slug>"}\`.`;
-  if (splittersError !== undefined) {
-    return [`Could not read your splitters: ${splittersError}`, nextStep];
-  }
-  const states = Array.isArray(splitters?.networkStates) ? splitters.networkStates : [];
-  const fee = typeof splitters?.feeBp === "number" ? ` (vAPI fee ${splitters.feeBp / 100}%)` : "";
-  return [
-    `Splitters${fee}:`,
-    ...states.map((state) => {
-      const label = [state.name, state.network].filter(Boolean).join(" ");
-      const address = typeof state.splitterAddress === "string" ? state.splitterAddress : "unknown";
-      return `  ${label || "network"}\t${address}\t${state.deployed === true ? "deployed" : "not deployed"}`;
-    }),
-    nextStep,
-  ];
+function formatDescriptionWarnings(created: CreatedListing): string[] {
+  const warnings = Array.isArray(created.descriptionWarnings) ? created.descriptionWarnings : [];
+  const lines = warnings.flatMap((warning: unknown) => {
+    if (typeof warning !== "object" || warning === null) return [];
+    const { message, hint } = warning as { message?: unknown; hint?: unknown };
+    if (typeof message !== "string") return [];
+    return [`- ${message}${typeof hint === "string" ? ` ${hint}` : ""}`];
+  });
+  return lines.length === 0
+    ? []
+    : ["Description check (the listing is published either way):", ...lines];
 }
 
 function formatListingStatus(
@@ -3720,9 +3710,8 @@ export function verificationTag(listing: {
 /**
  * One block per listing. The group tag is the shortest honest answer to "whose
  * API is this", the verification tag is how far vAPI reviewed it, and the fee
- * label is the registry's own disclosure of what is already inside the price,
- * so none of the three is recomputed here. A group that already says `external`
- * is not repeated by the verification tag.
+ * label includes the percentage computed from the registry's basis points.
+ * A group that already says `external` is not repeated by the verification tag.
  */
 function formatSearch(page: MarketplaceDiscoveryPage): string {
   if (page.items.length === 0) return "No listings found.";
@@ -3733,10 +3722,23 @@ function formatSearch(page: MarketplaceDiscoveryPage): string {
         verificationTag({ verification: item.verification, external: isMirroredHit(item) }),
       ];
       const prefix = [...new Set(tags)].map((tag) => `[${tag}] `).join("");
+      const health =
+        item.kind === "api" && item.health
+          ? `${item.health.state}${
+              item.health.latencyP50Ms === null ? "" : ` ${Math.round(item.health.latencyP50Ms)}ms`
+            }`
+          : "-";
       return [
-        `${item.ref}\t${item.kind}\t${prefix}${item.card.title}`,
+        `${item.ref}\t${item.kind}\t${health}\t${prefix}${item.card.title}`,
         `  ${item.card.summary}`,
-        ...(item.fee ? [`  Fee: ${item.fee.label}`] : []),
+        ...(item.fee ? [`  Fee: ${formatListingFee(item.fee)}`] : []),
+        ...(item.kind === "api" && item.alternatives
+          ? [
+              `  Alternatives: ${item.alternatives
+                .map((alternative) => `${alternative.ref} (${alternative.reason})`)
+                .join(", ")}`,
+            ]
+          : []),
       ].join("\n");
     })
     .join("\n");
@@ -3749,17 +3751,32 @@ function formatSearch(page: MarketplaceDiscoveryPage): string {
  * it. Liveness, conformance, and identity are said only when the registry sent them.
  */
 function formatInspect(result: Awaited<ReturnType<typeof callInspect.run>>): string {
+  const { hints: _hints, ...humanResult } = result;
+  void _hints;
   return [
     `Verification: ${verificationTag({
       verification: result.verification,
       external: result.group === "external",
     })}`,
-    ...(result.fee ? [`Fee: ${result.fee.label}`] : []),
+    ...(result.fee ? [`Fee: ${formatListingFee(result.fee)}`] : []),
+    ...(result.health ? [formatHealth(result.health)] : []),
+    ...(result.exampleRequest ? [`Example request: ${JSON.stringify(result.exampleRequest)}`] : []),
     ...(result.liveness ? [formatLiveness(result.liveness)] : []),
     ...(result.conformance ? [formatConformance(result.conformance)] : []),
     ...(result.identity ? formatIdentityLines(result.identity) : []),
-    JSON.stringify(result, null, 2),
+    JSON.stringify(humanResult, null, 2),
   ].join("\n");
+}
+
+function formatHealth(health: ListingHealth): string {
+  return [
+    `Health: ${health.state}`,
+    ...(health.uptime7d === null
+      ? [`(${health.checks7d} checks)`]
+      : [`${(health.uptime7d * 100).toFixed(1)}% up over 7 days (${health.checks7d} checks)`]),
+    ...(health.latencyP50Ms === null ? [] : [`p50 ${Math.round(health.latencyP50Ms)} ms`]),
+    ...(health.latencyP95Ms === null ? [] : [`p95 ${Math.round(health.latencyP95Ms)} ms`]),
+  ].join(" · ");
 }
 
 function formatLiveness(liveness: ListingLiveness): string {

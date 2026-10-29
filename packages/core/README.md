@@ -23,7 +23,17 @@ Seven entry points: `@vapi-network/core`, `@vapi-network/core/secrets`, `@vapi-n
 
 ## Exports
 
+Discovery API hits expose optional health and alternatives, and inspected
+endpoints expose optional response schemas and example requests.
+`SpendCapExceededError` reports a payment stopped before signing with
+`code`, `cap`, `amountUsd`, `limitUsd`, optional `spentUsd` and `wallet`,
+`command` and `retryable` fields. Amounts are decimal USD strings; `command`
+can be null when the SDK's `maxAtomic` must be raised.
+
 ### Runtime exports
+
+`formatListingFee(fee: ListingFee): string` displays `No network fee` for zero
+basis points, or the registry label and computed percentage for legacy fees.
 
 | Name                                  | What it is                                                                                                                                                                                                                                                           | Since            |
 | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
@@ -225,6 +235,7 @@ Seven entry points: `@vapi-network/core`, `@vapi-network/core/secrets`, `@vapi-n
 | `SOLANA_MAINNET_CAIP2`                | constant SOLANA_MAINNET_CAIP2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"                                                                                                                                                                                 | 0.5.0 or earlier |
 | `SOLANA_MAINNET_USDC`                 | constant SOLANA_MAINNET_USDC: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"                                                                                                                                                                                         | 0.5.0 or earlier |
 | `SpendCapError`                       | class SpendCapError                                                                                                                                                                                                                                                  | 0.5.0 or earlier |
+| `SpendCapExceededError`               | class SpendCapExceededError; code `spend_cap_exceeded`, `retryable: false`                                                                                                                                                                                           | Unreleased       |
 | `spendCapsForWallet`                  | function (store: WalletStore, name: WalletName = DEFAULT_WALLET_NAME): Promise<SpendCaps>                                                                                                                                                                            | 0.5.0 or earlier |
 | `spendCapsSchema`                     | constant spendCapsSchema: ZodObject<{ perCallAtomic: ZodString; perDayAtomic: ZodString; }, $strip>                                                                                                                                                                  | 0.5.0 or earlier |
 | `SpendPolicy`                         | class SpendPolicy                                                                                                                                                                                                                                                    | 0.5.0 or earlier |

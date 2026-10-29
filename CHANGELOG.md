@@ -3,7 +3,29 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
-## Unreleased
+## 0.11.0 — 2026-10-29
+
+### Added
+
+- The public `vapi-network` package ships `SKILL.md` with setup, discovery, payment and recovery guidance for agents.
+
+- API search results can include registry health and cheaper or healthier alternatives, and inspected endpoints can include response schemas and example requests.
+- CLI JSON and MCP results for search, inspect and pay include up to four hints naming next actions.
+- `vapi search --include-outage` and MCP `call.search`'s `includeOutage` input request listings hidden by the hosted registry's default outage filter.
+- API payment spend-cap refusals now use the typed `spend_cap_exceeded` error with attempted and limit amounts, a non-retryable MCP result, and command guidance when the limit can be raised.
+- `vapi mcp install claude-code` registers the vAPI server through Claude Code's CLI, while `claude-desktop`, `cursor` and `codex` retain file-based setup.
+- Partner listings can display the `failed_calls_free` badge ("Provider failures aren't charged") for APIs served through vAPI's hosted shim.
+
+### Changed
+
+- vAPI Call takes no fee. Providers are paid directly. Publishing now guides providers to set every endpoint's x402 `payTo` to the signed payout wallet before activation, without a splitter lookup or deployment step.
+- Search and inspect show `No network fee` for zero basis points and the registry's label plus the computed percentage for legacy fees. The fee schemas continue to accept legacy 500-basis-point listings.
+- Human search output shows health and alternatives, and inspect shows health and an example request when supplied by the registry.
+- `vapi mcp install claude` remains an alias for Claude Desktop and prints a note naming the separate Claude Code target.
+- Discovery pages accept any `rankingVersion` label, so a registry that re-ranks no longer breaks installed clients. Required before the registry ships `marketplace-ranking-v2`.
+- The hidden-outage hint appears only when the registry reports `totals.hiddenOutage` above zero.
+
+## 0.10.0 — 2026-10-28
 
 ### Added
 
