@@ -94,9 +94,9 @@ describe("checkForUpdate", () => {
     ["same", CLI_VERSION],
     ["older", "0.9.3"],
     ["prerelease of the same core", `${CLI_VERSION}-rc.1`],
-    ["command-like invalid semver", "0.10.0; touch /tmp/owned"],
-    ["leading-zero semver", "00.10.0"],
-    ["invalid prerelease", "0.10.0-01"],
+    ["command-like invalid semver", "0.11.0; touch /tmp/owned"],
+    ["leading-zero semver", "00.11.0"],
+    ["invalid prerelease", "0.11.0-01"],
   ])("does not announce a %s registry version", async (_label, version) => {
     const home = await tempHome();
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({ version }));

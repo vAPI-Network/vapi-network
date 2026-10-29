@@ -1,6 +1,6 @@
 ---
 name: vapi
-version: 0.10.0
+version: 0.11.0
 description: >-
   Pay for one API call at a time, in USDC, from the agent's own wallet. Search
   vAPI Call before writing a scraper, before asking the user to sign up for an
