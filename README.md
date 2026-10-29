@@ -114,9 +114,117 @@ These pre-namespace names still work and each result carries a DEPRECATED: line 
 | `call`    | `call.pay`       |
 | `wallet`  | `wallet.balance` |
 
+## Use your Compute in Claude Code and Codex
+
+Set up a vAPI account with the quickstart above. Install Claude Code or Codex and make its executable available on PATH. Configure
+vAPI for the tools it finds:
+
+```bash
+vapi code install
+```
+
+The installer reuses your account link and Router key, or starts login and creates
+a key when needed. The key stays in the existing OS secret store. Codex gets a
+`vapi` model provider and profile in `~/.codex/config.toml`, or
+`$CODEX_HOME/config.toml` when `CODEX_HOME` is set. Claude Code needs no config file
+change. Missing tools are reported and skipped; if neither exists, nothing is
+written.
+
+To accept the optional shell aliases without a prompt:
+
+```bash
+vapi code install --yes
+```
+
+Aliases cover only tools found on PATH. The installer replaces its marked block
+in `~/.zshrc` or `~/.bashrc`; Windows skips aliases. Open a new terminal after
+adding them. To keep your shell configuration as it is:
+
+```bash
+vapi code install --no-alias
+```
+
+Start either tool in your project directory:
+
+```bash
+vapi claude
+vapi codex
+```
+
+At launch, vAPI chooses the Router when at least $0.50 of today's Compute remains.
+Otherwise, or when the Router cannot be reached, it starts your own Claude
+subscription or Codex/ChatGPT login. You must already be signed in to that tool.
+The choice happens at launch. There is no local proxy or automatic mid-session
+switch.
+
+Claude Code defaults to `venice/claude-sonnet-5-5`. The installer sets Codex's
+profile model to `venice/openai-gpt-61-sol`. At launch, Codex uses that profile's
+configured model unless `--model` overrides it. Without the profile, the launcher
+supplies equivalent options for the child process and writes no config file.
+
+| Flag            | Behavior                                                                                                            |
+| --------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `--own`         | Uses the tool's own login with your existing environment, without checking the Router.                              |
+| `--vapi`        | Forces the Router route, even below $0.50. Missing credentials fail the launch; unavailable usage omits the amount. |
+| `--use-balance` | Counts purchased Router balance alongside Compute when choosing the launch route.                                   |
+| `--model`       | Selects a model. Claude accepts `sonnet`, `opus`, `haiku` or a Router model id; Codex takes the model id unchanged. |
+| `--account`     | Selects the vAPI account whose Router credentials and allowance to use.                                             |
+
+```bash
+vapi claude --own
+vapi codex --vapi
+vapi claude --use-balance --model opus
+vapi codex --model venice/openai-gpt-61-sol --account main
+```
+
+Other arguments keep their order. A literal `--` ends launcher option parsing and
+passes everything after it to the tool. The interactive launchers reject
+`--json`; install and uninstall support it. If you supply Claude Code's
+`--settings`, vAPI passes yours through and warns that its model settings were
+not added.
+
+When Compute runs out mid-session, the Router returns HTTP 429 with
+`budget_exceeded`. Exit Claude Code:
+
+```text
+/exit
+```
+
+Then resume the conversation through the launch check:
+
+```bash
+vapi claude --continue
+```
+
+For Codex, quit the session:
+
+```text
+/quit
+```
+
+Then resume its last conversation:
+
+```bash
+vapi codex resume --last
+```
+
+The launchers change model endpoint and selection. Project files, `CLAUDE.md`,
+skills and MCP servers stay as configured. Claude requests on vAPI Compute go
+through Venice. Claude rows on Venice are anonymized, not private.
+
+Remove the installed provider, profile and marked alias blocks:
+
+```bash
+vapi code uninstall
+```
+
+Uninstall preserves other config content, including MCP entries. It retains
+your account link and Router key.
+
 ## CLI reference
 
-Every command accepts `--json`. Most write one success or error value to stdout.
+Most commands accept `--json` and write one success or error value to stdout.
+The Claude Code and Codex launchers are interactive and reject that flag.
 Task watch and a partially completed scope-signing flow can emit newline-delimited
 JSON; delivery emits one result after chain success. See [Task commands](./docs/tasks.md#cli). Exit codes are
 `0` for success, `1` for an operational failure, and `2` for invalid usage or
@@ -128,6 +236,8 @@ Hosted search hides listings in outage unless `--include-outage` is set.
 API hits can include health and cheaper or healthier alternatives; inspect can
 include response schemas and an example request. Search, inspect and pay JSON
 results include zero to four next-action hints.
+
+Protected-vault access and legacy secret-store commands are documented in the [wallet guide](./docs/wallets.md).
 
 Every wallet command takes `--account <name>`, falls back to `VAPI_WALLET`, then the default from `vapi accounts use`; `--wallet <name>` keeps working for one release.
 
@@ -191,6 +301,10 @@ Posting a task moves no money. The create-order contract stores its market amoun
 | `vapi login`                                  | `--wallet <name>`, `--label <name>`, `--publish`, `--no-browser`                                                                                                                                                                                   | Links the local agent wallet to your vAPI account                                                                                 |
 | `vapi logout`                                 | `--wallet <name>`                                                                                                                                                                                                                                  | Removes the selected wallet's agent link and stored credentials                                                                   |
 | `vapi whoami`                                 | `--wallet <name>`                                                                                                                                                                                                                                  | Shows the chosen wallet's owner link and permissions, whether the link is live, and its ERC-8004 agent identity.                  |
+| `vapi code install`                           | `--yes`, `--no-alias`, `--account <name>`, `--json`                                                                                                                                                                                                | Configures detected coding tools for vAPI Compute and optional shell aliases                                                      |
+| `vapi code uninstall`                         | `--json`                                                                                                                                                                                                                                           | Removes the vAPI provider, profile and marked shell aliases                                                                       |
+| `vapi claude [args...]`                       | `--vapi`, `--own`, `--use-balance`, `--model <m>`, `--account <name>`                                                                                                                                                                              | Starts Claude Code on Compute or the tool's own login; interactive, no JSON                                                       |
+| `vapi codex [args...]`                        | `--vapi`, `--own`, `--use-balance`, `--model <id>`, `--account <name>`                                                                                                                                                                             | Starts Codex on Compute or the tool's own login; interactive, no JSON                                                             |
 | `vapi router models`                          | `--wallet <name>`                                                                                                                                                                                                                                  | Lists the vAPI Router model ids                                                                                                   |
 | `vapi router usage`                           | `--wallet <name>`                                                                                                                                                                                                                                  | Shows the agent's Compute allowance and Router balance                                                                            |
 | `vapi router chat --model <id> "<prompt>"`    | `--system <text>`, `--max-tokens <n>`, `--wallet <name>`                                                                                                                                                                                           | Sends one chat request through vAPI Router                                                                                        |
@@ -225,9 +339,7 @@ Posting a task moves no money. The create-order contract stores its market amoun
 | `vapi vault protect`                          | `--json`                                                                                                                                                                                                                                           | Adds a password to the device vault                                                                                               |
 | `vapi vault unprotect`                        | `--json`                                                                                                                                                                                                                                           | Removes the password from the device vault                                                                                        |
 | `vapi vault lock`                             | `--json`                                                                                                                                                                                                                                           | Closes the protected vault on this device                                                                                         |
-| `vapi vault unlock`                           | `--json`                                                                                                                                                                                                                                           | Opens the protected vault for 8 hours, or set `VAPI_VAULT_PASSWORD`                                                               |
 | `vapi vault status`                           | `--json`                                                                                                                                                                                                                                           | Shows whether the device vault is protected and open                                                                              |
-| `vapi unlock`                                 | `--wallet <name>`                                                                                                                                                                                                                                  | Puts that wallet's passphrase in the OS secret store                                                                              |
 | `vapi lock`                                   | `--wallet <name>`, `--all`                                                                                                                                                                                                                         | Takes a stored passphrase back out                                                                                                |
 | `vapi report "<what>"`                        | `--include-addresses`, `--send`                                                                                                                                                                                                                    | Writes a privacy-preserving local bug report                                                                                      |
 | `vapi auth set-key`                           | -                                                                                                                                                                                                                                                  | Types the registry API key on a prompt into the OS secret store                                                                   |
