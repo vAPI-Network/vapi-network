@@ -162,6 +162,7 @@ async function chooseRoute(
   const timeout = dependencies.code?.usageTimeoutMs ?? 4_000;
   let credentials: Credentials | undefined;
   let deps: RouterClientDeps | undefined;
+  let balanceKeyRequired = false;
   try {
     credentials = await bounded(async (signal) => {
       const target = await targetWallet(
@@ -187,11 +188,31 @@ async function chooseRoute(
       if (options.vapi) return { kind: "vapi", credentials };
       throw error;
     }
-    if (options.vapi || remaining(usage, options.balance) >= 0.5)
+    if (options.vapi || remaining(usage, options.balance) >= 0.5) {
+      // A session has one funding key; choose balance only when Compute cannot qualify alone.
+      if (
+        options.balance &&
+        usage.compute.remainingTodayUsd < 0.5 &&
+        (usage.balance?.remainingUsd ?? 0) > 0
+      ) {
+        balanceKeyRequired = true;
+        credentials = await bounded(
+          (signal) =>
+            (dependencies.router?.routerCredentials ?? routerCredentials)(
+              abortableDeps(deps!, signal),
+              { funding: "balance" },
+            ),
+          timeout,
+        );
+      }
       return { kind: "vapi", credentials, usage };
+    }
     return { kind: "own", exhausted: true };
   } catch (error) {
-    const reason = shortReason(error, env, credentials);
+    const reason =
+      balanceKeyRequired && error instanceof RouterClientError && error.code === "no_router_key"
+        ? "no Router balance key is stored"
+        : shortReason(error, env, credentials);
     if (options.vapi) return { kind: "unavailable", reason };
     return { kind: "own", reason };
   }
@@ -304,9 +325,8 @@ async function codexArgs(
   } catch (error) {
     if (!isMissingFile(error)) throw error;
   }
-  if (hasVapiCodexProfile(contents))
-    return ["--profile", VAPI_CODEX_PROFILE, ...(model === undefined ? [] : ["-m", model])];
-  return [
+  // Bind the selected key to the current Router, even when an installed profile is stale.
+  const providerArgs = [
     "-c",
     `model_providers.${VAPI_CODEX_PROVIDER}.name="vAPI Router"`,
     "-c",
@@ -317,9 +337,15 @@ async function codexArgs(
     `model_providers.${VAPI_CODEX_PROVIDER}.wire_api="responses"`,
     "-c",
     `model_provider="${VAPI_CODEX_PROVIDER}"`,
-    "-m",
-    model ?? VAPI_CODEX_DEFAULT_MODEL,
   ];
+  if (hasVapiCodexProfile(contents))
+    return [
+      "--profile",
+      VAPI_CODEX_PROFILE,
+      ...providerArgs,
+      ...(model === undefined ? [] : ["-m", model]),
+    ];
+  return [...providerArgs, "-m", model ?? VAPI_CODEX_DEFAULT_MODEL];
 }
 
 async function runChild(

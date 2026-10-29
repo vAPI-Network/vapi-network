@@ -1,12 +1,16 @@
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { WalletStore, type SecretStore } from "@vapi-network/core";
-import { RouterClientError, type AgentRouterUsage } from "@vapi-network/core/router-client";
+import {
+  RouterClientError,
+  type AgentRouterUsage,
+  type routerCredentials,
+} from "@vapi-network/core/router-client";
 
 import { UsageError, runCli, type CliDependencies } from "./cli.js";
 import { claudeCommand, codexCommand } from "./code-launch.js";
@@ -14,6 +18,7 @@ import { codexConfigPath, type CodeChild, type CodeSpawn } from "./code.js";
 
 const homes: string[] = [];
 const KEY = "test-router-key-not-for-argv";
+const BALANCE_KEY = "test-router-balance-key-not-for-argv";
 const credentials = { baseURL: "https://router.example/v1", apiKey: KEY };
 const usage: AgentRouterUsage = {
   compute: {
@@ -75,7 +80,9 @@ async function fixture() {
     queueMicrotask(() => child.emit("exit", 0, null));
     return child;
   });
-  const readCredentials = vi.fn(async () => credentials);
+  const readCredentials = vi.fn<typeof routerCredentials>(async (_deps, options) =>
+    options?.funding === "balance" ? { ...credentials, apiKey: BALANCE_KEY } : credentials,
+  );
   const readUsage = vi.fn(async () => usage);
   const deps: CliDependencies = {
     env,
@@ -155,8 +162,18 @@ for (const tool of ["claude", "codex"] as const) {
         expect(binary).toBe(`/fake/bin/${tool}`);
         expect(options.stdio).toBe("inherit");
         expect(options.env[tool === "claude" ? "ANTHROPIC_AUTH_TOKEN" : "VAPI_ROUTER_KEY"]).toBe(
-          vapi ? KEY : undefined,
+          vapi
+            ? flags.includes("--use-balance") && compute < 0.5 && (balance ?? 0) > 0
+              ? BALANCE_KEY
+              : KEY
+            : undefined,
         );
+        if (vapi && flags.includes("--use-balance") && compute < 0.5 && (balance ?? 0) > 0) {
+          expect(f.readCredentials).toHaveBeenLastCalledWith(
+            expect.objectContaining({ wallet: "daily" }),
+            { funding: "balance" },
+          );
+        }
         expect(args.slice(-2)).toEqual(["resume", "--last"]);
         expect(JSON.stringify(args)).not.toContain(KEY);
         if (!vapi) {
@@ -195,6 +212,64 @@ for (const tool of ["claude", "codex"] as const) {
         ]);
       },
     );
+
+    it("prefers Compute even with --use-balance when Compute qualifies alone", async () => {
+      const f = await fixture();
+      f.readUsage.mockResolvedValue(usageWith(0.5, 5));
+      expect(await f.run(tool, ["--use-balance"])).toBe(0);
+      expect(f.readCredentials).toHaveBeenCalledTimes(1);
+      expect(
+        f.spawn.mock.calls[0]![2].env[
+          tool === "claude" ? "ANTHROPIC_AUTH_TOKEN" : "VAPI_ROUTER_KEY"
+        ],
+      ).toBe(KEY);
+    });
+
+    it.each([false, true])(
+      "fails safely if the balance key is missing with forced route %s",
+      async (forced) => {
+        const f = await fixture();
+        f.readUsage.mockResolvedValue(usageWith(0, 5));
+        f.readCredentials.mockImplementation(async (_deps, options) => {
+          if (options?.funding === "balance")
+            throw new RouterClientError("no_router_key", "missing balance key");
+          return credentials;
+        });
+        expect(await f.run(tool, ["--use-balance", ...(forced ? ["--vapi"] : [])])).toBe(
+          forced ? 1 : 0,
+        );
+        expect(f.stderr.join("\n")).toContain("no Router balance key is stored");
+        if (forced) expect(f.spawn).not.toHaveBeenCalled();
+        else {
+          expect(f.spawn.mock.calls[0]![2].env).toBe(f.env);
+          expect(JSON.stringify(f.spawn.mock.calls[0]![2].env)).not.toContain(BALANCE_KEY);
+          expect(f.stderr[0]).toContain("vAPI unreachable");
+        }
+      },
+    );
+
+    it("bounds balance-key lookup by the launch timeout", async () => {
+      const f = await fixture();
+      vi.useFakeTimers();
+      f.deps.code!.usageTimeoutMs = 10;
+      f.readUsage.mockResolvedValue(usageWith(0, 5));
+      let reached!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      f.readCredentials.mockImplementation(async (_deps, options) => {
+        if (options?.funding !== "balance") return credentials;
+        reached();
+        return new Promise<never>(() => {});
+      });
+      const result = f.run(tool, ["--use-balance"]);
+      await ready;
+      await vi.advanceTimersByTimeAsync(10);
+      expect(await result).toBe(0);
+      expect(f.spawn.mock.calls[0]![2].env).toBe(f.env);
+      expect(f.stderr[0]).toContain("timed out");
+      expect(vi.getTimerCount()).toBe(0);
+    });
 
     it("falls back on a credential failure without reading usage", async () => {
       const f = await fixture();
@@ -486,12 +561,59 @@ describe("vAPI Codex configuration", () => {
       expect(f.spawn.mock.calls[0]![1]).toEqual([
         "--profile",
         "vapi",
+        "-c",
+        'model_providers.vapi.name="vAPI Router"',
+        "-c",
+        'model_providers.vapi.base_url="https://router.example/v1"',
+        "-c",
+        'model_providers.vapi.env_key="VAPI_ROUTER_KEY"',
+        "-c",
+        'model_providers.vapi.wire_api="responses"',
+        "-c",
+        'model_provider="vapi"',
         ...(model === undefined ? [] : ["-m", model]),
         "resume",
         "--last",
       ]);
     },
   );
+
+  it("binds an installed profile to the selected account's endpoint without rewriting it", async () => {
+    const f = await fixture();
+    await f.store.create("work", "test-passphrase");
+    const path = codexConfigPath(f.env, f.home);
+    await mkdir(join(f.home, ".codex"));
+    const original =
+      '[model_providers.vapi]\nbase_url = "https://old-router.example/v1"\nenv_key = "OLD_KEY"\n[profiles.vapi]\nmodel_provider = "vapi"\nmodel = "custom-model"\n';
+    await writeFile(path, original);
+    f.readCredentials.mockImplementation(async (deps) => ({
+      baseURL: `https://${deps.wallet}-router.example/v1`,
+      apiKey: `${deps.wallet}-router-key`,
+    }));
+    for (const account of ["daily", "work"]) {
+      expect(await f.run("codex", ["--account", account])).toBe(0);
+      const [, args, { env }] = f.spawn.mock.calls.at(-1)!;
+      expect(args).toContain(
+        `model_providers.vapi.base_url="https://${account}-router.example/v1"`,
+      );
+      expect(args).toContain('model_providers.vapi.env_key="VAPI_ROUTER_KEY"');
+      expect(args).toContain('model_provider="vapi"');
+      expect(args).not.toContain("-m");
+      expect(env.VAPI_ROUTER_KEY).toBe(`${account}-router-key`);
+      expect(args.join(" ")).not.toContain("old-router");
+      expect(args.join(" ")).not.toContain(`${account}-router-key`);
+    }
+    f.readCredentials.mockResolvedValue({
+      baseURL: "https://relinked-router.example/v1",
+      apiKey: "relinked-router-key",
+    });
+    expect(await f.run("codex", ["--account", "work"])).toBe(0);
+    expect(f.spawn.mock.calls.at(-1)![1]).toContain(
+      'model_providers.vapi.base_url="https://relinked-router.example/v1"',
+    );
+    expect(f.spawn.mock.calls.at(-1)![2].env.VAPI_ROUTER_KEY).toBe("relinked-router-key");
+    expect(await readFile(path, "utf8")).toBe(original);
+  });
 
   it("does not translate Claude model shortcuts in the fallback overrides", async () => {
     const f = await fixture();

@@ -16,6 +16,7 @@ import {
   UsageError,
   getEnvironment,
   getLinePrompt,
+  isInteractive,
   isStdinInteractive,
   parseArguments,
   targetWallet,
@@ -295,7 +296,7 @@ export async function codeCommand(
       const yes =
         parsed.has("--yes") ||
         (!json &&
-          dependencies.interactive === true &&
+          isInteractive(dependencies) &&
           isStdinInteractive(dependencies) &&
           /^y(?:es)?$/iu.test(
             (

@@ -1224,6 +1224,37 @@ describe("listRouterModels", () => {
 });
 
 describe("routerCredentials", () => {
+  it("returns the selected account's balance key and Router URL without a request or purchase", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const deps = await linkedDeps(fetchImpl, { balanceKey: BALANCE_KEY });
+    deps.secrets.entries[agentSecretAccounts("other").routerBalance] = "other-account-key";
+    await expect(routerCredentials(deps, { funding: "balance" })).resolves.toEqual({
+      baseURL: "https://router.example/gateway/v1",
+      apiKey: BALANCE_KEY,
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(deps.secrets.setCalls).toEqual([]);
+    await expect(routerCredentials(deps)).resolves.toMatchObject({ apiKey: ROUTER_KEY });
+  });
+
+  it("does not substitute another account's key or the Compute key when a balance key is absent", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const deps = await linkedDeps(fetchImpl);
+    deps.secrets.entries[agentSecretAccounts("other").routerBalance] = BALANCE_KEY;
+    await expect(routerCredentials(deps, { funding: "balance" })).rejects.toMatchObject({
+      code: "no_router_key",
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(deps.secrets.setCalls).toEqual([]);
+  });
+
+  it("rejects balance credentials without an available secret store", async () => {
+    const deps = await linkedDeps(vi.fn(), { balanceKey: BALANCE_KEY, available: false });
+    await expect(routerCredentials(deps, { funding: "balance" })).rejects.toMatchObject({
+      code: "no_router_key",
+    });
+  });
+
   it("returns the OpenAI-compatible base URL and stored stake key", async () => {
     const fetchImpl = vi.fn<typeof fetch>();
     const deps = await linkedDeps(fetchImpl, {

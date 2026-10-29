@@ -130,7 +130,7 @@ a key when needed. The key stays in the existing OS secret store. Codex gets a
 change. Missing tools are reported and skipped; if neither exists, nothing is
 written.
 
-To accept the optional shell aliases without a prompt:
+Interactive terminals ask once before adding shell aliases. To accept without a prompt:
 
 ```bash
 vapi code install --yes
@@ -166,7 +166,7 @@ supplies equivalent options for the child process and writes no config file.
 | --------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `--own`         | Uses the tool's own login with your existing environment, without checking the Router.                              |
 | `--vapi`        | Forces the Router route, even below $0.50. Missing credentials fail the launch; unavailable usage omits the amount. |
-| `--use-balance` | Counts purchased Router balance alongside Compute when choosing the launch route.                                   |
+| `--use-balance` | Counts purchased Router balance for launch selection; uses it for the session when Compute is below $0.50.          |
 | `--model`       | Selects a model. Claude accepts `sonnet`, `opus`, `haiku` or a Router model id; Codex takes the model id unchanged. |
 | `--account`     | Selects the vAPI account whose Router credentials and allowance to use.                                             |
 

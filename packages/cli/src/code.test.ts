@@ -326,6 +326,30 @@ describe("vapi code install/uninstall", () => {
     expect(await optional(f.rc)).toContain("alias claude=");
   });
 
+  it.each([true, false])(
+    "detects terminal interactivity without an injected flag (TTY: %s)",
+    async (tty) => {
+      const f = await fixture();
+      delete f.deps.interactive;
+      delete f.deps.stdinIsTTY;
+      const streams = [process.stdin, process.stdout];
+      const descriptors = streams.map((stream) => Object.getOwnPropertyDescriptor(stream, "isTTY"));
+      try {
+        for (const stream of streams)
+          Object.defineProperty(stream, "isTTY", { configurable: true, value: tty });
+        expect(await f.run(["install"])).toBe(0);
+        expect(f.line).toHaveBeenCalledTimes(tty ? 1 : 0);
+        expect((await optional(f.rc)) !== undefined).toBe(tty);
+      } finally {
+        streams.forEach((stream, index) => {
+          const descriptor = descriptors[index];
+          if (descriptor === undefined) Reflect.deleteProperty(stream, "isTTY");
+          else Object.defineProperty(stream, "isTTY", descriptor);
+        });
+      }
+    },
+  );
+
   it("produces one JSON object, including after inline login, and never prompts", async () => {
     const f = await fixture();
     f.deps.interactive = true;
