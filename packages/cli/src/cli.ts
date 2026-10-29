@@ -158,6 +158,7 @@ import { agentCommand, type AgentCommandDependencies } from "./agent.js";
 import { formatIdentityLines } from "./identity.js";
 import { loginCommand, logoutCommand, whoamiCommand } from "./login.js";
 import { mcpInstallCommand } from "./mcp-install.js";
+import { codeCommand } from "./code.js";
 import { routerCommand } from "./router.js";
 import { sendCommand } from "./send.js";
 import { setupCommand } from "./setup.js";
@@ -249,6 +250,8 @@ Usage:
   vapi login [--account <name>] [--label <name>] [--publish] [--no-browser] [--json]
   vapi logout [--account <name>] [--json]
   vapi whoami [--account <name>] [--json]
+  vapi code install [--yes] [--no-alias] [--account <name>] [--json]
+  vapi code uninstall [--json]
   vapi router models [--account <name>] [--json]
   vapi router usage [--account <name>] [--json]
   vapi router chat --model <id> [--system <text>] [--max-tokens <n>] "<prompt>" [--account <name>] [--json]
@@ -398,6 +401,17 @@ export type CliDependencies = {
     sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
     randomBytes?: (size: number) => Uint8Array;
     uploadTimeoutMs?: number;
+  };
+  /** Code installer and launcher seams; tests never touch the real HOME or processes. */
+  code?: {
+    homedir?: string;
+    platform?: NodeJS.Platform;
+    isExecutable?: (path: string) => Promise<boolean>;
+    realpath?: (path: string) => Promise<string>;
+    selfPath?: string;
+    spawn?: import("./code.js").CodeSpawn;
+    usageTimeoutMs?: number;
+    login?: typeof import("./login.js").runLoginFlow;
   };
   /** MCP client locations, injected so installer tests never touch user config. */
   mcpInstall?: {
@@ -840,6 +854,9 @@ export async function runCli(
       case "whoami":
         await whoamiCommand(args.slice(1), json, io, dependencies);
         exitCode = 0;
+        break;
+      case "code":
+        exitCode = await codeCommand(args.slice(1), json, io, dependencies);
         break;
       case "router":
         await routerCommand(args.slice(1), json, io, dependencies);
