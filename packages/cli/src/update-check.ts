@@ -44,6 +44,8 @@ export async function checkForUpdate(
   if (
     !(options.stderrIsTTY ?? process.stderr.isTTY) ||
     argv.includes("--json") ||
+    argv[0] === "claude" ||
+    argv[0] === "codex" ||
     (argv[0] === "mcp" && argv[1] !== "install") ||
     env.VAPI_NO_UPDATE_CHECK === "1" ||
     env.CI !== undefined

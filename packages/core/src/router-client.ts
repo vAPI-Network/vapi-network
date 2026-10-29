@@ -806,8 +806,19 @@ export async function ownerStake(deps: RouterClientDeps): Promise<{
 /** For the SDK (plan 029): base URL + key for OpenAI-compatible frameworks. Never exposed via MCP. */
 export async function routerCredentials(
   deps: RouterClientDeps,
+  options: { funding?: "compute" | "balance" } = {},
 ): Promise<{ baseURL: string; apiKey: string }> {
-  const { routerBaseUrl, routerKey } = await routerCredentialSnapshot(deps);
+  const credentials =
+    options.funding === "balance"
+      ? await routerBalanceCredentialSnapshot(deps)
+      : await routerCredentialSnapshot(deps);
+  if (credentials === undefined) {
+    throw new RouterClientError(
+      "no_router_key",
+      "No Router balance key is stored for this wallet.",
+    );
+  }
+  const { routerBaseUrl, routerKey } = credentials;
   return { baseURL: `${routerBaseUrl}/v1`, apiKey: routerKey };
 }
 

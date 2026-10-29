@@ -17,6 +17,8 @@ import {
   type CliIo,
 } from "./cli.js";
 
+import { escapeToml, removeTomlTables, tomlSeparator } from "./toml-config.js";
+
 import { offerDashboardLink } from "./dashboard.js";
 
 type McpInstallApp = "claude-code" | "claude-desktop" | "cursor" | "codex";
@@ -405,7 +407,10 @@ function jsonConfig(path: string, existing: string | undefined, entry: McpServer
 }
 
 function tomlConfig(existing: string, entry: McpServerEntry): string {
-  const retained = removeVapiTomlTables(existing);
+  const retained = removeTomlTables(
+    existing,
+    ([root, name]) => root === "mcp_servers" && name === "vapi",
+  );
   const block = [
     "[mcp_servers.vapi]",
     'command = "npx"',
@@ -414,52 +419,6 @@ function tomlConfig(existing: string, entry: McpServerEntry): string {
     "",
   ].join("\n");
   return `${retained}${tomlSeparator(retained)}${block}`;
-}
-
-function removeVapiTomlTables(contents: string): string {
-  const lines = contents.match(/[^\n]*\n|[^\n]+$/g) ?? [];
-  let removing = false;
-  let retained = "";
-  for (const line of lines) {
-    const table = tomlTableName(line);
-    if (table !== undefined) removing = isVapiTomlTable(table);
-    if (!removing) retained += line;
-  }
-  return retained;
-}
-
-function tomlTableName(line: string): string | undefined {
-  const header = line.replace(/\r?\n$/, "");
-  const match = /^\s*(?:\[\[\s*(.*?)\s*\]\]|\[\s*(.*?)\s*\])\s*(?:#.*)?$/.exec(header);
-  return match?.[1] ?? match?.[2];
-}
-
-function isVapiTomlTable(table: string): boolean {
-  const key = String.raw`(?:[A-Za-z0-9_-]+|"(?:[^"\\]|\\.)*"|'[^']*')`;
-  const match = new RegExp(`^\\s*(${key})\\s*\\.\\s*(${key})(?:\\s*\\.|\\s*$)`).exec(table);
-  if (match === null) return false;
-  return unquoteTomlKey(match[1]!) === "mcp_servers" && unquoteTomlKey(match[2]!) === "vapi";
-}
-
-function unquoteTomlKey(key: string): string {
-  if (key.startsWith("'") && key.endsWith("'")) return key.slice(1, -1);
-  if (key.startsWith('"') && key.endsWith('"')) {
-    try {
-      return JSON.parse(key) as string;
-    } catch {
-      return key;
-    }
-  }
-  return key;
-}
-
-function tomlSeparator(contents: string): string {
-  if (contents.length === 0 || /(?:\r?\n)[ \t]*(?:\r?\n)$/.test(contents)) return "";
-  return /\r?\n$/.test(contents) ? "\n" : "\n\n";
-}
-
-function escapeToml(value: string): string {
-  return value.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

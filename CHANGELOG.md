@@ -3,6 +3,13 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+## Unreleased
+
+### Added
+
+- `vapi code install` configures detected Claude Code and Codex tools for vAPI Compute, with optional shell aliases. `vapi code uninstall` removes those settings while preserving other config content.
+- `vapi claude` and `vapi codex` choose vAPI Compute or the tool's own login at launch, with explicit route, balance, model and account options. Sessions stay on the selected route until exit.
+
 ## 0.11.0 — 2026-10-29
 
 ### Added
