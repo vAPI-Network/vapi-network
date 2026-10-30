@@ -34,17 +34,17 @@ describe("checkForUpdate", () => {
   it("uses a successful cache for a day and refreshes it when it expires", async () => {
     const home = await tempHome();
     const now = 1_800_000_000_000;
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({ version: "0.12.0" }));
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({ version: "0.13.0" }));
 
-    expect(await checkForUpdate(enabled(home, fetchImpl, now))).toContain("vapi-network 0.12.0");
+    expect(await checkForUpdate(enabled(home, fetchImpl, now))).toContain("vapi-network 0.13.0");
     expect(await checkForUpdate(enabled(home, fetchImpl, now + DAY - 1))).toContain(
-      "vapi-network 0.12.0",
+      "vapi-network 0.13.0",
     );
     expect(fetchImpl).toHaveBeenCalledTimes(1);
 
-    fetchImpl.mockResolvedValueOnce(response({ version: "0.13.0" }));
+    fetchImpl.mockResolvedValueOnce(response({ version: "0.14.0" }));
     expect(await checkForUpdate(enabled(home, fetchImpl, now + DAY))).toContain(
-      "vapi-network 0.13.0",
+      "vapi-network 0.14.0",
     );
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
@@ -80,13 +80,13 @@ describe("checkForUpdate", () => {
       "invalid cached version",
       JSON.stringify({ checkedAt: 1_800_000_000_000, latest: "1.2.3;owned" }),
     ],
-    ["invalid timestamp", JSON.stringify({ checkedAt: "today", latest: "0.12.0" })],
+    ["invalid timestamp", JSON.stringify({ checkedAt: "today", latest: "0.13.0" })],
   ])("recovers from %s", async (_label, cache) => {
     const home = await tempHome();
     await writeFile(getVapiPaths(home).updateCheck, cache);
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({ version: "0.12.0" }));
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({ version: "0.13.0" }));
 
-    expect(await checkForUpdate(enabled(home, fetchImpl))).toContain("vapi-network 0.12.0");
+    expect(await checkForUpdate(enabled(home, fetchImpl))).toContain("vapi-network 0.13.0");
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
@@ -94,9 +94,9 @@ describe("checkForUpdate", () => {
     ["same", CLI_VERSION],
     ["older", "0.9.3"],
     ["prerelease of the same core", `${CLI_VERSION}-rc.1`],
-    ["command-like invalid semver", "0.12.0; touch /tmp/owned"],
-    ["leading-zero semver", "00.12.0"],
-    ["invalid prerelease", "0.12.0-01"],
+    ["command-like invalid semver", "0.13.0; touch /tmp/owned"],
+    ["leading-zero semver", "00.13.0"],
+    ["invalid prerelease", "0.13.0-01"],
   ])("does not announce a %s registry version", async (_label, version) => {
     const home = await tempHome();
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({ version }));
@@ -105,18 +105,18 @@ describe("checkForUpdate", () => {
 
   it("compares numeric semver components instead of lexically", async () => {
     const home = await tempHome();
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({ version: "0.12.0" }));
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({ version: "0.13.0" }));
     expect(await checkForUpdate(enabled(home, fetchImpl))).toBe(
-      `vapi-network 0.12.0 is available (you have ${CLI_VERSION}). Update: npm i -g vapi-network@latest`,
+      `vapi-network 0.13.0 is available (you have ${CLI_VERSION}). Update: npm i -g vapi-network@latest`,
     );
   });
 
   it("checks for updates when installing an MCP entry", async () => {
     const home = await tempHome();
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({ version: "0.12.0" }));
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({ version: "0.13.0" }));
     expect(
       await checkForUpdate({ ...enabled(home, fetchImpl), argv: ["mcp", "install", "codex"] }),
-    ).toContain("vapi-network 0.12.0");
+    ).toContain("vapi-network 0.13.0");
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
@@ -174,7 +174,7 @@ describe("runCliWithUpdateCheck", () => {
   it("prints command output before the update notice and preserves the exit code", async () => {
     const home = await tempHome();
     const events: string[] = [];
-    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({ version: "0.12.0" }));
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(response({ version: "0.13.0" }));
 
     const code = await runCliWithUpdateCheck(
       ["version"],
@@ -189,7 +189,7 @@ describe("runCliWithUpdateCheck", () => {
     expect(code).toBe(0);
     expect(events).toEqual([
       `stdout:${CLI_VERSION}`,
-      `stderr:vapi-network 0.12.0 is available (you have ${CLI_VERSION}). Update: npm i -g vapi-network@latest`,
+      `stderr:vapi-network 0.13.0 is available (you have ${CLI_VERSION}). Update: npm i -g vapi-network@latest`,
     ]);
   });
 
