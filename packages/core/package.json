@@ -1,6 +1,6 @@
 {
   "name": "@vapi-network/core",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Non-custodial x402 protocol, wallet policy, discovery, and receipts core",
   "license": "Apache-2.0",
   "repository": {
