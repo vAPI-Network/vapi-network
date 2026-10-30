@@ -17,7 +17,7 @@ The recipient may be `owner`, an active account name, or the address of the owne
 
 The account signs one EIP-3009 `transferWithAuthorization`. It names one exact recipient and amount, and expires after 10 minutes. The key stays on this machine, and the relay receives only the authorization and its signature.
 
-The core API also accepts `purpose: "sweep"` when the recipient is the owner. An owner sweep is exempt from the sender's caps because it returns funds to the owner. A sweep to another account is refused.
+The core API also accepts `purpose: "sweep"` when the recipient is the owner or the explicitly supplied `sweepParent`, such as a swarm treasury. These sweeps are exempt from the sender's caps. Other recipients are refused for a sweep.
 
 ## Distribute from one account
 

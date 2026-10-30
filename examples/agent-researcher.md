@@ -24,7 +24,7 @@ Fund its dedicated wallet with $2 of USDC on Base. The command opens the
 funding page and prints the address as a fallback:
 
 ```bash
-vapi fund --wallet researcher --amount 2
+vapi fund --account researcher --amount 2
 ```
 
 Run the research task locally:
@@ -36,10 +36,10 @@ vapi agent run researcher "Summarise today's Base DEX volume with sources"
 Show the paid calls recorded in the local append-only ledger:
 
 ```bash
-vapi receipts --wallet researcher
+vapi receipts --account researcher
 ```
 
-Open the vAPI console and show `researcher` under **Your agents**. The entry is
+Open the vAPI console and show `researcher` under My agents. The entry is
 the owner link for this local wallet, not a hosted agent process.
 
 Pause and resume it without deleting either the profile or wallet:
@@ -55,6 +55,6 @@ wallet on disk.
 
 ```bash
 vapi agent pause researcher
-vapi sweep 0xYOUR_OWNER_ADDRESS --wallet researcher
+vapi sweep 0xYOUR_OWNER_ADDRESS --account researcher
 vapi agent revoke researcher
 ```

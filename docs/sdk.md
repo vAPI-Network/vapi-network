@@ -54,7 +54,7 @@ Discovery API hits may include `health` and `alternatives`. Health reports
 Alternatives contain a `ref` and a `reason` of `cheaper` or `healthier`.
 Inspected endpoints may include `responseSchema` and one `exampleRequest`.
 
-`{ wallet }` still works in 0.6 and prints one deprecation line to stderr; it goes away in 0.7.
+`{ wallet }` remains a deprecated alias for `{ account }` in 0.12.0 and prints one deprecation line to stderr.
 
 ### Lower-level packages
 
@@ -93,7 +93,10 @@ const [listing] = await vapiRegistrySource(config.marketplaceDiscoveryUrl, {
 
 const store = await WalletStore.open(paths.directory);
 const { name } = store.resolve();
-const account = await store.unlock(name, (await resolvePassphrase(name)).passphrase);
+const passphrase = (await store.hasVaultAccount(name))
+  ? ""
+  : (await resolvePassphrase(name)).passphrase;
+const account = await store.unlock(name, passphrase);
 const wallet = new LocalWallet(
   account,
   new SpendPolicy(await spendCapsForWallet(store, name), {
@@ -102,6 +105,9 @@ const wallet = new LocalWallet(
   }),
 );
 ```
+
+Vault accounts use the device key or an open protected-vault session. The legacy
+passphrase lookup runs only for an account not yet migrated to the vault.
 
 The x402 payment path throws `SpendCapExceededError`, exported from
 `@vapi-network/core`, before signing when a spend cap blocks payment. It has the
@@ -143,8 +149,8 @@ await store.setSpendCaps("agent", {
 
 `WalletStore` is the one entry point for the layout: `open`, `list`, `resolve`,
 `create`, `importKey`, `unlock`, `setDefault`, `rename`, `setLabel`,
-`setSpendCaps`, `remove`, `restore` and `listTrash`. It never rewrites key
-material; it moves, names and caps keystores.
+`setSpendCaps`, `remove`, `restore` and `listTrash`. It manages accounts in the device vault and their registry metadata.
+Names, labels and caps do not change an account's key.
 
 Two runnable examples live in [`examples/`](../examples):
 [`pay-with-sdk.ts`](../examples/pay-with-sdk.ts) (`pnpm example:pay -- weather`)

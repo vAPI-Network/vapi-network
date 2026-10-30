@@ -16,7 +16,7 @@ Device vault  ~/.vapi/vault.json   one 12-word phrase, unlocked by the OS keycha
 
 The Owner controls links and allowances. The account controls its own caps. The Router spends against the allowance and the caps.
 
-Agent accounts keep small working balances. Each account defaults to a 5 USDC ceiling on Base. After a settled paid call and whenever the status screen opens, the account signs any excess back to its linked owner. The per-day spend cap is the floor, so a 5 USDC ceiling with an 8 USDC daily cap sweeps down to 8 USDC.
+Agent accounts keep small working balances. Each account defaults to a 5 USDC ceiling on Base. After a settled paid call and whenever the status screen opens, the client attempts an automatic ceiling sweep to the linked owner, or to the treasury for a swarm member. Excess below 0.10 USDC is not swept. The per-day spend cap is the floor, so a 5 USDC ceiling with an 8 USDC daily cap sweeps down to 8 USDC.
 
 ## Vocabulary
 
@@ -33,7 +33,7 @@ These words have the same meaning in the CLI, console, MCP tool names, SDK, and 
 
 ## The vault file
 
-The file is `vault.json` under the vAPI home, which defaults to `~/.vapi`. It holds one recovery phrase per device in encrypted form. Derived accounts use BIP-39 and the MetaMask derivation path `m/44'/60'/0'/0/{index}`; imported accounts sit next to them and keep encrypted private keys. The device key lives in the OS secret store: macOS Keychain, Windows Credential Manager via DPAPI, or Linux libsecret.
+The file is `vault.json` under the vAPI home, which defaults to `~/.vapi`. It holds one recovery phrase per device in encrypted form. Derived accounts use BIP-39 and the MetaMask derivation path `m/44'/60'/0'/0/{index}`; imported accounts sit next to them and keep encrypted private keys. The device key lives in the OS secret store: macOS Keychain, Windows Data Protection (DPAPI), or Linux libsecret.
 
 ## Servers and CI: `vapi vault protect`
 
@@ -84,11 +84,11 @@ VAPI_KEYSTORE_PASSWORD is deprecated for vault passwords; use VAPI_VAULT_PASSWOR
 
 Losing a device should cost as little as possible. Three layers cover it, cheapest first.
 
-| Layer                        | What it protects                                                                                                                                                                  | Where                                                 |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| Small balances               | Each account keeps a 5 USDC ceiling on Base by default and signs any excess back to the owner. A lost account loses its working balance only.                                     | [Accounts](#accounts), [docs/sending.md](sending.md)  |
-| One phrase                   | One 12-word recovery phrase rebuilds every derived account in the vault. `vapi backup` prints it and `vapi restore` reads it.                                                     | [Backup and restore](#backup-and-restore)             |
-| Owner-encrypted cloud backup | The device encrypts the vault with a key only the owner wallet can produce and stores the ciphertext with vAPI. A new device restores it after the owner approves in the browser. | [docs/backup-and-recovery.md](backup-and-recovery.md) |
+| Layer                        | What it protects                                                                                                                                                                                            | Where                                                 |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| Small balances               | Each account defaults to a 5 USDC ceiling on Base, with best-effort sweeps to the owner or swarm treasury. A lost account loses its working balance only.                                                   | [Accounts](#accounts), [docs/sending.md](sending.md)  |
+| One phrase                   | One 12-word recovery phrase rebuilds every derived account in the vault. `vapi backup` prints it and `vapi restore` reads it.                                                                               | [Backup and restore](#backup-and-restore)             |
+| Owner-encrypted cloud backup | The device encrypts the vault with a key derived from an owner-wallet signature or recovery password and stores the ciphertext with vAPI. A new device restores it after the owner approves in the browser. | [docs/backup-and-recovery.md](backup-and-recovery.md) |
 
 Imported keys are not in the phrase. The cloud backup carries them, or back them up separately.
 
@@ -115,7 +115,7 @@ vapi setup
 
 If balance history is unavailable or you know exactly how many derived accounts to recover, use `vapi restore --accounts <n>` or `vapi setup --accounts <n>`. The explicit count restores the first `n` accounts without querying balances; it accepts 1 through 10,000.
 
-This wallet is yours. vAPI stores at most an encrypted backup that only your owner wallet can open, and cannot recover the key without it. If you lose this machine, your recovery phrase, and the owner-encrypted backup, the funds are gone.
+This wallet is yours. vAPI stores at most an encrypted backup opened with the key derived from your owner-wallet signature or recovery password. vAPI cannot recover that key. If you lose this machine, your recovery phrase, and the owner-encrypted backup, the funds are gone.
 
 ## Accounts
 
@@ -173,7 +173,7 @@ Use `vapi accounts distribute --cancel <movement-id>` when a movement cannot res
 
 A restored leg requires extra review. Check its sender balance and explorer history, then add `--replace-expired-restored` to the cancel command. The override cancels an unjournaled restored leg or a signed restored leg whose nonce is proven expired. A pending nonce or failed chain check refuses the whole cancellation without changing the movement or spend ledger. The result prints the sender balance commands to run before another movement. MCP cannot cancel a movement or set the override.
 
-The ceiling is 5 USDC for new and existing accounts unless the terminal sets another value. `--ceiling off` disables automatic sweeps. A sweep always returns funds to the linked owner and never lowers the account below its per-day cap. Automatic ceiling enforcement and `vapi sweep` refuse to sign while an open movement leg from that account may still settle. Resume the movement first. If it cannot resume, wait for any signed authorization to expire and cancel it from the terminal.
+The ceiling is 5 USDC for new and existing accounts unless the terminal sets another value. `--ceiling off` disables automatic sweeps. An automatic ceiling sweep returns funds to the linked owner, or to the treasury for a swarm member, and never lowers the account below its per-day cap. Automatic ceiling enforcement and `vapi sweep` refuse to sign while an open movement leg from that account may still settle. Resume the movement first. If it cannot resume, wait for any signed authorization to expire and cancel it from the terminal.
 
 The `--all` flag shows every account of the same owner, including accounts on other devices. Rows from other devices are read-only, and no command acts on them. The default account's link supplies the agent bearer, or the first linked local account does when the default is not linked. If no local account is linked, the command prints the local accounts and tells you to run `vapi login`. The request sends only the agent bearer; keys and phrases stay on the machine. With `--all --json`, the object contains `accounts` and `siblings`, plus `siblingsError` when the remote read fails.
 

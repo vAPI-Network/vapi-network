@@ -7,32 +7,55 @@ Configuration, funding, networks, sign-in and local metrics are covered here; se
 Local state lives in `~/.vapi/`:
 
 ```text
-config.json           registry URLs, networks and RPC endpoints
-wallets.json          which wallet is the default, plus per-wallet caps and labels
+config.json           registry URLs, networks, RPC endpoints and device name
+vault.json            encrypted device phrase and account keys
+wallets.json          default account, caps, labels and account links
 wallets/
-  main.json           one encrypted keystore per wallet, mode 0600
-  .trash/             removed wallets, kept encrypted, never deleted for you
-keystore.json         a 0600 symlink to wallets/main.json, for one release
-audit.log             one JSON line per secret export or wallet change
+  <name>.json         legacy keystores or compatibility links after migration
+  .trash/             removed accounts, kept encrypted
+wallets.migrated/      archived legacy keystores
+audit.log             one JSON line per secret export or account change
 receipts.jsonl        the append-only call ledger
 searches.jsonl        one line per discovery query
-spend-ledger.json     today's total, per wallet
+spend-ledger.json     today's spend reservations and totals, per account
+update-check.json     cached npm update check
 reports/              what vapi report writes
 ```
 
-| Variable                 | What it does                                                                |
-| ------------------------ | --------------------------------------------------------------------------- |
-| `VAPI_HOME`              | Use a different directory instead of `~/.vapi`                              |
-| `VAPI_WALLET`            | The wallet to use when no `--wallet` is given                               |
-| `VAPI_REGISTRY_URL`      | Replace the registry base; the canonical discovery paths derive from it     |
-| `VAPI_KEYSTORE_PASSWORD` | The passphrase, for CI and for Windows. Checked before the OS secret store. |
-| `VAPI_API_KEY`           | The registry key `vapi publish` authenticates with, for CI                  |
-| `VAPI_NO_SECRETS`        | Set to `1` to stop `vapi backup` and `vapi export-key` printing anything    |
-| `VAPI_DEVICE`            | Override the device name sent with account link requests                    |
+`keystore.json` is retired by the device-vault migration. See the [wallet guide](wallets.md#migration-from-05) for legacy files.
+
+| Variable                 | What it does                                                                               |
+| ------------------------ | ------------------------------------------------------------------------------------------ |
+| `VAPI_HOME`              | Use a different directory instead of `~/.vapi`                                             |
+| `VAPI_WALLET`            | The account to use when no `--account` is given                                            |
+| `VAPI_REGISTRY_URL`      | Replace the registry base; canonical discovery paths derive from it                        |
+| `VAPI_VAULT_PASSWORD`    | Supply the password for a protected device vault in unattended use                         |
+| `VAPI_KEYSTORE_PASSWORD` | Legacy keystore passphrase; deprecated alias for a vault password                          |
+| `VAPI_API_KEY`           | Registry key for human publishing or CI; overrides the OS secret store and config fallback |
+| `VAPI_NO_SECRETS`        | Set to `1` to refuse recovery phrase and private key exports                               |
+| `VAPI_DEVICE`            | Override the device name sent with account link requests                                   |
+| `VAPI_DOCS_URL`          | Override the public documentation origin                                                   |
+| `VAPI_NO_UPDATE_CHECK`   | Set to `1` to disable the interactive npm update check                                     |
+
+`config.json` accepts these fields:
+
+| Field                          | What it controls                                                                      |
+| ------------------------------ | ------------------------------------------------------------------------------------- |
+| `discoveryUrl`                 | Service catalogue URL; defaults to `https://api.vapinetwork.ai/api/call/services`     |
+| `marketplaceDiscoveryUrl`      | Ranked discovery URL; defaults to `https://api.vapinetwork.ai/api/call/discovery`     |
+| `registryFallbacks`            | Optional pairs of service and ranked discovery URLs                                   |
+| `networks`                     | Network-keyed RPC URLs, USDC addresses, optional deposit guidance and EIP-712 domains |
+| `spendCaps`                    | Legacy fallback caps; current account caps live in `wallets.json`                     |
+| `device`                       | Device name for account linking                                                       |
+| `allowPrivateNetwork`          | Allow private destinations for a development registry; defaults to false              |
+| `tasksEscrowFactoryOverrides`  | Trusted escrow factory by chain ID for Tasks preview                                  |
+| `tasksEscrowDurationOverrides` | Trusted work and review durations by chain ID for Tasks preview                       |
+
+The raw file may also contain an `apiKey` fallback on platforms without an OS secret store. Parsed configuration drops that secret; config rewrites preserve it. MCP cannot import the API-key entry point.
 
 The `device` field in `config.json` names the device sent with link requests, uses 1 to 32 lowercase letters, digits, or dashes, and is written from the hostname on first use.
 
-`ARC_RPC_URL` overrides the Arc mainnet RPC. `ARC_TESTNET_RPC_URL` and
+`BASE_RPC_URL` overrides the Base RPC. `ARC_RPC_URL` overrides the Arc mainnet RPC. `ARC_TESTNET_RPC_URL` and
 `SOLANA_RPC_URL` point those two networks at an endpoint you trust. On first
 use of the default home, the client copies an existing `~/.vapi/agent-cash/`
 configuration into `~/.vapi/` when it can do so without overwriting files,
@@ -78,14 +101,13 @@ to its human.
 The x402 reference packages shorten the Solana CAIP-2 reference to
 `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`; vAPI accepts that identifier as an
 alias while persisting the full genesis hash above. Enable Arc mainnet with
-`vapi init --networks base,arc` (or the same `--networks` value on `vapi wallet
-create` or `vapi import`), `vapi accounts --enable arc`, or `ARC_RPC_URL`. Its
+`vapi init --networks base,arc` (or the same `--networks` value on `vapi import`), `vapi accounts --enable arc`, or `ARC_RPC_URL`. Its
 explorer is `https://explorer.arc.io`.
 
-`vapi accounts` lists one deposit account per configured network: its CAIP-2 ID,
+The legacy `vapi accounts --account <name>` and `vapi accounts --enable <network>` forms list one deposit account per configured network: its CAIP-2 ID,
 network name, address, atomic and formatted USDC balance, gas-token balance, and
 deposit guidance. Account lookup dispatches by CAIP namespace, so the EVM and
-Solana adapters stay independent of one another. For Arc testnet, add the faucet
+Solana adapters stay independent of one another. The current `vapi accounts` command lists vault accounts; see the [wallet guide](wallets.md#accounts). For Arc testnet, add the faucet
 to that network's `config.json` entry:
 
 ```json
@@ -98,14 +120,7 @@ to that network's `config.json` entry:
 Arc mainnet uses the default public RPC or `ARC_RPC_URL` and needs no faucet
 configuration.
 
-Create both local accounts at initialization with `vapi init --networks
-base,solana`, or add an Ed25519 account to an existing keystore with `vapi
-accounts --enable solana`. Fund the printed Solana address with SPL USDC. Exact
-x402 payments use the facilitator advertised in the challenge as fee payer, so
-they do not consume the local SOL balance; `vapi sweep` is a separate
-transaction and does need a little SOL. The default public Solana RPC is
-rate-limited and has no availability guarantee; set `SOLANA_RPC_URL` to a
-dedicated endpoint for regular use.
+Solana listings remain searchable, but the device vault does not support Solana keys yet. Inspecting or paying a Solana listing returns `unsupported_network`. Solana setup through `vapi init --networks base,solana` or `vapi accounts --enable solana` is refused. The network table describes protocol metadata, not released vault payment support.
 
 ## Sign-in with X
 

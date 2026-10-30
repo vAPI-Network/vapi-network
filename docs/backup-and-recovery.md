@@ -149,11 +149,13 @@ Restore marks matching unfinished local legs for every movement named by the aut
 
 The human result lists restored profiles and swarms, unfinished movements, skipped items, and conflicts. The JSON result returns the same values as `agents`, `swarms`, `movements`, `skipped`, and `conflicts`.
 
-The new device stores its backup key during restore. Link every restored account before its calls, Router access, relayed transfers, or later backup uploads can resume:
+The new device stores its backup key during restore. Link every restored account before Router access, relayed transfers or later backup uploads can resume:
 
 ```sh
 vapi login --account <name>
 ```
+
+Call payments use the local key and do not need a link.
 
 ## Open movements after restore
 
