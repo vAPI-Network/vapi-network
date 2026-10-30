@@ -4,3 +4,7 @@ _import/
 **/node_modules/
 **/publish/
 pnpm-lock.yaml
+apps/desktop/out/
+apps/desktop/release/
+apps/desktop/resources/mcp-shim/
+apps/desktop/native/out/

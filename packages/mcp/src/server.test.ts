@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 
 import {
   SOLANA_MAINNET_CAIP2,
@@ -1566,5 +1567,27 @@ describe("MCP App resources", () => {
     } finally {
       await server.close();
     }
+  });
+});
+
+describe("VapiMcpServer.connect", () => {
+  it("serves JSON-RPC over caller-supplied streams", async () => {
+    const input = new PassThrough();
+    const written: string[] = [];
+    const server = createVapiServer({});
+    server.connect(input, { write: (chunk: string) => written.push(chunk) });
+
+    input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })}\n`);
+    input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" })}\n`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const replies = written.map((line) => JSON.parse(line) as { id: number; result: unknown });
+    expect(replies.map((reply) => reply.id)).toEqual([1, 2]);
+    expect((replies[0]?.result as { serverInfo: { name: string } }).serverInfo.name).toBe(
+      "@vapi-network/mcp",
+    );
+    expect((replies[1]?.result as { tools: unknown[] }).tools.length).toBeGreaterThan(0);
+
+    input.end();
   });
 });

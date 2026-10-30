@@ -1,5 +1,6 @@
 packages:
   - "packages/*"
+  - "apps/*"
 
 catalog:
   "@eslint/js": ^10.0.1
@@ -12,4 +13,5 @@ catalog:
   vitest: ^4.1.0
 
 onlyBuiltDependencies:
+  - electron
   - esbuild

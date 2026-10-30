@@ -17,3 +17,6 @@ publish
 .pnpm-store
 coverage
 .pack-check/
+
+# vAPI Desktop .mcpb bundles
+dist-mcpb/

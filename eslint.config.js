@@ -3,7 +3,17 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["**/coverage/**", "**/dist/**", "**/node_modules/**", "**/publish/**", "_import/**"],
+    ignores: [
+      "**/coverage/**",
+      "**/dist/**",
+      "**/node_modules/**",
+      "**/publish/**",
+      "_import/**",
+      // vAPI Desktop build output and the generated shim bundle.
+      "apps/desktop/out/**",
+      "apps/desktop/release/**",
+      "apps/desktop/resources/mcp-shim/**",
+    ],
   },
   js.configs.recommended,
   ...tseslint.configs.strict,
@@ -88,6 +98,41 @@ export default tseslint.config(
     files: ["**/*.mjs"],
     rules: {
       "no-undef": "off",
+    },
+  },
+  {
+    files: ["apps/desktop/scripts/**", "apps/desktop/*.cjs"],
+    languageOptions: {
+      globals: {
+        process: "readonly",
+        Buffer: "readonly",
+        console: "readonly",
+        module: "readonly",
+        require: "readonly",
+        __dirname: "readonly",
+        __filename: "readonly",
+        URL: "readonly",
+        Response: "readonly",
+        AbortSignal: "readonly",
+      },
+    },
+    rules: {
+      "no-undef": "error",
+    },
+  },
+  {
+    files: ["apps/desktop/scripts/**/*.cjs", "apps/desktop/*.cjs"],
+    rules: {
+      "@typescript-eslint/no-require-imports": "off",
+    },
+  },
+  {
+    files: ["apps/desktop/**/*.{ts,tsx}"],
+    rules: {
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        { argsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_", ignoreRestSiblings: true },
+      ],
     },
   },
   {

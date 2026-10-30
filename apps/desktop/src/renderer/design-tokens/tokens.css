@@ -1,0 +1,308 @@
+/**
+ * vAPI shared design tokens — raw --vapi-* custom properties only.
+ * Source: vAPI Brand Guidelines 2026. See docs/DESIGN.md for usage rules.
+ * Fonts live in fonts.css; Tailwind mapping in theme.css.
+ */
+
+:root {
+  /* Brand primitives, fonts, radius, motion, space and z tokens are theme-independent. */
+  --vapi-font-sans: "Space Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --vapi-font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+  --vapi-font-display: var(--vapi-font-sans);
+
+  --vapi-color-black: #111111;
+  --vapi-color-off-white: #fafafa;
+  --vapi-color-white: #ffffff;
+  --vapi-color-lime: #c3ff3d;
+  --vapi-color-blue: #0041eb;
+  --vapi-color-pink: #ff337c;
+  --vapi-color-cyan: #97efff;
+  --vapi-color-purple: #8a37fb;
+  --vapi-color-orange: #ff7300;
+  --vapi-color-campaign-warm: #bca476;
+  --vapi-color-editorial-paper: #f7f1e2;
+  --vapi-color-orange-text: #9a3d00;
+  --vapi-color-lime-text: #4f6f00;
+  --vapi-color-cyan-text: #006078;
+  --vapi-color-pink-text: #b00043;
+  --vapi-color-purple-text: #5f1fb0;
+  --vapi-color-blue-text: var(--vapi-color-blue);
+
+  /* The app sits on the handoff's warm canvas; product surfaces stay white. */
+  --vapi-color-app-canvas: #efeee9;
+  --vapi-color-background: var(--vapi-color-white);
+  --vapi-color-foreground: var(--vapi-color-black);
+  --vapi-color-card: var(--vapi-color-white);
+  --vapi-color-card-foreground: var(--vapi-color-black);
+  --vapi-color-primary: var(--vapi-color-black);
+  --vapi-color-primary-foreground: var(--vapi-color-off-white);
+  --vapi-color-primary-hover: #2b2b2b;
+  --vapi-color-primary-pressed: #2b2b2b;
+  --vapi-color-hover-surface: #fafafa;
+  --vapi-color-pressed-surface: #e5e5e5;
+  --vapi-color-secondary: var(--vapi-color-blue);
+  --vapi-color-secondary-foreground: var(--vapi-color-white);
+  --vapi-color-muted: #f1f1f1;
+  --vapi-color-muted-foreground: #5c5c5c;
+  --vapi-color-accent: #fff0e5;
+  --vapi-color-accent-foreground: var(--vapi-color-orange-text);
+  --vapi-color-destructive: var(--vapi-color-pink);
+  --vapi-color-destructive-foreground: var(--vapi-color-black);
+  --vapi-color-border: var(--vapi-color-black);
+  --vapi-color-input: var(--vapi-color-black);
+  --vapi-color-ring: var(--vapi-color-foreground);
+  --vapi-color-header: #0a0a0a;
+  --vapi-color-header-foreground: #fafafa;
+  --vapi-color-toast-surface: var(--vapi-color-header);
+  --vapi-color-toast-border: var(--vapi-color-header);
+  --vapi-color-link: var(--vapi-color-blue);
+  --vapi-color-scrim: rgb(17 17 17 / 32%);
+  --vapi-color-drawer-scrim: rgb(0 0 0 / 55%);
+  --vapi-color-header-hover: #2b2b2b;
+  --vapi-color-header-muted: #d4d4d4;
+  --vapi-color-footer-muted: #b0b0ab;
+  --vapi-color-header-marker-dim: #555555;
+  --vapi-color-header-line: #2a2a2a;
+  --vapi-color-overlay: var(--vapi-color-scrim);
+  --vapi-color-disabled: #d4d4d4;
+  --vapi-color-skeleton: #f0f0f0;
+
+  --vapi-radius-base: 0;
+  --vapi-shadow-hard: 5px 5px 0 var(--vapi-color-black);
+  --vapi-shadow-hard-sm: 3px 3px 0 var(--vapi-color-black);
+  --vapi-shadow-sheet: 4px 4px 0 #2b2b2b;
+  /* Elevation (OVERLAYS.md): solid offsets, no blur. Popover = menus, dropdowns,
+     notifications, search, toasts; sheet = dialogs and the transaction sheet. */
+  --vapi-shadow-popover: 4px 4px 0 #e5e5e5;
+  /* Inverse popovers (ink panels off the header): a light offset in both themes. */
+  --vapi-color-inverse-surface: #111111;
+  --vapi-color-inverse-border: #2b2b2b;
+  --vapi-color-inverse-foreground: #fafafa;
+  --vapi-color-inverse-muted: #b0b0ab;
+  --vapi-color-inverse-hover: #222222;
+  --vapi-color-inverse-link: #6f9bff;
+  --vapi-shadow-popover-inverse: 4px 4px 0 #e5e5e5;
+  --vapi-color-elevated: #ffffff;
+  --vapi-color-elevated-border: #e5e5e5;
+
+  /* App surface / line / dim-text scale (graduated, hairline-style) */
+  --vapi-color-surface-flat: var(--vapi-color-white);
+  --vapi-color-surface-raised: #f7f7f7;
+  --vapi-color-surface-focal: var(--vapi-color-white);
+  --vapi-color-surface: var(--vapi-color-surface-flat);
+  --vapi-color-surface-2: var(--vapi-color-surface-raised);
+  --vapi-color-surface-3: #efefef;
+  --vapi-color-line: #e5e5e5;
+  --vapi-color-line-2: #cfcfcf;
+  --vapi-color-fg-dim: #555555;
+  /* ≥4.5:1 on background, surface-2 and surface-3 (WCAG AA small text) */
+  --vapi-color-fg-dimmer: #666666;
+
+  /* Task status recipes. Declaration order is the workflow contract. */
+  --vapi-status-open-border: #e5e5e5;
+  --vapi-status-open-bg: #ffffff;
+  --vapi-status-open-fg: #111111;
+  --vapi-status-open-marker: #111111;
+  --vapi-status-taken-border: #e5e5e5;
+  --vapi-status-taken-bg: #ffffff;
+  --vapi-status-taken-fg: #111111;
+  --vapi-status-taken-marker: #555555;
+  --vapi-status-awarded-border: #e5e5e5;
+  --vapi-status-awarded-bg: #ffffff;
+  --vapi-status-awarded-fg: #111111;
+  --vapi-status-awarded-marker: #111111;
+  --vapi-status-funded-border: #e5e5e5;
+  --vapi-status-funded-bg: #ffffff;
+  --vapi-status-funded-fg: #111111;
+  --vapi-status-funded-marker: #c3ff3d;
+  --vapi-status-funded-marker-border: #4f6f00;
+  --vapi-status-delivered-border: #e5e5e5;
+  --vapi-status-delivered-bg: #ffffff;
+  --vapi-status-delivered-fg: #4f6f00;
+  --vapi-status-delivered-marker: #4f6f00;
+  --vapi-status-paid-border: #c3ff3d;
+  --vapi-status-paid-bg: #c3ff3d;
+  --vapi-status-paid-fg: #111111;
+  --vapi-status-paid-marker: #111111;
+  --vapi-status-refunded-border: #e5e5e5;
+  --vapi-status-refunded-bg: #ffffff;
+  --vapi-status-refunded-fg: #555555;
+  --vapi-status-refunded-marker: #555555;
+  --vapi-status-disputed-border: #ff337c;
+  --vapi-status-disputed-bg: #ffffff;
+  --vapi-status-disputed-fg: #b00043;
+  --vapi-status-disputed-marker: #ff337c;
+  --vapi-status-expired-border: #e5e5e5;
+  --vapi-status-expired-bg: #ffffff;
+  --vapi-status-expired-fg: #555555;
+  --vapi-status-expired-marker: #d4d4d4;
+  --vapi-status-closed-border: #e5e5e5;
+  --vapi-status-closed-bg: #ffffff;
+  --vapi-status-closed-fg: #555555;
+  --vapi-status-closed-marker: #d4d4d4;
+
+  --vapi-escrow-chip-border: var(--vapi-color-foreground);
+  --vapi-escrow-chip-label: var(--vapi-color-fg-dim);
+  --vapi-escrow-chip-fg: var(--vapi-color-foreground);
+
+  --vapi-tone-lime-text: var(--vapi-color-lime-text);
+  --vapi-tone-lime-surface: var(--vapi-color-lime);
+  --vapi-tone-lime-line: var(--vapi-color-lime);
+  --vapi-tone-cyan-text: var(--vapi-color-cyan-text);
+  --vapi-tone-cyan-surface: var(--vapi-color-cyan);
+  --vapi-tone-cyan-line: var(--vapi-color-cyan);
+  --vapi-tone-pink-text: var(--vapi-color-pink-text);
+  --vapi-tone-pink-surface: var(--vapi-color-pink);
+  --vapi-tone-pink-line: var(--vapi-color-pink);
+  --vapi-tone-orange-text: var(--vapi-color-orange-text);
+  --vapi-tone-orange-surface: var(--vapi-color-orange);
+  --vapi-tone-orange-line: var(--vapi-color-orange);
+
+  --vapi-motion-fast: 150ms;
+  --vapi-motion-base: 200ms;
+  --vapi-motion-slow: 250ms;
+  --vapi-ease-enter: cubic-bezier(0.23, 1, 0.32, 1);
+  --vapi-ease-exit: cubic-bezier(0.77, 0, 0.175, 1);
+
+  --vapi-space-1: 0.25rem;
+  --vapi-space-2: 0.5rem;
+  --vapi-space-3: 0.75rem;
+  --vapi-space-4: 1rem;
+  --vapi-space-5: 1.5rem;
+  --vapi-space-6: 2rem;
+  --vapi-space-7: 2.75rem;
+
+  /* header = current fixed header z-40 (apps/api/app/app-shell/client/components/layout/marketplace-shell.tsx:294); dialog = command palette z-index 70 (apps/api/app/app.css:22); menus use z-[80]; dialogs/sheets opened with showModal() sit in the top layer; these values are the stacking order for non-top-layer use (F2 adopts them). */
+  --vapi-z-header: 40;
+  --vapi-z-sheet: 60;
+  --vapi-z-dialog: 70;
+  --vapi-z-toast: 100;
+}
+
+.dark {
+  /* #111111 flat surfaces, with close black tints reserved for depth. */
+  --vapi-color-app-canvas: #0a0a0a;
+  --vapi-color-background: var(--vapi-color-black);
+  --vapi-color-foreground: var(--vapi-color-off-white);
+  --vapi-color-card: #1a1a1a;
+  --vapi-color-card-foreground: var(--vapi-color-off-white);
+  --vapi-color-primary: var(--vapi-color-off-white);
+  --vapi-color-primary-foreground: var(--vapi-color-black);
+  --vapi-color-primary-hover: #e5e5e5;
+  --vapi-color-primary-pressed: #e5e5e5;
+  --vapi-color-hover-surface: #222222;
+  --vapi-color-pressed-surface: #2b2b2b;
+  --vapi-color-secondary: var(--vapi-color-blue);
+  --vapi-color-secondary-foreground: var(--vapi-color-white);
+  --vapi-color-muted: #222222;
+  --vapi-color-muted-foreground: #c4c4c0;
+  --vapi-color-accent: #2a180b;
+  --vapi-color-accent-foreground: var(--vapi-color-orange);
+  --vapi-color-destructive: var(--vapi-color-pink);
+  --vapi-color-destructive-foreground: var(--vapi-color-black);
+  --vapi-color-border: var(--vapi-color-off-white);
+  --vapi-color-input: var(--vapi-color-off-white);
+  --vapi-color-ring: var(--vapi-color-foreground);
+  --vapi-color-header: #0a0a0a;
+  --vapi-color-header-foreground: #fafafa;
+  --vapi-color-toast-surface: #1a1a1a;
+  --vapi-color-toast-border: #2b2b2b;
+  --vapi-color-link: #6f9bff;
+  --vapi-color-scrim: rgb(0 0 0 / 60%);
+  --vapi-color-drawer-scrim: rgb(0 0 0 / 55%);
+  --vapi-color-header-hover: #2b2b2b;
+  --vapi-color-header-muted: #d4d4d4;
+  --vapi-color-header-marker-dim: #555555;
+  --vapi-color-header-line: #2a2a2a;
+  --vapi-color-footer-muted: #b0b0ab;
+  --vapi-color-overlay: var(--vapi-color-scrim);
+  --vapi-color-disabled: #3a3a3a;
+  --vapi-color-skeleton: #2b2b2b;
+  --vapi-shadow-hard: 5px 5px 0 var(--vapi-color-off-white);
+  --vapi-shadow-hard-sm: 3px 3px 0 var(--vapi-color-off-white);
+  --vapi-shadow-sheet: 8px 8px 0 #000000;
+  --vapi-shadow-popover: 4px 4px 0 #000000;
+  --vapi-shadow-popover-inverse: 4px 4px 0 #3a3a3a;
+  --vapi-color-elevated: #1a1a1a;
+  --vapi-color-elevated-border: #3a3a3a;
+  --vapi-color-orange-text: var(--vapi-color-orange);
+  --vapi-color-lime-text: var(--vapi-color-lime);
+  --vapi-color-cyan-text: var(--vapi-color-cyan);
+  --vapi-color-pink-text: var(--vapi-color-pink);
+  --vapi-color-purple-text: var(--vapi-color-purple);
+  --vapi-color-blue-text: #6f9bff;
+  --vapi-color-campaign-warm: #6f6044;
+  --vapi-color-editorial-paper: var(--vapi-color-black);
+
+  /* App surface / line / dim-text scale (graduated, hairline-style) */
+  --vapi-color-surface-flat: var(--vapi-color-black);
+  --vapi-color-surface-raised: #1a1a1a;
+  --vapi-color-surface-focal: #1a1a1a;
+  --vapi-color-surface: var(--vapi-color-surface-flat);
+  --vapi-color-surface-2: var(--vapi-color-surface-raised);
+  --vapi-color-surface-3: var(--vapi-color-surface-focal);
+  --vapi-color-line: #2a2a2a;
+  --vapi-color-line-2: #3b3b3b;
+  --vapi-color-fg-dim: #b0b0ab;
+  /* ≥4.5:1 on the dark surface scale (WCAG AA small text) */
+  --vapi-color-fg-dimmer: #94948e;
+
+  --vapi-status-open-border: #2b2b2b;
+  --vapi-status-open-bg: #111111;
+  --vapi-status-open-fg: #fafafa;
+  --vapi-status-open-marker: #fafafa;
+  --vapi-status-taken-border: #2b2b2b;
+  --vapi-status-taken-bg: #111111;
+  --vapi-status-taken-fg: #fafafa;
+  --vapi-status-taken-marker: #b0b0ab;
+  --vapi-status-awarded-border: #2b2b2b;
+  --vapi-status-awarded-bg: #111111;
+  --vapi-status-awarded-fg: #fafafa;
+  --vapi-status-awarded-marker: #fafafa;
+  --vapi-status-funded-border: #2b2b2b;
+  --vapi-status-funded-bg: #111111;
+  --vapi-status-funded-fg: #fafafa;
+  --vapi-status-funded-marker: #c3ff3d;
+  --vapi-status-funded-marker-border: #c3ff3d;
+  --vapi-status-delivered-border: #2b2b2b;
+  --vapi-status-delivered-bg: #111111;
+  --vapi-status-delivered-fg: #c3ff3d;
+  --vapi-status-delivered-marker: #c3ff3d;
+  --vapi-status-paid-border: #c3ff3d;
+  --vapi-status-paid-bg: #c3ff3d;
+  --vapi-status-paid-fg: #111111;
+  --vapi-status-paid-marker: #111111;
+  --vapi-status-refunded-border: #2b2b2b;
+  --vapi-status-refunded-bg: #111111;
+  --vapi-status-refunded-fg: #b0b0ab;
+  --vapi-status-refunded-marker: #b0b0ab;
+  --vapi-status-disputed-border: #ff337c;
+  --vapi-status-disputed-bg: #111111;
+  --vapi-status-disputed-fg: #ff337c;
+  --vapi-status-disputed-marker: #ff337c;
+  --vapi-status-expired-border: #2b2b2b;
+  --vapi-status-expired-bg: #111111;
+  --vapi-status-expired-fg: #b0b0ab;
+  --vapi-status-expired-marker: #3a3a3a;
+  --vapi-status-closed-border: #2b2b2b;
+  --vapi-status-closed-bg: #111111;
+  --vapi-status-closed-fg: #b0b0ab;
+  --vapi-status-closed-marker: #3a3a3a;
+
+  --vapi-escrow-chip-border: var(--vapi-color-foreground);
+  --vapi-escrow-chip-label: var(--vapi-color-fg-dim);
+  --vapi-escrow-chip-fg: var(--vapi-color-foreground);
+
+  --vapi-tone-lime-text: var(--vapi-color-lime-text);
+  --vapi-tone-lime-surface: var(--vapi-color-lime);
+  --vapi-tone-lime-line: var(--vapi-color-lime);
+  --vapi-tone-cyan-text: var(--vapi-color-cyan-text);
+  --vapi-tone-cyan-surface: var(--vapi-color-cyan);
+  --vapi-tone-cyan-line: var(--vapi-color-cyan);
+  --vapi-tone-pink-text: var(--vapi-color-pink-text);
+  --vapi-tone-pink-surface: var(--vapi-color-pink);
+  --vapi-tone-pink-line: var(--vapi-color-pink);
+  --vapi-tone-orange-text: var(--vapi-color-orange-text);
+  --vapi-tone-orange-surface: var(--vapi-color-orange);
+  --vapi-tone-orange-line: var(--vapi-color-orange);
+}

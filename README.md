@@ -371,6 +371,13 @@ Phrase recovery checks Base USDC balances until five consecutive addresses are e
 Every npm tarball is bundled and has zero runtime dependencies. The scoped
 packages are useful for embedding; most users should start with `vapi-network`.
 
+## vAPI Desktop
+
+vAPI Desktop is the macOS app for managing agent wallets and connecting local MCP clients.
+The signer process keeps keys on your computer.
+Signed DMGs will be published on [GitHub Releases](https://github.com/vAPI-Network/vapi-network/releases); until then it is a private beta.
+See [the desktop release guide](apps/desktop/RELEASE.md) for building and signing the app.
+
 ## Development
 
 A pnpm workspace for Node.js 22 and pnpm 10. The gate, in order:

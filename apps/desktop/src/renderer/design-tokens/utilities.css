@@ -1,0 +1,702 @@
+/**
+ * Shared vAPI utility classes used by both apps.
+ * App-specific utilities (RainbowKit overrides, patterns, transfer animations)
+ * stay in the owning app's entry CSS.
+ */
+
+@layer utilities {
+  /* Hard offset shadows — the only shadows in the design system. */
+  .shadow-hard {
+    box-shadow: var(--vapi-shadow-hard);
+  }
+  .shadow-hard-sm {
+    box-shadow: var(--vapi-shadow-hard-sm);
+  }
+
+  .vapi-depth-flat {
+    border: 1px solid var(--color-line);
+    border-radius: var(--vapi-radius-base);
+    background: var(--color-surface-flat);
+    box-shadow: none;
+  }
+  .vapi-depth-raised {
+    border: 1px solid var(--color-border);
+    border-radius: var(--vapi-radius-base);
+    background: var(--color-surface-raised);
+    box-shadow: var(--vapi-shadow-hard-sm);
+  }
+  .vapi-depth-focal {
+    border: 1px solid var(--color-border);
+    border-radius: var(--vapi-radius-base);
+    background: var(--color-surface-focal);
+    box-shadow: var(--vapi-shadow-hard);
+  }
+
+  .vapi-control-ladder {
+    border: 1px solid var(--color-fg-dim);
+    background: var(--color-background);
+    color: var(--color-foreground);
+    transition:
+      background-color var(--vapi-motion-fast),
+      border-color var(--vapi-motion-fast),
+      color var(--vapi-motion-fast);
+  }
+  /* Zero specificity so a caller's own h-* utility (the Select's h-11 / lg:h-9
+     ladder, a toolbar matching its search field) wins over this default. */
+  :where(.vapi-control-ladder:not(textarea):not(fieldset)) {
+    height: 36px;
+  }
+  .vapi-control-ladder:where(:not(:disabled):not([aria-disabled="true"])):hover,
+  .vapi-control-ladder[data-state="open"] {
+    border-color: var(--color-foreground);
+  }
+  .vapi-control-ladder:focus-visible {
+    outline: 2px solid var(--color-foreground);
+    outline-offset: 2px;
+  }
+  .vapi-control-ladder:disabled,
+  .vapi-control-ladder[aria-disabled="true"] {
+    border-color: var(--color-fg-dim);
+    background: var(--color-disabled);
+    color: var(--color-fg-dim);
+  }
+  .vapi-control-ladder[aria-invalid="true"],
+  .vapi-control-ladder[aria-invalid="true"]:hover,
+  .vapi-control-ladder[aria-invalid="true"][data-state="open"],
+  .vapi-control-ladder[aria-invalid="true"]:focus-visible {
+    border-color: var(--color-tone-pink-line);
+  }
+
+  /* Shared theme control and tooltip also work on campaign routes that import
+     the token stylesheet without Tailwind's generated utility bundle. */
+  .vapi-theme-toggle {
+    display: inline-flex;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    align-items: center;
+    justify-content: center;
+    color: var(--vapi-color-foreground);
+    background: var(--vapi-color-background);
+    border: 1px solid var(--vapi-color-foreground);
+    border-radius: 0;
+    cursor: pointer;
+    transition:
+      color 200ms,
+      background-color 200ms,
+      border-color 200ms;
+  }
+  .vapi-theme-toggle__mark {
+    display: block;
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    aspect-ratio: 1;
+  }
+  .vapi-theme-toggle:hover {
+    color: var(--vapi-color-foreground);
+    background: var(--vapi-color-accent);
+    border-color: var(--vapi-color-foreground);
+  }
+  .vapi-theme-toggle:focus-visible {
+    outline: 2px solid var(--vapi-color-foreground);
+    outline-offset: 2px;
+  }
+  @media (min-width: 768px) {
+    .vapi-theme-toggle[data-compact="true"] {
+      width: 36px;
+      height: 36px;
+    }
+  }
+
+  /* Reveal the newly selected theme across the full viewport. A broad mask
+     feather gives the moving boundary a soft glow without obscuring content. */
+  html[data-theme-transition]::view-transition-group(root),
+  html[data-theme-transition]::view-transition-old(root) {
+    animation: none;
+  }
+  html[data-theme-transition]::view-transition-old(root) {
+    z-index: 1;
+    mix-blend-mode: normal;
+  }
+  html[data-theme-transition]::view-transition-new(root) {
+    z-index: 2;
+    mix-blend-mode: normal;
+    animation-duration: 560ms;
+    animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+    animation-fill-mode: both;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-size: 240% 100%;
+    mask-size: 240% 100%;
+  }
+  html[data-theme-transition="to-dark"]::view-transition-new(root) {
+    animation-name: vapi-theme-reveal-from-left;
+    -webkit-mask-image: linear-gradient(to right, #000 0 50%, transparent 54% 100%);
+    mask-image: linear-gradient(to right, #000 0 50%, transparent 54% 100%);
+  }
+  html[data-theme-transition="to-light"]::view-transition-new(root) {
+    animation-name: vapi-theme-reveal-from-right;
+    -webkit-mask-image: linear-gradient(to left, #000 0 50%, transparent 54% 100%);
+    mask-image: linear-gradient(to left, #000 0 50%, transparent 54% 100%);
+  }
+  @keyframes vapi-theme-reveal-from-left {
+    from {
+      -webkit-mask-position: 100% 0;
+      mask-position: 100% 0;
+    }
+    to {
+      -webkit-mask-position: 0 0;
+      mask-position: 0 0;
+    }
+  }
+  @keyframes vapi-theme-reveal-from-right {
+    from {
+      -webkit-mask-position: 0 0;
+      mask-position: 0 0;
+    }
+    to {
+      -webkit-mask-position: 100% 0;
+      mask-position: 100% 0;
+    }
+  }
+
+  .vapi-tooltip-root {
+    position: relative;
+    display: inline-flex;
+  }
+  .vapi-tooltip-content {
+    position: absolute;
+    z-index: 50;
+    width: max-content;
+    max-width: 16rem;
+    padding: 8px 12px;
+    color: var(--vapi-color-card-foreground);
+    font-size: 12px;
+    line-height: 1.45;
+    pointer-events: none;
+    background: var(--vapi-color-card);
+    border: 1px solid var(--vapi-color-border);
+    border-radius: 0;
+    box-shadow: var(--vapi-shadow-hard-sm);
+    opacity: 0;
+    transition: opacity 150ms;
+  }
+  .vapi-tooltip-content[data-side="top"] {
+    bottom: 100%;
+    left: 50%;
+    margin-bottom: 8px;
+    transform: translateX(-50%);
+  }
+  .vapi-tooltip-content[data-side="bottom"] {
+    top: 100%;
+    left: 50%;
+    margin-top: 8px;
+    transform: translateX(-50%);
+  }
+  .vapi-tooltip-root:hover .vapi-tooltip-content,
+  .vapi-tooltip-root:focus-within .vapi-tooltip-content {
+    opacity: 1;
+  }
+}
+
+@layer components {
+  /* Shared flat button recipe. Variant and size modifiers keep the rendered
+     control identical in Tailwind, Astro, and plain-CSS consumers. */
+  .vapi-btn {
+    -webkit-appearance: none;
+    appearance: none;
+    box-sizing: border-box;
+    display: inline-flex;
+    height: 44px;
+    margin: 0;
+    padding: 0 16px;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border: 1px solid var(--vapi-color-border);
+    border-radius: var(--vapi-radius-base);
+    color: var(--vapi-color-foreground);
+    font-family: var(--vapi-font-sans);
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1.5;
+    letter-spacing: 0;
+    text-align: center;
+    text-decoration: none;
+    background-color: transparent;
+    cursor: pointer;
+    /* Soft, unhurried state changes: hover, press and enable all ease. */
+    transition:
+      background-color var(--vapi-motion-slow) var(--vapi-ease-enter),
+      border-color var(--vapi-motion-slow) var(--vapi-ease-enter),
+      color var(--vapi-motion-slow) var(--vapi-ease-enter),
+      opacity var(--vapi-motion-slow) var(--vapi-ease-enter);
+  }
+  .vapi-btn:focus-visible {
+    outline: 2px solid var(--vapi-color-foreground);
+    outline-offset: 2px;
+    box-shadow: none;
+  }
+  .vapi-btn--default {
+    color: var(--vapi-color-primary-foreground);
+    background-color: var(--vapi-color-primary);
+  }
+  .vapi-btn--default:hover {
+    background-color: var(--vapi-color-primary-hover);
+  }
+  /* A quiet hairline that firms up on hover, not a hard outline. */
+  .vapi-btn--secondary {
+    border-color: var(--vapi-color-line-2);
+    color: var(--vapi-color-foreground);
+    background-color: transparent;
+  }
+  .vapi-btn--secondary:hover {
+    border-color: var(--vapi-color-fg-dimmer);
+    background-color: var(--vapi-color-hover-surface);
+  }
+  .vapi-btn--ghost {
+    border-color: transparent;
+    color: var(--vapi-color-foreground);
+    background-color: transparent;
+  }
+  .vapi-btn--ghost:hover {
+    background-color: var(--vapi-color-hover-surface);
+  }
+  .vapi-btn--destructive {
+    border-color: color-mix(in srgb, var(--vapi-color-pink) 40%, transparent);
+    color: var(--vapi-color-pink-text);
+    background-color: var(--vapi-color-background);
+  }
+  .vapi-btn--destructive:hover {
+    border-color: var(--vapi-color-pink);
+    background-color: var(--vapi-color-hover-surface);
+  }
+  .vapi-btn:active {
+    background-color: var(--vapi-color-pressed-surface);
+    box-shadow: none;
+    transform: none;
+  }
+  .vapi-btn--default:active {
+    background-color: var(--vapi-color-primary-pressed);
+  }
+  .vapi-btn--sm {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+  .vapi-btn--icon {
+    width: 44px;
+    padding-right: 0;
+    padding-left: 0;
+  }
+  .vapi-btn--md {
+    height: 36px;
+  }
+  .vapi-btn--compact {
+    height: 32px;
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+  .vapi-btn--touch {
+    height: 44px;
+  }
+  .vapi-btn--icon-md {
+    width: 36px;
+    height: 36px;
+    padding-right: 0;
+    padding-left: 0;
+  }
+  .vapi-stake-cta,
+  .vapi-stake-cta:hover,
+  .vapi-stake-cta:active {
+    border-color: var(--vapi-color-foreground);
+    color: var(--vapi-color-black);
+    background-color: var(--vapi-color-orange);
+  }
+  .vapi-stake-mark-ink {
+    background: var(--vapi-color-black);
+  }
+  .vapi-stake-mark-white {
+    background: var(--vapi-color-white);
+  }
+  .vapi-stake-mark-cell {
+    transition: background-color var(--vapi-motion-fast) ease-out;
+  }
+  .vapi-stake-cta {
+    min-height: 48px;
+    font-size: 15px;
+    line-height: 20px;
+    transition: background-color var(--vapi-motion-fast) ease-out;
+  }
+  .vapi-stake-cta:active:not(:disabled, [aria-disabled="true"]) {
+    background-color: color-mix(in srgb, var(--vapi-color-orange) 80%, var(--vapi-color-black));
+  }
+  /* Hover reads like the header product tabs: the mark's cells turn ink and
+     pulse in turn, clockwise (delays set per cell). */
+  @keyframes vapi-stake-mark-hover {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.55;
+    }
+  }
+  .vapi-stake-cta:is(:hover, :focus-visible):not(:disabled, [aria-disabled="true"])
+    .vapi-stake-mark-cell {
+    background: var(--vapi-color-black);
+    animation: vapi-stake-mark-hover 1200ms ease-in-out infinite;
+  }
+  /* Disabled keeps its variant and fades back instead of turning into a
+     grey outlined box, so enabling it reads as a smooth fade-in. */
+  .vapi-btn:is(:disabled, [aria-disabled="true"]) {
+    opacity: 0.4;
+    pointer-events: none;
+  }
+  /* Height is a size token. Variant never changes geometry, so a default
+     primary and a default secondary stay flush in the same action row. */
+  @media (min-width: 640px) {
+    .vapi-btn--sm {
+      height: 40px;
+    }
+    .vapi-btn--icon {
+      width: 40px;
+      height: 40px;
+    }
+    .vapi-stake-cta:not(.vapi-stake-cta--sheet) {
+      min-height: 44px;
+    }
+  }
+  .vapi-escrow-chip {
+    font-family: var(--vapi-font-mono);
+  }
+}
+
+@layer utilities {
+  /* Shared async-button loader. Campaign and product surfaces use the handoff's
+     three-block `Waiting` state; the original label stays in layout and
+     accessible so geometry and the button's name never change. */
+  @keyframes vapi-btn-cascade {
+    0%,
+    60%,
+    100% {
+      opacity: 0.25;
+    }
+    20% {
+      opacity: 1;
+    }
+    40% {
+      opacity: 0.5;
+    }
+  }
+  .vapi-btn-waiting {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    white-space: nowrap;
+  }
+  .vapi-btn[aria-busy="true"],
+  .vapi-btn--signal[aria-busy="true"] {
+    opacity: 1;
+  }
+  .vapi-btn-cascade {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .vapi-btn-loading-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    opacity: 0;
+  }
+  .vapi-btn-cascade > span {
+    width: 6px;
+    height: 6px;
+    background: currentColor;
+    animation: vapi-btn-cascade 900ms cubic-bezier(0.65, 0, 0.35, 1) infinite;
+  }
+  .vapi-btn-cascade > span:nth-child(1) {
+    animation-delay: -220ms;
+  }
+  .vapi-btn-cascade > span:nth-child(2) {
+    animation-delay: -110ms;
+  }
+  .vapi-btn-cascade > span:nth-child(3) {
+    animation-delay: 0ms;
+  }
+  .vapi-visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .vapi-stake-cta,
+    .vapi-stake-mark-cell {
+      transition: none;
+    }
+    .vapi-stake-cta .vapi-stake-mark-cell {
+      animation: none !important;
+    }
+    .vapi-control-ladder,
+    .vapi-theme-toggle,
+    .vapi-theme-toggle__mark,
+    .vapi-tooltip-content {
+      transition: none;
+    }
+    .vapi-btn-cascade > span {
+      animation: none;
+    }
+    .vapi-btn-cascade > span:nth-child(1) {
+      opacity: 1;
+    }
+    .vapi-btn-cascade > span:nth-child(2) {
+      opacity: 0.5;
+    }
+    .vapi-btn-cascade > span:nth-child(3) {
+      opacity: 0.25;
+    }
+  }
+
+  /* Brand priority: orange, Base blue, pink, lime, then cyan and purple. */
+  .vapi-highlight {
+    background: linear-gradient(
+      90deg,
+      var(--vapi-color-orange) 0 52%,
+      var(--vapi-color-blue) 52% 76%,
+      var(--vapi-color-pink) 76% 90%,
+      var(--vapi-color-lime) 90% 97%,
+      var(--vapi-color-cyan) 97% 99%,
+      var(--vapi-color-purple) 99% 100%
+    );
+  }
+
+  /* Scroll reveal. Content is only hidden when JS is running (html[data-js]),
+     so crawlers and no-JS visitors always see the page. */
+  html[data-js] .reveal {
+    opacity: 0;
+    transform: translateY(16px);
+    transition:
+      opacity 0.8s ease,
+      transform 0.8s ease;
+  }
+  html[data-js] .reveal.in {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html[data-js] .reveal {
+      opacity: 1;
+      transform: none;
+      transition: none;
+    }
+  }
+
+  /* The one overlay entrance: menus, select popovers, dialogs' content, the
+     command palette. Enter-only by design — closing is the user leaving, so it
+     is instant. Animates `translate`, not `transform`, so it composes with any
+     transform the surface already carries (popper positioning, the palette's
+     translateX centering). */
+  @keyframes vapi-pop {
+    from {
+      opacity: 0;
+      translate: 0 -4px;
+    }
+    to {
+      opacity: 1;
+      translate: 0 0;
+    }
+  }
+  @keyframes vapi-pop-fade {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  .vapi-pop {
+    transform-origin: top;
+    animation: vapi-pop 160ms cubic-bezier(0.23, 1, 0.32, 1) both;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .vapi-pop {
+      translate: none;
+      animation: vapi-pop-fade 120ms ease both;
+    }
+  }
+
+  /* Lime pulse dot (status tags, live markers). */
+  @keyframes vapi-pulse {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 rgba(195, 255, 61, 0.6);
+    }
+    50% {
+      box-shadow: 0 0 0 8px rgba(195, 255, 61, 0);
+    }
+  }
+  .vapi-pulse {
+    animation: vapi-pulse 2s infinite;
+  }
+
+  /* Signal-lock interaction — the shared vAPI hover language. One orange
+     packet pinned at the corner, fading in with a single restrained pulse.
+     No rail, no growing line: the block is the whole signal. */
+  :where(.vapi-track-link, .vapi-signal, .vapi-btn--signal, .glitch) {
+    --vapi-signal-block-x: 4px;
+    --vapi-signal-block-y: 4px;
+    position: relative;
+    isolation: isolate;
+  }
+
+  .vapi-track-link {
+    --vapi-signal-block-x: -7px;
+    --vapi-signal-block-y: 0.08em;
+    width: fit-content;
+    padding-bottom: 0.24rem;
+    transition: color 360ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .vapi-signal,
+  .vapi-btn--signal,
+  .glitch {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .vapi-track-link::after,
+  .vapi-signal::after,
+  .vapi-btn--signal::after,
+  .glitch::after {
+    position: absolute;
+    top: var(--vapi-signal-block-y);
+    left: var(--vapi-signal-block-x);
+    width: 4px;
+    height: 4px;
+    background: var(--vapi-color-orange);
+    content: "";
+    opacity: 0;
+    pointer-events: none;
+    transform: scale(0.7);
+    transition:
+      opacity 180ms ease,
+      transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .vapi-track-link:hover,
+  .vapi-track-link:focus-visible {
+    color: var(--vapi-color-foreground);
+  }
+
+  :is(.vapi-track-link, .vapi-signal, .vapi-btn--signal, .glitch):is(
+      :hover,
+      :focus-visible,
+      [aria-current="page"]
+    )::after {
+    opacity: 1;
+    transform: scale(1);
+    animation: vapi-signal-pulse 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .glitch > .glitch-label {
+    position: relative;
+    z-index: 1;
+  }
+
+  :is(.vapi-track-link, .vapi-signal, .vapi-btn--signal, .glitch):is(
+      :disabled,
+      [aria-disabled="true"]
+    )::after {
+    display: none;
+  }
+
+  @keyframes vapi-signal-pulse {
+    0% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--vapi-color-orange) 60%, transparent);
+      transform: scale(0.7);
+    }
+    58% {
+      box-shadow: 0 0 0 5px transparent;
+      transform: scale(1.18);
+    }
+    100% {
+      box-shadow: 0 0 0 0 transparent;
+      transform: scale(1);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .vapi-track-link,
+    .vapi-track-link::after,
+    .vapi-signal,
+    .vapi-signal::after,
+    .vapi-btn--signal,
+    .vapi-btn--signal::after,
+    .glitch,
+    .glitch::after,
+    .glitch > .glitch-label {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
+}
+
+/**
+ * Brand wordmark lockup, shared by the marketing nav and the product shell.
+ * Space Grotesk's line metrics put the baseline at the box edge at .692, so the
+ * logo mark and the uppercase letters share one visible bottom. Both apps read
+ * this definition; do not restate these metrics in a component.
+ */
+.vapi-brand-wordmark {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.015em;
+  line-height: 0.692;
+  white-space: nowrap;
+}
+
+.vapi-brand-wordmark__mark {
+  position: relative;
+  display: block;
+  width: 0.632em;
+  height: 0.56em;
+  flex: none;
+}
+
+.vapi-brand-wordmark__image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  object-position: left bottom;
+}
+
+.vapi-brand-wordmark__letters {
+  font: inherit;
+  line-height: inherit;
+  letter-spacing: -0.075em;
+}
+
+/**
+ * Text set beside the lockup — the "Network" suffix, the nav breadcrumb — must
+ * carry the lockup's line metrics, not the body's. At the body's 1.5 that text's
+ * line box hangs below the shared baseline and above the cap line, so the row's
+ * flex box grows taller than its ink and centring it centres empty space — the
+ * wordmark then reads ~4px high against anything beside it. At .692 the box runs
+ * cap-top to baseline like the letters, so the row hugs its own ink: baseline
+ * alignment lines the text up with the lockup, and the row still centres on what
+ * the eye sees.
+ */
+.vapi-brand-wordmark__suffix {
+  line-height: 0.692;
+}

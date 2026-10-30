@@ -1,0 +1,161 @@
+/**
+ * Tailwind v4 theme mapping for the vAPI design system.
+ * Maps raw --vapi-* tokens (tokens.css) onto Tailwind theme variables so both
+ * apps share identical utility names. Import order in each app's entry CSS:
+ *   tailwindcss → tokens.css → fonts.css → theme.css → base.css → utilities.css
+ */
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --font-sans: var(--vapi-font-sans);
+  --font-heading: var(--vapi-font-sans);
+  --font-mono: var(--vapi-font-mono);
+  --font-display: var(--vapi-font-display);
+
+  --color-background: var(--vapi-color-background);
+  --color-foreground: var(--vapi-color-foreground);
+  --color-card: var(--vapi-color-card);
+  --color-card-foreground: var(--vapi-color-card-foreground);
+  --color-primary: var(--vapi-color-primary);
+  --color-primary-foreground: var(--vapi-color-primary-foreground);
+  --color-primary-hover: var(--vapi-color-primary-hover);
+  --color-primary-pressed: var(--vapi-color-primary-pressed);
+  --color-hover-surface: var(--vapi-color-hover-surface);
+  --color-pressed-surface: var(--vapi-color-pressed-surface);
+  --color-secondary: var(--vapi-color-secondary);
+  --color-secondary-foreground: var(--vapi-color-secondary-foreground);
+  --color-muted: var(--vapi-color-muted);
+  --color-muted-foreground: var(--vapi-color-muted-foreground);
+  --color-accent: var(--vapi-color-accent);
+  --color-accent-foreground: var(--vapi-color-accent-foreground);
+  --color-destructive: var(--vapi-color-destructive);
+  --color-destructive-foreground: var(--vapi-color-destructive-foreground);
+  --color-border: var(--vapi-color-border);
+  --color-input: var(--vapi-color-input);
+  --color-ring: var(--vapi-color-ring);
+  --color-header: var(--vapi-color-header);
+  --color-header-foreground: var(--vapi-color-header-foreground);
+  --color-toast-surface: var(--vapi-color-toast-surface);
+  --color-toast-border: var(--vapi-color-toast-border);
+  --color-link: var(--vapi-color-link);
+  --color-scrim: var(--vapi-color-scrim);
+  --color-drawer-scrim: var(--vapi-color-drawer-scrim);
+  --color-header-hover: var(--vapi-color-header-hover);
+  --color-header-muted: var(--vapi-color-header-muted);
+  --color-footer-muted: var(--vapi-color-footer-muted);
+  --color-header-marker-dim: var(--vapi-color-header-marker-dim);
+  --color-header-line: var(--vapi-color-header-line);
+  --color-elevated: var(--vapi-color-elevated);
+  --color-elevated-border: var(--vapi-color-elevated-border);
+  --color-inverse-surface: var(--vapi-color-inverse-surface);
+  --color-inverse-border: var(--vapi-color-inverse-border);
+  --color-inverse-foreground: var(--vapi-color-inverse-foreground);
+  --color-inverse-muted: var(--vapi-color-inverse-muted);
+  --color-inverse-hover: var(--vapi-color-inverse-hover);
+  --color-inverse-link: var(--vapi-color-inverse-link);
+  --color-disabled: var(--vapi-color-disabled);
+  --color-skeleton: var(--vapi-color-skeleton);
+  --radius: var(--vapi-radius-base);
+  --shadow-sheet: var(--vapi-shadow-sheet);
+  --shadow-popover: var(--vapi-shadow-popover);
+  --shadow-popover-inverse: var(--vapi-shadow-popover-inverse);
+  --ease-enter: var(--vapi-ease-enter);
+  --ease-exit: var(--vapi-ease-exit);
+
+  /* Surface / line / dim-text scale (hairline grids) */
+  --color-surface: var(--vapi-color-surface);
+  --color-surface-2: var(--vapi-color-surface-2);
+  --color-surface-3: var(--vapi-color-surface-3);
+  --color-app-canvas: var(--vapi-color-app-canvas);
+  --color-surface-flat: var(--vapi-color-surface-flat);
+  --color-surface-raised: var(--vapi-color-surface-raised);
+  --color-surface-focal: var(--vapi-color-surface-focal);
+  --color-line: var(--vapi-color-line);
+  --color-line-2: var(--vapi-color-line-2);
+  --color-fg-dim: var(--vapi-color-fg-dim);
+  --color-overlay: var(--vapi-color-overlay);
+  --color-fg-dimmer: var(--vapi-color-fg-dimmer);
+
+  /* Campaign/editorial surfaces share the same light/dark semantic source. */
+  --color-campaign-warm: var(--vapi-color-campaign-warm);
+  --color-editorial-paper: var(--vapi-color-editorial-paper);
+
+  /* Brand accents (theme-independent) */
+  --color-lime: var(--vapi-color-lime);
+  --color-cyan: var(--vapi-color-cyan);
+  --color-pink: var(--vapi-color-pink);
+  --color-purple: var(--vapi-color-purple);
+  --color-blue: var(--vapi-color-blue);
+  --color-orange: var(--vapi-color-orange);
+
+  /* Contrast-safe accent text: dark variant in light mode, bright in dark mode. */
+  --color-orange-text: var(--vapi-color-orange-text);
+  --color-lime-text: var(--vapi-color-lime-text);
+  --color-cyan-text: var(--vapi-color-cyan-text);
+  --color-pink-text: var(--vapi-color-pink-text);
+  --color-purple-text: var(--vapi-color-purple-text);
+  --color-blue-text: var(--vapi-color-blue-text);
+
+  /* Task statuses */
+  --color-status-open-border: var(--vapi-status-open-border);
+  --color-status-open-bg: var(--vapi-status-open-bg);
+  --color-status-open-fg: var(--vapi-status-open-fg);
+  --color-status-open-marker: var(--vapi-status-open-marker);
+  --color-status-taken-border: var(--vapi-status-taken-border);
+  --color-status-taken-bg: var(--vapi-status-taken-bg);
+  --color-status-taken-fg: var(--vapi-status-taken-fg);
+  --color-status-taken-marker: var(--vapi-status-taken-marker);
+  --color-status-awarded-border: var(--vapi-status-awarded-border);
+  --color-status-awarded-bg: var(--vapi-status-awarded-bg);
+  --color-status-awarded-fg: var(--vapi-status-awarded-fg);
+  --color-status-awarded-marker: var(--vapi-status-awarded-marker);
+  --color-status-funded-border: var(--vapi-status-funded-border);
+  --color-status-funded-bg: var(--vapi-status-funded-bg);
+  --color-status-funded-fg: var(--vapi-status-funded-fg);
+  --color-status-funded-marker: var(--vapi-status-funded-marker);
+  --color-status-funded-marker-border: var(--vapi-status-funded-marker-border);
+  --color-status-delivered-border: var(--vapi-status-delivered-border);
+  --color-status-delivered-bg: var(--vapi-status-delivered-bg);
+  --color-status-delivered-fg: var(--vapi-status-delivered-fg);
+  --color-status-delivered-marker: var(--vapi-status-delivered-marker);
+  --color-status-paid-border: var(--vapi-status-paid-border);
+  --color-status-paid-bg: var(--vapi-status-paid-bg);
+  --color-status-paid-fg: var(--vapi-status-paid-fg);
+  --color-status-paid-marker: var(--vapi-status-paid-marker);
+  --color-status-refunded-border: var(--vapi-status-refunded-border);
+  --color-status-refunded-bg: var(--vapi-status-refunded-bg);
+  --color-status-refunded-fg: var(--vapi-status-refunded-fg);
+  --color-status-refunded-marker: var(--vapi-status-refunded-marker);
+  --color-status-disputed-border: var(--vapi-status-disputed-border);
+  --color-status-disputed-bg: var(--vapi-status-disputed-bg);
+  --color-status-disputed-fg: var(--vapi-status-disputed-fg);
+  --color-status-disputed-marker: var(--vapi-status-disputed-marker);
+  --color-status-expired-border: var(--vapi-status-expired-border);
+  --color-status-expired-bg: var(--vapi-status-expired-bg);
+  --color-status-expired-fg: var(--vapi-status-expired-fg);
+  --color-status-expired-marker: var(--vapi-status-expired-marker);
+  --color-status-closed-border: var(--vapi-status-closed-border);
+  --color-status-closed-bg: var(--vapi-status-closed-bg);
+  --color-status-closed-fg: var(--vapi-status-closed-fg);
+  --color-status-closed-marker: var(--vapi-status-closed-marker);
+
+  /* Escrow chip */
+  --color-escrow-chip-border: var(--vapi-escrow-chip-border);
+  --color-escrow-chip-label: var(--vapi-escrow-chip-label);
+  --color-escrow-chip-fg: var(--vapi-escrow-chip-fg);
+
+  /* Accent tones */
+  --color-tone-lime-text: var(--vapi-tone-lime-text);
+  --color-tone-lime-surface: var(--vapi-tone-lime-surface);
+  --color-tone-lime-line: var(--vapi-tone-lime-line);
+  --color-tone-cyan-text: var(--vapi-tone-cyan-text);
+  --color-tone-cyan-surface: var(--vapi-tone-cyan-surface);
+  --color-tone-cyan-line: var(--vapi-tone-cyan-line);
+  --color-tone-pink-text: var(--vapi-tone-pink-text);
+  --color-tone-pink-surface: var(--vapi-tone-pink-surface);
+  --color-tone-pink-line: var(--vapi-tone-pink-line);
+  --color-tone-orange-text: var(--vapi-tone-orange-text);
+  --color-tone-orange-surface: var(--vapi-tone-orange-surface);
+  --color-tone-orange-line: var(--vapi-tone-orange-line);
+}
