@@ -1,0 +1,50 @@
+{
+  "name": "@vapi/desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "vAPI Desktop \u2014 the non-custodial agent-wallet app for macOS and Windows",
+  "type": "module",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "bash scripts/copy-mcp-shim.sh && electron-vite build",
+    "preview": "electron-vite preview",
+    "pack:mac": "pnpm build && electron-builder --mac --publish never --config electron-builder.config.cjs",
+    "check:packaged": "node scripts/check-packaged.mjs",
+    "test": "bash scripts/copy-mcp-shim.sh && vitest run",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "native:build": "bash native/build.sh",
+    "resources:shim": "bash scripts/copy-mcp-shim.sh",
+    "check:copy": "node scripts/check-copy.mjs"
+  },
+  "dependencies": {
+    "@vapi-network/core": "workspace:*",
+    "@vapi-network/mcp": "workspace:*",
+    "electron-updater": "6.8.11",
+    "lucide-react": "^0.555.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "viem": "^2.43.5",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@electron/fuses": "^2.0.0",
+    "@tailwindcss/vite": "^4.2.2",
+    "@types/node": "^22.18.6",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vapi-network/mcp-shim": "workspace:*",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "45.0.0",
+    "electron-builder": "^26.0.0",
+    "electron-vite": "^4.0.0",
+    "jsdom": "30.0.1",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^5.9.0",
+    "vite": "7.3.5",
+    "vitest": "^3.2.0"
+  },
+  "license": "Apache-2.0"
+}

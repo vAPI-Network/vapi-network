@@ -1,0 +1,129 @@
+name: Desktop release
+
+on:
+  push:
+    tags: ["desktop-v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Desktop release (signed)
+    runs-on: macos-15
+    permissions:
+      contents: write
+    environment: desktop-signing
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Check release version
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { tagVersion } from './apps/desktop/scripts/release-verify.mjs';
+          const { version } = JSON.parse(readFileSync('apps/desktop/package.json', 'utf8'));
+          if (tagVersion(process.env.TAG) !== version) throw new Error('Tag version must equal apps/desktop/package.json version');
+          JS
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Build native helpers
+        run: pnpm --dir apps/desktop native:build
+
+      - name: Test desktop
+        run: |
+          set -euo pipefail
+          node --test apps/desktop/scripts/*.test.mjs
+          pnpm --dir apps/desktop check:copy
+          pnpm --dir apps/desktop test
+          pnpm --dir apps/desktop typecheck
+
+      - name: Build signed and notarized app
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          : "${CSC_LINK:?Missing CSC_LINK}"
+          : "${CSC_KEY_PASSWORD:?Missing CSC_KEY_PASSWORD}"
+          : "${APPLE_ID:?Missing APPLE_ID}"
+          : "${APPLE_APP_SPECIFIC_PASSWORD:?Missing APPLE_APP_SPECIFIC_PASSWORD}"
+          : "${APPLE_TEAM_ID:?Missing APPLE_TEAM_ID}"
+          rm -rf apps/desktop/release
+          pnpm --dir apps/desktop pack:mac
+
+      - name: Check packaged app
+        run: pnpm --dir apps/desktop check:packaged
+
+      - name: Prepare rollout metadata and checksums
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'JS'
+          import { createReadStream, existsSync, readFileSync, readdirSync, renameSync, writeFileSync } from 'node:fs';
+          import { createHash } from 'node:crypto';
+          import { execFileSync } from 'node:child_process';
+          import { parseLatestYml } from './apps/desktop/scripts/release-verify.mjs';
+          const dir = 'apps/desktop/release';
+          const path = `${dir}/latest-mac.yml`;
+          const latest = readFileSync(path, 'utf8').replace(/^stagingPercentage:.*\r?\n?/gm, '');
+          const artifacts = new Map();
+          for (const name of readdirSync(dir).filter(name => /\.(dmg|zip)$/.test(name))) {
+            const hash = createHash('sha512');
+            for await (const chunk of createReadStream(`${dir}/${name}`)) hash.update(chunk);
+            artifacts.set(name, hash.digest('base64'));
+          }
+          const update = parseLatestYml(latest);
+          for (const file of update.files) {
+            const matches = [...artifacts].filter(([name, hash]) => hash === file.sha512 && name.endsWith(file.url.endsWith('.dmg') ? '.dmg' : '.zip'));
+            if (matches.length !== 1) throw new Error(`Cannot identify update artifact: ${file.url}`);
+            const [name] = matches[0];
+            if (name === file.url) continue;
+            if (existsSync(`${dir}/${file.url}`)) throw new Error(`Artifact destination already exists: ${file.url}`);
+            renameSync(`${dir}/${name}`, `${dir}/${file.url}`);
+            if (existsSync(`${dir}/${name}.blockmap`)) renameSync(`${dir}/${name}.blockmap`, `${dir}/${file.url}.blockmap`);
+          }
+          writeFileSync(path, `${latest.trimEnd()}\nstagingPercentage: 10\n`);
+          const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+          writeFileSync(`${dir}/build-info.json`, JSON.stringify({ commit, tag: process.env.TAG }, null, 2) + '\n');
+          JS
+          cd apps/desktop/release
+          shopt -s nullglob
+          artifacts=(*.dmg *.zip *.blockmap latest-mac.yml build-info.json)
+          shasum -a 256 -- "${artifacts[@]}" > SHA256SUMS
+
+      - name: Create public release draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd apps/desktop/release
+          shopt -s nullglob
+          artifacts=(*.dmg *.zip *.blockmap latest-mac.yml build-info.json SHA256SUMS)
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --title "vAPI Desktop ${TAG#desktop-v}" "${artifacts[@]}"

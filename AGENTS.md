@@ -12,13 +12,16 @@ non-custodial.
 - `packages/mcp`: stdio MCP server and tool registration
 - `packages/cli`: command parsing and command implementations
 - `packages/vapi-network`: bundled public distribution and `vapi` binary
+- `apps/desktop`: Electron app; the signer is the only process that touches
+  keys; macOS-only build
 - `examples`: direct SDK usage, type-checked by `pnpm typecheck` through
   `examples/tsconfig.json`
 - `scripts`: repository-wide staged publishing and tarball verification
 
 Dependencies point inward: `core` has no workspace dependency; `sources`
-depends on core; interface packages may depend on core and sources. Do not make
-core aware of the CLI, MCP protocol, or a specific registry.
+depends on core; interface packages may depend on core and sources. Apps may
+depend on any package. Do not make core aware of the CLI, MCP protocol, or a
+specific registry.
 
 ## Commands
 

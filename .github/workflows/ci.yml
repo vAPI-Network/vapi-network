@@ -46,3 +46,43 @@ jobs:
 
       - name: Verify publish tarballs
         run: pnpm pack:check
+
+  desktop:
+    name: vAPI Desktop (macOS)
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.27.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Build native helpers
+        run: pnpm --dir apps/desktop native:build
+
+      - name: Typecheck desktop
+        run: pnpm --dir apps/desktop typecheck
+
+      - name: Test desktop
+        run: pnpm --dir apps/desktop test
+
+      - name: Check desktop copy
+        run: pnpm --dir apps/desktop check:copy
+
+      - name: Test desktop scripts
+        run: node --test apps/desktop/scripts/*.test.mjs

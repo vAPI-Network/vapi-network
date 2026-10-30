@@ -1,0 +1,5 @@
+*.tsbuildinfo
+out/
+release/
+native/out/
+resources/mcp-shim/

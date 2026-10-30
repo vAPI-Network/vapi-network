@@ -1,0 +1,138 @@
+@import "tailwindcss";
+@import "./design-tokens/tokens.css";
+@import "./design-tokens/fonts.css";
+@import "./design-tokens/theme.css";
+@import "./design-tokens/base.css";
+@import "./design-tokens/utilities.css";
+
+@source "./";
+
+/* A desktop window, not a page: the app owns the full viewport and never scrolls as a whole. */
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.5;
+  user-select: none;
+}
+input,
+textarea,
+.selectable {
+  user-select: text;
+}
+
+@keyframes vapi-desktop-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+.vapi-waiting > span {
+  animation: vapi-desktop-pulse 1.4s ease-in-out infinite;
+}
+.vapi-waiting > span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.vapi-waiting > span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .vapi-waiting > span {
+    animation: none;
+  }
+}
+
+/* Boot loader: the console's block-assembly motion (apps/api/app/root.tsx), symmetric in and out. */
+@keyframes vapi-loader-block {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  18% {
+    opacity: 1;
+    transform: translateY(0);
+    animation-timing-function: linear;
+  }
+  62% {
+    opacity: 1;
+    transform: translateY(0);
+    animation-timing-function: cubic-bezier(0.65, 0, 0.35, 1);
+  }
+  82% {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+.vapi-boot rect {
+  opacity: 0;
+  transform-box: fill-box;
+  animation: vapi-loader-block 2000ms cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+.vapi-boot {
+  transition:
+    opacity 240ms var(--vapi-ease-enter, ease),
+    visibility 0s 240ms;
+}
+.vapi-boot.is-done {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .vapi-boot rect {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+  .vapi-boot {
+    transition: none;
+  }
+}
+
+:root {
+  color-scheme: dark;
+}
+
+/* Frameless window: these strips move the window; controls inside opt out. */
+.app-drag {
+  -webkit-app-region: drag;
+}
+.app-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Emergency Kit: only the sheet prints; on screen it is never shown. The sheet is portalled to
+   <body>, so hiding every other body child leaves no blank pages from the app's layout. */
+.kit-print {
+  display: none;
+}
+@media print {
+  html,
+  body {
+    height: auto;
+    overflow: visible;
+    background: #fff;
+  }
+  body > :not(.kit-print) {
+    display: none !important;
+  }
+  .kit-print {
+    display: block;
+    padding: 24mm 20mm;
+    color: #000;
+    font-size: 11pt;
+    line-height: 1.5;
+  }
+  .kit-print .kit-words {
+    columns: 3;
+    font-size: 14pt;
+    font-family: ui-monospace, monospace;
+  }
+}
