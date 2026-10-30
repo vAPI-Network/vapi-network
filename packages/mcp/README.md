@@ -33,7 +33,9 @@ It exposes the views as `ui://vapi/call-search.html` and `ui://vapi/call-inspect
 
 ## Exports
 
-### Runtime exports
+These tables show selected exports. [src/index.ts](https://github.com/vAPI-Network/vapi-network/blob/main/packages/mcp/src/index.ts) defines the full entry point. The [tool reference](https://github.com/vAPI-Network/vapi-network/blob/main/docs/mcp.md#tools) lists every registered MCP tool.
+
+### Selected runtime exports
 
 | Name                     | What it is                                                                                                                                                                                                                                                           | Since            |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
@@ -57,7 +59,7 @@ It exposes the views as `ui://vapi/call-search.html` and `ui://vapi/call-inspect
 | `WalletSession`          | class WalletSession                                                                                                                                                                                                                                                  | 0.5.0 or earlier |
 | `wrapUntrusted`          | function (tool: string, value: unknown): string                                                                                                                                                                                                                      | 0.5.0 or earlier |
 
-### Types
+### Selected types
 
 | Name                     | What it is                                                                                                                                                                                                                                                                                             | Since            |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------- |

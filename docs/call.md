@@ -4,14 +4,13 @@ Discovering, checking, publishing and paying for APIs are covered here; see [REA
 
 ## Reading search results
 
-That is the same order `vapi init` prints as its next steps, and the same order
-`vapi` alone lists. Two more are worth knowing early: `vapi inspect <ref>` shows
+Discovery and search are free. Call is live on production.
+Before paying, `vapi inspect <ref>` shows
 a listing's request contract and the registry's last observed 402 quote for free.
 `vapi pay` fetches a fresh quote before signing, and `vapi balance` shows what the wallet holds.
 
 `vapi search` tags each listing with its group, `[vapi]`, `[added]`,
-`[partner]` or `[external]`, and prints the network fee that is already inside
-the price. vAPI Call takes no fee. Providers are paid directly.
+`[partner]` or `[external]`, and prints the fee disclosure. vAPI Call takes no fee. Providers are paid directly.
 New listings show `No network fee`. Legacy listings whose endpoints still pay an
 old payout splitter show the registry's label and the percentage computed from
 its basis points, for example `Network fee kept by this API's legacy payout splitter (5%)`.
@@ -252,7 +251,7 @@ vAPI mirrors public x402 catalogs, so your API may already be listed without
 you. If it is, you can own those listings instead of publishing new ones:
 
 ```bash
-vapi claim https://weather.example --wallet payout   # the wallet the listings pay
+vapi claim https://weather.example --account payout   # the wallet the listings pay
 ```
 
 The registry sends an EIP-4361 message bound to its own host and to Base, with

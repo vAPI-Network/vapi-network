@@ -52,7 +52,7 @@ Removing a member keeps its local account, key, and profile. Dissolving a swarm 
 
 An account name and its recorded address identify one swarm account. Every new movement leg also records its resolved sender and recipient addresses before signing. Planning, execution and `vapi accounts distribute --resume` refuse a name that now resolves to another address. Restore the recorded account at that name before retrying.
 
-`vapi accounts remove` refuses every account named by a swarm or unfinished movement. This includes a sender whose leg is sent while another leg remains open. Retryable failures and failed legs with signed authorizations remain open. Terminal unsigned failures and cancelled legs do not. Rename protects the same names. Dissolve the swarm, resume the movement, or cancel its terminal legs before changing an account name.
+`vapi accounts remove` refuses every account named by a swarm or unfinished movement. This includes a sender whose leg is sent while another leg remains open. Retryable failures and failed legs with signed authorizations remain open. Non-restored terminal unsigned failures and cancelled legs do not. Restored legs stay open until sent or cancelled. Rename protects the same names. Dissolve the swarm, resume the movement, or cancel its terminal legs before changing an account name.
 
 Capital commands reconcile a sender's unfinished automatic ceiling sweep before planning or resuming another leg. Automatic sweeps perform the reciprocal check under the same sender lock. They reconcile signed movement legs when possible and skip with `unfinished_movement` while an authorization may still settle. The standalone `vapi sweep` command uses the same sender lock and refuses until the movement resumes or is safely cancelled.
 
@@ -239,7 +239,7 @@ railway sandbox destroy <sandbox-id>
 
 For a matching stale `starting` record, run its terminal confirmation command after the sandbox is gone. The confirmation retires that id-less sidecar with the reservation, so the member can start again.
 
-A sandbox nobody destroys stops at the idle timeout (30 minutes), the last backstop. Until then its key can spend what the member holds, which the balance limit keeps at 2.00 USDC or less.
+A sandbox nobody destroys stops at the idle timeout (30 minutes), the last backstop. Until then its key can spend what the member holds. The 2.00 USDC balance limit is checked at key export; it does not restrict later deposits.
 
 Railway authentication is whatever the `railway` CLI is logged into, or `RAILWAY_API_TOKEN`. vAPI never reads or stores Railway tokens.
 
@@ -270,7 +270,7 @@ The member's excess above 1 USDC sweeps to `earners-treasury`. Treasury funds ab
 
 ## What is safe
 
-Swarms are non-custodial, and every key stays on this device. Per-call caps, per-day caps, and ceilings limit each account separately. The treasury holds capital without an agent profile or loop.
+Swarms are non-custodial. Local runs keep keys on this device; the experimental Railway runtime exports each member key only with `--allow-remote-key`. Per-call caps, per-day caps, and ceilings limit each account separately. The treasury holds capital without an agent profile or loop.
 
 Each registered action passes one policy gate before it runs. Every movement is written before signing with one nonce and two resolved addresses per leg. A rerun skips sent legs and resumes bound planned or unknown legs without replacing a live nonce. An older planned leg without address bindings fails closed before signing.
 

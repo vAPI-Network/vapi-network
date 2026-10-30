@@ -1,11 +1,11 @@
 # Agents
 
-Agent commands and the launch flow are covered here; see [README.md](../README.md).
+Agents is live on production. Link accounts and set each agent's daily Router allowance on [My agents](https://api.vapinetwork.ai/agents); agent spend also shows on Usage. The commands below run agents locally; agent hosting is coming. See [README.md](../README.md).
 
 | Command                          | Options                                                                                                                                                                                                                                            | What it does                                                                                                     |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `vapi agent create <name>`       | `--model <id>`, `--instructions <file>`, `--call-budget <usd>`, `--max-per-call <usd>`, `--router-budget <usd>`, `--approve-above <usd>`, `--max-per-task <usd>`, `--auto-release-below <usd>`, `--include-unverified`, `--max-steps <n>`, `--yes` | Creates a capped local agent wallet, profile and owner link; `--yes` skips task policy prompts                   |
-| `vapi agent run <name> "<task>"` | `--budget <usd>`                                                                                                                                                                                                                                   | Runs the named agent with an optional hard budget across Call and Router top-ups                                 |
+| `vapi agent run <name> "<task>"` | `--budget <usd>`, `--detach`, `--runtime local`, `--result-file <path>`, `--json`                                                                                                                                                                  | Runs the named agent with an optional hard budget across Call and Router top-ups                                 |
 | `vapi agent list`                | None                                                                                                                                                                                                                                               | Lists profiles, links and today's Call and Router budgets                                                        |
 | `vapi agent show <name>`         | None                                                                                                                                                                                                                                               | Prints the agent's spend policy, caps and tools                                                                  |
 | `vapi agent pause <name>`        | None                                                                                                                                                                                                                                               | Stops future runs until the agent is resumed                                                                     |
@@ -17,8 +17,7 @@ Agent commands and the launch flow are covered here; see [README.md](../README.m
 
 ## Task policy
 
-`maxPerTaskUsd` (default $100), set with `--max-per-task`, caps one escrow
-funding. Escrow funding also counts against the wallet's per-day cap
+`maxPerTaskUsd` (default $100), set with `--max-per-task`, caps the running total of escrow funding and dispute fees reserved for one task. Tasks is coming soon on production. Escrow funding also counts against the wallet's per-day cap
 (`--call-budget`) and asks for approval above `--approve-above`.
 
 `autoReleaseBelowUsd` (default $25), set with `--auto-release-below`, lets
@@ -69,7 +68,7 @@ Fund its dedicated wallet with $2 of USDC on Base. The command opens the
 funding page and prints the address as a fallback:
 
 ```bash
-vapi fund --wallet researcher --amount 2
+vapi fund --account researcher --amount 2
 ```
 
 Run the research task locally:
@@ -81,10 +80,10 @@ vapi agent run researcher "Summarise today's Base DEX volume with sources"
 Show the paid calls recorded in the local append-only ledger:
 
 ```bash
-vapi receipts --wallet researcher
+vapi receipts --account researcher
 ```
 
-Open the vAPI console and show `researcher` under **Your agents**. The entry is
+Open the vAPI console and show `researcher` under My agents. The entry is
 the owner link for this local wallet, not a hosted agent process.
 
 Pause and resume it without deleting either the profile or wallet:
@@ -100,6 +99,6 @@ wallet on disk.
 
 ```bash
 vapi agent pause researcher
-vapi sweep 0xYOUR_OWNER_ADDRESS --wallet researcher
+vapi sweep 0xYOUR_OWNER_ADDRESS --account researcher
 vapi agent revoke researcher
 ```

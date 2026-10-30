@@ -52,7 +52,8 @@ vapi balance --json
 MCP clients get the same tools (`call.search`, `call.inspect`, `call.pay`, `wallet.balance`, `receipts.list`):
 
 ```bash
-vapi mcp install claude    # Claude Desktop
+vapi mcp install claude-code
+vapi mcp install claude-desktop
 vapi mcp install cursor
 vapi mcp install codex
 ```
@@ -75,7 +76,7 @@ vapi inspect <ref> --json
 vapi pay <ref> --body '{"city":"Lisbon"}' --max 0.02 --json > forecast.json
 ```
 
-1. **Search** with one short noun phrase and `--limit 10`. Read those 5 to 10 results before searching again or paging with `--cursor`. Each result has a `ref`, a price, a `group` and a `verification` tier. `--include-unverified` adds self-listed APIs that passed vAPI's automated probe but were never reviewed.
+1. **Search** with one short noun phrase and `--limit 10`. Read those 5 to 10 results before searching again or paging with `--cursor`. Each result has a `ref`, a price, a `group` and a `verification` tier. `--include-unverified` adds self-listed APIs that passed vAPI's automated probe but were never reviewed. Health and cheaper or healthier alternatives may be supplied; `--include-outage` includes APIs hidden by the default outage filter.
 2. **Inspect** the one you picked. It is free and shows the request contract (method, content type, request schema), the last observed quote and payee, and liveness. A listing with several endpoints needs `--endpoint <name>`. Build the request from the schema; never guess a field.
 3. **Pay** with `--max` set to the price you expect, in USD. `--body` takes the request as JSON; for a GET it is sent as query parameters. `vapi pay` fetches a fresh quote, checks it against `--max` and the caps, signs one USDC authorization for exactly that quote, and returns the provider's response with the payment and its proof.
 4. **Split** a task that needs several sources into one search, inspect and pay per source.
@@ -93,7 +94,7 @@ Prefer, in this order, among listings that fit the task:
 | Liveness       | Higher 7-day uptime, then lower p95 latency.                                         |
 | Price          | The lower quote, when the two are otherwise equal.                                   |
 
-`vapi inspect` prints a `Liveness:` line when vAPI has measured the listing: uptime over the last seven days of hourly checks, with p50 and p95 latency. No liveness line means not measured yet. That is common for a low-traffic listing and is no reason to skip it. A listing that fails three checks in a row is suspended and drops out of search, so search does not show listings known to be down.
+`vapi inspect` prints a `Liveness:` line when vAPI has measured the listing: uptime over the last seven days of hourly checks, with p50 and p95 latency. No liveness line means not measured yet. That is common for a low-traffic listing and is no reason to skip it. Three consecutive failed checks suspend a listing and remove it from discovery. The registry also hides APIs whose health is `outage` by default; `--include-outage` requests those results.
 
 Use these signals to break ties between listings that fit. Fit to the task comes first.
 
@@ -101,13 +102,17 @@ Use these signals to break ties between listings that fit. Fit to the task comes
 
 The CLI checks every payment against the account's caps before signing. A block is terminal: nothing was signed, nothing was paid, and retrying gives the same answer.
 
-| Code                    | Meaning                                                          |
-| ----------------------- | ---------------------------------------------------------------- |
-| `per_call_cap_exceeded` | The fresh quote is above the per-call cap.                       |
-| `per_day_cap_exceeded`  | This payment would take today's spend (UTC) above the daily cap. |
-| `max_price_exceeded`    | The fresh quote is above the `--max` you passed.                 |
+Current clients return `spend_cap_exceeded` with one of these `cap` values:
 
-Current clients return `spend_cap_exceeded` with `cap` set to `per_call`, `per_day` or `max_price` for these blocks; older clients used the codes above. Read `amountUsd`, `limitUsd`, optional `spentUsd`, and `command` for the attempted payment and guidance. MCP marks the result `retryable: false`.
+| `cap`        | Meaning                                                          |
+| ------------ | ---------------------------------------------------------------- |
+| `per_call`   | The fresh quote is above the per-call cap.                       |
+| `per_day`    | This payment would take today's spend (UTC) above the daily cap. |
+| `max_price`  | The fresh quote is above the `--max` you passed.                 |
+| `max_amount` | The fresh quote is above the SDK's `maxAtomic` limit.            |
+| `run_budget` | This payment would exceed the agent or swarm run budget.         |
+
+Read `amountUsd`, `limitUsd`, optional `spentUsd`, and `command` for the attempted payment and guidance. MCP marks the result `retryable: false`.
 
 Tell the user which cap blocked, the quote, and the command that changes it. The caps are the user's spending limit, so the user decides whether to raise them:
 
@@ -117,16 +122,16 @@ vapi accounts caps <account> --per-call 0.50 --per-day 5
 
 ## Recovery
 
-| What happened                                                    | Do this                                                                                                                                                                          |
-| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Provider answers 400 or 422, or the result has `expectedRequest` | Input does not match the contract. Run `vapi inspect` again and rebuild the body from its schema before paying again. A null `payment` means nothing was charged.                |
-| `max_price_exceeded`: the quote changed since inspect            | Run `vapi inspect` for the new quote. Pay again with a new `--max` only if the new price still fits what the user asked for.                                                     |
-| `settlement_unknown`                                             | Do not pay again. Run `vapi pay --resume <receipt-id>`. **Settled**: it went through. **Expired**: never used, paying again is safe. **Pending**: wait until the time it prints. |
-| `response_unreadable` after a settled payment                    | The payment went through; do not pay again. Report the receipt to the user.                                                                                                      |
-| `payment_rejected`                                               | The payment was refused and nothing settled. Check `vapi balance`, then try once more or pick another listing.                                                                   |
-| HTTP 429 or a rate-limit message                                 | Back off. Wait for `Retry-After` when the provider sends it, otherwise 30 seconds, and retry once. Do not loop.                                                                  |
-| `unsupported_network`                                            | The listing settles on Solana, which the vault does not pay yet. Pick a Base or Arc listing.                                                                                     |
-| Insufficient USDC                                                | Run `vapi fund` and tell the user the address and amount.                                                                                                                        |
+| What happened                                                                 | Do this                                                                                                                                                                          |
+| ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Provider answers 400 or 422, or the result has `expectedRequest`              | Input does not match the contract. Run `vapi inspect` again and rebuild the body from its schema before paying again. A null `payment` means nothing was charged.                |
+| `spend_cap_exceeded` with `cap: "max_price"`: the quote changed since inspect | Run `vapi inspect` for the new quote. Pay again with a new `--max` only if the new price still fits what the user asked for.                                                     |
+| `settlement_unknown`                                                          | Do not pay again. Run `vapi pay --resume <receipt-id>`. **Settled**: it went through. **Expired**: never used, paying again is safe. **Pending**: wait until the time it prints. |
+| `response_unreadable` after a settled payment                                 | The payment went through; do not pay again. Report the receipt to the user.                                                                                                      |
+| `payment_rejected`                                                            | The payment was refused and nothing settled. Check `vapi balance`, then try once more or pick another listing.                                                                   |
+| HTTP 429 or a rate-limit message                                              | Back off. Wait for `Retry-After` when the provider sends it, otherwise 30 seconds, and retry once. Do not loop.                                                                  |
+| `unsupported_network`                                                         | The listing settles on Solana, which the vault does not pay yet. Pick a Base or Arc listing.                                                                                     |
+| Insufficient USDC                                                             | Run `vapi fund` and tell the user the address and amount.                                                                                                                        |
 
 Exit codes are `0` for success, `1` for an operational failure and `2` for invalid usage.
 

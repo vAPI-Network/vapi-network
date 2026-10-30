@@ -74,7 +74,7 @@ The optional arrays use this canonical order:
 | `swarms`    | Swarm name                    |
 | `movements` | `createdAt`, then movement id |
 
-`movements` contains only unfinished movement files. A movement is unfinished when at least one leg can still move money or resume. A `planned`, `unknown`, retryable `failed`, or journal-signed `failed` leg keeps it unfinished. A version 2 leg may also be `cancelled`; that state is terminal and survives restore unchanged. Local movement files bind sender and recipient names to addresses, but backup plaintext omits those fields.
+`movements` contains only unfinished movement files. A movement is unfinished when at least one leg can still move money or resume. A `planned`, `unknown`, retryable `failed`, or journal-signed `failed` leg keeps it unfinished. Every restored leg remains unfinished until it is `sent` or `cancelled`, including an unsigned, non-retryable failure. A version 2 leg may also be `cancelled`; that state is terminal and survives restore unchanged. Local movement files bind sender and recipient names to addresses, but backup plaintext omits those fields.
 
 `transferReceipts` contains only `kind: "transfer"` receipts whose wallet and nonce match a leg in an included movement. Each receipt is reduced to this allow-list, in this order:
 
