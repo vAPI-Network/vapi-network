@@ -6,7 +6,7 @@ Security fixes are applied to the latest published release line.
 
 | Version          | Supported |
 | ---------------- | --------- |
-| 0.11.x           | Yes       |
+| 0.12.x           | Yes       |
 | Earlier releases | No        |
 
 Pre-release software may change quickly, but reports affecting a published

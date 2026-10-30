@@ -112,7 +112,7 @@ Current clients return `spend_cap_exceeded` with one of these `cap` values:
 | `max_amount` | The fresh quote is above the SDK's `maxAtomic` limit.            |
 | `run_budget` | This payment would exceed the agent or swarm run budget.         |
 
-Read `amountUsd`, `limitUsd`, optional `spentUsd`, and `command` for the attempted payment and guidance. MCP marks the result `retryable: false`.
+Clients before 0.11.0 used `per_call_cap_exceeded`, `per_day_cap_exceeded` and `max_price_exceeded` for these blocks. Read `amountUsd`, `limitUsd`, optional `spentUsd`, and `command` for the attempted payment and guidance. MCP marks the result `retryable: false`.
 
 Tell the user which cap blocked, the quote, and the command that changes it. The caps are the user's spending limit, so the user decides whether to raise them:
 

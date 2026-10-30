@@ -22,7 +22,7 @@ vAPI Network is not related to Vapi.ai, the voice AI company.
 
 ## Install
 
-The latest released client is 0.11.0.
+This README describes client 0.12.0. `npm view vapi-network version` shows the latest published release.
 
 ```bash
 npm i -g vapi-network
@@ -117,9 +117,9 @@ These pre-namespace names still work and each result carries a DEPRECATED: line 
 | `call`    | `call.pay`       |
 | `wallet`  | `wallet.balance` |
 
-## Use your Compute in Claude Code and Codex (unreleased, next version)
+## Use your Compute in Claude Code and Codex
 
-This section describes unreleased (next version) commands. They are not available in 0.11.0.
+These commands are available since 0.12.0.
 
 Set up a vAPI account with the quickstart above. Install Claude Code or Codex and make its executable available on PATH. Configure
 vAPI for the tools it finds:
@@ -228,7 +228,7 @@ your account link and Router key.
 
 ## CLI reference
 
-The code installer and Claude Code/Codex launchers below are unreleased (next version). Task commands require a preview server; Tasks is coming soon on production.
+The code installer and Claude Code/Codex launchers below are available since 0.12.0. Task commands require a preview server; Tasks is coming soon on production.
 
 Most commands accept `--json` and write one success or error value to stdout.
 The Claude Code and Codex launchers are interactive and reject that flag.

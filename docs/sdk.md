@@ -54,7 +54,7 @@ Discovery API hits may include `health` and `alternatives`. Health reports
 Alternatives contain a `ref` and a `reason` of `cheaper` or `healthier`.
 Inspected endpoints may include `responseSchema` and one `exampleRequest`.
 
-`{ wallet }` remains a deprecated alias for `{ account }` in 0.11.0 and prints one deprecation line to stderr.
+`{ wallet }` remains a deprecated alias for `{ account }` in 0.12.0 and prints one deprecation line to stderr.
 
 ### Lower-level packages
 
