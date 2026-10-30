@@ -427,6 +427,18 @@ export class WalletStore {
   }
 
   /**
+   * Creates the vault without deriving an account, for apps that create every
+   * account by name. Refuses when a vault already exists in this home.
+   */
+  async createEmptyVault(): Promise<void> {
+    if ((await this.readVaultUnlocked()) !== undefined) {
+      throw new KeystoreError("A vault already exists in this home.");
+    }
+    await this.openVault({ create: true });
+    this.dropVaultCache();
+  }
+
+  /**
    * Creates a vault account from a fresh or supplied recovery phrase. The first
    * wallet on a machine also becomes the default. `passphrase` and
    * `enableSolana` are accepted and ignored for one release. Every derived

@@ -1,0 +1,22 @@
+{
+  "manifest_version": "0.3",
+  "name": "vapi-desktop",
+  "display_name": "vAPI Desktop",
+  "version": "0.1.1",
+  "description": "Lets Claude pay x402 APIs and post USDC bounties through the agent wallets you manage in vAPI Desktop. Keys stay in the app on this computer.",
+  "author": { "name": "Vertical Labs", "url": "https://vapinetwork.ai" },
+  "server": {
+    "type": "node",
+    "entry_point": "dist/shim.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/shim.js"],
+      "env": {
+        "VAPI_DESKTOP_SOCKET": "${HOME}/Library/Application Support/vAPI Desktop/mcp.sock"
+      }
+    }
+  },
+  "compatibility": { "platforms": ["darwin", "win32"], "runtimes": { "node": ">=20" } },
+  "keywords": ["x402", "usdc", "payments", "agent wallet", "vapi"],
+  "license": "Apache-2.0"
+}

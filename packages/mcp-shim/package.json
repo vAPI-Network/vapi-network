@@ -1,0 +1,24 @@
+{
+  "name": "@vapi-network/mcp-shim",
+  "version": "0.1.0",
+  "description": "Forwards an MCP stdio session to the vAPI Desktop app over a local socket",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "bin": {
+    "vapi-mcp-shim": "dist/shim.js"
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-package.mjs shim=src/shim.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "pack:mcpb": "pnpm build && rm -rf mcpb/dist && cp -R dist mcpb/dist && npx -y @anthropic-ai/mcpb pack mcpb ../../dist-mcpb/vapi-desktop.mcpb"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

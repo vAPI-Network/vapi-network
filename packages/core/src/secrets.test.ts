@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 
 import * as index from "./index.js";
 import * as secrets from "./secrets.js";
+import * as setup from "./vault-setup.js";
+import * as vault from "./vault.js";
 
 const SECRET_RETURNING = [
   "createKeystoreWithPhrase",
@@ -32,7 +34,10 @@ describe("@vapi-network/core/secrets", () => {
   it("keeps the vault's phrase-returning helpers off the main entry point", () => {
     expect(Reflect.has(index, "exportVaultPhrase")).toBe(false);
     expect(Reflect.has(index, "phrase")).toBe(false);
-    expect(Reflect.has(index, "createVault")).toBe(false);
+    // The main entry point's createVault (vault-setup.ts) returns nothing; the
+    // phrase-holding vault.ts createVault stays internal.
+    expect(index.createVault).toBe(setup.createVault);
+    expect(Reflect.get(index, "createVault")).not.toBe(vault.createVault);
     expect(Reflect.has(index, "openVault")).toBe(false);
     expect(typeof secrets.exportVaultPhrase).toBe("function");
   });

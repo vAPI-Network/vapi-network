@@ -499,9 +499,16 @@ export class VapiMcpServer {
     }
   }
 
-  connectStdio(): void {
+  #output: { write(chunk: string): unknown } = process.stdout;
+
+  /**
+   * Serves JSON-RPC lines from `input` and answers on `output`. The desktop
+   * app hands in a socket; the CLI hands in stdio through connectStdio().
+   */
+  connect(input: NodeJS.ReadableStream, output: { write(chunk: string): unknown }): void {
     if (this.#stdio) return;
-    this.#stdio = createInterface({ input: process.stdin, crlfDelay: Infinity });
+    this.#output = output;
+    this.#stdio = createInterface({ input, crlfDelay: Infinity });
     this.#stdio.on("line", (line) => {
       void this.#handleLine(line);
     });
@@ -509,6 +516,10 @@ export class VapiMcpServer {
       this.#stdio = undefined;
       this.#onClose?.();
     });
+  }
+
+  connectStdio(): void {
+    this.connect(process.stdin, process.stdout);
   }
 
   async close(): Promise<void> {
@@ -603,7 +614,7 @@ export class VapiMcpServer {
   }
 
   #write(message: unknown): void {
-    process.stdout.write(`${JSON.stringify(message)}\n`);
+    this.#output.write(`${JSON.stringify(message)}\n`);
   }
 }
 
