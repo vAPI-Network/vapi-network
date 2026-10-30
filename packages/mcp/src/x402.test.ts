@@ -360,7 +360,7 @@ describe("x402 v2 challenge parsing", () => {
       outcome: "declined_policy",
       quote: { amountAtomic: "2500" },
       policy: { capsApplied: true },
-      client: { name: "vapi-network", version: "0.11.0" },
+      client: { name: "vapi-network", version: "0.12.0" },
       error: { code: "spend_cap_exceeded" },
     });
     expect(receipt).not.toHaveProperty("payer");

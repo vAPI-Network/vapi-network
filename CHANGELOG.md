@@ -5,10 +5,17 @@ scoped packages. The packages share one version and are released together.
 
 ## Unreleased
 
+## 0.12.0 — 2026-10-30
+
 ### Added
 
 - `vapi code install` configures detected Claude Code and Codex tools for vAPI Compute, with optional shell aliases. `vapi code uninstall` removes those settings while preserving other config content.
 - `vapi claude` and `vapi codex` choose vAPI Compute or the tool's own login at launch, with explicit route, balance, model and account options. Sessions stay on the selected route until exit.
+- Core and MCP building blocks for vAPI Desktop: `createVault()` without a first account, per-wallet `linkStates()`, a remote payment account that signs through a caller-supplied channel, and `VapiMcpServer.connect` with caller-supplied streams.
+
+### Notes
+
+- Claude Code on vAPI Compute needs the Router's `/v1/messages` fix and prompt-cache pricing, live on vAPI production since v3.26.0.
 
 ## 0.11.0 — 2026-10-29
 
