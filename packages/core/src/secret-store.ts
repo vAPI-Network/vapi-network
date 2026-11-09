@@ -525,13 +525,22 @@ function binaryInstalled(file: string, env: NodeJS.ProcessEnv): boolean {
   return (env.PATH ?? "").split(delimiter).some((directory) => existsSync(join(directory, file)));
 }
 
+// Subprocess output can contain secrets. Emit only these fixed reasons, never
+// raw stderr or stdout, even when a known reason appears beside a secret.
+const SAFE_FAILURE_DETAILS = [
+  "Cannot autolaunch D-Bus without X11 $DISPLAY",
+  "Cannot autolaunch D-Bus",
+  "User interaction is not allowed.",
+  "Access to the path is denied.",
+] as const;
+
 /** Turns a failed run into one sentence. The passphrase is never in it. */
 function requireSuccess(result: SecretStoreOutcome, what: string): void {
   if (result.code === 0) return;
-  const detail = result.stderr.trim() || result.stdout.trim();
+  const detail = SAFE_FAILURE_DETAILS.find((reason) => result.stderr.includes(reason));
   throw new KeystoreError(
     `Could not ${what}${result.code === null ? "" : ` (exit ${result.code})`}.${
-      detail.length === 0 ? "" : ` ${detail}`
+      detail === undefined ? "" : ` ${detail}`
     }`,
   );
 }

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { decryptWithKey, deriveScryptKey, KeystoreError } from "./keystore.js";
-import type { SecretStore } from "./secret-store.js";
+import { secretStore, type SecretStore } from "./secret-store.js";
 import {
   loadOrCreateDeviceKey,
   lockVault,
@@ -143,6 +143,48 @@ describe("loadOrCreateDeviceKey failures", () => {
       cause,
     );
   });
+});
+
+describe.each([
+  ["darwin", "User interaction is not allowed."],
+  ["linux", "Cannot autolaunch D-Bus without X11 $DISPLAY"],
+  ["win32", "Access to the path is denied."],
+] as const)("device-key errors from the %s adapter", (platform, diagnostic) => {
+  it.each(["stdout", "stderr", "mixed diagnostics"] as const)(
+    "does not expose secret material in subprocess %s",
+    async (output) => {
+      const key = DEVICE_KEY.toString("base64");
+      const rawDetail = `untrusted subprocess detail ${key}`;
+      const secrets = secretStore({
+        platform,
+        installed: () => true,
+        run: async () => ({
+          code: 1,
+          stdout: output === "stderr" ? "" : rawDetail,
+          stderr:
+            output === "stdout"
+              ? ""
+              : output === "stderr"
+                ? rawDetail
+                : `${diagnostic}\n${rawDetail}`,
+        }),
+      });
+
+      const error = await loadOrCreateDeviceKey({
+        secrets,
+        randomBytes: () => Uint8Array.from(DEVICE_KEY),
+      }).catch((caught: unknown) => caught);
+
+      if (!(error instanceof Error)) throw new Error("Expected a device-key failure.");
+      expect(error).toBeInstanceOf(VaultError);
+      expect(error).toMatchObject({ code: "corrupt", cause: expect.any(KeystoreError) });
+      expect(error.message).not.toContain(key);
+      expect(error.message).not.toContain("untrusted subprocess detail");
+      expect(error.cause).toHaveProperty("message", expect.not.stringContaining(key));
+      if (output === "mixed diagnostics") expect(error.message).toContain(diagnostic);
+      if (platform === "linux") expect(error.message).toContain("GitHub Codespace");
+    },
+  );
 });
 
 describe("device vault keys", () => {
