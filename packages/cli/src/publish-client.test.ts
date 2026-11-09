@@ -4,6 +4,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { verifyMessage, type Hex } from "viem";
 
 import {
+  apiKeyConsoleUrl,
   buildPayoutSiweMessage,
   createListingsClient,
   formatProbeSteps,
@@ -52,6 +53,20 @@ describe("listingsUrl", () => {
     expect(listingsUrl("https://registry.example/vapi?x=1", "/api/call/listings").href).toBe(
       "https://registry.example/vapi/api/call/listings",
     );
+  });
+});
+
+describe("apiKeyConsoleUrl", () => {
+  it.each([
+    ["https://api.vapinetwork.ai", "https://api.vapinetwork.ai/connect?advanced=keys#api-keys"],
+    ["https://api.vapinetwork.ai/", "https://api.vapinetwork.ai/connect?advanced=keys#api-keys"],
+    ["https://example.test/vapi/", "https://example.test/vapi/connect?advanced=keys#api-keys"],
+    [
+      "https://api.vapinetwork.ai/?x=1#y",
+      "https://api.vapinetwork.ai/connect?advanced=keys#api-keys",
+    ],
+  ])("builds the API keys link for %s", (base, expected) => {
+    expect(apiKeyConsoleUrl(base).href).toBe(expected);
   });
 });
 
@@ -116,7 +131,7 @@ describe("registry errors", () => {
     expect((error as RegistryApiError).status).toBe(401);
     expect((error as Error).message).toContain("The vAPI API key was rejected.");
     expect((error as Error).message).toContain("unknown key");
-    expect((error as Error).message).toContain(`${BASE}/account`);
+    expect((error as Error).message).toContain(`${BASE}/connect?advanced=keys#api-keys`);
     expect((error as Error).message).toContain("vapi auth set-key");
   });
 

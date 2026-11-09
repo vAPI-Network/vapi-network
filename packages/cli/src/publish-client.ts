@@ -38,8 +38,13 @@ export const PAYOUT_STATEMENT = "Confirm this wallet receives vAPI Call payouts"
 /** The sentence a claim message states, completed with the origin being claimed. */
 export const CLAIM_STATEMENT_PREFIX = "Claim the vAPI Call listings served from";
 
-/** Where a person creates the key this client authenticates with. */
-export const API_KEY_CONSOLE_PATH = "/account";
+/** Where a person creates an API key: the Advanced section of the console's Connect page. */
+export function apiKeyConsoleUrl(baseUrl: string): URL {
+  const url = listingsUrl(baseUrl, "/connect");
+  url.search = "advanced=keys";
+  url.hash = "api-keys";
+  return url;
+}
 
 /** One candidate endpoint the probe found behind the URL it was given. */
 export type ProbeOperation = Readonly<{
@@ -372,7 +377,7 @@ async function registryError(response: Response, baseUrl: string): Promise<Regis
       [
         "The vAPI API key was rejected.",
         detail,
-        `Create a key in the console at ${listingsUrl(baseUrl, API_KEY_CONSOLE_PATH).href} and store it with vapi auth set-key.`,
+        `Create a key in the console at ${apiKeyConsoleUrl(baseUrl).href} and store it with vapi auth set-key.`,
       ]
         .filter(Boolean)
         .join(" "),
