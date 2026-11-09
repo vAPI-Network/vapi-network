@@ -530,6 +530,8 @@ function binaryInstalled(file: string, env: NodeJS.ProcessEnv): boolean {
 const SAFE_FAILURE_DETAILS = [
   "Cannot autolaunch D-Bus without X11 $DISPLAY",
   "Cannot autolaunch D-Bus",
+  "The name org.freedesktop.secrets was not provided by any .service files",
+  "Cannot create an item in a locked collection",
   "User interaction is not allowed.",
   "Access to the path is denied.",
 ] as const;
