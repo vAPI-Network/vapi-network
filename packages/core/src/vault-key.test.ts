@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { decryptWithKey, deriveScryptKey } from "./keystore.js";
+import { decryptWithKey, deriveScryptKey, KeystoreError } from "./keystore.js";
 import type { SecretStore } from "./secret-store.js";
 import {
   loadOrCreateDeviceKey,
@@ -81,6 +81,70 @@ async function expectVaultCode(promise: Promise<unknown>, code: string): Promise
   await expect(promise).rejects.toMatchObject({ code });
 }
 
+describe("loadOrCreateDeviceKey failures", () => {
+  const failingStore = (error: Error, platform: NodeJS.Platform): SecretStore => ({
+    available: true,
+    platform,
+    description: "a failing store",
+    get: async () => {
+      throw error;
+    },
+    has: async () => false,
+    set: async () => undefined,
+    remove: async () => false,
+  });
+
+  it("names the secret-store cause", async () => {
+    const cause = new KeystoreError(
+      "secret-tool is not installed, so the passphrase cannot be kept.",
+    );
+    const result = loadOrCreateDeviceKey({ secrets: failingStore(cause, "darwin") });
+    await expect(result).rejects.toMatchObject({
+      message:
+        "Unable to load or create the device vault key: secret-tool is not installed, so the passphrase cannot be kept.",
+      code: "corrupt",
+      cause,
+    });
+    await expect(result).rejects.toBeInstanceOf(VaultError);
+  });
+
+  it("adds the headless hint on Linux", async () => {
+    const cause = new KeystoreError(
+      "Could not read the passphrase of vault-key from the secret service (exit 1). Cannot autolaunch D-Bus without X11 $DISPLAY",
+    );
+    const error = await loadOrCreateDeviceKey({ secrets: failingStore(cause, "linux") }).catch(
+      (caught: unknown) => caught as Error,
+    );
+    if (!(error instanceof Error)) throw new Error("Expected a device-key failure.");
+    expect(error.message).toContain("Cannot autolaunch D-Bus");
+    expect(error.message).toContain("$DISPLAY. A server");
+    expect(error.message).toContain("GitHub Codespace");
+    expect(error.message).toContain("/connect");
+  });
+
+  it.each(["darwin", "linux"] as const)(
+    "does not repeat an unknown cause on %s",
+    async (platform) => {
+      const cause = new Error("raw spawn detail");
+      const error = await loadOrCreateDeviceKey({
+        secrets: failingStore(cause, platform),
+      }).catch((caught: unknown) => caught as Error);
+      if (!(error instanceof Error)) throw new Error("Expected a device-key failure.");
+      expect(error.message).toBe("Unable to load or create the device vault key.");
+      expect(error).toBeInstanceOf(VaultError);
+      expect(error).toMatchObject({ code: "corrupt" });
+      expect(error.cause).toBe(cause);
+    },
+  );
+
+  it("passes an existing VaultError through unchanged", async () => {
+    const cause = new VaultError("corrupt", "The stored device vault key has the wrong length.");
+    await expect(loadOrCreateDeviceKey({ secrets: failingStore(cause, "linux") })).rejects.toBe(
+      cause,
+    );
+  });
+});
+
 describe("device vault keys", () => {
   it("creates one device key, stores it as base64, and reuses it", async () => {
     const store = memoryStore();
@@ -117,7 +181,9 @@ describe("device vault keys", () => {
     const store = memoryStore();
     store.entries.set(VAULT_KEY_ACCOUNT, Buffer.alloc(31, 1).toString("base64"));
 
-    await expectVaultCode(loadOrCreateDeviceKey({ secrets: store }), "corrupt");
+    const result = loadOrCreateDeviceKey({ secrets: store });
+    await expectVaultCode(result, "corrupt");
+    await expect(result).rejects.toThrow("The stored device vault key has the wrong length.");
   });
 
   it("protects a vault, removes its plain key, and refuses repeated protection", async () => {
