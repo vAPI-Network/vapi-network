@@ -365,7 +365,7 @@ function asVaultError(error: unknown, message: string): VaultError {
 }
 
 const HEADLESS_LINUX_HINT =
-  "A server, container or GitHub Codespace usually has no keyring. Run vapi on your own computer, or connect Claude from https://api.vapinetwork.ai/connect.";
+  "A server, container or GitHub Codespace usually has no keyring. Set VAPI_VAULT_PASSWORD and run vapi setup again, or run vapi on your own computer.";
 
 /**
  * The device-key failure plus the store's own reason. Only our own

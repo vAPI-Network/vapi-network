@@ -33,7 +33,7 @@ These words have the same meaning in the CLI, console, MCP tool names, SDK, and 
 
 ## The vault file
 
-The file is `vault.json` under the vAPI home, which defaults to `~/.vapi`. It holds one recovery phrase per device in encrypted form. Derived accounts use BIP-39 and the MetaMask derivation path `m/44'/60'/0'/0/{index}`; imported accounts sit next to them and keep encrypted private keys. The device key lives in the OS secret store: macOS Keychain, Windows Data Protection (DPAPI), or Linux libsecret.
+The file is `vault.json` under the vAPI home, which defaults to `~/.vapi`. It holds one recovery phrase per device in encrypted form. Derived accounts use BIP-39 and the MetaMask derivation path `m/44'/60'/0'/0/{index}`; imported accounts sit next to them and keep encrypted private keys. The device key lives in the OS secret store: macOS Keychain, Windows Data Protection (DPAPI), or Linux libsecret. On Linux without a working keyring (servers, containers, GitHub Codespaces), set `VAPI_VAULT_PASSWORD` before `vapi setup`; the device key and agent link are then kept in `~/.vapi/secrets.json`, encrypted with that password. The choice is made once per vault.
 
 ## Servers and CI: `vapi vault protect`
 
@@ -212,7 +212,7 @@ vapi
 This screen comes from a vault restored from the BIP-39 test phrase into an empty home, so the account holds nothing and is not linked yet:
 
 ```text
-vAPI 0.12.1        home /tmp/vapi-docs-home        registry api.vapinetwork.ai
+vAPI 0.13.0        home /tmp/vapi-docs-home        registry api.vapinetwork.ai
 
 Owner      not linked   console: https://api.vapinetwork.ai/agents
 Vault      unlocked on this device (macOS Keychain)   backup: vapi backup

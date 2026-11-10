@@ -2,7 +2,10 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { delimiter, isAbsolute, join, win32 } from "node:path";
 
+import { getVapiPaths } from "./config.js";
+import { fileSecretStore } from "./file-secret-store.js";
 import { KeystoreError } from "./keystore.js";
+import { readSecretBackend, secretsFilePath } from "./secret-backend.js";
 
 /**
  * The OS secret store, so an agent never needs a passphrase in plain text.
@@ -88,6 +91,8 @@ export type SecretStore = {
 };
 
 export type SecretStoreOptions = {
+  /** The vAPI home whose secret-store pin decides the backend. Defaults to getVapiPaths().directory. */
+  home?: string | undefined;
   /** Defaults to `process.platform`. */
   platform?: NodeJS.Platform | undefined;
   /** Defaults to running the real binary. */
@@ -98,8 +103,17 @@ export type SecretStoreOptions = {
   installed?: ((file: string) => boolean) | undefined;
 };
 
-/** The secret store of this machine, or one that refuses on every call. */
+/** The secret store pinned for this vault, or the OS store when no pin exists. */
 export function secretStore(options: SecretStoreOptions = {}): SecretStore {
+  const home = options.home ?? getVapiPaths().directory;
+  if (readSecretBackend(home) === "file") {
+    return fileSecretStore({ path: secretsFilePath(home), env: options.env ?? process.env });
+  }
+  return osSecretStore(options);
+}
+
+/** The OS store of this machine, ignoring any pin; setup probes this one. */
+export function osSecretStore(options: SecretStoreOptions = {}): SecretStore {
   const platform = options.platform ?? process.platform;
   const run: SecretStoreRunner =
     options.run ?? (async (file, args, input) => await spawnRunner(platform, file, args, input));

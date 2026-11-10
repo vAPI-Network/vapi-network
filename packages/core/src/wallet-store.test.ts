@@ -13,13 +13,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
 import { readAuditLog } from "./audit.js";
 import { withAccountMovementLock } from "./account-movement-lock.js";
 import { DEFAULT_CEILING_ATOMIC, DEFAULT_SPEND_CAPS, getVapiPaths } from "./config.js";
+import { createFileSecretStore, fileSecretStore } from "./file-secret-store.js";
 import {
   createKeystoreFromPrivateKey,
   createKeystoreWithPhrase,
@@ -39,7 +40,7 @@ import { executeMovement } from "./movement.js";
 import type { SecretStore } from "./secret-store.js";
 import { readSpendLedger, readSpendLedgerRows, reserveSpend } from "./spend-policy.js";
 import type { TransferArgs, TransferResult } from "./transfer.js";
-import { loadOrCreateDeviceKey, lockVault, protectVault } from "./vault-key.js";
+import { loadOrCreateDeviceKey, lockVault, protectVault, VAULT_KEY_ACCOUNT } from "./vault-key.js";
 import { createVault, readVaultFileUnlocked } from "./vault.js";
 import {
   assertWalletName,
@@ -65,6 +66,7 @@ const temporaryDirectories: string[] = [];
 const secretStores = new Map<string, SecretStore>();
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   delete process.env.VAPI_WALLET;
   const directories = temporaryDirectories.splice(0);
   for (const directory of directories) secretStores.delete(directory);
@@ -115,6 +117,30 @@ async function makeHome(): Promise<string> {
   temporaryDirectories.push(directory);
   return directory;
 }
+
+it("opens the requested home's file-backed vault when VAPI_HOME points at another vault", async () => {
+  const firstHome = await makeHome();
+  const secondHome = await makeHome();
+  const env = { VAPI_VAULT_PASSWORD: PASSPHRASE };
+  for (const [index, home] of [firstHome, secondHome].entries()) {
+    const path = join(home, "secrets.json");
+    await createFileSecretStore({ path, env });
+    await writeFile(join(home, "secret-store.json"), JSON.stringify({ v: 1, backend: "file" }));
+    const secrets = fileSecretStore({ path, env });
+    await secrets.set(VAULT_KEY_ACCOUNT, Buffer.alloc(32, index + 1).toString("base64"));
+    const store = await WalletStore.open(home, { secrets, env });
+    await store.create("main", "", { phrase: TEST_PHRASE });
+  }
+  vi.stubEnv("VAPI_HOME", firstHome);
+  vi.stubEnv("VAPI_VAULT_PASSWORD", PASSPHRASE);
+  const control = await WalletStore.open(secondHome, {
+    secrets: fileSecretStore({ path: join(secondHome, "secrets.json"), env }),
+    env,
+  });
+  const expected = await control.unlock("main", "");
+  const store = await WalletStore.open(secondHome, { env });
+  expect((await store.unlock("main", "")).address).toBe(expected.address);
+});
 
 async function writeUnfinishedMovement(
   home: string,

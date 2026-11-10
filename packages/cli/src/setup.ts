@@ -2,10 +2,12 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
+  chooseSecretBackend,
   DEFAULT_WALLET_NAME,
   MAX_RESTORE_ACCOUNTS,
   getVapiPaths,
   loadOrCreateDeviceKey,
+  osSecretStore,
   promptForSecret,
   restoreVault,
   validateRecoveryPhrase,
@@ -19,6 +21,7 @@ import {
   UsageError,
   baseUsdcBalanceReader,
   fileExists,
+  getEnvironment,
   getSecretStore,
   isInteractive,
   openWalletStore,
@@ -75,6 +78,15 @@ export async function setupCommand(
     steps.push("config");
   }
   const config = await readConfig(paths.config, humanIo);
+  // Choose the secret store once, before a new vault can write its device key.
+  if (!(await fileExists(join(paths.directory, "vault.json")))) {
+    const os =
+      dependencies.secretBackendProbe ??
+      (dependencies.secretStore === undefined ? osSecretStore() : undefined);
+    if (os !== undefined) {
+      await chooseSecretBackend({ home: paths.directory, os, env: getEnvironment(dependencies) });
+    }
+  }
   let store = await openWalletStore(dependencies);
   let vault: SetupResult["vault"] = "existing";
   let changedVault = false;

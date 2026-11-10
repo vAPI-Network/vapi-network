@@ -5,6 +5,16 @@ scoped packages. The packages share one version and are released together.
 
 ## Unreleased
 
+## 0.13.0 — 2026-11-10
+
+### Added
+
+- `vapi setup` works on Linux without a keyring (servers, containers, GitHub Codespaces): set `VAPI_VAULT_PASSWORD` (at least 12 characters) and the device key and agent link are kept in `~/.vapi/secrets.json`, encrypted with that password. The choice is pinned once per vault in `~/.vapi/secret-store.json`; existing vaults, macOS and Windows keep the OS store.
+
+### Changed
+
+- The Linux device-key failure hint now names `VAPI_VAULT_PASSWORD`.
+
 ## 0.12.1 — 2026-11-09
 
 ### Fixed

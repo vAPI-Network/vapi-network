@@ -370,6 +370,8 @@ export type CliDependencies = {
   railwayExec?: RailwayExec;
   /** The OS secret store `vapi unlock` and `vapi lock` act on. */
   secretStore?: SecretStore;
+  /** The OS store setup probes before it makes a new vault; injected so tests never touch a real keychain. */
+  secretBackendProbe?: SecretStore;
   /** Injected clock, so a signed message is reproducible in a test. */
   now?: () => Date;
   /** Injected hostname, so device naming is reproducible in a test. */

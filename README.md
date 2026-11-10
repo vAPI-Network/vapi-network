@@ -22,7 +22,7 @@ vAPI Network is not related to Vapi.ai, the voice AI company.
 
 ## Install
 
-This README describes client 0.12.0. `npm view vapi-network version` shows the latest published release.
+This README describes client 0.13.0. `npm view vapi-network version` shows the latest published release.
 
 ```bash
 npm i -g vapi-network
@@ -54,6 +54,22 @@ vapi receipts                    # one line per paid call: quote, settlement, la
 
 Back up the recovery phrase only in a terminal; vAPI cannot recover it.
 Turn on encrypted cloud backup with `vapi backup --cloud`; only the owner can approve a restore.
+
+## Headless Linux
+
+On Linux without a working keyring (servers, containers, GitHub Codespaces), set
+`VAPI_VAULT_PASSWORD` before `vapi setup`; the device key and agent link are then
+kept in `~/.vapi/secrets.json`, encrypted with that password. The choice is made once
+per vault.
+
+```bash
+read -rs -p 'Vault password (at least 12 characters): ' VAPI_VAULT_PASSWORD
+export VAPI_VAULT_PASSWORD
+vapi setup
+```
+
+In GitHub Codespaces, add `VAPI_VAULT_PASSWORD` as a Codespaces secret with at least
+12 characters before running setup.
 
 ## What you can do
 

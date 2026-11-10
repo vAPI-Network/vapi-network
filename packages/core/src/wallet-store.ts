@@ -247,7 +247,7 @@ export class WalletStore {
     registry: WalletRegistry,
   ) {
     this.registry = registry;
-    this.secrets = options.secrets ?? secretStore();
+    this.secrets = options.secrets ?? secretStore({ home });
     this.environment = options.env ?? process.env;
     this.passphraseResolver =
       options.resolvePassphrase ?? defaultPassphraseResolver(this.environment, this.secrets);
