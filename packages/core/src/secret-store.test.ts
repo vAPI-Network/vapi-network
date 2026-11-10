@@ -96,7 +96,7 @@ describe("the pinned secret store", () => {
     expect(await store.get("vault-key")).toBe("pinned-file-secret-sentinel");
 
     const locked = secretStore({ platform: "linux", home: directory, env: {}, run });
-    expect(locked.available).toBe(false);
+    expect(locked.available).toBe(true);
     await expect(locked.get("vault-key")).rejects.toThrow("VAPI_VAULT_PASSWORD");
     expect(runs).toEqual([]);
   });

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { KeystoreError } from "./keystore.js";
+import { fileSecretStore } from "./file-secret-store.js";
 import {
   chooseSecretBackend,
   readSecretBackend,
@@ -12,6 +13,8 @@ import {
   secretsFilePath,
 } from "./secret-backend.js";
 import { memorySecretStore, type SecretStore } from "./secret-store.js";
+import { loadOrCreateDeviceKey } from "./vault-key.js";
+import { createVault, openVault } from "./vault.js";
 
 const brokenOs: SecretStore = {
   ...memorySecretStore(),
@@ -37,6 +40,111 @@ async function home(): Promise<string> {
 }
 
 describe("secret backend", () => {
+  it.each([true, false])(
+    "preserves a concurrent setup's file backend after a delayed probe that succeeds %s",
+    async (works) => {
+      const dir = await home();
+      const env = { VAPI_VAULT_PASSWORD: "correct horse battery" };
+      let reportProbe!: () => void;
+      const probeStarted = new Promise<void>((resolve) => {
+        reportProbe = resolve;
+      });
+      let resumeProbe!: () => void;
+      const mayProbeFinish = new Promise<void>((resolve) => {
+        resumeProbe = resolve;
+      });
+      const memory = memorySecretStore();
+      const delayed = chooseSecretBackend({
+        home: dir,
+        env,
+        os: {
+          ...memory,
+          platform: "linux",
+          set: async (name, value) => {
+            reportProbe();
+            await mayProbeFinish;
+            if (!works) throw new KeystoreError("No keyring");
+            await memory.set(name, value);
+          },
+        },
+      });
+      await probeStarted;
+      try {
+        expect(await chooseSecretBackend({ home: dir, os: brokenOs, env })).toBe("file");
+        const secrets = fileSecretStore({ path: secretsFilePath(dir), env });
+        const key = await loadOrCreateDeviceKey({
+          secrets,
+          randomBytes: () => Buffer.alloc(32, 7),
+        });
+        try {
+          await createVault({
+            path: join(dir, "vault.json"),
+            key,
+            phrase: "test test test test test test test test test test test junk",
+          });
+          const original = await readFile(secretsFilePath(dir), "utf8");
+          resumeProbe();
+          expect(await delayed).toBe("file");
+          expect(readSecretBackend(dir)).toBe("file");
+          expect(await readFile(secretsFilePath(dir), "utf8")).toBe(original);
+          const reloaded = await loadOrCreateDeviceKey({ secrets });
+          try {
+            expect(Buffer.from(reloaded)).toEqual(key);
+            await expect(
+              openVault({ path: join(dir, "vault.json"), key: reloaded }),
+            ).resolves.toBeDefined();
+          } finally {
+            reloaded.fill(0);
+          }
+        } finally {
+          key.fill(0);
+        }
+      } finally {
+        resumeProbe();
+        await delayed.catch(() => undefined);
+      }
+    },
+  );
+
+  it("does not write a pin when a vault appeared while its probe was paused", async () => {
+    const dir = await home();
+    let reportProbe!: () => void;
+    const probeStarted = new Promise<void>((resolve) => {
+      reportProbe = resolve;
+    });
+    let resumeProbe!: () => void;
+    const mayProbeFinish = new Promise<void>((resolve) => {
+      resumeProbe = resolve;
+    });
+    const pending = chooseSecretBackend({
+      home: dir,
+      env: { VAPI_VAULT_PASSWORD: "correct horse battery" },
+      os: {
+        ...brokenOs,
+        set: async () => {
+          reportProbe();
+          await mayProbeFinish;
+          throw new KeystoreError("No keyring");
+        },
+      },
+    });
+    await probeStarted;
+    try {
+      await createVault({
+        path: join(dir, "vault.json"),
+        key: Buffer.alloc(32, 7),
+        phrase: "test test test test test test test test test test test junk",
+      });
+      resumeProbe();
+      expect(await pending).toBe("os");
+      await expect(stat(secretBackendPath(dir))).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(stat(secretsFilePath(dir))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      resumeProbe();
+      await pending.catch(() => undefined);
+    }
+  });
+
   it("reads os when nothing is pinned", async () => {
     expect(readSecretBackend(await home())).toBe("os");
   });

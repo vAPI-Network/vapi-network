@@ -15,8 +15,9 @@ import {
   validateApiKey,
 } from "./api-key.js";
 import { enableDefaultNetwork, loadConfig, writeDefaultConfig } from "./config.js";
+import { createFileSecretStore } from "./file-secret-store.js";
 import { SOLANA_MAINNET_CAIP2 } from "./networks.js";
-import type { SecretStore } from "./secret-store.js";
+import { secretStore, type SecretStore } from "./secret-store.js";
 
 const KEY = "vapi_sk_0123456789abcdefghij";
 const OTHER_KEY = "vapi_sk_zyxwvutsrqponmlkjihg";
@@ -141,6 +142,27 @@ describe("resolveApiKey", () => {
 });
 
 describe("storeApiKey", () => {
+  it("refuses a locked file backend without writing an API key to config.json", async () => {
+    const directory = await home("vapi-api-key-locked-file-");
+    const configPath = join(directory, "config.json");
+    const path = join(directory, "secrets.json");
+    await writeDefaultConfig(configPath, {});
+    await createFileSecretStore({ path, env: { VAPI_VAULT_PASSWORD: "correct horse battery" } });
+    await writeFile(
+      join(directory, "secret-store.json"),
+      JSON.stringify({ v: 1, backend: "file" }),
+    );
+    const originalConfig = await readFile(configPath, "utf8");
+    const originalSecrets = await readFile(path, "utf8");
+    const store = secretStore({ home: directory, env: {} });
+    const result = storeApiKey(KEY, { store, configPath, env: {} });
+
+    await expect(result).rejects.toThrow("VAPI_VAULT_PASSWORD");
+    await expect(result).rejects.not.toThrow(KEY);
+    expect(await readFile(configPath, "utf8")).toBe(originalConfig);
+    expect(await readFile(path, "utf8")).toBe(originalSecrets);
+  });
+
   it("puts the key in the OS secret store when there is one", async () => {
     const entries: Record<string, string> = {};
     const store = secretStoreStub(entries);

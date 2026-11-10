@@ -55,7 +55,7 @@ describe("file secret store", () => {
     const path = await freshPath();
     await createFileSecretStore({ path, env: { VAPI_VAULT_PASSWORD: PASSWORD } });
     const store = fileSecretStore({ path, env: {} });
-    expect(store.available).toBe(false);
+    expect(store.available).toBe(true);
     await expect(store.set("vault-key", "x")).rejects.toThrow("VAPI_VAULT_PASSWORD");
   });
 
@@ -189,7 +189,7 @@ describe("file secret store", () => {
     const path = await freshPath();
     const env: NodeJS.ProcessEnv = {};
     const store = fileSecretStore({ path, env });
-    expect(store.available).toBe(false);
+    expect(store.available).toBe(true);
     expect(store.platform).toBe(process.platform);
     expect(store.description).toBe("the encrypted vAPI secrets file");
     expect(FILE_SECRET_STORE_PASSWORD_ENV).toBe("VAPI_VAULT_PASSWORD");
@@ -216,6 +216,44 @@ describe("file secret store", () => {
     await Promise.all([store.remove("a"), fileSecretStore({ path, env }).set("b", "new secret")]);
     expect(await store.get("a")).toBeUndefined();
     expect(await store.get("b")).toBe("new secret");
+  });
+
+  it("preserves every entry and the original ciphertext when initialized again", async () => {
+    const path = await freshPath();
+    const env = { VAPI_VAULT_PASSWORD: PASSWORD };
+    await createFileSecretStore({ path, env });
+    const store = fileSecretStore({ path, env });
+    await store.set("vault-key", "device-key-preservation-sentinel");
+    await store.set("agent-link", "agent-link-preservation-sentinel");
+    const original = await readFile(path, "utf8");
+
+    await createFileSecretStore({ path, env });
+
+    expect(await readFile(path, "utf8")).toBe(original);
+    expect(await store.get("vault-key")).toBe("device-key-preservation-sentinel");
+    expect(await store.get("agent-link")).toBe("agent-link-preservation-sentinel");
+  });
+
+  it("refuses to replace an existing secrets file with a different password", async () => {
+    const path = await freshPath();
+    await createFileSecretStore({ path, env: { VAPI_VAULT_PASSWORD: PASSWORD } });
+    const original = await readFile(path, "utf8");
+    const password = "different password sentinel";
+    const result = createFileSecretStore({ path, env: { VAPI_VAULT_PASSWORD: password } });
+
+    await expect(result).rejects.toThrow("Wrong VAPI_VAULT_PASSWORD");
+    await expect(result).rejects.not.toThrow(password);
+    expect(await readFile(path, "utf8")).toBe(original);
+  });
+
+  it("does not replace a damaged existing file during initialization", async () => {
+    const path = await freshPath();
+    await writeFile(path, "not json", { mode: 0o600 });
+
+    await expect(
+      createFileSecretStore({ path, env: { VAPI_VAULT_PASSWORD: PASSWORD } }),
+    ).rejects.toThrow("damaged");
+    expect(await readFile(path, "utf8")).toBe("not json");
   });
 
   it("does not mistake inherited object properties for stored entries", async () => {

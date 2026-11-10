@@ -1,9 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 
 import { z } from "zod";
 
 import { writeJsonAtomic } from "./atomic-file.js";
+import { isMissingFile } from "./config.js";
 import { decryptWithKey, deriveScryptKey, encryptWithKey, KeystoreError } from "./keystore.js";
 import type { SecretStore } from "./secret-store.js";
 import { withVaultLock } from "./vault.js";
@@ -28,7 +29,7 @@ const fileSchema = z
 type StoredFile = z.infer<typeof fileSchema>;
 type Sealed = z.infer<typeof sealedSchema>;
 
-/** Creates a password-encrypted secrets file with a sealed password check. */
+/** Creates a secrets file, or validates an existing file without replacing its entries. */
 export async function createFileSecretStore(options: {
   path: string;
   env?: NodeJS.ProcessEnv;
@@ -39,10 +40,22 @@ export async function createFileSecretStore(options: {
       `${FILE_SECRET_STORE_PASSWORD_ENV} must be at least ${FILE_SECRET_STORE_MIN_PASSWORD} characters.`,
     );
   }
-  const salt = randomBytes(32);
-  const key = await deriveScryptKey(password, salt);
-  try {
-    await withVaultLock(options.path, async () => {
+  await withVaultLock(options.path, async () => {
+    let exists = true;
+    try {
+      await stat(options.path);
+    } catch (error) {
+      if (!isMissingFile(error)) throw error;
+      exists = false;
+    }
+    if (exists) {
+      await withKey(options.path, options.env, async () => undefined);
+      return;
+    }
+
+    const salt = randomBytes(32);
+    const key = await deriveScryptKey(password, salt);
+    try {
       await writeJsonAtomic(
         options.path,
         {
@@ -53,46 +66,35 @@ export async function createFileSecretStore(options: {
         } satisfies StoredFile,
         { mode: 0o600 },
       );
-    });
-  } finally {
-    key.fill(0);
-  }
+    } finally {
+      key.fill(0);
+    }
+  });
 }
 
 /** A file secret store that reads VAPI_VAULT_PASSWORD afresh on every call. */
 export function fileSecretStore(options: { path: string; env?: NodeJS.ProcessEnv }): SecretStore {
   const env = options.env ?? process.env;
 
-  const withKey = async <T>(
-    operation: (file: StoredFile, key: Buffer) => Promise<T>,
-  ): Promise<T> => {
-    const file = await readStoredFile(options.path);
-    const key = await deriveScryptKey(passwordFrom(env), Buffer.from(file.salt, "base64"));
-    try {
-      if (open(key, file.check) !== CHECK_VALUE) throw wrongPassword();
-      return await operation(file, key);
-    } finally {
-      key.fill(0);
-    }
-  };
   const write = async (change: (file: StoredFile, key: Buffer) => boolean): Promise<boolean> =>
     await withVaultLock(
       options.path,
       async () =>
-        await withKey(async (file, key) => {
+        await withKey(options.path, env, async (file, key) => {
           const changed = change(file, key);
           if (changed) await writeJsonAtomic(options.path, file, { mode: 0o600 });
           return changed;
         }),
     );
   const get = async (name: string): Promise<string | undefined> =>
-    await withKey(async (file, key) => {
+    await withKey(options.path, env, async (file, key) => {
       const sealed = Object.hasOwn(file.entries, name) ? file.entries[name] : undefined;
       return sealed === undefined ? undefined : open(key, sealed);
     });
 
   return {
-    available: Boolean(env[FILE_SECRET_STORE_PASSWORD_ENV]),
+    // A locked backend still exists; it must never enable a plaintext fallback.
+    available: true,
     platform: process.platform,
     description: "the encrypted vAPI secrets file",
     get,
@@ -116,6 +118,21 @@ export function fileSecretStore(options: { path: string; env?: NodeJS.ProcessEnv
       });
     },
   };
+}
+
+async function withKey<T>(
+  path: string,
+  env: NodeJS.ProcessEnv | undefined,
+  operation: (file: StoredFile, key: Buffer) => Promise<T>,
+): Promise<T> {
+  const file = await readStoredFile(path);
+  const key = await deriveScryptKey(passwordFrom(env), Buffer.from(file.salt, "base64"));
+  try {
+    if (open(key, file.check) !== CHECK_VALUE) throw wrongPassword();
+    return await operation(file, key);
+  } finally {
+    key.fill(0);
+  }
 }
 
 function passwordFrom(env: NodeJS.ProcessEnv | undefined): string {

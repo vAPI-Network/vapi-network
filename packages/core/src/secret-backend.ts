@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { z } from "zod";
@@ -12,6 +13,7 @@ import {
 } from "./file-secret-store.js";
 import { KeystoreError } from "./keystore.js";
 import type { SecretStore } from "./secret-store.js";
+import { withVaultLock } from "./vault.js";
 
 /** The store chosen when a vault is created; a missing pin means the OS store. */
 export type SecretBackend = "os" | "file";
@@ -48,23 +50,41 @@ export async function chooseSecretBackend(options: {
   env?: NodeJS.ProcessEnv;
 }): Promise<SecretBackend> {
   const env = options.env ?? process.env;
-  let backend: SecretBackend;
-  if (options.os.platform !== "linux" || (await osStoreWorks(options.os))) {
-    backend = "os";
-  } else if (env[FILE_SECRET_STORE_PASSWORD_ENV]) {
-    await createFileSecretStore({ path: secretsFilePath(options.home), env });
-    backend = "file";
-  } else {
-    throw new KeystoreError(
-      [
-        `This machine has no working keyring (${options.os.description}).`,
-        `Set ${FILE_SECRET_STORE_PASSWORD_ENV} (at least ${FILE_SECRET_STORE_MIN_PASSWORD} characters; in a GitHub Codespace add it as a Codespaces secret) and run vapi setup again,`,
-        "or run vapi on your own computer, or connect Claude from https://api.vapinetwork.ai/connect.",
-      ].join(" "),
-    );
+  const osWorks = options.os.platform !== "linux" || (await osStoreWorks(options.os));
+  const path = secretBackendPath(options.home);
+  return await withVaultLock(path, async () => {
+    // Another setup may have finished while the OS probe was waiting.
+    if (await fileExists(path)) return readSecretBackend(options.home);
+    if (await fileExists(join(options.home, "vault.json"))) return "os";
+
+    let backend: SecretBackend;
+    if (osWorks) {
+      backend = "os";
+    } else if (env[FILE_SECRET_STORE_PASSWORD_ENV]) {
+      await createFileSecretStore({ path: secretsFilePath(options.home), env });
+      backend = "file";
+    } else {
+      throw new KeystoreError(
+        [
+          `This machine has no working keyring (${options.os.description}).`,
+          `Set ${FILE_SECRET_STORE_PASSWORD_ENV} (at least ${FILE_SECRET_STORE_MIN_PASSWORD} characters; in a GitHub Codespace add it as a Codespaces secret) and run vapi setup again,`,
+          "or run vapi on your own computer, or connect Claude from https://api.vapinetwork.ai/connect.",
+        ].join(" "),
+      );
+    }
+    await writeJsonAtomic(path, { v: 1, backend }, { mode: 0o600 });
+    return backend;
+  });
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if (isMissingFile(error)) return false;
+    throw error;
   }
-  await writeJsonAtomic(secretBackendPath(options.home), { v: 1, backend }, { mode: 0o600 });
-  return backend;
 }
 
 async function osStoreWorks(store: SecretStore): Promise<boolean> {
