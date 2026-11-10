@@ -119,7 +119,7 @@ describe("loadOrCreateDeviceKey failures", () => {
     expect(error.message).toContain("Cannot autolaunch D-Bus");
     expect(error.message).toContain("$DISPLAY. A server");
     expect(error.message).toContain("GitHub Codespace");
-    expect(error.message).toContain("/connect");
+    expect(error.message).toContain("VAPI_VAULT_PASSWORD");
   });
 
   it.each(["darwin", "linux"] as const)(

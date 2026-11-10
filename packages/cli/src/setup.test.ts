@@ -1,10 +1,18 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { type SecretStore, WalletStore } from "@vapi-network/core";
+import {
+  createFileSecretStore,
+  fileSecretStore,
+  KeystoreError,
+  osSecretStore,
+  type SecretStore,
+  VAULT_KEY_ACCOUNT,
+  WalletStore,
+} from "@vapi-network/core";
 import type {
   DeviceLinkStart,
   LinkResult,
@@ -20,6 +28,22 @@ import {
   type CliPrompts,
 } from "./cli.js";
 import { CLI_VERSION } from "./version.js";
+
+vi.mock("@vapi-network/core", async (importOriginal) => {
+  const core = await importOriginal<typeof import("@vapi-network/core")>();
+  return {
+    ...core,
+    osSecretStore: vi.fn(() => {
+      throw new Error("A setup test must inject its OS probe.");
+    }),
+    secretStore: (options?: Parameters<typeof core.secretStore>[0]) => {
+      if (core.readSecretBackend(options?.home) !== "file") {
+        throw new Error("A setup test must inject a secret store or pin the file backend.");
+      }
+      return core.secretStore(options);
+    },
+  };
+});
 
 const RECOVERY_PHRASE =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
@@ -57,16 +81,180 @@ const CLOUD_BACKUP_OFFER =
 const CLOUD_BACKUP_CHOICE = "Turn on cloud backup? [Y/n] ";
 
 const originalHome = process.env.VAPI_HOME;
+const originalVaultPassword = process.env.VAPI_VAULT_PASSWORD;
 const homes: string[] = [];
 const secretStores = new Map<string, SecretStore>();
 
 afterEach(async () => {
   restoreEnvironment("VAPI_HOME", originalHome);
+  restoreEnvironment("VAPI_VAULT_PASSWORD", originalVaultPassword);
+  vi.mocked(osSecretStore).mockReset();
   secretStores.clear();
   await Promise.all(homes.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
 describe("vapi setup", () => {
+  it("tells a headless Linux user how to continue when no keyring works", async () => {
+    const home = await temporaryHome("vapi-setup-no-keyring-");
+    const captured = captureIo();
+
+    expect(
+      await runCliWithDependencies(["setup", "--no-cloud-backup"], captured.io, {
+        ...baseDependencies(),
+        agentLink: linkMocks().operations,
+        secretBackendProbe: brokenLinuxStore(),
+        env: {},
+      }),
+    ).toBe(1);
+
+    expect(captured.stderr.join("\n")).toContain("VAPI_VAULT_PASSWORD");
+    expect(captured.stderr.join("\n")).toContain("own computer");
+    for (const name of ["vault.json", "secret-store.json", "secrets.json"]) {
+      expect(await fileExists(join(home, name))).toBe(false);
+    }
+    expectNoSecretLeak(captured);
+  });
+
+  it("creates a file-backed vault when VAPI_VAULT_PASSWORD is set", async () => {
+    const home = await temporaryHome("vapi-setup-file-");
+    const env = { VAPI_VAULT_PASSWORD: "correct horse battery" };
+    process.env.VAPI_VAULT_PASSWORD = env.VAPI_VAULT_PASSWORD;
+    const captured = captureIo();
+
+    expect(
+      await runCliWithDependencies(["setup", "--no-cloud-backup"], captured.io, {
+        ...baseDependencies(),
+        agentLink: linkMocks().operations,
+        prompts: scriptedPrompts({ [SETUP_CHOICE]: "new" }).prompts,
+        secretBackendProbe: brokenLinuxStore(),
+        env,
+      }),
+    ).toBe(0);
+
+    expect(JSON.parse(await readFile(join(home, "secret-store.json"), "utf8"))).toEqual({
+      v: 1,
+      backend: "file",
+    });
+    expect(await fileExists(join(home, "vault.json"))).toBe(true);
+    const path = join(home, "secrets.json");
+    const raw = await readFile(path, "utf8");
+    expect(JSON.parse(raw)).toMatchObject({
+      entries: { [VAULT_KEY_ACCOUNT]: { ciphertext: expect.any(String) } },
+    });
+    const deviceKey = await fileSecretStore({ path, env }).get(VAULT_KEY_ACCOUNT);
+    expect(deviceKey).toBeDefined();
+    expect(raw).not.toContain(deviceKey!);
+    for (const secret of [
+      env.VAPI_VAULT_PASSWORD,
+      RESULT.tokens.accessToken,
+      RESULT.tokens.refreshToken,
+      RESULT.routerKey!,
+    ]) {
+      expect(raw).not.toContain(secret);
+      expect([...captured.stdout, ...captured.stderr].join("\n")).not.toContain(secret);
+    }
+    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    expect((await stat(join(home, "secret-store.json"))).mode & 0o777).toBe(0o600);
+    expect((await stat(home)).mode & 0o777).toBe(0o700);
+    expectNoSecretLeak(captured);
+  }, 15_000);
+
+  it.each([false, true])(
+    "hides the recovery phrase in file mode with an agent marker and interactive %s",
+    async (interactive) => {
+      const home = await temporaryHome("vapi-setup-file-agent-");
+      const env = { VAPI_VAULT_PASSWORD: "correct horse battery", CLAUDECODE: "1" };
+      process.env.VAPI_VAULT_PASSWORD = env.VAPI_VAULT_PASSWORD;
+      const captured = captureIo();
+      const prompts = scriptedPrompts({ [SETUP_CHOICE]: "new" });
+
+      expect(
+        await runCliWithDependencies(["setup", "--no-cloud-backup"], captured.io, {
+          ...baseDependencies(),
+          agentLink: linkMocks().operations,
+          prompts: prompts.prompts,
+          secretBackendProbe: brokenLinuxStore(),
+          interactive,
+          env,
+        }),
+      ).toBe(0);
+
+      expect(await fileExists(join(home, "vault.json"))).toBe(true);
+      expect(captured.stdout).toContain(
+        "Recovery phrase: run vapi backup yourself in a terminal to see it.",
+      );
+      expect(captured.stdout.join("\n")).not.toContain("These 12 words restore this wallet");
+      expect(prompts.prompted).toEqual([SETUP_CHOICE]);
+      expectNoSecretLeak(captured);
+    },
+    15_000,
+  );
+
+  it("never re-chooses the backend for an existing vault", async () => {
+    const home = await temporaryHome("vapi-setup-existing-backend-");
+    const link = linkMocks();
+    expect(
+      await runCli(["setup", "--no-cloud-backup"], captureIo().io, {
+        ...baseDependencies(),
+        agentLink: link.operations,
+      }),
+    ).toBe(0);
+    await rm(join(home, "secret-store.json"), { force: true });
+    const originalVault = await readFile(join(home, "vault.json"), "utf8");
+    const probe = brokenLinuxStore();
+
+    expect(
+      await runCli(["setup", "--no-cloud-backup"], captureIo().io, {
+        ...baseDependencies(),
+        agentLink: link.operations,
+        secretBackendProbe: probe,
+      }),
+    ).toBe(0);
+
+    expect(await fileExists(join(home, "secret-store.json"))).toBe(false);
+    expect(await readFile(join(home, "vault.json"), "utf8")).toBe(originalVault);
+    expect(probe.set).not.toHaveBeenCalled();
+    expect(probe.get).not.toHaveBeenCalled();
+    expect(probe.remove).not.toHaveBeenCalled();
+  });
+
+  it("does not choose a backend when a secret store is injected without a probe", async () => {
+    const home = await temporaryHome("vapi-setup-injected-backend-");
+    expect(
+      await runCli(["setup", "--no-cloud-backup"], captureIo().io, {
+        ...baseDependencies(),
+        agentLink: linkMocks().operations,
+      }),
+    ).toBe(0);
+    expect(await fileExists(join(home, "secret-store.json"))).toBe(false);
+    expect(osSecretStore).not.toHaveBeenCalled();
+  });
+
+  it("probes the raw OS store when retrying after a partial file-backed setup", async () => {
+    const home = await temporaryHome("vapi-setup-stale-file-pin-");
+    const env = { VAPI_VAULT_PASSWORD: "correct horse battery" };
+    process.env.VAPI_VAULT_PASSWORD = env.VAPI_VAULT_PASSWORD;
+    await createFileSecretStore({ path: join(home, "secrets.json"), env });
+    await writeFile(join(home, "secret-store.json"), JSON.stringify({ v: 1, backend: "file" }));
+    const probe = brokenLinuxStore();
+    vi.mocked(osSecretStore).mockReturnValueOnce(probe);
+
+    expect(
+      await runCliWithDependencies(["setup", "--no-cloud-backup"], captureIo().io, {
+        ...baseDependencies(),
+        agentLink: linkMocks().operations,
+        env,
+      }),
+    ).toBe(0);
+
+    expect(osSecretStore).toHaveBeenCalledExactlyOnceWith();
+    expect(probe.set).toHaveBeenCalledExactlyOnceWith("setup-probe", "ok");
+    expect(JSON.parse(await readFile(join(home, "secret-store.json"), "utf8"))).toEqual({
+      v: 1,
+      backend: "file",
+    });
+  }, 15_000);
+
   it("creates a fresh vault, links main, and prints the complete next step", async () => {
     const home = await temporaryHome("vapi-setup-new-");
     const link = linkMocks();
@@ -506,6 +694,21 @@ function captureIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
       stdout: (message) => stdout.push(message),
       stderr: (message) => stderr.push(message),
     },
+  };
+}
+
+function brokenLinuxStore(): SecretStore {
+  const fail = async () => {
+    throw new KeystoreError("Cannot autolaunch D-Bus without X11 $DISPLAY");
+  };
+  return {
+    available: true,
+    platform: "linux",
+    description: "the libsecret keyring",
+    set: vi.fn(fail),
+    get: vi.fn(fail),
+    has: vi.fn(fail),
+    remove: vi.fn(fail),
   };
 }
 
