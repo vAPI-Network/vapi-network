@@ -107,6 +107,7 @@ export * from "./receipts.js";
 export * from "./run-budget.js";
 export * from "./searches.js";
 export * from "./secret-store.js";
+export * from "./file-secret-store.js";
 export * from "./siblings.js";
 export * from "./link-state.js";
 export * from "./stats.js";
