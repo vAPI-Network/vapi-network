@@ -406,6 +406,19 @@ describe("the libsecret store", () => {
       "Could not store the passphrase of main in the secret service (exit 1). Cannot autolaunch D-Bus",
     );
   });
+
+  it.each([
+    "The name org.freedesktop.secrets was not provided by any .service files",
+    "Cannot create an item in a locked collection",
+  ])("names the headless keyring reason %s", async (reason) => {
+    const { run } = recordingRunner([{ code: 1, stderr: `secret-tool: ${reason}\n` }]);
+
+    await expect(
+      secretStore({ platform: "linux", run }).set("main", "test-only-passphrase"),
+    ).rejects.toThrow(
+      `Could not store the passphrase of main in the secret service (exit 1). ${reason}`,
+    );
+  });
 });
 
 describe("every other platform", () => {

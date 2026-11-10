@@ -4,7 +4,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { z } from "zod";
 
 import { deriveEvmPrivateKey, phraseToSeed, validateRecoveryPhrase } from "./hd.js";
-import { decryptWithKey, deriveScryptKey, encryptWithKey } from "./keystore.js";
+import { decryptWithKey, deriveScryptKey, encryptWithKey, KeystoreError } from "./keystore.js";
 import type { SecretStore } from "./secret-store.js";
 import {
   createVault,
@@ -47,7 +47,7 @@ export async function loadOrCreateDeviceKey(args: {
       await args.secrets.set(VAULT_KEY_ACCOUNT, key.toString("base64"));
       return key;
     } catch (error) {
-      throw asVaultError(error, "Unable to load or create the device vault key.");
+      throw asVaultError(error, deviceKeyFailureMessage(error, args.secrets.platform));
     }
   });
 }
@@ -362,4 +362,18 @@ function parseJson(value: string): unknown {
 
 function asVaultError(error: unknown, message: string): VaultError {
   return error instanceof VaultError ? error : new VaultError("corrupt", message, { cause: error });
+}
+
+const HEADLESS_LINUX_HINT =
+  "A server, container or GitHub Codespace usually has no keyring. Run vapi on your own computer, or connect Claude from https://api.vapinetwork.ai/connect.";
+
+/**
+ * The device-key failure plus the store's own reason. Only our own
+ * KeystoreError text is repeated: it never holds a secret, while an arbitrary
+ * error from a spawned binary might hold anything.
+ */
+function deviceKeyFailureMessage(error: unknown, platform: NodeJS.Platform): string {
+  if (!(error instanceof KeystoreError)) return "Unable to load or create the device vault key.";
+  const detail = `Unable to load or create the device vault key: ${error.message.replace(/\.$/u, "")}.`;
+  return platform === "linux" ? `${detail} ${HEADLESS_LINUX_HINT}` : detail;
 }

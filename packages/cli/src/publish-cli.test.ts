@@ -997,7 +997,8 @@ describe("vapi publish activate, verify-request and list", () => {
     expect(registry.calls).toEqual([]);
     const message = captured.stderr.join("\n");
     expect(message).toContain("No vAPI API key on this machine.");
-    expect(message).toContain("https://api.vapinetwork.ai/account");
+    expect(message).toContain("https://api.vapinetwork.ai/connect?advanced=keys#api-keys");
+    expect(message).not.toContain("/account");
     expect(message).toContain("vapi auth set-key");
     expect(message).toContain("VAPI_API_KEY");
   });
@@ -1348,7 +1349,9 @@ describe("vapi auth", () => {
       }),
     ).toBe(0);
     expect(captured.stdout.join("\n")).toContain("No vAPI API key on this machine.");
-    expect(captured.stdout.join("\n")).toContain("https://api.vapinetwork.ai/account");
+    expect(captured.stdout.join("\n")).toContain(
+      "https://api.vapinetwork.ai/connect?advanced=keys#api-keys",
+    );
   });
 
   it("includes the selected wallet's agent link without reading a secret", async () => {

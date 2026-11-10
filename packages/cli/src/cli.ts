@@ -171,12 +171,11 @@ import { resolveRuntime, type RuntimeRequest } from "./runtime-local.js";
 import { RemoteKeyRefusedError, type RailwayExec } from "./runtime-railway.js";
 import { restoreCommand, vaultCommand } from "./vault.js";
 import {
-  API_KEY_CONSOLE_PATH,
+  apiKeyConsoleUrl,
   assertClaimMessage,
   buildPayoutSiweMessage,
   createListingsClient,
   formatProbeSteps,
-  listingsUrl,
   LISTING_CATEGORIES,
   PROBE_MODES,
   readProbeOperations,
@@ -2777,7 +2776,7 @@ function sameOrigin(left: string, right: string): boolean {
 function noApiKeyMessage(baseUrl: string): string {
   return [
     "No vAPI API key on this machine.",
-    `Create one in the console at ${listingsUrl(baseUrl, API_KEY_CONSOLE_PATH).href}, then store it with vapi auth set-key.`,
+    `Create one in the console at ${apiKeyConsoleUrl(baseUrl).href}, then store it with vapi auth set-key.`,
     `In CI, set ${API_KEY_ENV} instead.`,
   ].join("\n");
 }

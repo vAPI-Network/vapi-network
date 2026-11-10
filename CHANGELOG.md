@@ -5,6 +5,14 @@ scoped packages. The packages share one version and are released together.
 
 ## Unreleased
 
+## 0.12.1 — 2026-11-09
+
+### Fixed
+
+- CLI messages that ask for an API key now link to Connect → API keys (`/connect?advanced=keys#api-keys`). Create a key there; earlier versions linked to `/account`, which has no page.
+- When `vapi setup` cannot store the device vault key, it now says why, for example that `secret-tool` is not installed. On Linux it adds that a server, container or GitHub Codespace usually has no keyring. Run vapi on your own computer or connect Claude from https://api.vapinetwork.ai/connect.
+- OS secret-store errors no longer repeat the keyring tool's raw output, which could contain a secret. They name a known reason (such as no keyring daemon, a locked collection, or no D-Bus) or only the exit code.
+
 ## 0.12.0 — 2026-10-30
 
 ### Added
