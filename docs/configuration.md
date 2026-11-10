@@ -24,18 +24,18 @@ reports/              what vapi report writes
 
 `keystore.json` is retired by the device-vault migration. See the [wallet guide](wallets.md#migration-from-05) for legacy files.
 
-| Variable                 | What it does                                                                               |
-| ------------------------ | ------------------------------------------------------------------------------------------ |
-| `VAPI_HOME`              | Use a different directory instead of `~/.vapi`                                             |
-| `VAPI_WALLET`            | The account to use when no `--account` is given                                            |
-| `VAPI_REGISTRY_URL`      | Replace the registry base; canonical discovery paths derive from it                        |
-| `VAPI_VAULT_PASSWORD`    | Supply the password for a protected device vault in unattended use                         |
-| `VAPI_KEYSTORE_PASSWORD` | Legacy keystore passphrase; deprecated alias for a vault password                          |
-| `VAPI_API_KEY`           | Registry key for human publishing or CI; overrides the OS secret store and config fallback |
-| `VAPI_NO_SECRETS`        | Set to `1` to refuse recovery phrase and private key exports                               |
-| `VAPI_DEVICE`            | Override the device name sent with account link requests                                   |
-| `VAPI_DOCS_URL`          | Override the public documentation origin                                                   |
-| `VAPI_NO_UPDATE_CHECK`   | Set to `1` to disable the interactive npm update check                                     |
+| Variable                 | What it does                                                                                                                     |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `VAPI_HOME`              | Use a different directory instead of `~/.vapi`                                                                                   |
+| `VAPI_WALLET`            | The account to use when no `--account` is given                                                                                  |
+| `VAPI_REGISTRY_URL`      | Replace the registry base; canonical discovery paths derive from it                                                              |
+| `VAPI_VAULT_PASSWORD`    | Supply the password for a protected device vault in unattended use, and the encrypted secrets file on machines without a keyring |
+| `VAPI_KEYSTORE_PASSWORD` | Legacy keystore passphrase; deprecated alias for a vault password                                                                |
+| `VAPI_API_KEY`           | Registry key for human publishing or CI; overrides the OS secret store and config fallback                                       |
+| `VAPI_NO_SECRETS`        | Set to `1` to refuse recovery phrase and private key exports                                                                     |
+| `VAPI_DEVICE`            | Override the device name sent with account link requests                                                                         |
+| `VAPI_DOCS_URL`          | Override the public documentation origin                                                                                         |
+| `VAPI_NO_UPDATE_CHECK`   | Set to `1` to disable the interactive npm update check                                                                           |
 
 `config.json` accepts these fields:
 

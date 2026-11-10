@@ -47,6 +47,52 @@ jobs:
       - name: Verify publish tarballs
         run: pnpm pack:check
 
+  headless-linux:
+    name: Setup without a keyring (Linux)
+    runs-on: ubuntu-latest
+    container: node:22-bookworm
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Enable pnpm
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Set up and reopen an encrypted file-backed vault
+        shell: bash
+        run: |
+          set -euo pipefail
+          export VAPI_HOME="$(mktemp -d)"
+          export VAPI_VAULT_PASSWORD='ci-only-password-1234'
+          export VAPI_REGISTRY_URL='http://127.0.0.1:1'
+          export BASE_RPC_URL="$VAPI_REGISTRY_URL"
+          trap 'rm -rf "$VAPI_HOME"' EXIT
+
+          # Keep CI markers and stdin closed so the recovery phrase stays hidden.
+          # Linking fails against the local registry; assert the vault separately.
+          timeout 300 node packages/vapi-network/dist/cli.js setup --no-cloud-backup < /dev/null || true
+          test "$(node -p 'require(process.env.VAPI_HOME + "/secret-store.json").backend')" = file
+          test -f "$VAPI_HOME/vault.json"
+          node -e 'const f=require(process.env.VAPI_HOME+"/secrets.json"); const e=f.entries["vault-key"]; if (!e || typeof e.ciphertext!=="string") process.exit(1)'
+          test "$(stat -c %a "$VAPI_HOME/secrets.json")" = 600
+          test "$(stat -c %a "$VAPI_HOME/secret-store.json")" = 600
+          node packages/vapi-network/dist/cli.js accounts --json | grep -q '"address"'
+
+          # Listing public addresses works while locked; adding an account needs the key.
+          node packages/vapi-network/dist/cli.js accounts add unlocked-check --no-link --json | grep -q '"address"'
+          if locked_output=$(env -u VAPI_VAULT_PASSWORD node packages/vapi-network/dist/cli.js accounts add locked-check --no-link --json 2>&1); then
+            echo 'Expected account derivation to fail without VAPI_VAULT_PASSWORD.' >&2
+            exit 1
+          fi
+          printf '%s\n' "$locked_output" | grep -q 'VAPI_VAULT_PASSWORD'
+
   windows:
     name: Secret store (Windows)
     runs-on: windows-latest
