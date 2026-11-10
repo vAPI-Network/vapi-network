@@ -1,10 +1,13 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { createFileSecretStore } from "./file-secret-store.js";
+import { KeystoreError } from "./keystore.js";
 import {
   memorySecretStore,
+  osSecretStore,
   secretStore,
   type SecretStoreOutcome,
   type SecretStoreRunner,
@@ -27,6 +30,77 @@ function recordingRunner(answers: Array<Partial<SecretStoreOutcome>>): {
   };
   return { run, runs };
 }
+
+describe("the pinned secret store", () => {
+  let directory: string;
+
+  beforeEach(() => {
+    directory = mkdtempSync(join(tmpdir(), "vapi-pin-"));
+    vi.stubEnv("VAPI_HOME", directory);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("uses the file store when the vault is pinned to it", () => {
+    writeFileSync(join(directory, "secret-store.json"), JSON.stringify({ v: 1, backend: "file" }));
+    const store = secretStore({
+      platform: "linux",
+      home: directory,
+      env: { VAPI_VAULT_PASSWORD: "x".repeat(12) },
+    });
+    expect(store.description).toBe("the encrypted vAPI secrets file");
+  });
+
+  it("keeps the OS store when nothing is pinned", () => {
+    const store = secretStore({ platform: "linux", home: directory, installed: () => true });
+    expect(store.description).toBe("the libsecret keyring");
+  });
+
+  it("lets setup reach the OS store even when the vault is pinned to file", () => {
+    writeFileSync(join(directory, "secret-store.json"), JSON.stringify({ v: 1, backend: "file" }));
+    const store = osSecretStore({ platform: "linux", home: directory, installed: () => true });
+    expect(store.description).toBe("the libsecret keyring");
+  });
+
+  it("fails closed on a damaged pin before reaching the OS store", () => {
+    writeFileSync(join(directory, "secret-store.json"), "pin-secret-sentinel");
+    const { run, runs } = recordingRunner([]);
+    const open = () => secretStore({ platform: "linux", home: directory, run });
+    expect(open).toThrow(KeystoreError);
+    expect(open).toThrow("damaged");
+    expect(open).not.toThrow("pin-secret-sentinel");
+    expect(runs).toEqual([]);
+    expect(
+      osSecretStore({ platform: "linux", home: directory, installed: () => true }).description,
+    ).toBe("the libsecret keyring");
+  });
+
+  it("uses the configured vAPI home by default", () => {
+    writeFileSync(join(directory, "secret-store.json"), JSON.stringify({ v: 1, backend: "file" }));
+    expect(secretStore({ platform: "linux", env: {} }).description).toBe(
+      "the encrypted vAPI secrets file",
+    );
+  });
+
+  it("opens the encrypted file and never falls back to an OS runner without its password", async () => {
+    const path = join(directory, "secrets.json");
+    const env = { VAPI_VAULT_PASSWORD: "correct horse battery" };
+    await createFileSecretStore({ path, env });
+    writeFileSync(join(directory, "secret-store.json"), JSON.stringify({ v: 1, backend: "file" }));
+    const { run, runs } = recordingRunner([]);
+    const store = secretStore({ platform: "linux", home: directory, env, run });
+    await store.set("vault-key", "pinned-file-secret-sentinel");
+    expect(await store.get("vault-key")).toBe("pinned-file-secret-sentinel");
+
+    const locked = secretStore({ platform: "linux", home: directory, env: {}, run });
+    expect(locked.available).toBe(false);
+    await expect(locked.get("vault-key")).rejects.toThrow("VAPI_VAULT_PASSWORD");
+    expect(runs).toEqual([]);
+  });
+});
 
 describe("the macOS keychain store", () => {
   it("stores the passphrase over stdin, never in an argument", async () => {
