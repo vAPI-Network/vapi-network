@@ -1,4 +1,4 @@
-# vAPI Network
+npm i -g vapi-network# vAPI Network
 
 vAPI Network builds payment and trust infrastructure for AI agents on Base, with
 x402 API payments in USDC.
