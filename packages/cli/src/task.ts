@@ -95,12 +95,15 @@ import {
 } from "./cli.js";
 
 import { taskV2Command } from "./task-v2.js";
+import { TASK_JURY_VERBS, taskJuryCommand } from "./task-jury.js";
 
 export type TasksCommandDependencies = {
   client?: TasksClient | ((options: TasksClientOptions) => TasksClient);
   chain?: TasksChain;
   sleep?: (milliseconds: number) => Promise<void>;
   randomUUID?: () => string;
+  /** Read-only RPC for reviewer-status; defaults to the configured Tasks RPC. */
+  rpcFor?: (chainId: number) => import("viem").PublicClient;
 };
 
 export const TASK_HELP = `Usage:
@@ -123,6 +126,11 @@ export const TASK_HELP = `Usage:
   vapi task dispute <id> [--evidence-hash <0x + 64 hex>|--index N --evidence <text>] [--action raise|resolve-unmatched|split --to-worker <base-units>] [--yes] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task counter-evidence <id> [--evidence-hash <0x + 64 hex>|--index N --evidence <text>] [--yes] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task resolve-unmatched <id> [--index N] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task jury <id> --index N --step open|draw|rearm|resolve [--account <name>] [--json]
+  vapi task vote <id> --index N (--commit worker|poster|split [--to-worker <base-units>] | --reveal) [--account <name>] [--json]
+  vapi task approve-bond <id> [--yes] [--account <name>] [--json]
+  vapi task claim-owed <id> [--to <0x…>] [--account <name>] [--json]
+  vapi task reviewer-status [--address <0x…>] [--account <name>] [--json]
   vapi task message <id> <text> [--account <name>] [--json]
   vapi task thread <id> [--after <cursor>] [--account <name>] [--json]
   vapi task watch <id> [--until <state>] [--auto-release] [--timeout 7d] [--interval 5s] [--counterparty <0x…>] [--account <name>] [--json]
@@ -130,6 +138,8 @@ export const TASK_HELP = `Usage:
 
 Durations: 5s, 10m, 48h, 7d, or an ISO-8601 timestamp. Posting and proposal terms require at least 10 minutes.
 V1 dispute accepts a precomputed evidence hash. V2 dispute accepts --index with --evidence text. C0 action indices are zero-based; declared milestone indices remain one-based.
+Jury: with 20 or fewer eligible reviewers everyone eligible votes; above 20, 5 are drawn. A verdict needs at least 3 reveals and a strict majority. A tie or no majority restores the pre-dispute state and a new dispute round may be raised. No mediation or appeal. Jury open repeats while the case is Snapshotting.
+Vote --commit seals the salt in a local ballot under VAPI_HOME before vAPI sees the commitment; --reveal reads that ballot back by the onchain commitment, so reveal from the machine that committed. --to-worker is USDC base units and only for split.
 Watch requires an interval of at least 1s and a positive timeout. Auto-release uses the acting wallet's agent profile, or defaults, and releases only amounts strictly below the threshold.
 Posting without --fund moves no money. --fund applies task and daily caps before signing. Task reads require tasks:read and writes require tasks:write; write access includes reads.
 The thread cursor is the previous page's nextBeforeSeq; --after reads older messages using beforeSeq.
@@ -230,6 +240,12 @@ function lazyTasksChain(
     }
     return action === "dispute" ? initialized.dispute(input) : initialized.counterEvidence(input);
   }
+  async function juryV2() {
+    const initialized = await get();
+    if (!initialized.juryV2)
+      throw new TaskOperationError("chain_unavailable", "Local jury signing is unavailable.");
+    return initialized.juryV2;
+  }
   return {
     available: true,
     executeV2: async (input) => {
@@ -237,6 +253,13 @@ function lazyTasksChain(
       if (!initialized.executeV2)
         throw new TaskOperationError("chain_unavailable", "V2 signing is unavailable.");
       return initialized.executeV2(input);
+    },
+    juryV2: {
+      caseState: async (input) => (await juryV2()).caseState(input),
+      assertJuryOpenable: async (input) => (await juryV2()).assertJuryOpenable(input),
+      sealBallot: async (input) => (await juryV2()).sealBallot(input),
+      openBallot: async (input) => (await juryV2()).openBallot(input),
+      assertSealedCase: async (input) => (await juryV2()).assertSealedCase(input),
     },
     ...(signingAddress === undefined ? {} : { signingAddress }),
     getSigningAddress: async () => {
@@ -363,6 +386,7 @@ export async function taskContext(
               onV2UntrustedOverride: io.stderr,
               trustedDurations: config.tasksEscrowDurationOverrides,
               bindings: createScopeBindings(getVapiPaths().directory),
+              ballotsHome: getVapiPaths().directory,
               rpcFor: createTasksRpcFor(config, {
                 env,
                 ...(dependencies.fetchImpl === undefined ? {} : { fetch: dependencies.fetchImpl }),
@@ -469,6 +493,10 @@ async function taskCommandInner(
       ...(["milestone", "dispute", "counter-evidence", "resolve-unmatched", "sign"].includes(verb!)
         ? ["--index"]
         : []),
+      ...(verb === "jury" ? ["--index", "--step"] : []),
+      ...(verb === "vote" ? ["--index", "--commit", "--to-worker"] : []),
+      ...(verb === "claim-owed" ? ["--to"] : []),
+      ...(verb === "reviewer-status" ? ["--address"] : []),
       ...(verb === "milestone"
         ? ["--reason", "--proof", "--file", "--files", "--note", "--proof-json"]
         : []),
@@ -542,6 +570,8 @@ async function taskCommandInner(
       ...(["sign", "fund", "dispute", "counter-evidence"].includes(verb!) ? ["--yes"] : []),
       ...(["sign", "fund", "deliver", "release"].includes(verb!) ? ["--no-wait"] : []),
       ...(verb === "watch" ? ["--auto-release"] : []),
+      ...(verb === "vote" ? ["--reveal"] : []),
+      ...(verb === "approve-bond" ? ["--yes"] : []),
     ]),
     repeatableOptions: new Set([
       ...(["submit", "milestone"].includes(verb!) ? ["--proof", "--file"] : []),
@@ -549,15 +579,24 @@ async function taskCommandInner(
       ...(verb === "deliver" ? ["--files"] : []),
       ...(verb === "post" ? ["--milestone", "--proof"] : []),
     ]),
-    maximumPositionals: ["search", "post", "pending"].includes(verb!)
+    maximumPositionals: ["search", "post", "pending", "reviewer-status"].includes(verb!)
       ? 0
       : ["award", "message", "milestone", "cancel"].includes(verb!)
         ? 2
         : 1,
   });
-  const id = ["search", "post", "pending"].includes(verb!)
+  const id = ["search", "post", "pending", "reviewer-status"].includes(verb!)
     ? undefined
     : taskId(parsed.positionals[0]);
+  if ((TASK_JURY_VERBS as readonly string[]).includes(verb!))
+    return await taskJuryCommand(
+      verb as (typeof TASK_JURY_VERBS)[number],
+      id,
+      parsed,
+      json,
+      io,
+      dependencies,
+    );
   if (id !== undefined) {
     const v2 = await taskV2Command(verb!, id, parsed, json, io, dependencies);
     if (v2 !== null) return v2;

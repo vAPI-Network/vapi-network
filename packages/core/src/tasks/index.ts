@@ -62,4 +62,17 @@ export * from "./v2-write.js";
 
 export * from "./v2-execution.js";
 
+export * from "./v2-public.js";
+
 export * from "./v2-trust.js";
+
+export * from "./ballots.js";
+
+export * from "./v2-jury.js";
+
+export {
+  V2_RESOLVER_ACTIONS,
+  isV2ResolverAction,
+  verifiedV2Resolver,
+  acceptedV2WorkerBond,
+} from "./v2-plan-guard.js";

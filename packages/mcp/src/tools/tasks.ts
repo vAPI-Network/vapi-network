@@ -13,6 +13,10 @@ import {
   executeTaskV2,
   taskUsesV2,
   recoverTaskV2,
+  readTaskV2ReviewerStatus,
+  runTaskV2Jury,
+  runTaskV2Vote,
+  TASK_V2_VOTE_OUTCOMES,
   taskV2ActionSchema,
   taskV2ConsentSchema,
   taskV2IndexSchema,
@@ -297,6 +301,35 @@ export const tasksResolveUnmatchedTool = descriptor(
   "Executes the user's own resolution of an unmatched dispute with the user's vault wallet after the onchain counter-evidence deadline when no counter-evidence was submitted; nothing is custodial.",
   { ...moneyParticipant, i: taskV2IndexSchema.optional() },
 );
+const JURY_RULES =
+  "With 20 or fewer eligible reviewers everyone eligible votes; above 20, 5 are drawn. A verdict needs at least 3 reveals and a strict majority. A tie or no majority restores the pre-dispute state and a new dispute round may be raised. No mediation or appeal.";
+const address = z.string().regex(/^0x[0-9a-fA-F]{40}$/u);
+export const tasksJuryTool = descriptor(
+  `Does not move money from the wallet. Run one hosted-prepared DisputeResolverV3 jury step on a disputed V2 milestone with the local vault wallet: open (repeats while the case is Snapshotting), draw, rearm or resolve. C0 index i is zero-based. ${JURY_RULES}`,
+  { ...participant, i: taskV2IndexSchema, step: z.enum(["open", "draw", "rearm", "resolve"]) },
+);
+export const tasksVoteTool = descriptor(
+  `Does not move money. Commit or reveal this wallet's jury vote. commit seals a random salt in a local ballot file before vAPI sees the commitment; reveal reads that ballot back by the onchain commitment, so reveal from the machine that committed. outcome is worker, poster or split; toWorker (USDC base units) only for split. ${JURY_RULES}`,
+  {
+    ...participant,
+    i: taskV2IndexSchema,
+    action: z.enum(["commit", "reveal"]),
+    outcome: z.enum(TASK_V2_VOTE_OUTCOMES).optional(),
+    toWorker: z.string().regex(/^\d+$/u).optional(),
+  },
+);
+export const tasksApproveBondTool = descriptor(
+  "Executes the user's own USDC approval of the agreed worker bond to the verified escrow clone, which collects it when the poster awards; nothing is custodial. The bond counts against task and daily caps; MCP refuses human approval with approval:true.",
+  participant,
+);
+export const tasksClaimOwedTool = descriptor(
+  "Executes the user's own pull of a payout the V2 escrow could not push to this wallet, to the wallet or another address, with the user's vault wallet; nothing is custodial. Returns the owed amount.",
+  { ...participant, to: address.optional() },
+);
+export const tasksReviewerStatusTool = descriptor(
+  "Does not move money. Read a wallet's jury reviewer readiness from the chain: registry seat, vAPI ID, stake against the gate threshold, availability, suspension, missed reveals and claimable fees. Defaults to the selected account.",
+  { ...walletArgument, address: address.optional() },
+);
 export const tasksMessageTool = descriptor(
   "Does not move money. Send task thread text as the acting wallet.",
   {
@@ -334,6 +367,8 @@ export const tasksStatusTool = descriptor(
 export type TasksOverrides = {
   client?: TasksClient | ((options: TasksClientOptions) => TasksClient);
   chain?: TasksChain;
+  /** Read-only RPC for tasks.reviewer-status; defaults to the configured Tasks RPC. */
+  rpcFor?: (chainId: number) => import("viem").PublicClient;
   randomUUID?: () => string;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
@@ -381,6 +416,12 @@ function lazyTasksChain(
     }
     return action === "dispute" ? initialized.dispute(input) : initialized.counterEvidence(input);
   }
+  async function juryV2() {
+    const initialized = await get();
+    if (!initialized.juryV2)
+      throw new TaskOperationError("chain_unavailable", "Local jury signing is unavailable.");
+    return initialized.juryV2;
+  }
   return {
     available: true,
     executeV2: async (input) => {
@@ -388,6 +429,13 @@ function lazyTasksChain(
       if (!initialized.executeV2)
         throw new TaskOperationError("chain_unavailable", "V2 signing is unavailable.");
       return initialized.executeV2(input);
+    },
+    juryV2: {
+      caseState: async (input) => (await juryV2()).caseState(input),
+      assertJuryOpenable: async (input) => (await juryV2()).assertJuryOpenable(input),
+      sealBallot: async (input) => (await juryV2()).sealBallot(input),
+      openBallot: async (input) => (await juryV2()).openBallot(input),
+      assertSealedCase: async (input) => (await juryV2()).assertSealedCase(input),
     },
     getSigningAddress: async () => {
       const initialized = await get();
@@ -500,6 +548,7 @@ export function createTasksTools(options: TasksToolsOptions) {
                 trustedFactories: config.tasksEscrowFactoryOverrides,
                 trustedDurations: config.tasksEscrowDurationOverrides,
                 bindings: createScopeBindings(home),
+                ballotsHome: home,
                 rpcFor: createTasksRpcFor(config, { fetch: guardedFetch }),
                 pending,
                 now,
@@ -584,25 +633,34 @@ export function createTasksTools(options: TasksToolsOptions) {
     return taskResult(outcome, !outcome.ok);
   }
 
+  async function v2Base(input: { id: string; wallet?: string }) {
+    const ctx = await acting(input.wallet);
+    return {
+      ctx,
+      base: {
+        id: input.id,
+        policy: await taskPolicyForWallet({
+          directory: home,
+          wallet: ctx.selected.name,
+          schema: registeredAgentProfileSchema,
+        }),
+        caps: await spendCapsForWallet(options.wallets!, ctx.selected.name),
+        wallet: ctx.selected.name,
+        ledgerPath: options.ledgerPath ?? getVapiPaths(home).ledger,
+        approval: { granted: false },
+      },
+    };
+  }
   async function v2(
     input: { id: string; wallet?: string },
     write?: TaskV2Action,
     consent?: TaskV2Consent,
   ) {
-    const ctx = await acting(input.wallet);
+    const { ctx, base } = await v2Base(input);
     const result = await executeTaskV2(ctx, {
-      id: input.id,
+      ...base,
       ...(write ? { write } : {}),
       ...(consent ? { consent } : {}),
-      policy: await taskPolicyForWallet({
-        directory: home,
-        wallet: ctx.selected.name,
-        schema: registeredAgentProfileSchema,
-      }),
-      caps: await spendCapsForWallet(options.wallets!, ctx.selected.name),
-      wallet: ctx.selected.name,
-      ledgerPath: options.ledgerPath ?? getVapiPaths(home).ledger,
-      approval: { granted: false },
     });
     return taskResult(result, !result.ok);
   }
@@ -1056,6 +1114,55 @@ export function createTasksTools(options: TasksToolsOptions) {
         await resolveUnmatchedTaskOperation(await acting(input.wallet), {
           id: input.id,
           ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
+        }),
+      );
+    },
+    async jury(input: Input<typeof tasksJuryTool>) {
+      const { ctx, base } = await v2Base(input);
+      const result = await runTaskV2Jury(ctx, { ...base, i: input.i, step: input.step });
+      return taskResult(result, !result.ok);
+    },
+    async vote(input: Input<typeof tasksVoteTool>) {
+      const { ctx, base } = await v2Base(input);
+      const result = await runTaskV2Vote(ctx, {
+        ...base,
+        i: input.i,
+        action: input.action,
+        ...(input.outcome === undefined ? {} : { outcome: input.outcome }),
+        ...(input.toWorker === undefined ? {} : { toWorker: input.toWorker }),
+      });
+      return taskResult(result, !result.ok);
+    },
+    async approveBond(input: Input<typeof tasksApproveBondTool>) {
+      return v2(input, { action: "approve-bond" });
+    },
+    async claimOwed(input: Input<typeof tasksClaimOwedTool>) {
+      return v2(
+        input,
+        taskV2ActionSchema.parse({
+          action: "claim-owed",
+          ...(input.to === undefined ? {} : { to: input.to }),
+        }),
+      );
+    },
+    async reviewerStatus(input: Input<typeof tasksReviewerStatusTool>) {
+      const ctx = await context(input.wallet, input.address !== undefined);
+      const wallet =
+        input.address ??
+        (ctx.selected
+          ? (await options.session.addressesFor(ctx.selected.name)).address
+          : undefined);
+      if (!wallet) throw new TaskInputError("address or a local account is required.");
+      const deployment = await ctx.client.deployment();
+      return taskResult(
+        await readTaskV2ReviewerStatus({
+          chainId: deployment.chainId,
+          wallet,
+          rpcFor:
+            options.rpcFor ??
+            createTasksRpcFor(await loadConfig(getVapiPaths(home).config), {
+              fetch: options.fetchImpl,
+            }),
         }),
       );
     },

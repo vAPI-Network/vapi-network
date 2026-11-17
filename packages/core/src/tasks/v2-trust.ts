@@ -3,6 +3,7 @@ import { TaskOperationError } from "./operation-support.js";
 
 export type TasksV2Deployment = {
   escrowFactoryV2: Address;
+  /** DisputeResolverV3 pin; jury plans must also match the verified clone's DISPUTE_RESOLVER(). */
   disputeResolverV3: Address;
   bountyPoolFactoryV1: Address;
   usdc: Address;

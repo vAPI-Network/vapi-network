@@ -25,6 +25,11 @@ The task SDK in `@vapi-network/core/tasks` talks to the vAPI task API and builds
 | `dispute`           | Raises a dispute and charges the contract dispute fee.                       | Yes                    |
 | `counter-evidence`  | Submits counter-evidence and pays the verified dispute fee.                  | Yes                    |
 | `resolve-unmatched` | Resolves a dispute after an unanswered counter-evidence deadline.            | Yes                    |
+| `jury`              | Opens, draws, rearms or resolves the V2 jury on a disputed milestone.        | No                     |
+| `vote`              | Commits a sealed jury vote, or reveals it from the local ballot.             | No                     |
+| `approve-bond`      | Approves the verified escrow to collect the agreed worker bond.              | Yes                    |
+| `claim-owed`        | Pulls a payout the escrow could not send to this wallet.                     | Yes                    |
+| `reviewer-status`   | Shows a wallet's jury reviewer readiness from the chain.                     | No                     |
 | `message`           | Sends a message to the other party.                                          | No                     |
 | `thread`            | Reads the task message thread.                                               | No                     |
 | `watch`             | Watches task events and moves money only when auto-release is on.            | Only with auto-release |
@@ -53,6 +58,11 @@ vapi task refund <id> [--counterparty <0x…>] [--account <name>] [--json]
 vapi task dispute <id> --evidence-hash <0x + 64 hex> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
 vapi task counter-evidence <id> --evidence-hash <0x + 64 hex> [--yes] [--counterparty <0x…>] [--account <name>] [--json]
 vapi task resolve-unmatched <id> [--counterparty <0x…>] [--account <name>] [--json]
+vapi task jury <id> --index N --step open|draw|rearm|resolve [--account <name>] [--json]
+vapi task vote <id> --index N (--commit worker|poster|split [--to-worker <base-units>] | --reveal) [--account <name>] [--json]
+vapi task approve-bond <id> [--yes] [--account <name>] [--json]
+vapi task claim-owed <id> [--to <0x…>] [--account <name>] [--json]
+vapi task reviewer-status [--address <0x…>] [--account <name>] [--json]
 vapi task message <id> <text> [--account <name>]
 vapi task thread <id> [--after <cursor>] [--account <name>]
 vapi task watch <id> [--until <state>] [--auto-release] [--timeout 7d] [--interval 5s] [--counterparty <0x…>] [--account <name>] [--json]
@@ -221,6 +231,11 @@ The CLI and MCP share the same policy and core functions. Each CLI verb maps to 
 | `dispute`           | `tasks.dispute`           |
 | `counter-evidence`  | `tasks.counter-evidence`  |
 | `resolve-unmatched` | `tasks.resolve-unmatched` |
+| `jury`              | `tasks.jury`              |
+| `vote`              | `tasks.vote`              |
+| `approve-bond`      | `tasks.approve-bond`      |
+| `claim-owed`        | `tasks.claim-owed`        |
+| `reviewer-status`   | `tasks.reviewer-status`   |
 | `message`           | `tasks.message`           |
 | `thread`            | `tasks.thread`            |
 | `watch`             | `tasks.watch`             |
@@ -292,7 +307,8 @@ the action. Stable hosted errors such as `v2_writes_disabled`,
 `chain_preflight_unavailable`, `v2_binding_mismatch`,
 `v2_funding_snapshot_unavailable` and `v1_order` retain their codes.
 
-Approval, pool creation and action steps run in sequence. A failed step stops the
+Creation, approval and action steps run in sequence. Each V2 transaction is signed with a 25%
+buffer over the node's gas estimate; unused gas is not charged. A failed step stops the
 sequence. Signed transaction bytes and preparation keys persist in the local
 pending journal; retrying the original command resumes its hosted operation.
 The CLI and SDK poll order-level confirm/reconcile and recover responses without
@@ -328,6 +344,13 @@ VAPI_TASKS_V2_USDC_NAME_84532='USD Coin'
 VAPI_TASKS_V2_USDC_VERSION_84532=2
 ```
 
+The guard reads the current contracts: the factory's `paymentToken()`, the clone's
+`FACTORY()`, `USDC()`, `terms()` and `totalPrincipal()`, and consent nonces from
+`consentNonces()` under the `vAPI Tasks Escrow` version `2` EIP-712 domain. Its ABI
+entries are copied from the vapi-app generated artifact by
+`node scripts/sync-tasks-v2-abi.mjs <vapi-app checkout>` (`--check` reports a stale
+copy); never edit `packages/core/src/tasks/v2-abi.generated.ts` by hand.
+
 Cloud inputs use the `VAPI_NETWORK_` prefix. Every override is logged to stderr as
 “untrusted override”; SDK callers can supply `trustedV2Deployments` and
 `onV2UntrustedOverride` in the chain options. Factory membership, poster, token,
@@ -338,9 +361,13 @@ the on-chain role required by the action; award consent comes from the prospecti
 worker before assignment. The money confirmation preview includes the verified
 escrow address.
 
-Fresh approval-first funding predicts the recipient from accepted order terms
-and local defaults before approving the pinned factory. The later creation step
-must use exactly those inputs. An accepted bounty choice window takes precedence
+Fresh funding follows the hosted sequence: `createEscrow` (or `createPool`) on the
+pinned factory, a USDC approval of the new clone, then `fund()` on the clone; with
+an EIP-3009 authorization a task is created and funded in one
+`createAndFundWithAuthorization` call. The client predicts the clone from accepted
+order terms, local defaults, the pinned factory's `feeBp()` and its implementation's
+`MIN_OBJECTION_WINDOW()`; every creation input (the complete `IEscrowV2.Terms`
+tuple, the milestones and the order salt) must match that prediction. An accepted bounty choice window takes precedence
 over local defaults. Unset offer TTL and choice windows default to 604800 seconds;
 staging can explicitly set
 `VAPI_TASKS_V2_OFFER_TTL_SECONDS_<chainId>` and
@@ -356,17 +383,129 @@ undeployed recipient, so that authorization is refused until the recipient can
 be independently verified. Pool funding also requires its on-chain verifier to
 be the accepted poster; an independently trusted delegated checker is not yet
 configured. Funding authorizations require the exact pinned USDC
-domain and schema, a 32-byte nonce and a chain-clock validity window of at most
-one hour.
+domain and schema, a 32-byte nonce, a start before the chain clock and an expiry at
+most one hour after it.
 
 Every transaction selector, destination and requested index/amount is checked
-before signing. C0 task creation funding approves only the pinned escrow factory;
-pool funding and dispute fees approve only the verified clone, for the exact
-amount paid. Unmatched settlement requires a verified disputed milestone,
-resolver state, elapsed evidence window and opener event before its money
-preview. Voluntary refunds include pending and submitted milestones; cancelling
+before signing. Funding, dispute fees and the worker bond approve only the verified
+clone, for the exact amount paid. Unmatched settlement requires a verified disputed
+milestone and the clone resolver's `caseData` (Raised, the same opener, an elapsed
+evidence deadline) before its money preview. Voluntary refunds include pending and submitted milestones; cancelling
 an unpaid remainder includes pending milestones only.
 
 Post-with-funding persists its original unsigned operation or intent and
 idempotency key before an approval refusal. `task fund <id> --yes` resumes that
 preparation without creating a conflicting hosted operation.
+
+## V2 jury and reviewer steps
+
+A matched V2 dispute goes to a jury of reviewers on DisputeResolverV3. The rules:
+
+- With 20 or fewer eligible reviewers, everyone eligible votes. Above 20, 5 are drawn.
+- A verdict needs at least 3 reveals and a strict majority.
+- A tie or no majority restores the pre-dispute state, and a new dispute round may be raised.
+- There is no mediation or appeal.
+
+```sh
+vapi task jury <id> --index 0 --step open
+vapi task jury <id> --index 0 --step draw
+vapi task jury <id> --index 0 --step rearm
+vapi task vote <id> --index 0 --commit worker
+vapi task vote <id> --index 0 --commit split --to-worker 40000000
+vapi task vote <id> --index 0 --reveal
+vapi task jury <id> --index 0 --step resolve
+vapi task approve-bond <id>
+vapi task claim-owed <id> [--to 0x...]
+vapi task reviewer-status [--address 0x...]
+```
+
+| Step                  | Hosted write action                           | Contract call                                                    | Who may run it                                      |
+| --------------------- | --------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------- |
+| `jury --step open`    | `open-jury`                                   | `openJury`, then `continueJury` while the case is `Snapshotting` | Anyone, after the dispute is matched                |
+| `jury --step draw`    | `draw-jury`                                   | `drawJury`                                                       | Anyone, inside the draw window                      |
+| `jury --step rearm`   | `rearm-draw`                                  | `rearmDraw`                                                      | Anyone, after a missed draw window                  |
+| `jury --step resolve` | `resolve`                                     | `resolve`                                                        | Anyone, after the reveal window                     |
+| `vote --commit`       | `commit-vote` with the commitment             | `commitVote`                                                     | An eligible or drawn reviewer, in the commit window |
+| `vote --reveal`       | `reveal-vote` with outcome, toWorker and salt | `revealVote`                                                     | The reviewer that committed, in the reveal window   |
+| `approve-bond`        | `approve-bond`                                | USDC `approve(escrow clone, bond)`                               | The awarded or intended worker                      |
+| `claim-owed`          | `claim-owed`                                  | `claimOwed(to)` on the escrow clone                              | Any account the escrow owes                         |
+
+`vote --reveal` first reads the resolver's `caseData` and the chain clock: it refuses with
+`reveal_not_open` until the commit deadline has passed, `reveal_window_closed` after the reveal
+deadline and `reveal_unavailable` outside the voting stage, so the salt never reaches vAPI while
+others can still commit. `jury --step open` on a matched case refuses with `evidence_window_open` until
+the case's `evidenceDeadline` has passed.
+
+Every step follows the V2 participant write pattern: the hosted API prepares the plan through
+`POST /v1/work-orders/{id}/writes`, the client verifies it locally, signs with the local vault and
+confirms. Indices are zero-based C0 indices. `jury --step open` repeats while the case is
+`Snapshotting`, because a registry larger than one snapshot batch needs several `continueJury` calls.
+Jury and vote steps move no USDC from the acting wallet; `resolve` pays out from escrow by the
+verdict.
+
+The plan guard pins the resolver through the verified escrow. It reads `DISPUTE_RESOLVER()` from the
+clone that the pinned factory registered and requires every jury and vote plan to target that
+address. The required `VAPI_TASKS_V2_DISPUTE_RESOLVER_V3_<chainId>` pin (SDK `disputeResolverV3`),
+read with the other V2 override variables, must agree with it. The guard decodes each plan with the DisputeResolverV3 ABI and compares
+the selector, escrow, index, commitment, outcome, `toWorker` and salt to the requested step. A bond
+approval must approve exactly the bond `EscrowV2.award` collects, the clone's `totalPrincipal()` × its
+`terms().workerBondBp` / 10,000, to the verified clone. That on-chain rate must equal the accepted
+order terms (it is also part of the frozen terms hash); a rate from the hosted response alone is
+never used. The poster cannot run it, and it counts against the task and daily caps as escrow
+funding.
+`claim-owed` must call `claimOwed` on the verified clone with `--to`, or the acting wallet when
+`--to` is absent.
+
+Vote salts stay with the agent. `vote --commit` generates a 32-byte salt locally and computes the
+commitment on this machine, exactly as DisputeResolverV3 does:
+`keccak256(abi.encode(escrow, i, round, reviewer, outcome, toWorker, salt))`. Only the public
+dispute round (`disputeRound`) and case id are read over RPC, and the case id must match that round.
+It writes the ballot to
+`VAPI_HOME/tasks/ballots/<chainId>/<resolver>/<caseId>/<commitment>.json` with mode 0600 and an
+fsync before it requests the commit plan. Only the commitment goes to vAPI. A retry with the same
+vote reuses its sealed ballot. `vote --reveal` reads this wallet's onchain `commitments(caseId,
+voter)` and opens only the ballot with that commitment, so a replaced ballot whose commit never mined
+is never revealed. Reveal from the machine that committed; without the ballot there is nothing to
+reveal. Outcomes are `worker`, `poster` and `split` (DisputeResolverV3 order 0, 1, 2). `--to-worker`
+is USDC base units and only for `split`.
+
+Trust boundaries for a ballot:
+
+- Until reveal, the vote and its salt stay on this machine. The commit sends only the commitment to
+  vAPI and to the chain, and neither the RPC nor vAPI sees the vote or the salt.
+- At reveal, the vote and its salt go to the hosted vAPI API, which prepares the reveal transaction,
+  and then to the chain through your RPC in the signed transaction. After the reveal is mined the
+  vote is public chain data.
+
+Results, progress and errors carry the commitment, case and ballot path, and reveal calldata is
+shown as `[redacted: reveal calldata]`. Plain `show` and `status` drop every `salt` field, and the
+calldata and ballot fields of any commit or reveal vote step, at any depth. Outside the chain's
+`v2State` they also replace any text that quotes a ballot key with `[redacted]`, and drop
+`outcome` and `toWorker` from an object that carries both, or either one next to `ballot`, `vote`,
+`commitment` or `reveal`. Revealed votes in `v2State` stay. A `show` or `status` error whose message
+has a 32-byte hex value or mentions an outcome, toWorker, ballot, salt or vote gets a fixed message
+with only the HTTP status; a server code that is not short snake case becomes `http_<status>`. If
+the dispute moves to a new round between sealing and signing, the commit stops with
+`v2_round_changed` and nothing is signed; vote again in the new round. A hosted error on a commit or reveal
+step is never copied, because it may echo the request: it becomes `v2_vote_rejected` with a fixed
+message. Results, errors and `status --operation` recovery or abandon output carry only documented
+fields, down to each lifecycle milestone and the next action; unknown hosted fields are dropped and
+reveal calldata is redacted by step and by selector. During `status --operation` recovery or abandon,
+any failed hosted call, the order refresh included, is replaced whatever `--step` names: it becomes
+`v2_vote_rejected` for a commit or reveal step and `v2_recovery_failed` otherwise, with only the HTTP
+status kept.
+
+`reviewer-status` reads the chain directly. It takes the resolver from the pinned escrow factory's
+task implementation (`implementation()` then its immutable `DISPUTE_RESOLVER()`; the factory has no
+resolver getter), which must match the local `disputeResolverV3` pin, then reads the registry seat (`isReviewer`), the vAPI ID
+(`hasId`), the stake (`stakedBalance` on the gate's `staking()`) against the gate `threshold()`, the
+gate's `isEligible`, and the resolver's `available`, `suspended`, `missedReveals` and `claimable`.
+`ready` is true only when all of these allow a draw.
+
+MCP tools: `tasks.jury {id,i,step}`, `tasks.vote {id,i,action,outcome?,toWorker?}`,
+`tasks.approve-bond {id}`, `tasks.claim-owed {id,to?}` and `tasks.reviewer-status {address?}`. The
+local MCP server uses the same ballot store.
+
+Reviewer writes (`set-available`, `reactivate`, `claim-reviewer-fee`) are not in the CLI yet. They
+need an order-less hosted route, which vAPI does not offer yet; until then use the hosted MCP
+`tasks.reviewer` tool.

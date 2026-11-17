@@ -47,6 +47,8 @@ export type TasksEscrowOperation = {
  */
 export interface TasksChain {
   executeV2?: ReturnType<typeof import("./v2-execution.js").createTaskV2Executor>;
+  /** Jury ballot sealing and case reads bound to the same local wallet. */
+  juryV2?: import("./v2-jury.js").TaskV2Jury;
   readonly available: boolean;
   readonly signingAddress?: Address;
   /** Resolve the trusted local wallet identity without signing. */

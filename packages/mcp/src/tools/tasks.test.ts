@@ -16,6 +16,7 @@ import {
   canonicalJson,
   TasksPartiesNotBoundError,
   TasksClientError,
+  TaskOperationError,
   createPendingTransactions,
   createTasksClient,
   missingTasksChain,
@@ -1491,6 +1492,8 @@ describe("task MCP tools", () => {
             "dispute",
             "counter-evidence",
             "resolve-unmatched",
+            "approve-bond",
+            "claim-owed",
           ].includes(verb)
         ) {
           expect(tool.description).toMatch(/^Executes the user's own /u);
@@ -2403,5 +2406,277 @@ describe("hosted-prepared V2 participant tools", () => {
       ).isError,
     ).toBe(true);
     expect(executeV2).not.toHaveBeenCalled();
+  });
+});
+
+describe("V2 jury and reviewer tools", () => {
+  const COMMITMENT = `0x${"cd".repeat(32)}` as `0x${string}`;
+  const SALT = `0x${"5a".repeat(32)}` as `0x${string}`;
+  const RESOLVER = `0x${"99".repeat(20)}`;
+  function juryChain() {
+    const executeV2 = vi.fn().mockResolvedValue({
+      ok: true,
+      orderId: ID,
+      operation: { id: ESCROW, state: "confirmed" },
+      lifecycle: null,
+      nextAction: null,
+    });
+    const ballot = {
+      version: "vapi-tasks-ballot-v1",
+      orderId: ID,
+      chainId: 84532,
+      resolver: RESOLVER,
+      escrow: RESOLVER,
+      i: 0,
+      caseId: COMMITMENT,
+      voter: RESOLVER,
+      outcome: 1,
+      toWorker: "0",
+      salt: SALT,
+      commitment: COMMITMENT,
+      createdAt: NOW,
+    };
+    const juryV2 = {
+      assertJuryOpenable: vi.fn(async () => {}),
+      caseState: vi.fn(async () => ({ state: 3, name: "JuryDrawPending", resolver: RESOLVER })),
+      sealBallot: vi.fn(async () => ({ ballot, reused: false, path: "/home/ballot.json" })),
+      openBallot: vi.fn(async () => ({ ballot, path: "/home/ballot.json" })),
+      assertSealedCase: vi.fn(async () => {}),
+    };
+    return {
+      executeV2,
+      juryV2,
+      chain: { ...missingTasksChain, executeV2, juryV2 } as unknown as TasksChain,
+    };
+  }
+
+  it.each([
+    ["jury", { i: 0, step: "open" }, { action: "open-jury", i: 0 }],
+    ["jury", { i: 2, step: "resolve" }, { action: "resolve", i: 2 }],
+    ["approve-bond", {}, { action: "approve-bond" }],
+    ["claim-owed", {}, { action: "claim-owed" }],
+    ["claim-owed", { to: RESOLVER }, { action: "claim-owed", to: RESOLVER }],
+    [
+      "vote",
+      { i: 0, action: "commit", outcome: "poster" },
+      { action: "commit-vote", i: 0, commitment: COMMITMENT },
+    ],
+    [
+      "vote",
+      { i: 0, action: "reveal" },
+      { action: "reveal-vote", i: 0, outcome: 1, toWorker: "0", salt: SALT },
+    ],
+  ])(
+    "runs tasks.%s through the shared executor without granting approval",
+    async (verb, fields, write) => {
+      const fake = juryChain();
+      const { server } = await watchServer({
+        client: {} as TasksClient,
+        chain: fake.chain,
+        now: () => new Date(NOW),
+      });
+      const result = await server.callTool({
+        name: `tasks.${verb}`,
+        arguments: { id: ID, ...fields },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(fake.executeV2).toHaveBeenCalledWith(
+        expect.objectContaining({ id: ID, approval: { granted: false }, write }),
+      );
+      // A sealed ballot's salt never appears in a tool result.
+      expect(JSON.stringify(result.structuredContent)).not.toContain(SALT.slice(2, 12));
+    },
+  );
+
+  it("returns no salt or vote when a vote step fails", async () => {
+    for (const failure of ["seal", "execute"] as const) {
+      const fake = juryChain();
+      if (failure === "seal")
+        fake.juryV2.sealBallot.mockRejectedValueOnce(
+          new Error(`voteCommitment reverted with args [0, 2, "40000000", "${SALT}"]`),
+        );
+      else
+        fake.executeV2.mockRejectedValueOnce(
+          new TaskOperationError("chain_error", `estimate failed for ${SALT}`, undefined, {
+            operation: { plan: { data: `0xdeadbeef${SALT.slice(2)}` } },
+          }),
+        );
+      const { server } = await watchServer({
+        client: {} as TasksClient,
+        chain: fake.chain,
+        now: () => new Date(NOW),
+      });
+      const result = await server.callTool({
+        name: "tasks.vote",
+        arguments:
+          failure === "seal"
+            ? { id: ID, i: 0, action: "commit", outcome: "split", toWorker: "40000000" }
+            : { id: ID, i: 0, action: "reveal" },
+      });
+      expect(result.isError, failure).toBe(true);
+      const text = JSON.stringify(result);
+      expect(text, failure).not.toContain(SALT.slice(2, 18));
+      if (failure === "seal") expect(text).not.toContain("40000000");
+    }
+  });
+
+  it("keeps hosted echoes of a reveal out of tasks.vote and tasks.status results", async () => {
+    const echo = { salt: SALT, toWorker: "40000000" };
+    const leaks = (value: unknown) => {
+      const text = JSON.stringify(value);
+      return text.includes(SALT.slice(2, 18)) || text.includes("40000000");
+    };
+    const fake = juryChain();
+    const original = fake.executeV2.getMockImplementation()!;
+    fake.executeV2.mockImplementation(
+      async () => ({ ...(await original()), debug: echo }) as never,
+    );
+    const prepared = {
+      id: ESCROW,
+      kind: "tasks-v2-write",
+      state: "prepared",
+      step: "v2-reveal-vote",
+      expectedActor: RESOLVER,
+      transactionHash: null,
+      plan: {
+        version: "work-transaction-plan-v2",
+        operationId: ESCROW,
+        step: "v2-reveal-vote",
+        chainId: 84532,
+        network: "eip155:84532",
+        from: RESOLVER,
+        to: RESOLVER,
+        data: `0xdeadbeef${SALT.slice(2)}`,
+        value: "0",
+      },
+    };
+    const { server } = await watchServer({
+      client: {
+        operationV2: vi.fn(async () => ({
+          orderId: ID,
+          operation: prepared,
+          recovered: false,
+          scanComplete: true,
+          debug: echo,
+        })),
+        getOrder: vi.fn(async () => ({ workOrder: { id: ID }, lifecycle: null, nextAction: null })),
+      } as unknown as TasksClient,
+      chain: fake.chain,
+      now: () => new Date(NOW),
+    });
+    const voted = await server.callTool({
+      name: "tasks.vote",
+      arguments: { id: ID, i: 0, action: "reveal" },
+    });
+    expect(voted.isError).not.toBe(true);
+    expect(leaks(voted)).toBe(false);
+    fake.executeV2.mockRejectedValueOnce(
+      new TasksClientError("http", `bad reveal ${JSON.stringify(echo)}`, 409, SALT.slice(2)),
+    );
+    const failed = await server.callTool({
+      name: "tasks.vote",
+      arguments: { id: ID, i: 0, action: "reveal" },
+    });
+    expect(failed.isError).toBe(true);
+    expect(JSON.parse((failed.content as Array<{ text: string }>)[0]!.text).code).toBe(
+      "v2_vote_rejected",
+    );
+    expect(leaks(failed)).toBe(false);
+    const status = await server.callTool({
+      name: "tasks.status",
+      arguments: { id: ID, operationId: ESCROW, step: "v2-reveal-vote" },
+    });
+    expect(status.isError, JSON.stringify(status)).not.toBe(true);
+    expect(status.structuredContent).toMatchObject({
+      operation: { plan: { data: "[redacted: reveal calldata]" } },
+    });
+    expect(leaks(status)).toBe(false);
+  });
+
+  it("validates jury and vote arguments before any signing", async () => {
+    const fake = juryChain();
+    const { server } = await watchServer({
+      client: {} as TasksClient,
+      chain: fake.chain,
+      now: () => new Date(NOW),
+    });
+    for (const arguments_ of [
+      { name: "tasks.jury", arguments: { id: ID, i: 0, step: "appeal" } },
+      { name: "tasks.jury", arguments: { id: ID, i: 5, step: "open" } },
+      { name: "tasks.vote", arguments: { id: ID, i: 0, action: "commit" } },
+      { name: "tasks.vote", arguments: { id: ID, i: 0, action: "commit", outcome: "split" } },
+      {
+        name: "tasks.vote",
+        arguments: { id: ID, i: 0, action: "commit", outcome: "worker", toWorker: "5" },
+      },
+      { name: "tasks.vote", arguments: { id: ID, i: 0, action: "reveal", outcome: "worker" } },
+      { name: "tasks.claim-owed", arguments: { id: ID, to: "0x1234" } },
+      { name: "tasks.reviewer-status", arguments: { address: "0x1234" } },
+    ]) {
+      const result = await server.callTool(arguments_);
+      expect(result.isError, JSON.stringify(arguments_)).toBe(true);
+      expect(JSON.parse((result.content as Array<{ text: string }>)[0]!.text).code).toBe(
+        "invalid_input",
+      );
+    }
+    expect(fake.executeV2).not.toHaveBeenCalled();
+    expect(fake.juryV2.sealBallot).not.toHaveBeenCalled();
+  });
+
+  it("reads reviewer status for an address from local RPC reads", async () => {
+    const values: Record<string, unknown> = {
+      implementation: RESOLVER,
+      DISPUTE_RESOLVER: RESOLVER,
+      registry: RESOLVER,
+      vapiId: RESOLVER,
+      stakeGate: RESOLVER,
+      staking: RESOLVER,
+      isReviewer: true,
+      hasId: false,
+      stakedBalance: 0n,
+      threshold: 1000n,
+      isEligible: false,
+      available: false,
+      suspended: false,
+      claimable: 0n,
+      missedReveals: 0,
+    };
+    const { server } = await watchServer({
+      client: {
+        deployment: vi.fn(async () => ({ configured: true, chainId: 84532 })),
+      } as unknown as TasksClient,
+      chain: juryChain().chain,
+      now: () => new Date(NOW),
+      rpcFor: () =>
+        ({
+          getChainId: async () => 84532,
+          readContract: async ({ functionName }: { functionName: string }) => values[functionName],
+        }) as unknown as import("viem").PublicClient,
+    });
+    vi.stubEnv("VAPI_TASKS_V2_ESCROW_FACTORY_84532", RESOLVER);
+    vi.stubEnv("VAPI_TASKS_V2_POOL_FACTORY_84532", RESOLVER);
+    vi.stubEnv("VAPI_TASKS_V2_USDC_84532", RESOLVER);
+    vi.stubEnv("VAPI_TASKS_V2_USDC_NAME_84532", "USD Coin");
+    vi.stubEnv("VAPI_TASKS_V2_USDC_VERSION_84532", "2");
+    vi.stubEnv("VAPI_TASKS_V2_DISPUTE_RESOLVER_V3_84532", RESOLVER);
+    const notice = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await server.callTool({
+        name: "tasks.reviewer-status",
+        arguments: { address: RESOLVER },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        isReviewer: true,
+        hasId: false,
+        staked: "0",
+        threshold: "1000",
+        meetsStake: false,
+        ready: false,
+      });
+    } finally {
+      notice.mockRestore();
+      vi.unstubAllEnvs();
+    }
   });
 });

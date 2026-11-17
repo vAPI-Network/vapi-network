@@ -42,6 +42,7 @@ import {
 import type { CreateEscrowResponse, DeploymentResponse, GetOrderResponse } from "./types.js";
 
 import { createTaskV2Executor } from "./v2-execution.js";
+import { createTaskV2Jury } from "./v2-jury.js";
 
 type PrivateOrder = Extract<GetOrderResponse["workOrder"], { version: "work-order-view-v1" }>;
 type Deployment = Extract<DeploymentResponse, { configured: true }>;
@@ -62,6 +63,8 @@ export type TasksChainOptions = {
   onV2UntrustedOverride?: (message: string) => void;
   trustedDurations?: TasksDurationOverrides;
   bindings?: ScopeBindings;
+  /** VAPI_HOME directory for sealed jury ballots (`tasks/ballots/`). */
+  ballotsHome?: string;
 };
 
 // ReceiveWithAuthorization is defined by the server's eip3009-funding.ts.
@@ -743,6 +746,7 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
   return {
     available: true,
     executeV2: createTaskV2Executor(options),
+    juryV2: createTaskV2Jury(options),
     signingAddress: account.address,
     getSigningAddress: async () => account.address,
     bindScope: async (binding) => {

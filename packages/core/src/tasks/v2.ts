@@ -92,6 +92,9 @@ export const taskTermsFields = {
   milestones: declaredMilestonesSchema.optional(),
   proofSpec: proofSpecSchema.optional(),
   checkin: checkinCadenceSchema.optional(),
+  // vapi-app shared/order-terms.ts: the poster's worker bond in basis points of the principal.
+  // It is part of the frozen terms hash, so it is bound to the clone's termsHash and terms().
+  workerBondBp: z.number().int().min(0).max(2000).optional(),
   bounty: bountyTermsSchema.optional(),
   pool: poolTermsSchema.optional(),
 };

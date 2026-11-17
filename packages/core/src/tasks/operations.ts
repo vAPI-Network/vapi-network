@@ -52,6 +52,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { TasksChainUnavailableError, type TasksChain } from "./chain-port.js";
 import { TasksClientError, type TasksClient } from "./client.js";
 import type { PendingTransactions } from "./pending-transactions.js";
+import { redactTaskV2Ballots, taskReadWithoutBallots } from "./v2-public.js";
 import { parseFeeBp, taskMoney, type TaskMoney } from "./money.js";
 import {
   TASK_LIMITS,
@@ -424,37 +425,39 @@ export async function showTask(
       "show",
       typeof context.client.show === "function" ? "show" : "getOrder",
       () =>
-        context.client.show ? context.client.show(input.id) : context.client.getOrder(input.id),
+        taskReadWithoutBallots("show", () =>
+          context.client.show ? context.client.show(input.id) : context.client.getOrder(input.id),
+        ),
       context,
     );
     if (result.workOrder.id !== input.id)
       throw new TaskOperationError("invalid_response", "The response belongs to a different task.");
     const receipts = orderReceipts(result.workOrder, context.baseUrl);
-    return {
+    return redactTaskV2Ballots({
       ...result,
       lifecycle: result.lifecycle ?? result.workOrder.lifecycle ?? null,
       nextAction: result.nextAction ?? result.workOrder.nextAction ?? { action: "none" as const },
       receipts,
       ...(receipts[0] ?? {}),
-    };
+    });
   }
   const task = await taskRequest(
     "show",
     "publicTask",
-    () => context.client.publicTask(input.id),
+    () => taskReadWithoutBallots("show", () => context.client.publicTask(input.id)),
     context,
   );
   if (!task) throw new TaskOperationError("not_found", `Task ${input.id} was not found.`);
   if (task.id !== input.id)
     throw new TaskOperationError("invalid_response", "The response belongs to a different task.");
-  return {
+  return redactTaskV2Ballots({
     task,
     lifecycle: task.lifecycle ?? null,
     nextAction: task.nextAction ?? { action: "none" as const },
     ...(task.receiptUrl
       ? { receiptUrl: task.receiptUrl, receiptUrlSource: "server" as const }
       : {}),
-  };
+  });
 }
 export async function taskStatus(
   context: TaskOperationContext,
@@ -466,7 +469,7 @@ export async function taskStatus(
       "chainState",
       async () => {
         try {
-          return await context.client.chainState(input.id);
+          return await taskReadWithoutBallots("status", () => context.client.chainState(input.id));
         } catch (error) {
           if (error instanceof TasksClientError && error.status === 404) {
             if (isMissingTaskEntity(error.serverCode, error.message))
@@ -488,7 +491,9 @@ export async function taskStatus(
       "events",
       async () => {
         try {
-          return await context.client.events(input.id, { wait: 0 });
+          return await taskReadWithoutBallots("status", () =>
+            context.client.events(input.id, { wait: 0 }),
+          );
         } catch (error) {
           if (error instanceof TasksClientError && error.status === 404) {
             if (isMissingTaskEntity(error.serverCode, error.message)) return null;
@@ -502,30 +507,30 @@ export async function taskStatus(
       },
       context,
     );
-    return {
+    return redactTaskV2Ballots({
       task: { id: input.id },
       chainState,
       events: page ? [...page.events].sort((a, b) => a.sequence - b.sequence) : null,
       nextAfter: page?.nextAfter ?? null,
-    };
+    });
   }
   const task = await taskRequest(
     "status",
     "publicTask",
-    () => context.client.publicTask(input.id),
+    () => taskReadWithoutBallots("status", () => context.client.publicTask(input.id)),
     context,
   );
   if (!task) throw new TaskOperationError("not_found", `Task ${input.id} was not found.`);
   if (task.id !== input.id)
     throw new TaskOperationError("invalid_response", "The response belongs to a different task.");
-  return {
+  return redactTaskV2Ballots({
     task,
     lifecycle: task.lifecycle ?? null,
     nextAction: task.nextAction ?? { action: "none" as const },
     ...(task.receiptUrl
       ? { receiptUrl: task.receiptUrl, receiptUrlSource: "server" as const }
       : {}),
-  };
+  });
 }
 export async function awardTask(
   context: TaskOperationContext,

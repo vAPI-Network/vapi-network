@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Wire contracts mirrored from vapi-app tasks-v1, PR #490 (T11), shared/v2-write.ts
-// and client/domain/{chain-operation,v2-operation}. No calldata is built locally.
+// and client/domain/{chain-operation,v2-operation}. Jury, vote, approve-bond and claim-owed
+// actions follow tasks-v1 2621284b3 shared/v2-write.ts. No calldata is built locally.
 import { z } from "zod";
 
 const address = z
@@ -87,6 +88,24 @@ export const taskV2ActionSchema = z.discriminatedUnion("action", [
   }),
   z.strictObject({ action: z.literal("resolve-unmatched"), i }),
   z.strictObject({ action: z.literal("split"), i, toWorker: amount }),
+  // Jury steps on one disputed C0 milestone; each targets DisputeResolverV3.
+  z.strictObject({ action: z.literal("open-jury"), i }),
+  z.strictObject({ action: z.literal("draw-jury"), i }),
+  z.strictObject({ action: z.literal("rearm-draw"), i }),
+  z.strictObject({ action: z.literal("resolve"), i }),
+  z.strictObject({ action: z.literal("commit-vote"), i, commitment: hash }),
+  z.strictObject({
+    action: z.literal("reveal-vote"),
+    i,
+    // DisputeResolverV3 order: Worker = 0, Poster = 1, Split = 2.
+    outcome: z.union([z.literal(0), z.literal(1), z.literal(2)]),
+    toWorker: amount,
+    salt: hash,
+  }),
+  // The intended worker approves the escrow clone to collect the agreed bond at award.
+  z.strictObject({ action: z.literal("approve-bond") }),
+  // A party whose payout could not be pushed pulls its own credit, optionally to another address.
+  z.strictObject({ action: z.literal("claim-owed"), to: address.optional() }),
 ]);
 export const taskV2ConsentSchema = z.discriminatedUnion("action", [
   z.strictObject({ action: z.literal("award-consent") }),
@@ -96,6 +115,7 @@ export const taskV2StepSchema = z.enum([
   "v2-fund",
   "v2-approve-usdc",
   "v2-create-pool",
+  "v2-create-escrow",
   "v2-award",
   "v2-award-bounty",
   "v2-submit",
@@ -111,6 +131,16 @@ export const taskV2StepSchema = z.enum([
   "v2-counter-evidence",
   "v2-resolve-unmatched",
   "v2-split",
+  "v2-open-jury",
+  "v2-draw-jury",
+  "v2-rearm-draw",
+  "v2-resolve",
+  "v2-commit-vote",
+  "v2-reveal-vote",
+  "v2-claim-owed",
+  "v2-claim-reviewer-fee",
+  "v2-set-available",
+  "v2-reactivate",
 ]);
 export const taskV2PlanSchema = z
   .object({

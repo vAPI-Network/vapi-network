@@ -69,6 +69,12 @@ export const TOOL_PRESENTATION: Readonly<Record<string, ToolPresentation>> = {
   "tasks.dispute": { title: "Open a dispute", annotations: destructive },
   "tasks.counter-evidence": { title: "Add counter-evidence", annotations: write },
   "tasks.resolve-unmatched": { title: "Resolve an unmatched escrow", annotations: destructive },
+  // step "resolve" settles the disputed principal and pays out the dispute fees.
+  "tasks.jury": { title: "Run a jury step", annotations: destructive },
+  "tasks.vote": { title: "Commit or reveal a jury vote", annotations: write },
+  "tasks.approve-bond": { title: "Approve a worker bond", annotations: destructive },
+  "tasks.claim-owed": { title: "Claim an owed payout", annotations: destructive },
+  "tasks.reviewer-status": { title: "Show reviewer readiness", annotations: readOnly },
   "tasks.message": { title: "Message a task thread", annotations: write },
   "tasks.thread": { title: "Read a task thread", annotations: readOnly },
   "tasks.watch": { title: "Watch a task", annotations: readOnly },

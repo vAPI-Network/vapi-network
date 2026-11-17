@@ -3679,3 +3679,236 @@ it("passes the original post funding key and prepared operation through an appro
     expect.objectContaining({ preparationKey: KEY, prepared: expect.objectContaining(prepared) }),
   );
 });
+
+describe("Tasks V2 jury and reviewer verbs", () => {
+  const COMMITMENT = `0x${"cd".repeat(32)}` as `0x${string}`;
+  const SALT = `0x${"5a".repeat(32)}` as `0x${string}`;
+  function juryChain() {
+    const executeV2 = vi.fn(async () => ({
+      ok: true as const,
+      money: v2TestMoney(),
+      orderId: ID,
+      operation: v2TestOperation(),
+      lifecycle: null,
+      nextAction: null,
+    }));
+    const ballot = {
+      version: "vapi-tasks-ballot-v1" as const,
+      orderId: ID,
+      chainId: 8453,
+      resolver: ADDRESS,
+      escrow: ESCROW,
+      i: 0,
+      caseId: COMMITMENT,
+      voter: ADDRESS,
+      outcome: 2 as const,
+      toWorker: "40000000",
+      salt: SALT,
+      commitment: COMMITMENT,
+      createdAt: NOW.toISOString(),
+    } as const;
+    const juryV2 = {
+      assertJuryOpenable: vi.fn(async () => {}),
+      caseState: vi
+        .fn()
+        .mockResolvedValueOnce({ state: 6, name: "Snapshotting", resolver: ADDRESS })
+        .mockResolvedValue({ state: 3, name: "JuryDrawPending", resolver: ADDRESS }),
+      sealBallot: vi.fn(async () => ({ ballot, reused: false, path: "/home/ballot.json" })),
+      openBallot: vi.fn(async () => ({ ballot, path: "/home/ballot.json" })),
+      assertSealedCase: vi.fn(async () => {}),
+    };
+    return {
+      executeV2,
+      juryV2,
+      chain: { ...missingTasksChain, available: true, executeV2, juryV2 },
+    };
+  }
+
+  it.each([
+    [["jury", ID, "--index", "0", "--step", "draw"], { action: "draw-jury", i: 0 }],
+    [["jury", ID, "--index", "1", "--step", "rearm"], { action: "rearm-draw", i: 1 }],
+    [["jury", ID, "--index", "0", "--step", "resolve"], { action: "resolve", i: 0 }],
+    [["approve-bond", ID, "--yes"], { action: "approve-bond" }],
+    [["claim-owed", ID], { action: "claim-owed" }],
+    [["claim-owed", ID, "--to", ESCROW], { action: "claim-owed", to: ESCROW }],
+  ])("sends %j as one hosted write", async (args, write) => {
+    const f = await fixture();
+    const fake = juryChain();
+    f.dependencies.tasks!.chain = fake.chain;
+    const result = await invoke(args, f.dependencies);
+    expect(result.code).toBe(0);
+    expect(fake.executeV2).toHaveBeenCalledTimes(1);
+    expect(fake.executeV2).toHaveBeenCalledWith(expect.objectContaining({ id: ID, write }));
+    expect(result.value).toMatchObject({ operation: { state: "confirmed" } });
+  });
+
+  it("repeats jury open while the case is Snapshotting", async () => {
+    const f = await fixture();
+    const fake = juryChain();
+    f.dependencies.tasks!.chain = fake.chain;
+    const result = await invoke(["jury", ID, "--index", "0", "--step", "open"], f.dependencies);
+    expect(result.code).toBe(0);
+    expect(fake.executeV2).toHaveBeenCalledTimes(2);
+    expect(result.value).toMatchObject({ rounds: 2, caseState: "JuryDrawPending" });
+  });
+
+  it("commits only the commitment of a locally sealed split ballot", async () => {
+    const f = await fixture();
+    const fake = juryChain();
+    f.dependencies.tasks!.chain = fake.chain;
+    const result = await invoke(
+      ["vote", ID, "--index", "0", "--commit", "split", "--to-worker", "40000000"],
+      f.dependencies,
+    );
+    expect(result.code).toBe(0);
+    expect(fake.juryV2.sealBallot).toHaveBeenCalledWith({
+      id: ID,
+      i: 0,
+      outcome: 2,
+      toWorker: "40000000",
+    });
+    expect(fake.executeV2).toHaveBeenCalledWith(
+      expect.objectContaining({ write: { action: "commit-vote", i: 0, commitment: COMMITMENT } }),
+    );
+    expect(result.stdout.join("")).not.toContain(SALT.slice(2));
+  });
+
+  it("keeps hosted echoes of a reveal out of CLI JSON and errors", async () => {
+    const echo = { salt: SALT, toWorker: "40000000" };
+    const leaks = (text: string) => text.includes(SALT.slice(2, 18)) || text.includes("40000000");
+    const f = await fixture();
+    const fake = juryChain();
+    const original = fake.executeV2.getMockImplementation()!;
+    fake.executeV2.mockImplementation(
+      async () => ({ ...(await original()), debug: echo, request: echo }) as never,
+    );
+    f.dependencies.tasks!.chain = fake.chain;
+    const ok = await invoke(["vote", ID, "--index", "0", "--reveal"], f.dependencies);
+    expect(ok.code).toBe(0);
+    expect(leaks(ok.stdout.join("\n") + ok.stderr.join("\n"))).toBe(false);
+    fake.executeV2.mockRejectedValueOnce(
+      new TasksClientError("http", `bad reveal ${JSON.stringify(echo)}`, 409, SALT.slice(2)),
+    );
+    const failed = await invoke(["vote", ID, "--index", "0", "--reveal"], f.dependencies);
+    expect(failed.code).toBe(1);
+    expect(failed.value).toMatchObject({ error: { code: "v2_vote_rejected" } });
+    expect(leaks(failed.stdout.join("\n") + failed.stderr.join("\n"))).toBe(false);
+  });
+
+  it("redacts a recovered prepared reveal in task status JSON", async () => {
+    const operation = {
+      ...v2TestOperation(),
+      state: "prepared" as const,
+      step: "v2-reveal-vote" as const,
+      transactionHash: null,
+      plan: {
+        ...v2TestOperation().plan,
+        step: "v2-reveal-vote" as const,
+        to: ADDRESS,
+        // revealVote(escrow, 0, Split, 40000000, salt)
+        data: `0xdeadbeef${SALT.slice(2)}` as `0x${string}`,
+      },
+    };
+    const f = await fixture(
+      true,
+      fakeClient({
+        operationV2: vi.fn(async () => ({
+          orderId: ID,
+          operation,
+          recovered: false,
+          scanComplete: true,
+          debug: { salt: SALT },
+        })) as never,
+      }),
+    );
+    const result = await invoke(
+      ["status", ID, "--operation", KEY, "--step", "v2-reveal-vote"],
+      f.dependencies,
+    );
+    expect(result.code).toBe(0);
+    expect(result.value).toMatchObject({
+      operation: { plan: { data: "[redacted: reveal calldata]" } },
+    });
+    expect(result.stdout.join("\n")).not.toContain(SALT.slice(2, 18));
+  });
+
+  it("reveals the ballot read back by the onchain commitment", async () => {
+    const f = await fixture();
+    const fake = juryChain();
+    f.dependencies.tasks!.chain = fake.chain;
+    const result = await invoke(["vote", ID, "--index", "0", "--reveal"], f.dependencies);
+    expect(result.code).toBe(0);
+    expect(fake.executeV2).toHaveBeenCalledWith(
+      expect.objectContaining({
+        write: { action: "reveal-vote", i: 0, outcome: 2, toWorker: "40000000", salt: SALT },
+      }),
+    );
+  });
+
+  it.each([
+    ["jury", ID, "--index", "0"],
+    ["jury", ID, "--index", "5", "--step", "open"],
+    ["jury", ID, "--index", "0", "--step", "appeal"],
+    ["vote", ID, "--index", "0"],
+    ["vote", ID, "--index", "0", "--commit", "split"],
+    ["vote", ID, "--index", "0", "--commit", "worker", "--to-worker", "5"],
+    ["vote", ID, "--index", "0", "--commit", "maybe"],
+    ["vote", ID, "--index", "0", "--commit", "worker", "--reveal"],
+    ["vote", ID, "--index", "0", "--reveal", "--to-worker", "5"],
+    ["claim-owed", ID, "--to", "0x1234"],
+    ["reviewer-status", "--address", "0x1234"],
+  ])("refuses %j before any signing", async (...args) => {
+    const f = await fixture();
+    const fake = juryChain();
+    f.dependencies.tasks!.chain = fake.chain;
+    const result = await invoke(args, f.dependencies);
+    expect(result.code).toBe(1);
+    expect(result.value).toMatchObject({ error: { code: "usage_error" } });
+    expect(fake.executeV2).not.toHaveBeenCalled();
+    expect(fake.juryV2.sealBallot).not.toHaveBeenCalled();
+  });
+
+  it("reads reviewer status for --address from local RPC reads", async () => {
+    const f = await fixture();
+    f.dependencies.env = {
+      VAPI_TASKS_V2_ESCROW_FACTORY_8453: ADDRESS,
+      VAPI_TASKS_V2_POOL_FACTORY_8453: ADDRESS,
+      VAPI_TASKS_V2_USDC_8453: ADDRESS,
+      VAPI_TASKS_V2_USDC_NAME_8453: "USD Coin",
+      VAPI_TASKS_V2_USDC_VERSION_8453: "2",
+      VAPI_TASKS_V2_DISPUTE_RESOLVER_V3_8453: ESCROW,
+    };
+    const values: Record<string, unknown> = {
+      implementation: ADDRESS,
+      DISPUTE_RESOLVER: ESCROW,
+      registry: ADDRESS,
+      vapiId: ADDRESS,
+      stakeGate: ADDRESS,
+      staking: ADDRESS,
+      isReviewer: true,
+      hasId: true,
+      stakedBalance: 2000n,
+      threshold: 1000n,
+      isEligible: true,
+      available: true,
+      suspended: false,
+      claimable: 0n,
+      missedReveals: 0,
+    };
+    f.dependencies.tasks!.rpcFor = () =>
+      ({
+        getChainId: async () => 8453,
+        readContract: async ({ functionName }: { functionName: string }) => values[functionName],
+      }) as unknown as import("viem").PublicClient;
+    const result = await invoke(["reviewer-status", "--address", ESCROW], f.dependencies);
+    expect(result.code).toBe(0);
+    expect(result.value).toMatchObject({
+      command: "task reviewer-status",
+      resolver: "0x2222222222222222222222222222222222222222",
+      staked: "2000",
+      threshold: "1000",
+      ready: true,
+    });
+    expect(result.stderr.join("\n")).toContain("untrusted override");
+  });
+});
