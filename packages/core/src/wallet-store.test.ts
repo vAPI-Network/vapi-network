@@ -122,6 +122,27 @@ async function makeHome(): Promise<string> {
   return directory;
 }
 
+it("treats an Object.prototype name as absent until a wallet with that name exists", async () => {
+  const home = await makeHome();
+  const store = await openStore(home);
+
+  // An empty registry: names() is [], so no name should be reported as present.
+  expect(store.names()).toEqual([]);
+  for (const name of ["constructor", "toString", "valueOf", "hasOwnProperty"]) {
+    expect(store.entry(name)).toBeUndefined();
+    expect(store.has(name)).toBe(false);
+  }
+
+  // The valid name must be creatable, not blocked as if it already existed.
+  const created = await store.create("constructor", PASSPHRASE, { phrase: TEST_PHRASE });
+  expect(created.name).toBe("constructor");
+  expect(store.names()).toEqual(["constructor"]);
+  expect(store.entry("constructor")).toEqual(created.entry);
+
+  const reopened = await openStore(home);
+  expect(reopened.has("constructor")).toBe(true);
+});
+
 it("refuses an Object.prototype name on the registry write paths", async () => {
   const home = await makeHome();
   const store = await openStore(home);

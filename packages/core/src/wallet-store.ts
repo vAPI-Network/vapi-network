@@ -370,7 +370,9 @@ export class WalletStore {
   }
 
   entry(name: string): WalletEntry | undefined {
-    return isWalletName(name) ? this.registry.wallets[name] : undefined;
+    return isWalletName(name) && Object.hasOwn(this.registry.wallets, name)
+      ? this.registry.wallets[name]
+      : undefined;
   }
 
   has(name: string): boolean {
@@ -425,7 +427,7 @@ export class WalletStore {
       throw new KeystoreError("No wallet yet. Run vapi init.");
     }
     assertWalletName(name);
-    const entry = this.registry.wallets[name];
+    const entry = this.entry(name);
     if (!entry) {
       throw new KeystoreError(unknownWalletMessage(name, this.names()));
     }
@@ -1348,11 +1350,13 @@ export class WalletStore {
       await this.update((registry) => {
         for (const account of missing) {
           const name = assertWalletName(account.name);
-          registry.wallets[name] ??= {
-            createdAt: account.createdAt,
-            spendCaps: { ...DEFAULT_SPEND_CAPS },
-            ceilingAtomic: DEFAULT_CEILING_ATOMIC.toString(),
-          };
+          if (!Object.hasOwn(registry.wallets, name)) {
+            registry.wallets[name] = {
+              createdAt: account.createdAt,
+              spendCaps: { ...DEFAULT_SPEND_CAPS },
+              ceilingAtomic: DEFAULT_CEILING_ATOMIC.toString(),
+            };
+          }
         }
         registry.default ??= Object.keys(registry.wallets)[0] as WalletName | undefined;
       });
