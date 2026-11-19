@@ -1,15 +1,21 @@
 import { join } from "node:path";
-import { baseUsdcBalanceReader } from "./balance-reader.js";
 import { fileExists, openInBrowser } from "./platform.js";
-import { CUSTODY_NOTICE, formatRecoveryPhrase, showRecoveryPhrase } from "./recovery-phrase.js";
+import { CUSTODY_NOTICE, showRecoveryPhrase } from "./recovery-phrase.js";
 import { redactDetachedRunText } from "./run-redaction.js";
-import { SOLANA_VAULT_UNAVAILABLE, deviceVaultKey } from "./wallet-session.js";
+import {
+  backupCommand,
+  exportKeyCommand,
+  importCommand,
+  lockCommand,
+  passphraseCommand,
+  unlockCommand,
+} from "./vault.js";
+import { SOLANA_VAULT_UNAVAILABLE } from "./wallet-session.js";
 
 import { RouterClientError } from "@vapi-network/core/router-client";
 import { formatEther } from "viem";
 
 import {
-  BASE_MAINNET_CAIP2,
   DEFAULT_WALLET_NAME,
   DocsError,
   KeystoreError,
@@ -24,7 +30,6 @@ import {
   WalletStore,
   aggregateStats,
   assertWalletName,
-  changeKeystorePassphrase,
   checkReceiptSettlement,
   createPublicFetch,
   createSupportReport,
@@ -41,17 +46,13 @@ import {
   getVapiPaths,
   isMirroredHit,
   isNetworkConfigured,
-  isSolanaNetwork,
   listAccounts,
   listUnfinishedMovements,
   loadConfig,
-  lockVault,
   migrateLegacyRegistryConfig,
   migrateLegacyVapiHome,
-  readKeystoreVersion,
   readReceipts,
   readSearchEvents,
-  readVaultFileUnlocked,
   receiptWallet,
   receiptsToCsv,
   resolveRegistryUrl,
@@ -62,8 +63,6 @@ import {
   sweepBack,
   sweepNativeEth,
   usesUsdcGas,
-  validatePrivateKey,
-  validateRecoveryPhrase,
   withAccountMovementLock,
   writeDefaultConfig,
   writeJsonAtomic,
@@ -78,12 +77,6 @@ import {
   type WalletInfo,
   type WalletName,
 } from "@vapi-network/core";
-import {
-  exportKeystoreKeys,
-  exportRecoveryPhrase,
-  exportVaultAccountKey,
-  exportVaultPhrase,
-} from "@vapi-network/core/secrets";
 // The registry key lives behind its own entry point, like the secrets above:
 // no agent and no MCP tool may reach a provider credential.
 import {
@@ -114,7 +107,7 @@ import { accountsAddCommand, accountsCapsCommand, accountsCommand } from "./acco
 import { agentCommand } from "./agent.js";
 import { detectColorLevel, renderBanner } from "./brand.js";
 import { checkX402, formatCheckReport } from "./check.js";
-import { autoUploadBackup, cloudBackupCommand } from "./cloud-backup.js";
+import { autoUploadBackup } from "./cloud-backup.js";
 import { claudeCommand, codexCommand } from "./code-launch.js";
 import { codeCommand } from "./code.js";
 import { dashboardCommand, offerDashboardLink } from "./dashboard.js";
@@ -155,7 +148,6 @@ import {
 import {
   getEnvironment,
   getPrompts,
-  isInteractive,
   output,
   readConfig,
   type CliDependencies,
@@ -164,7 +156,6 @@ import {
 import { claimCommand, noApiKeyMessage, publishCommand, registryBaseUrl } from "./publish-cli.js";
 import { CLI_VERSION } from "./version.js";
 import {
-  confirmWalletName,
   getSecretStore,
   openWalletStore,
   outputForWallet,
@@ -174,8 +165,6 @@ import {
   targetWallet,
   unlockTarget,
   walletHeader,
-  walletPassphrase,
-  withResolvedPassphrase,
   type WalletTarget,
 } from "./wallet-session.js";
 
@@ -1932,510 +1921,6 @@ async function authClearCommand(
         ? [`${API_KEY_ENV} is still set in this environment; unset it to finish signing out.`]
         : []),
     ].join("\n"),
-  );
-}
-
-const EXPORT_KEY_WARNING =
-  "Anyone with this key can spend the wallet. Never paste it into a website or chat.";
-
-/**
- * Prints the private key of one wallet, to a person, on a terminal. The agent
- * gate runs before the passphrase is read, and the person types the wallet name
- * first, so a key never appears because a tool call asked for it.
- */
-async function exportKeyCommand(
-  argv: string[],
-  json: boolean,
-  io: CliIo,
-  dependencies: CliDependencies,
-): Promise<void> {
-  const parsed = parseArguments(argv, {
-    valueOptions: new Set(["--network", WALLET_OPTION]),
-    maximumPositionals: 0,
-  });
-  const network = parsed.one("--network") ?? BASE_MAINNET_CAIP2;
-  const solana = isSolanaNetwork(network);
-  if (!solana && !network.startsWith("eip155:")) {
-    throw new UsageError("--network must be an eip155:<chainId> or Solana network identifier.");
-  }
-  const target = await targetWallet(parsed, dependencies);
-  const vaultAccount = await target.store.hasVaultAccount(target.name);
-  if (vaultAccount && solana) throw new UsageError(SOLANA_VAULT_UNAVAILABLE);
-  await requireSecretsAllowed(dependencies, "secret.export.key", target.name);
-  await confirmWalletName(
-    target.name,
-    `Type ${target.name} to print its private key: `,
-    "That is not the wallet name. Nothing was printed.",
-    dependencies,
-  );
-  let address: string;
-  let privateKey: string;
-  if (vaultAccount) {
-    const { path, key } = await deviceVaultKey(target.store, dependencies);
-    try {
-      address = target.address ?? (await target.store.readAddress(target.name)) ?? "";
-      privateKey = await exportVaultAccountKey({ path, key, name: target.name });
-    } finally {
-      key.fill(0);
-    }
-  } else {
-    const resolved = await walletPassphrase(target, dependencies);
-    const keys = await withResolvedPassphrase(resolved, target, dependencies, (passphrase) =>
-      exportKeystoreKeys(passphrase, target.path),
-    );
-    if (solana && !keys.solana) {
-      throw new Error(
-        `No Solana key is enabled in ${target.path}. Run vapi accounts --enable solana first.`,
-      );
-    }
-    const selected = solana && keys.solana ? keys.solana : keys.evm;
-    address = selected.address;
-    privateKey = "secretKey" in selected ? selected.secretKey : selected.privateKey;
-  }
-  const result = {
-    network,
-    address,
-    privateKey,
-  };
-  await recordAudit(dependencies, "secret.export.key", { wallet: target.name, detail: network });
-  io.stderr(EXPORT_KEY_WARNING);
-  if (json) {
-    io.stdout(JSON.stringify({ wallet: target.name, ...result }));
-    return;
-  }
-  io.stdout(walletHeader(target));
-  io.stdout(result.privateKey);
-}
-
-const BACKUP_WARNING =
-  "Anyone with these words can spend the wallet. Never type them into a website or chat.";
-
-/**
- * Prints the recovery phrase of one wallet, to a person, on a terminal. The
- * same gate and the same typed confirmation as `vapi export-key`.
- */
-async function backupCommand(
-  argv: string[],
-  json: boolean,
-  io: CliIo,
-  dependencies: CliDependencies,
-): Promise<void> {
-  if (argv.includes("--cloud")) {
-    await cloudBackupCommand(argv, json, io, dependencies);
-    return;
-  }
-  const parsed = parseArguments(argv, {
-    valueOptions: new Set([WALLET_OPTION]),
-    maximumPositionals: 0,
-  });
-  if (!isInteractive(dependencies)) {
-    await recordAudit(dependencies, "secret.export.phrase", {
-      detail: "refused: not a terminal",
-    });
-    throw new KeystoreError(
-      "vapi backup prints your recovery phrase and only works in a terminal.",
-    );
-  }
-  const target = await targetWallet(parsed, dependencies);
-  const vaultAccount = await target.store.hasVaultAccount(target.name);
-  if (vaultAccount) {
-    const vault = await readVaultFileUnlocked(join(target.store.home, "vault.json"));
-    if (
-      vault.accounts.some((account) => account.name === target.name && account.kind === "imported")
-    ) {
-      throw new KeystoreError(
-        `Account ${target.name} was imported and is not recoverable from the vault phrase. Back it up with vapi export-key --account ${target.name}.`,
-      );
-    }
-  }
-  await requireSecretsAllowed(dependencies, "secret.export.phrase", target.name);
-  await confirmWalletName(
-    target.name,
-    `Type ${target.name} to print its recovery phrase: `,
-    "That is not the wallet name. Nothing was printed.",
-    dependencies,
-  );
-  io.stderr(BACKUP_WARNING);
-  let recoveryPhrase: string;
-  if (vaultAccount) {
-    const { path, key } = await deviceVaultKey(target.store, dependencies);
-    try {
-      recoveryPhrase = await exportVaultPhrase({ path, key });
-    } finally {
-      key.fill(0);
-    }
-  } else {
-    const resolved = await walletPassphrase(target, dependencies);
-    try {
-      recoveryPhrase = await withResolvedPassphrase(resolved, target, dependencies, (passphrase) =>
-        exportRecoveryPhrase(passphrase, target.path),
-      );
-    } catch (error) {
-      const version = await readKeystoreVersion(target.path);
-      if (version === undefined || version === 3) throw error;
-      throw new Error(
-        [
-          error instanceof Error ? error.message : String(error),
-          `Back up ${target.path} together with the passphrase that opens it, or print the key itself with vapi export-key.`,
-        ].join("\n"),
-      );
-    }
-  }
-  await recordAudit(dependencies, vaultAccount ? "vault.backup_shown" : "secret.export.phrase", {
-    wallet: target.name,
-  });
-  if (json) {
-    io.stdout(JSON.stringify({ wallet: target.name, recoveryPhrase }));
-    return;
-  }
-  io.stdout(walletHeader(target));
-  io.stdout(formatRecoveryPhrase(recoveryPhrase));
-}
-
-/**
- * Restores a wallet from words or a private key the person types in. The secret
- * never comes from argv, where a shell history would keep it, and an existing
- * wallet is moved to the trash rather than overwritten.
- */
-async function importCommand(
-  argv: string[],
-  json: boolean,
-  io: CliIo,
-  dependencies: CliDependencies,
-): Promise<void> {
-  const parsed = parseArguments(argv, {
-    valueOptions: new Set(["--networks", WALLET_OPTION]),
-    booleanOptions: new Set(["--phrase", "--key", "--replace", "--force"]),
-    maximumPositionals: 24,
-  });
-  if (parsed.positionals.length > 0) {
-    throw new UsageError(
-      "vapi import reads the secret from a prompt. Never pass a recovery phrase or a private key as an argument.",
-    );
-  }
-  const fromPhrase = parsed.has("--phrase");
-  if (fromPhrase === parsed.has("--key")) {
-    throw new UsageError("vapi import needs exactly one of --phrase or --key.");
-  }
-  const networks = parseInitNetworks(parsed.one("--networks") ?? "base");
-  if (networks.includes("solana")) throw new UsageError(SOLANA_VAULT_UNAVAILABLE);
-  const enableArc = networks.includes("arc");
-
-  const paths = getVapiPaths();
-  const store = await openWalletStore(dependencies);
-  const name = importWalletName(store, parsed, dependencies);
-  const existed = store.has(name);
-  if (existed && !parsed.has("--replace")) {
-    const address = await store.readAddress(name);
-    const location = (await store.hasVaultAccount(name))
-      ? join(store.home, "vault.json")
-      : store.pathFor(name);
-    throw new Error(
-      [
-        `Wallet ${name} already exists at ${location}.`,
-        ...(address ? [`Address: ${address}`] : []),
-        "Write its recovery phrase down with vapi backup first, then re-run with --replace.",
-      ].join("\n"),
-    );
-  }
-
-  const prompts = getPrompts(dependencies);
-  const secret = fromPhrase
-    ? validateRecoveryPhrase(await prompts.secret("Recovery phrase: "))
-    : validatePrivateKey(await prompts.secret("Private key: "));
-  // Only now, with the secret in hand, is the existing wallet moved: a failed
-  // prompt must never leave the machine without the wallet it had.
-  let previousKeystore: string | undefined;
-  if (existed) {
-    const config = await readConfig(paths.config, io);
-    const trashed = await store.remove(name, {
-      force: parsed.has("--force"),
-      balanceReader: baseUsdcBalanceReader(config, dependencies),
-      allowDefault: true,
-    });
-    await recordAudit(dependencies, "wallet.remove", {
-      wallet: trashed.name,
-      detail: "replaced by vapi import",
-    });
-    previousKeystore = trashed.path;
-  }
-  const imported = fromPhrase
-    ? await store.create(name, "", { phrase: secret })
-    : await store.importKey(name, "", secret);
-  await recordAudit(dependencies, "wallet.import", { wallet: imported.name });
-  const account = imported.account;
-
-  if (!(await fileExists(paths.config))) {
-    await writeDefaultConfig(paths.config, process.env, { networks });
-  } else {
-    if (enableArc) await enableDefaultNetwork("arc", paths.config);
-  }
-  const result = {
-    address: account.address,
-    ...(account.solana ? { solanaAddress: account.solana.address } : {}),
-    vault: join(paths.directory, "vault.json"),
-    ...(previousKeystore ? { previousKeystore } : {}),
-    message: "Wallet imported. Its encrypted key stays on this machine.",
-  };
-  outputForWallet(
-    io,
-    json,
-    { name: imported.name, address: account.address },
-    result,
-    [
-      result.message,
-      `Address: ${result.address}`,
-      ...(account.solana ? [`Solana address: ${account.solana.address}`] : []),
-      `Vault: ${result.vault}`,
-      ...(previousKeystore ? [`Previous keystore moved to ${previousKeystore}`] : []),
-    ].join("\n"),
-  );
-}
-
-/**
- * `main` only on a machine that has no wallet yet. Once one exists, an import
- * has to say which wallet it is writing, so it can never quietly land on top of
- * the one that holds the money.
- */
-function importWalletName(
-  store: WalletStore,
-  parsed: { one(name: string): string | undefined },
-  dependencies: CliDependencies,
-): WalletName {
-  const requested =
-    parsed.one(WALLET_OPTION)?.trim() || getEnvironment(dependencies).VAPI_WALLET?.trim();
-  if (requested !== undefined && requested.length > 0) return assertWalletName(requested);
-  if (store.names().length === 0) return DEFAULT_WALLET_NAME;
-  throw new Error(
-    [
-      `This machine already has ${store.names().sort().join(", ")}.`,
-      "Name the wallet to import with vapi import --account <name>.",
-    ].join("\n"),
-  );
-}
-
-/** Re-encrypts the same wallet under a new passphrase; the addresses stay. */
-async function passphraseCommand(
-  argv: string[],
-  json: boolean,
-  io: CliIo,
-  dependencies: CliDependencies,
-): Promise<void> {
-  const parsed = parseArguments(argv, {
-    valueOptions: new Set([WALLET_OPTION]),
-    maximumPositionals: 0,
-  });
-  const target = await targetWallet(parsed, dependencies);
-  if (await target.store.hasVaultAccount(target.name)) {
-    throw new KeystoreError(
-      "Vault accounts have no passphrase. Protect the whole vault instead with vapi vault protect.",
-    );
-  }
-  const prompts = getPrompts(dependencies);
-  const resolved = await walletPassphrase(target, dependencies);
-  const current = resolved.passphrase;
-  const next = await prompts.secret("New passphrase: ");
-  if (next.length === 0) throw new KeystoreError("Keystore passphrase cannot be empty.");
-  if (next === current) {
-    throw new KeystoreError("The new passphrase must differ from the current one.");
-  }
-  if ((await prompts.secret("Confirm new passphrase: ")) !== next) {
-    throw new KeystoreError("Passphrases do not match.");
-  }
-  const account = await withResolvedPassphrase(resolved, target, dependencies, (passphrase) =>
-    changeKeystorePassphrase(passphrase, next, target.path),
-  );
-  await recordAudit(dependencies, "passphrase.change", { wallet: target.name });
-  await retireStoredPassphrase(target, dependencies, io);
-  if (process.env.VAPI_KEYSTORE_PASSWORD !== undefined) {
-    io.stderr(
-      "VAPI_KEYSTORE_PASSWORD still holds the old passphrase. Update it before the next run.",
-    );
-  }
-  const result = {
-    address: account.address,
-    ...(account.solana ? { solanaAddress: account.solana.address } : {}),
-    keystore: target.path,
-    message: "Passphrase changed. The wallet and its addresses are unchanged.",
-  };
-  outputForWallet(
-    io,
-    json,
-    target,
-    result,
-    [result.message, `Address: ${result.address}`, `Keystore: ${target.path}`].join("\n"),
-  );
-}
-
-const UNLOCK_NEEDS_TERMINAL =
-  "Type the passphrase yourself in a terminal; an agent must never be handed one.";
-
-/**
- * Hands one wallet's passphrase to the OS secret store, so an agent can pay
- * from it without the passphrase sitting in an editor's configuration file.
- * The passphrase is typed by a person, on a terminal, and is verified against
- * the keystore before anything is stored: a typo must not be kept.
- */
-async function unlockCommand(
-  argv: string[],
-  json: boolean,
-  io: CliIo,
-  dependencies: CliDependencies,
-): Promise<void> {
-  const parsed = parseArguments(argv, {
-    valueOptions: new Set([WALLET_OPTION]),
-    maximumPositionals: 0,
-  });
-  const target = await targetWallet(parsed, dependencies);
-  if (await target.store.hasVaultAccount(target.name)) {
-    const message = `${target.name} lives in the device vault, which the OS secret store opens; nothing to unlock.`;
-    output(io, json, { wallet: target.name, unlocked: true, message }, message);
-    return;
-  }
-  await requireSecretsAllowed(dependencies, "wallet.unlock", target.name, {
-    refusal: UNLOCK_NEEDS_TERMINAL,
-  });
-  const store = getSecretStore(dependencies);
-  if (!store.available) {
-    throw new KeystoreError(NO_SECRET_STORE);
-  }
-
-  const passphrase = await getPrompts(dependencies).secret(`Passphrase for ${target.name}: `);
-  if (passphrase.length === 0) throw new KeystoreError("Keystore passphrase cannot be empty.");
-  try {
-    await target.store.unlock(target.name, passphrase);
-  } catch (error) {
-    await recordAudit(dependencies, "wallet.unlock", {
-      wallet: target.name,
-      detail: "refused: the passphrase did not open the wallet",
-    });
-    throw error;
-  }
-  await store.set(target.name, passphrase);
-  await recordAudit(dependencies, "wallet.unlock", {
-    wallet: target.name,
-    detail: store.description,
-  });
-  const message = `Wallet ${target.name} is unlocked for agents. Its passphrase is in ${store.description}.`;
-  outputForWallet(
-    io,
-    json,
-    target,
-    { unlocked: true, store: store.description, message },
-    [
-      message,
-      `Drop VAPI_KEYSTORE_PASSWORD from your MCP configuration; take the passphrase back out with vapi lock --account ${target.name}.`,
-    ].join("\n"),
-  );
-}
-
-/**
- * Takes a passphrase back out of the OS secret store. Nothing about the wallet
- * changes: the keystore, its addresses and its passphrase are untouched, and
- * the next run asks for the passphrase again.
- */
-async function lockCommand(
-  argv: string[],
-  json: boolean,
-  io: CliIo,
-  dependencies: CliDependencies,
-): Promise<void> {
-  const parsed = parseArguments(argv, {
-    valueOptions: new Set([WALLET_OPTION]),
-    booleanOptions: new Set([ALL_WALLETS_FLAG]),
-    maximumPositionals: 0,
-  });
-  const all = parsed.has(ALL_WALLETS_FLAG);
-  if (all && parsed.one(WALLET_OPTION) !== undefined) {
-    throw new UsageError(`${ACCOUNT_OPTION} and ${ALL_WALLETS_FLAG} cannot be used together.`);
-  }
-  const walletStore = await openWalletStore(dependencies);
-  const target = all ? undefined : await selectWallet(walletStore, parsed, dependencies);
-  const store = getSecretStore(dependencies);
-  if (!store.available) {
-    throw new KeystoreError(NO_SECRET_STORE);
-  }
-  if (target && (await walletStore.hasVaultAccount(target.name))) {
-    const vaultLocked = await lockVault({ secrets: store });
-    if (vaultLocked) {
-      await recordAudit(dependencies, "wallet.lock", {
-        wallet: target.name,
-        detail: "protected vault session",
-      });
-    }
-    const message = vaultLocked
-      ? "Locked the protected device vault."
-      : `${target.name} lives in the device vault, which has no active protected session to lock.`;
-    output(io, json, { wallet: target.name, locked: [], vaultLocked, message }, message);
-    return;
-  }
-  const names = target ? [target.name] : walletStore.names();
-  const hasVaultAccounts = (
-    await Promise.all(names.map(async (name) => await walletStore.hasVaultAccount(name)))
-  ).some(Boolean);
-  const vaultLocked = all && hasVaultAccounts ? await lockVault({ secrets: store }) : false;
-  if (vaultLocked) {
-    await recordAudit(dependencies, "wallet.lock", { detail: "protected vault session" });
-  }
-
-  const locked: string[] = [];
-  for (const name of names) {
-    if (await walletStore.hasVaultAccount(name)) continue;
-    if (!(await store.remove(name))) continue;
-    locked.push(name);
-    await recordAudit(dependencies, "wallet.lock", { wallet: name, detail: store.description });
-  }
-
-  const message =
-    vaultLocked && locked.length === 0
-      ? "Locked the protected device vault."
-      : locked.length === 0
-        ? `No passphrase was stored in ${store.description}${target ? ` for ${target.name}` : ""}.`
-        : `${vaultLocked ? "Locked the protected device vault. " : ""}Locked ${locked.join(", ")}. ${locked.length === 1 ? "Its passphrase is" : "Their passphrases are"} no longer in ${store.description}.`;
-  if (target) {
-    outputForWallet(io, json, target, { locked, store: store.description, message }, message);
-    return;
-  }
-  output(
-    io,
-    json,
-    { wallet: null, locked, vaultLocked, store: store.description, message },
-    message,
-  );
-}
-
-/** Every wallet on the machine, for `vapi lock`. */
-const ALL_WALLETS_FLAG = "--all";
-
-const NO_SECRET_STORE = "No OS secret store on this platform yet; use VAPI_KEYSTORE_PASSWORD.";
-
-/**
- * A new passphrase makes the stored copy wrong, so `vapi passphrase` retires
- * it. An entry that no longer opens its wallet is the one failure an agent
- * cannot do anything about.
- */
-async function retireStoredPassphrase(
-  target: WalletTarget,
-  dependencies: CliDependencies,
-  io: CliIo,
-): Promise<void> {
-  const store = getSecretStore(dependencies);
-  if (!store.available) return;
-  let removed: boolean;
-  try {
-    removed = await store.remove(target.name);
-  } catch {
-    // A keyring that will not answer is not a reason to fail a passphrase
-    // change that already succeeded.
-    return;
-  }
-  if (!removed) return;
-  await recordAudit(dependencies, "wallet.lock", {
-    wallet: target.name,
-    detail: "passphrase changed",
-  });
-  io.stderr(
-    `The old passphrase was removed from ${store.description}. Run vapi unlock --account ${target.name} to store the new one.`,
   );
 }
 
