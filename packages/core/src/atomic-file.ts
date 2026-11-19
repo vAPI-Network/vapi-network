@@ -206,7 +206,7 @@ async function removeOwnedLock(path: string, owners: readonly string[]): Promise
   try {
     await unlink(tombPath);
   } catch (error) {
-    if (!hasCode(error, "ENOENT") && pendingError === undefined) {
+    if (!tombAlreadyGoing(error) && pendingError === undefined) {
       pendingError = error;
     }
   }
@@ -236,7 +236,7 @@ async function removeAbandonedLockTombs(path: string): Promise<void> {
         (pid === undefined || !processIsAlive(pid)));
     if (!abandoned) continue;
     await unlink(tombPath).catch((error: unknown) => {
-      if (!hasCode(error, "ENOENT")) throw error;
+      if (!tombAlreadyGoing(error)) throw error;
     });
   }
 }
@@ -250,7 +250,7 @@ async function removeOwnedTombs(path: string, owners: readonly string[]): Promis
     const owner = await readFile(tombPath, "utf8").catch(() => undefined);
     if (owner === undefined || !owners.includes(owner)) continue;
     await unlink(tombPath).catch((error: unknown) => {
-      if (!hasCode(error, "ENOENT")) throw error;
+      if (!tombAlreadyGoing(error)) throw error;
     });
   }
 }
@@ -305,6 +305,18 @@ function processIsAlive(pid: number): boolean {
   } catch (error) {
     return hasCode(error, "EPERM");
   }
+}
+
+/**
+ * Another contender removed this tomb or is removing it. Windows answers an
+ * unlink of a file whose delete is pending, or that is held open, with a
+ * permission or busy error; a later pass reaps what is left.
+ */
+function tombAlreadyGoing(error: unknown): boolean {
+  return (
+    hasCode(error, "ENOENT") ||
+    (process.platform === "win32" && (hasCode(error, "EPERM") || hasCode(error, "EBUSY")))
+  );
 }
 
 function hasCode(error: unknown, code: string): boolean {

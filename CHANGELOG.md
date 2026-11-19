@@ -18,6 +18,7 @@ sentence under it is the summary shown on the
 - Token refresh checks and stores rotated tokens under a credential lock shared with login and logout, so a refresh that finishes after logout stores nothing and cannot overwrite a newer login. The new lock adds no wait for a refresh's network request.
 - Setting spend caps, a ceiling or provisioning limits for a wallet named `constructor` that does not exist now says "No wallet named constructor" instead of failing with a JavaScript error, and the ceiling sweep no longer claims a window for it. Reported by @goranai in #48.
 - Atomic JSON writes no longer fail on Windows: the parent directory flush that Windows rejects is skipped there. Other platforms still flush it.
+- On Windows, a caller waiting for a file lock no longer fails with a permission error when another caller is deleting the released lock at the same moment; it keeps waiting for the lock.
 - A failure while releasing a file lock no longer replaces the result of the operation that ran under it, so a saved receipt or a completed wallet rename is not reported as failed.
 
 ## 0.15.0 - 2026-11-19
