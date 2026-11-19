@@ -18,14 +18,12 @@ import {
 
 import {
   CUSTODY_NOTICE,
-  UsageError,
   baseUsdcBalanceReader,
   fileExists,
   getEnvironment,
   getSecretStore,
   isInteractive,
   openWalletStore,
-  parseArguments,
   promptForLine,
   readConfig,
   recordAudit,
@@ -33,6 +31,7 @@ import {
   type CliDependencies,
   type CliIo,
 } from "./cli.js";
+import { UsageError, parseArguments } from "./args.js";
 import { cloudBackupSetupChoice } from "./cloud-backup.js";
 import { runLoginFlow } from "./login.js";
 import { collectStatus, renderStatusScreen } from "./status.js";

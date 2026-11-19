@@ -28,13 +28,8 @@ import {
   redactAgentRunResult,
   printAgentRefills,
 } from "./agent.js";
-import {
-  UsageError,
-  getEnvironment,
-  redactDetachedRunValue,
-  type CliDependencies,
-  type CliIo,
-} from "./cli.js";
+import { getEnvironment, redactDetachedRunValue, type CliDependencies, type CliIo } from "./cli.js";
+import { UsageError } from "./args.js";
 
 /**
  * Headless `vapi agent run --bundle-env <VAR>`: one swarm member running on a

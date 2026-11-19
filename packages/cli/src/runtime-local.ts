@@ -22,13 +22,13 @@ import {
 } from "@vapi-network/mcp";
 
 import {
-  UsageError,
   deviceVaultKey,
   getEnvironment,
   getSecretStore,
   isInteractive,
   type CliDependencies,
 } from "./cli.js";
+import { UsageError } from "./args.js";
 import { createRailwayRuntime, type RailwayRuntimeOptions } from "./runtime-railway.js";
 
 type Spawn = (

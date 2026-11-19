@@ -17,17 +17,15 @@ import {
 } from "@vapi-network/mcp";
 
 import {
-  UsageError,
   getEnvironment,
   getSecretStore,
   openWalletStore,
-  parseArguments,
   registryBaseUrl,
-  requiredPositional,
   unlockTarget,
   type CliDependencies,
   type CliIo,
 } from "./cli.js";
+import { UsageError, parseArguments, requiredPositional } from "./args.js";
 
 const SEND_USAGE =
   "Usage: vapi send <amount> --from <account> --to <account|owner|0x…> [--network base|arc] [--resume <nonce>] [--json]";

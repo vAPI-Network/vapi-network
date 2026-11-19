@@ -26,7 +26,6 @@ import { registeredAgentProfileSchema } from "@vapi-network/mcp";
 
 import { detectColorLevel } from "./brand.js";
 import {
-  UsageError,
   fileExists,
   getEnvironment,
   getLinePrompt,
@@ -37,13 +36,13 @@ import {
   openInBrowser,
   openWalletStore,
   output,
-  parseArguments,
   readConfig,
   recordAudit,
   registryBaseUrl,
   type CliDependencies,
   type CliIo,
 } from "./cli.js";
+import { UsageError, parseArguments } from "./args.js";
 
 const CLOUD_BACKUP_USAGE = "Usage: vapi backup --cloud [off] [--json]";
 const OWNER_RESTORE_USAGE = "Usage: vapi restore --from-owner [--owner <0x…>] [--json]";

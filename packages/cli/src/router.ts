@@ -27,9 +27,7 @@ import {
 import { AGENT_LINK_REVOKED_MESSAGE } from "@vapi-network/core/agent-link";
 
 import {
-  UsageError,
   getSecretStore,
-  parseArguments,
   recordAudit,
   registryBaseUrl,
   requireSecretsAllowed,
@@ -39,6 +37,7 @@ import {
   type CliIo,
   type WalletTarget,
 } from "./cli.js";
+import { UsageError, parseArguments } from "./args.js";
 
 const WALLET_OPTION = "--wallet";
 const CHAT_USAGE =

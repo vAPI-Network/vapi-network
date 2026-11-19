@@ -24,13 +24,13 @@ import {
   getEnvironment,
   getSecretStore,
   openInBrowser,
-  parseArguments,
   registryBaseUrl,
   targetWallet,
   unlockTarget,
   type CliDependencies,
   type CliIo,
 } from "./cli.js";
+import { parseArguments } from "./args.js";
 import { fetchWalletIdentity, formatIdentityLines } from "./identity.js";
 
 const WALLET_OPTION = "--wallet";

@@ -56,21 +56,19 @@ import {
 
 import { buildAgentRunDeps } from "./agent.js";
 import {
-  UsageError,
   confirmWalletName,
   getEnvironment,
   getSecretStore,
   isStdinInteractive,
   openWalletStore,
-  parseArguments,
   recordAudit,
   redactDetachedRunValue,
   registryBaseUrl,
-  requiredPositional,
   unlockTarget,
   type CliDependencies,
   type CliIo,
 } from "./cli.js";
+import { UsageError, parseArguments, requiredPositional } from "./args.js";
 import { parseRuntimeKind, resolveRuntime } from "./runtime-local.js";
 import {
   agentMarkerRefusal,
