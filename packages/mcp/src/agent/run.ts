@@ -1,5 +1,9 @@
 import { AGENT_LINK_REVOKED_MESSAGE } from "@vapi-network/core/agent-link";
-import { ROUTER_KEY_REVOKED_MESSAGE } from "@vapi-network/core/router-client";
+import {
+  RouterClientError,
+  routerPurchaseView,
+  ROUTER_KEY_REVOKED_MESSAGE,
+} from "@vapi-network/core/router-client";
 import {
   appendAudit,
   createRunId,
@@ -45,6 +49,7 @@ import type { InspectToolResult } from "../tools/inspect.js";
 import { UNTRUSTED_NOTICE, wrapUntrusted } from "./guards.js";
 
 export type AgentEvent =
+  | ({ type: "refill" } & ReturnType<typeof routerPurchaseView>)
   | { type: "step"; n: number }
   | { type: "tool"; name: string; summary: string }
   | { type: "paid"; ref: string; amountUsd: number; network: string }
@@ -116,6 +121,7 @@ export type RunAgentResult = {
   paidUsd: number;
   steps: number;
   budget?: { limitUsd: number; spentUsd: number };
+  refills?: Array<ReturnType<typeof routerPurchaseView>>;
 };
 
 type ModelToolCall = ChatResult["toolCalls"][number];
@@ -471,6 +477,12 @@ export async function runAgent(task: string, deps: RunAgentDeps): Promise<RunAge
   const tools = loopToolsForProfile(profile);
   let paidUsd = 0;
   let steps = 0;
+  const refills: Array<ReturnType<typeof routerPurchaseView>> = [];
+  const recordRefill = (purchase: NonNullable<ChatResult["refill"]>): void => {
+    const view = routerPurchaseView(purchase);
+    refills.push(view);
+    deps.onEvent?.({ type: "refill", ...view });
+  };
 
   const audit = async (
     event: "agent.run.start" | "agent.run.step" | "agent.run.pay" | "agent.run.declined",
@@ -521,6 +533,7 @@ export async function runAgent(task: string, deps: RunAgentDeps): Promise<RunAge
       stoppedBecause,
       paidUsd,
       steps,
+      ...(refills.length === 0 ? {} : { refills }),
       ...(deps.budget === undefined
         ? {}
         : {
@@ -667,6 +680,9 @@ export async function runAgent(task: string, deps: RunAgentDeps): Promise<RunAge
     try {
       reply = await deps.chat({ model: profile.model, messages, tools, tool_choice: "auto" });
     } catch (error) {
+      if (error instanceof RouterClientError && error.refill !== undefined) {
+        recordRefill(error.refill);
+      }
       if (
         error instanceof RunBudgetError ||
         hasErrorCode(error, "run_budget_exceeded") ||
@@ -679,6 +695,7 @@ export async function runAgent(task: string, deps: RunAgentDeps): Promise<RunAge
       }
       return await stop("error", routerErrorDetail(error));
     }
+    if (reply.refill !== undefined) recordRefill(reply.refill);
     if (reply.toolCalls.length === 0) {
       return await stop("finished", undefined, reply.content ?? null);
     }
@@ -913,6 +930,12 @@ function routerErrorDetail(error: unknown): string {
   }
   if (hasErrorCode(error, "no_router_key") && hasErrorStatus(error, 401)) {
     return ROUTER_KEY_REVOKED_MESSAGE;
+  }
+  if (
+    error instanceof RouterClientError &&
+    (error.code === "refill_pending" || error.refill !== undefined)
+  ) {
+    return error.message;
   }
   return "The vAPI Router request failed.";
 }

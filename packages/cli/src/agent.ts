@@ -425,6 +425,28 @@ async function runCommand(
   const executed = await execute(task, runDependencies);
   const result =
     resultFile === undefined ? executed : redactDetachedRunValue(executed, environment);
+  if (resultFile !== undefined) {
+    for (const [index, refill] of (executed.refills ?? []).entries()) {
+      const transaction = refill.receipt.transaction;
+      const redacted = result.refills?.[index];
+      if (
+        redacted !== undefined &&
+        transaction !== undefined &&
+        /^0x[0-9a-fA-F]{64}$/u.test(transaction)
+      ) {
+        // Restore only the public settlement reference, never other redacted fields.
+        redacted.receipt.transaction = transaction;
+      }
+    }
+  }
+  if (!json) {
+    for (const refill of result.refills ?? []) {
+      io.stderr(`Receipt: ${refill.receipt.id}`);
+      if (refill.receipt.transaction !== undefined)
+        io.stderr(`Transaction: ${refill.receipt.transaction}`);
+      for (const warning of refill.warnings ?? []) io.stderr(warning.message);
+    }
+  }
   const exitCode = result.stoppedBecause.reason === "finished" ? 0 : 1;
 
   if (resultFile !== undefined) {

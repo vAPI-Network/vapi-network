@@ -25,6 +25,8 @@ export type {
   ChatRequest,
   ChatResult,
   RouterModel,
+  RouterPurchaseResult,
+  RouterPurchaseWarning,
 } from "./router-client.js";
 export { buyRouterBalance } from "./router-client.js";
 export { TASKS_CLIENT_VERBS, prepareDeliveryManifest, sha256Hex } from "./tasks/index.js";

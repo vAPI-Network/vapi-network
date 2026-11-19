@@ -25,6 +25,7 @@ Router purchases recover after an interruption without a second charge, swarm di
 
 ### Breaking
 
+- `AgentEvent` adds the `refill` member with public Router purchase evidence and warnings.
 - CLI Router purchase/refill JSON now matches MCP: `receipt.id`, `receipt.amountUsd`, `receipt.network` and optional `receipt.transaction` replace the flat `receiptId`, `amountUsd`, `network` and `transaction` fields. Human output includes the public receipt and transaction references.
 - `buyRouterBalance` returns `RouterPurchaseResult` with optional `PaymentWarning` entries. `routerPurchaseSummary`, CLI purchase JSON and MCP purchase output allow `amountUsd: null` and `network: "unknown"` when charged metadata is absent.
 - `payRequest` returns a confirmed in-memory receipt with warnings when receipt persistence or post-settlement processing fails, instead of rejecting. Callers must retain the receipt and must not repeat the payment for these warnings.
@@ -38,6 +39,8 @@ Router purchases recover after an interruption without a second charge, swarm di
 
 ### Fixed
 
+- Agent runs retain Router refill evidence in `RunAgentResult.refills`, CLI stderr, JSON and result files, including purchases carried by failed chats. Stops preserve `refill_pending` recovery guidance.
+- SDK `client.router.buy()` returns `RouterPurchaseResult` so callers can read warnings. The main core entry exports `RouterPurchaseResult` and `RouterPurchaseWarning` types.
 - Linux: `vapi login` no longer fails with "The agent link could not be stored consistently" on keyrings where `secret-tool clear` exits 1 without a message when it matches nothing. An exit 1 without a message for an entry the lookup did not find now counts as nothing to remove; any other exit code, a failure with a reason, and a failure to remove an entry the lookup found are still reported. Reported in #41, first fixed by @Rizal9 in #31.
 - A refused agent link now names the HTTP status and the server's error code, for example `The vAPI agent link request failed (HTTP 429, rate_limited).` Earlier versions printed only "The vAPI agent link request failed." for a rate limit, a refusal and a proxy error alike (#30, #42). A gateway or proxy error page without a JSON body is reported the same way and no longer as "response was invalid".
 - Pending Router purchases survive process restarts and are recovered before any refill decision, including manual purchases with automatic refill disabled. An unresolved purchase blocks another payment; credential-only chat retries do not unlock the payment account.
