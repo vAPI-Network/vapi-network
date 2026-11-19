@@ -3,7 +3,7 @@ import { baseUsdcBalanceReader } from "./balance-reader.js";
 import { fileExists, openInBrowser } from "./platform.js";
 import { CUSTODY_NOTICE, formatRecoveryPhrase, showRecoveryPhrase } from "./recovery-phrase.js";
 import { redactDetachedRunText } from "./run-redaction.js";
-import { deviceVaultKey } from "./wallet-session.js";
+import { SOLANA_VAULT_UNAVAILABLE, deviceVaultKey } from "./wallet-session.js";
 
 import { RouterClientError } from "@vapi-network/core/router-client";
 import { formatEther } from "viem";
@@ -365,7 +365,6 @@ const processIo: CliIo = {
 };
 const WALLET_OPTION_DEPRECATION =
   "--wallet is now --account; --wallet keeps working for one release.";
-const SOLANA_VAULT_UNAVAILABLE = "Solana keys are not part of the device vault yet.";
 
 /** The one trust switch `vapi search` exposes; see `searchCommand`. */
 const INCLUDE_UNVERIFIED_OPTION = "--include-unverified";
