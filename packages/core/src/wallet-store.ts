@@ -668,7 +668,7 @@ export class WalletStore {
     const walletName = assertWalletName(name);
     return await withRegistryLock(this.registryPath, async () => {
       const registry = await this.readRegistry();
-      const entry = registry.wallets[walletName];
+      const entry = ownWalletEntry(registry.wallets, walletName);
       if (!entry) {
         throw new KeystoreError(unknownWalletMessage(walletName, Object.keys(registry.wallets)));
       }
@@ -714,7 +714,7 @@ export class WalletStore {
     }
     return await withRegistryLock(this.registryPath, async () => {
       const registry = await this.readRegistry();
-      const entry = registry.wallets[walletName];
+      const entry = ownWalletEntry(registry.wallets, walletName);
       if (!entry) {
         throw new KeystoreError(unknownWalletMessage(walletName, Object.keys(registry.wallets)));
       }
@@ -744,7 +744,7 @@ export class WalletStore {
     const walletName = assertWalletName(name);
     return await withRegistryLock(this.registryPath, async () => {
       const registry = await this.readRegistry();
-      const entry = registry.wallets[walletName];
+      const entry = ownWalletEntry(registry.wallets, walletName);
       if (!entry) {
         throw new KeystoreError(unknownWalletMessage(walletName, Object.keys(registry.wallets)));
       }
@@ -769,7 +769,7 @@ export class WalletStore {
     const walletName = assertWalletName(name);
     return await withRegistryLock(this.registryPath, async () => {
       const registry = await this.readRegistry();
-      const entry = registry.wallets[walletName];
+      const entry = ownWalletEntry(registry.wallets, walletName);
       if (!entry) {
         throw new KeystoreError(unknownWalletMessage(walletName, Object.keys(registry.wallets)));
       }
@@ -800,7 +800,7 @@ export class WalletStore {
     }
     return await withRegistryLock(this.registryPath, async () => {
       const registry = await this.readRegistry();
-      const entry = registry.wallets[walletName];
+      const entry = ownWalletEntry(registry.wallets, walletName);
       if (!entry) {
         throw new KeystoreError(unknownWalletMessage(walletName, Object.keys(registry.wallets)));
       }
@@ -829,7 +829,7 @@ export class WalletStore {
     const parsed = refill === null ? undefined : routerRefillSchema.parse(refill);
     const wallet = this.resolve({ name });
     const registry = await this.update((registry) => {
-      const entry = registry.wallets[wallet.name];
+      const entry = ownWalletEntry(registry.wallets, wallet.name);
       if (!entry)
         throw new KeystoreError(unknownWalletMessage(wallet.name, Object.keys(registry.wallets)));
       if (parsed === undefined) delete entry.routerRefill;
@@ -912,7 +912,7 @@ export class WalletStore {
         : walletEntrySchema.shape.label.parse(label);
     const wallet = this.resolve({ name });
     await this.update((registry) => {
-      const entry = registry.wallets[wallet.name];
+      const entry = ownWalletEntry(registry.wallets, wallet.name);
       if (!entry) return;
       if (parsed === undefined) delete entry.label;
       else entry.label = parsed;
@@ -927,7 +927,7 @@ export class WalletStore {
     const parsed = agentLinkSchema.parse(link);
     const wallet = this.resolve({ name });
     const registry = await this.update((registry) => {
-      const entry = registry.wallets[wallet.name];
+      const entry = ownWalletEntry(registry.wallets, wallet.name);
       if (!entry)
         throw new KeystoreError(unknownWalletMessage(wallet.name, Object.keys(registry.wallets)));
       entry.link = parsed;
@@ -938,7 +938,7 @@ export class WalletStore {
   async clearLink(name: WalletName): Promise<WalletEntry> {
     const wallet = this.resolve({ name });
     const registry = await this.update((registry) => {
-      const entry = registry.wallets[wallet.name];
+      const entry = ownWalletEntry(registry.wallets, wallet.name);
       if (!entry)
         throw new KeystoreError(unknownWalletMessage(wallet.name, Object.keys(registry.wallets)));
       delete entry.link;
@@ -1736,6 +1736,17 @@ export function assertWalletName(value: string): WalletName {
 function unknownWalletMessage(name: string, names: readonly string[]): string {
   if (names.length === 0) return "No wallet yet. Run vapi init.";
   return `No wallet named ${name}. This machine has: ${[...names].sort().join(", ")}.`;
+}
+
+/**
+ * Reads a registry entry by own key only. `registry.wallets` is a plain object, so a bare
+ * index returns inherited `Object.prototype` members such as `constructor`.
+ */
+function ownWalletEntry(
+  wallets: Readonly<Record<string, WalletEntry>>,
+  name: string,
+): WalletEntry | undefined {
+  return Object.hasOwn(wallets, name) ? wallets[name] : undefined;
 }
 
 function emptyRegistry(): WalletRegistry {

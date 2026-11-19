@@ -122,6 +122,26 @@ async function makeHome(): Promise<string> {
   return directory;
 }
 
+it("refuses an Object.prototype name on the registry write paths", async () => {
+  const home = await makeHome();
+  const store = await openStore(home);
+  await store.create("main", PASSPHRASE, { phrase: TEST_PHRASE });
+  const refusal = "No wallet named constructor. This machine has: main.";
+
+  await expect(store.setSpendCaps("constructor", DEFAULT_SPEND_CAPS)).rejects.toThrow(refusal);
+  await expect(store.updateSpendCaps("constructor", (caps) => caps)).rejects.toThrow(refusal);
+  await expect(store.setCeiling("constructor", 5n)).rejects.toThrow(refusal);
+  await expect(store.claimCeilingSweepAttempt("constructor", new Date())).rejects.toThrow(refusal);
+  await expect(store.updateCeilingSweepPending("constructor", () => undefined)).rejects.toThrow(
+    refusal,
+  );
+  await expect(
+    store.lowerProvisioningLimits("constructor", DEFAULT_SPEND_CAPS, 5n),
+  ).rejects.toThrow(refusal);
+  expect(Object.hasOwn(Object, "ceilingSweepAttemptedAt")).toBe(false);
+  expect((await openStore(home)).names()).toEqual(["main"]);
+});
+
 it("opens the requested home's file-backed vault when VAPI_HOME points at another vault", async () => {
   const firstHome = await makeHome();
   const secondHome = await makeHome();
