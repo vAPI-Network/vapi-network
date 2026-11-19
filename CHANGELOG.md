@@ -20,6 +20,7 @@ sentence under it is the summary shown on the
 - Atomic JSON writes no longer fail on Windows: the parent directory flush that Windows rejects is skipped there. Other platforms still flush it.
 - On Windows, a caller waiting for a file lock keeps waiting when the released lock it is removing is deleted by another caller at the same moment, instead of failing with a permission error.
 - A failure while releasing a file lock no longer replaces the result of the operation that ran under it, so a saved receipt or a completed wallet rename is not reported as failed.
+- A failed Railway launch that leaves a launch marker without a sandbox id, because the id could not be saved or the marker could not be removed, now keeps its starting reservation and returns `launch_ambiguous`, so `vapi swarm stop <swarm> <runId> --confirm-worker-stopped` can clear the marker after the five-minute window. Identified sidecars still use `vapi swarm stop <swarm> <runId>` and `vapi swarm forget-run <swarm> <runId> --confirm-destroyed` after verified destruction.
 
 ## 0.15.0 - 2026-11-19
 
