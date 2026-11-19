@@ -1448,7 +1448,16 @@ describe("agentAccessToken", () => {
       const resolved = expect(refresh).resolves.toBe("rotated-access");
       try {
         // Login holds the publish lock, so the refresh cannot act on a half-published link.
-        await lockWait;
+        await expect(
+          Promise.race([
+            lockWait.then(() => "lock-wait"),
+            requestStarted.then(() => "request"),
+            refresh.then(
+              () => "settled",
+              () => "settled",
+            ),
+          ]),
+        ).resolves.toBe("lock-wait");
         expect(fetchImpl).not.toHaveBeenCalled();
         finishLogin();
         const newLink = await login;
