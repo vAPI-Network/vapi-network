@@ -9,6 +9,7 @@ import {
   SpendCapExceededError,
   getDefaultConfig,
   appendReceipt,
+  __setReceiptTestHooks,
   readReceipts,
   type RouterPendingPurchase,
   getVapiPaths,
@@ -43,6 +44,7 @@ let activeSecretStore: SecretStore | undefined;
 let activeSecretEntries: Record<string, string> | undefined;
 
 afterEach(async () => {
+  __setReceiptTestHooks(undefined);
   await drainCeilingSweeps();
   restoreEnvironment("VAPI_HOME", originalHome);
   activeSecretStore = undefined;
@@ -70,6 +72,76 @@ describe("vapi router models", () => {
 });
 
 describe("vapi router clear-pending", () => {
+  it.each([false, true])(
+    "syncs an existing receipt before clearing and retains the journal on sync failure (%s)",
+    async (fails) => {
+      const home = await initializedHome();
+      const store = await WalletStore.open(home);
+      const pending = pendingPurchase();
+      await store.setRouterPendingPurchase(WALLET, pending);
+      const path = getVapiPaths(home).receipts;
+      await appendReceipt(
+        {
+          id: pending.receiptId,
+          timestamp: pending.createdAt,
+          wallet: WALLET,
+          resourceUrl: `${pending.link.apiBase}/api/router/top-up/5`,
+          source: "router.topup",
+          settlement: { outcome: "succeeded" },
+        },
+        path,
+      );
+      const events: string[] = [];
+      __setReceiptTestHooks({
+        beforeSync: () => {
+          if (fails) throw new Error("ledger sync failed");
+        },
+        afterSync: (target) => {
+          expect(target).toBe(path);
+          events.push("sync");
+        },
+      });
+      const original = WalletStore.prototype.setRouterPendingPurchase;
+      const clear = vi
+        .spyOn(WalletStore.prototype, "setRouterPendingPurchase")
+        .mockImplementation(async function (this: WalletStore, name, value, expected) {
+          if (value === null) {
+            expect(events).toEqual(["sync"]);
+            events.push("clear");
+          }
+          return await original.call(this, name, value, expected);
+        });
+      try {
+        const captured = captureIo();
+        expect(
+          await runCli(
+            ["router", "clear-pending", "--confirm-settled", "--account", WALLET, "--json"],
+            captured.io,
+            commandDependencies(),
+          ),
+        ).toBe(fails ? 1 : 0);
+        if (fails) {
+          expect(events).toEqual([]);
+          expect(JSON.parse(captured.stdout[0]!)).toMatchObject({ error: "ledger sync failed" });
+          expect((await WalletStore.open(home)).entry(WALLET)?.routerPendingPurchase).toEqual(
+            pending,
+          );
+        } else {
+          expect(events).toEqual(["sync", "clear"]);
+          expect(JSON.parse(captured.stdout[0]!)).toMatchObject({
+            cleared: true,
+            receiptAppended: false,
+          });
+          expect(
+            (await WalletStore.open(home)).entry(WALLET)?.routerPendingPurchase,
+          ).toBeUndefined();
+        }
+      } finally {
+        clear.mockRestore();
+      }
+    },
+  );
+
   it.each([false, true])(
     "records and prints settled evidence before retiring (JSON %s)",
     async (json) => {

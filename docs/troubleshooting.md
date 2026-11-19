@@ -48,6 +48,6 @@ Never paste a recovery phrase, a private key, a vault password or a Router key i
 
 Keep the receipt id and transaction when Router reports an unconfirmed authorization or credit awaiting confirmation.
 Retry chat without repeating the purchase; a settled journal keeps guarding against another payment until credit and receipt persistence are established.
-After relinking, recovery accepts the same owner and API base, and a successful balance-key chat proves usable credit.
-A missing or different link permits stake-key chat with a pending-purchase warning and keeps the payment journal.
+After relinking, recovery accepts the same owner (case-insensitive) and API base. Usage reaching the recorded baseline plus the purchased tier or a successful balance-key chat proves usable credit; entries without a baseline still require chat.
+The payment journal stays pending under a missing link or another owner or API base. Stake-key chat continues under a valid current link with usable credentials. With no link, chat returns `not_linked` and the error still carries `pending_purchase_unlinked`.
 See [Router recovery](router.md#purchase-recovery) for inspection and explicit settled retirement; keep the printed evidence and contact support if credit does not appear.

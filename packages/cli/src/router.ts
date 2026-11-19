@@ -5,6 +5,7 @@ import {
   getVapiPaths,
   loadConfig,
   spendCapsForWallet,
+  syncReceipts,
 } from "@vapi-network/core";
 import {
   ROUTER_TOPUP_TIERS,
@@ -125,6 +126,7 @@ async function clearPendingCommand(
         io.stdout(`Network: ${networkDisplayName(payment.network)}`);
         io.stdout(notice);
       }
+      await syncReceipts(getVapiPaths(target.store.home).receipts);
       await target.store.setRouterPendingPurchase(target.name, null, pending.receiptId);
       io.stdout(
         json

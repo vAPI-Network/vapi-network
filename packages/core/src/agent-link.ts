@@ -69,6 +69,7 @@ const ALLOWED_AGENT_SCOPES = new Set<string>([
   "tasks:write",
 ]);
 const publicFetch = createPublicFetch({ allowPrivateNetwork: false });
+const AGENT_REVOCATION_TIMEOUT_MS = 10_000;
 
 export async function startDeviceLink(args: {
   apiBase: string;
@@ -409,13 +410,34 @@ export async function agentFetch(
   url: string,
   init?: RequestInit,
 ): Promise<Response> {
+  return await agentFetchWithin(args, url, init, undefined);
+}
+
+/**
+ * `agentFetch` with one deadline over token resolution, refresh and both
+ * requests. A caller's own `init.signal` still reaches only its requests, so
+ * cancelling a request cannot drop a refreshed token before it is stored.
+ */
+async function agentFetchWithin(
+  args: Parameters<typeof agentFetch>[0],
+  url: string,
+  init: RequestInit | undefined,
+  signal: AbortSignal | undefined,
+): Promise<Response> {
   const fetchImpl = args.fetchImpl ?? publicFetch;
-  const accessToken = await resolveAgentAccessToken(args, {});
-  const response = await safeAgentFetch(fetchImpl, url, withBearer(init, accessToken));
+  const accessToken = await resolveAgentAccessToken(args, { signal });
+  const response = await abortable(signal, () =>
+    safeAgentFetch(fetchImpl, url, withBearer(init, accessToken)),
+  );
   if (response.status !== 401) return response;
 
-  const refreshedToken = await resolveAgentAccessToken(args, { rejectedAccessToken: accessToken });
-  const refreshedResponse = await safeAgentFetch(fetchImpl, url, withBearer(init, refreshedToken));
+  const refreshedToken = await resolveAgentAccessToken(args, {
+    rejectedAccessToken: accessToken,
+    signal,
+  });
+  const refreshedResponse = await abortable(signal, () =>
+    safeAgentFetch(fetchImpl, url, withBearer(init, refreshedToken)),
+  );
   if (refreshedResponse.status === 401) {
     throw new AgentLinkError("not_linked", AGENT_LINK_REVOKED_MESSAGE);
   }
@@ -428,16 +450,26 @@ export async function forgetAgentLink(args: {
   wallet: WalletName;
   fetchImpl?: typeof fetch;
   home?: string;
+  revocationTimeoutMs?: number;
 }): Promise<void> {
   return await withLinkPurchaseLock(args.wallets, args.wallet, async () => {
     await args.wallets.reload();
     const link = args.wallets.entry(args.wallet)?.link;
     let revokedError: AgentLinkError | undefined;
     if (link !== undefined) {
+      const deadline = new AbortController();
+      const timer = setTimeout(
+        () => deadline.abort(),
+        args.revocationTimeoutMs ?? AGENT_REVOCATION_TIMEOUT_MS,
+      );
       try {
-        await agentFetch(args, apiEndpoint(link.apiBase, "/api/agents/self"), {
-          method: "DELETE",
-        });
+        // Let any in-flight local token write finish before cleanup can remove it.
+        await agentFetchWithin(
+          args,
+          apiEndpoint(link.apiBase, "/api/agents/self"),
+          { method: "DELETE", signal: deadline.signal },
+          deadline.signal,
+        );
       } catch (error) {
         if (
           error instanceof AgentLinkError &&
@@ -447,6 +479,8 @@ export async function forgetAgentLink(args: {
           revokedError = error;
         }
         // Remote revocation is best effort. Local secrets must still be removed.
+      } finally {
+        clearTimeout(timer);
       }
     }
 
@@ -478,7 +512,7 @@ async function resolveAgentAccessToken(
     fetchImpl?: typeof fetch;
     now?: () => number;
   },
-  options: { rejectedAccessToken?: string },
+  options: { rejectedAccessToken?: string; signal?: AbortSignal | undefined },
 ): Promise<string> {
   await args.wallets.reload();
   const link = args.wallets.entry(args.wallet)?.link;
@@ -491,60 +525,90 @@ async function resolveAgentAccessToken(
     return tokens.accessToken;
   }
 
-  return await withAgentCredentialLock(args.wallets, link.clientId, async () => {
-    await args.wallets.reload();
-    const currentLink = args.wallets.entry(args.wallet)?.link;
-    if (currentLink === undefined) throw notLinkedError();
-    const currentAccounts = agentSecretAccounts(args.wallet);
-    const current = parseTokens(await safeGetSecret(args.secrets, currentAccounts.tokens));
-    if (current === undefined) throw notLinkedError();
-    if (
-      options.rejectedAccessToken !== undefined &&
-      current.accessToken !== options.rejectedAccessToken
-    ) {
-      return current.accessToken;
-    }
-    if (options.rejectedAccessToken === undefined && current.expiresAt - 60_000 > now()) {
-      return current.accessToken;
-    }
-
-    if (current.refreshToken === undefined) {
-      throw new AgentLinkError("not_linked", REMOTE_AGENT_TOKEN_EXPIRED_MESSAGE);
-    }
-
-    const response = await safeFetch(
-      args.fetchImpl ?? publicFetch,
-      apiEndpoint(currentLink.apiBase, "/oauth/token"),
-      {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          grant_type: "refresh_token",
-          refresh_token: current.refreshToken,
-          client_id: currentLink.clientId,
-        }),
-      },
-    );
-    const payload = await responseRecord(response);
-    if (!response.ok) {
-      if (response.status === 400 && stringField(payload, "error") === "invalid_grant") {
-        throw new AgentLinkError("not_linked", AGENT_LINK_REVOKED_MESSAGE);
+  return await withAgentCredentialLock(
+    args.wallets,
+    link.clientId,
+    async () => {
+      options.signal?.throwIfAborted();
+      await args.wallets.reload();
+      const currentLink = args.wallets.entry(args.wallet)?.link;
+      if (currentLink === undefined) throw notLinkedError();
+      const currentAccounts = agentSecretAccounts(args.wallet);
+      const current = parseTokens(await safeGetSecret(args.secrets, currentAccounts.tokens));
+      if (current === undefined) throw notLinkedError();
+      if (
+        options.rejectedAccessToken !== undefined &&
+        current.accessToken !== options.rejectedAccessToken
+      ) {
+        return current.accessToken;
       }
-      throw httpError("The vAPI agent token refresh failed.");
-    }
+      if (options.rejectedAccessToken === undefined && current.expiresAt - 60_000 > now()) {
+        return current.accessToken;
+      }
 
-    const refreshed: AgentTokens = {
-      accessToken: requiredString(payload, "access_token"),
-      refreshToken: stringField(payload, "refresh_token") ?? current.refreshToken,
-      expiresAt: now() + requiredNumber(payload, "expires_in") * 1_000,
-      scopes:
-        stringField(payload, "scope") === undefined
-          ? [...current.scopes]
-          : splitScopes(requiredString(payload, "scope")),
-    };
-    await safeSetSecret(args.secrets, currentAccounts.tokens, JSON.stringify(refreshed));
-    return refreshed.accessToken;
+      const refreshToken = current.refreshToken;
+      if (refreshToken === undefined) {
+        throw new AgentLinkError("not_linked", REMOTE_AGENT_TOKEN_EXPIRED_MESSAGE);
+      }
+
+      const { response, payload } = await abortable(options.signal, async () => {
+        const response = await safeFetch(
+          args.fetchImpl ?? publicFetch,
+          apiEndpoint(currentLink.apiBase, "/oauth/token"),
+          {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              grant_type: "refresh_token",
+              refresh_token: refreshToken,
+              client_id: currentLink.clientId,
+            }),
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          },
+        );
+        return { response, payload: await responseRecord(response) };
+      });
+      if (!response.ok) {
+        if (response.status === 400 && stringField(payload, "error") === "invalid_grant") {
+          throw new AgentLinkError("not_linked", AGENT_LINK_REVOKED_MESSAGE);
+        }
+        throw httpError("The vAPI agent token refresh failed.");
+      }
+
+      const refreshed: AgentTokens = {
+        accessToken: requiredString(payload, "access_token"),
+        refreshToken: stringField(payload, "refresh_token") ?? refreshToken,
+        expiresAt: now() + requiredNumber(payload, "expires_in") * 1_000,
+        scopes:
+          stringField(payload, "scope") === undefined
+            ? [...current.scopes]
+            : splitScopes(requiredString(payload, "scope")),
+      };
+      options.signal?.throwIfAborted();
+      await safeSetSecret(args.secrets, currentAccounts.tokens, JSON.stringify(refreshed));
+      return refreshed.accessToken;
+    },
+    options.signal,
+  );
+}
+
+/** Bound injected transports too, even when they ignore the abort signal. */
+async function abortable<T>(
+  signal: AbortSignal | undefined,
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (signal === undefined) return await operation();
+  signal.throwIfAborted();
+  let onAbort: () => void = () => undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
   });
+  try {
+    return await Promise.race([operation(), aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
 }
 
 type AgentSecretAccountSet = ReturnType<typeof agentSecretAccounts>;
@@ -623,6 +687,7 @@ export async function withAgentCredentialLock<T>(
   wallets: WalletStore,
   clientId: string,
   operation: () => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
   const digest = createHash("sha256").update(clientId).digest("hex").slice(0, 24);
   const lockPath = `${wallets.registryPath}.${digest}.agent-link.lock`;
@@ -631,6 +696,7 @@ export async function withAgentCredentialLock<T>(
   let handle: FileHandle | undefined;
 
   while (!handle) {
+    signal?.throwIfAborted();
     try {
       handle = await open(lockPath, "wx", 0o600);
     } catch (error) {
@@ -639,11 +705,12 @@ export async function withAgentCredentialLock<T>(
       if (Date.now() >= deadline) {
         throw httpError("Timed out waiting to update the agent credentials.");
       }
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await abortable(signal, () => new Promise((resolve) => setTimeout(resolve, 20)));
     }
   }
 
   try {
+    signal?.throwIfAborted();
     return await operation();
   } finally {
     await handle.close();
