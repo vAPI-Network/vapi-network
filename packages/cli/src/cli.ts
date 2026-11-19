@@ -189,6 +189,25 @@ export { getEnvironment, getLinePrompt, type CliDependencies, type CliIo } from 
 export { getSecretStore, targetWallet, unlockTarget, type WalletTarget } from "./wallet-session.js";
 export { registryBaseUrl } from "./publish-cli.js";
 
+// Re-exported so `@vapi-network/cli/cli` (bin.ts forwards every export of this file) keeps the names it had
+// before these helpers moved out. Import from the module directly inside this package.
+export { requiredPositional } from "./args.js";
+export {
+  getPrompts,
+  isInteractive,
+  isStdinInteractive,
+  output,
+  promptForLine,
+  readConfig,
+  type CliPrompts,
+} from "./cli-context.js";
+export {
+  confirmWalletName,
+  openWalletStore,
+  recordAudit,
+  requireSecretsAllowed,
+} from "./wallet-session.js";
+
 const HELP_HEADING = "vAPI Network";
 
 export const HELP = `${HELP_HEADING}
