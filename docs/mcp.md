@@ -203,7 +203,7 @@ results.
 `swarm.stop` takes `{ "name": "<swarm>", "runId": "<run>" }` or
 `{ "name": "<swarm>", "all": true }`. It stops tracked starting, running and
 unknown workers and returns `stopped`, `unchanged` and `failed` summaries. A stop
-failure returns `isError: true` and leaves the record unresolved. Unknown Railway runs and starting Railway runs with a saved id require destroy exit zero; not-found text cannot clear them, and a refused starting run becomes unknown. The standard
+failure returns `isError: true` and leaves the record unresolved. Running and unknown Railway runs and starting Railway runs with a saved id require destroy exit zero; not-found text cannot clear them, and a refused starting or running run becomes unknown. After checking destruction in the original project/environment, the owner can recover with `vapi swarm forget-run <name> <runId> --confirm-destroyed`. The standard
 CLI-hosted MCP server resolves local and Railway adapters for stopping only;
 remote startup and the terminal-only stale-start confirmation remain unchanged.
 An SDK host without the matching runtime gets `runtime_unavailable` and can use

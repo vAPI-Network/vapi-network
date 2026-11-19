@@ -2093,6 +2093,73 @@ describe("railway runtime create failures", () => {
     },
   );
 
+  it.each([
+    { poll: "throws", destroy: "wrong-project" },
+    { poll: "inconclusive", destroy: "wrong-project" },
+    { poll: "inconclusive", destroy: "plain-not-found" },
+    { poll: "throws", destroy: "success-warning" },
+  ] as const)(
+    "requires exit zero to stop a running Railway record ($poll, $destroy)",
+    async ({ poll, destroy }) => {
+      const f = await fixture();
+      const railway = fakeRailway({
+        cat: () => {
+          if (poll === "throws") throw new Error("status request timed out");
+          return MISSING_RESULT;
+        },
+        destroy: () => ({
+          code: destroy === "success-warning" ? 0 : 1,
+          stdout: "",
+          stderr:
+            destroy === "success-warning"
+              ? "Warning: experimental feature"
+              : destroy === "plain-not-found"
+                ? "sandbox not found"
+                : `sandbox ${SANDBOX_ID} not found in project other`,
+        }),
+      });
+      const record = {
+        v: 1 as const,
+        runId: RUN_ID,
+        kind: "railway" as const,
+        member: MEMBER,
+        run: RUN,
+        handle: handle(),
+        startedAt: STARTED_AT,
+        state: "running" as const,
+      };
+      await writeRunRecord(f.home, record);
+      await writeFile(
+        railwaySidecarPath(f.home, RUN_ID),
+        JSON.stringify(sidecarOf({ state: "running", sandboxId: SANDBOX_ID })),
+      );
+      const operation = stopRun({
+        home: f.home,
+        runtime: runtimeFor(f, railway.exec),
+        record,
+        now: () => new Date(STARTED_AT),
+      });
+      if (destroy === "success-warning") {
+        await expect(operation).resolves.toMatchObject({ state: "stopped" });
+        expect((await readRunRecord(f.home, RUN_ID))?.state).toBe("stopped");
+        expect(await exists(railwaySidecarPath(f.home, RUN_ID))).toBe(false);
+      } else {
+        await expect(operation).rejects.toThrow(
+          `vapi swarm forget-run team ${RUN_ID} --confirm-destroyed`,
+        );
+        expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+          state: "unknown",
+          endedAt: STARTED_AT,
+          detail: expect.stringContaining("not found"),
+        });
+        expect(readSidecarFile(f)).toMatchObject({ state: "running", sandboxId: SANDBOX_ID });
+      }
+      expect(railway.calls.filter((call) => call[1] === "destroy")).toEqual([
+        ["sandbox", "destroy", SANDBOX_ID],
+      ]);
+    },
+  );
+
   it("requires exit zero to stop a starting Railway record with a saved id", async () => {
     const f = await fixture();
     const railway = fakeRailway({ cat: () => SANDBOX_GONE, destroy: () => SANDBOX_GONE });
@@ -2287,7 +2354,7 @@ describe("railway runtime sandbox-gone detection", () => {
     else await expect(stopping).rejects.toThrow(`railway sandbox destroy ${SANDBOX_ID} failed`);
   });
 
-  it("leaves the run record running when stop hits an unrelated failure", async () => {
+  it("marks the run unknown when stop hits an unrelated failure", async () => {
     const f = await fixture();
     const railway = fakeRailway({
       destroy: () => ({ code: 1, stdout: "", stderr: "Error: request timed out" }),
@@ -2303,7 +2370,7 @@ describe("railway runtime sandbox-gone detection", () => {
     await expect(
       stopRun({ home: f.home, runtime: runtimeFor(f, railway.exec), record }),
     ).rejects.toThrow(/request timed out/u);
-    expect((await readRunRecord(f.home, RUN_ID))?.state).toBe("running");
+    expect((await readRunRecord(f.home, RUN_ID))?.state).toBe("unknown");
   });
 
   it("reports running with the error when status hits an unrelated failure", async () => {

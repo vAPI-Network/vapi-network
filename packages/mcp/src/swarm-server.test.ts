@@ -222,6 +222,83 @@ describe("MCP swarm lifecycle", () => {
     },
   );
 
+  it.each([false, true])(
+    "keeps a running Railway stop failure unresolved with owner recovery (all=%s)",
+    async (all) => {
+      const runId = "run_0123456789abcdef01234567";
+      const stop = vi.fn<Runtime["stop"]>(async () => {
+        throw new Error("sandbox sbx_9 not found in project other");
+      });
+      const runtime: Runtime = {
+        kind: "railway",
+        start: vi.fn(),
+        stop,
+        status: async () => ({ state: "running", detail: "status request timed out" }),
+      };
+      const balanceReader = vi.fn(async () => 0n);
+      const transfer = vi.fn<MovementTransfer>();
+      const fixture = await runnableSwarmFixture({
+        replies: [],
+        runtime,
+        runtimeForStop: () => runtime,
+        swarm: { balanceReader, transfer },
+      });
+      try {
+        const member = {
+          swarm: "team",
+          account: fixture.swarm.members[0]!.account,
+          profile: "lead",
+        };
+        const handle = {
+          runId,
+          kind: "railway" as const,
+          member,
+          ref: "sbx_9",
+          startedAt: new Date(NOW).toISOString(),
+        };
+        await writeRunRecord(fixture.home, {
+          v: 1,
+          runId,
+          kind: "railway",
+          member,
+          handle,
+          run: { runId, task: "Work", mode: "agent" },
+          state: "running",
+          startedAt: handle.startedAt,
+        });
+        await writeJsonAtomic(join(fixture.home, "runs", `${runId}.railway.json`), {
+          v: 1,
+          swarm: "team",
+          account: member.account,
+          sandboxId: handle.ref,
+        });
+        const stopped = await fixture.server.callTool({
+          name: "swarm.stop",
+          arguments: { name: "team", ...(all ? { all: true } : { runId }) },
+        });
+        expect(stopped.isError).toBe(true);
+        expect(stop).toHaveBeenCalledWith(handle, { requireSuccessfulExit: true });
+        const confirmation = `vapi swarm forget-run team ${runId} --confirm-destroyed`;
+        expect(stopped.content[0]!.text).toContain(confirmation);
+        expect((await listRunRecords(fixture.home))[0]).toMatchObject({
+          state: "unknown",
+          detail: "sandbox sbx_9 not found in project other",
+        });
+        expect(await readdir(join(fixture.home, "runs"))).toContain(`${runId}.railway.json`);
+        const dissolved = await fixture.server.callTool({
+          name: "swarm.dissolve",
+          arguments: { name: "team" },
+        });
+        expect(dissolved.isError).toBe(true);
+        expect(dissolved.content[0]!.text).toContain(confirmation);
+        expect(balanceReader).not.toHaveBeenCalled();
+        expect(transfer).not.toHaveBeenCalled();
+      } finally {
+        await fixture.server.close();
+      }
+    },
+  );
+
   it.each(["starting", "running", "unknown"] as const)(
     "refuses dissolution with a tracked %s Railway run before moving money",
     async (state) => {

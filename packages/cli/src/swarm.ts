@@ -796,7 +796,13 @@ async function stopCommand(
             error instanceof Error ? error.message : String(error),
             ...(record.kind === "railway" &&
             record.handle.ref !== "" &&
-            (record.state === "starting" || record.state === "unknown")
+            (record.state === "starting" || record.state === "unknown") &&
+            !(
+              error instanceof Error &&
+              error.message.includes(
+                `vapi swarm forget-run ${name} ${record.runId} --confirm-destroyed`,
+              )
+            )
               ? [
                   `Destroy it yourself with: railway sandbox destroy ${record.handle.ref}`,
                   `Verify destruction in the original Railway project/environment, then run vapi swarm forget-run ${name} ${record.runId} --confirm-destroyed.`,

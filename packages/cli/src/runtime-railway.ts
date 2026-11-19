@@ -1098,12 +1098,14 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
       const id = sandboxRef(handle);
       if (id === undefined) throw new Error("Invalid railway runtime sandbox id.");
       if (stopOptions?.requireSuccessfulExit === true) {
-        // An unknown worker cannot be cleared by text or the current CLI scope.
+        // stopRun requires this for running, starting and unknown Railway workers.
         // Only the destroy process's successful exit confirms this stop.
         const outcome = await exec(RAILWAY_CLI.binary, RAILWAY_CLI.destroy(id));
         if (outcome.code !== 0)
           throw new Error(`railway sandbox destroy ${id} failed${describeFailure(outcome, [])}`);
       } else {
+        // Retain the exported adapter's lenient default for direct callers and
+        // launch-persistence rollback; stopRun always requests strict destruction.
         await destroySandbox(exec, id);
       }
       await removeSidecar(home, handle.runId);

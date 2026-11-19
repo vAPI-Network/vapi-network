@@ -2282,16 +2282,18 @@ describe("vapi swarm railway runs", () => {
     },
   );
 
-  it.each([
-    { status: "throws", refreshFirst: false },
-    { status: "throws", refreshFirst: true },
-    { status: "nonzero", refreshFirst: true },
-    { status: "missing-result", refreshFirst: true },
-  ] as const)(
-    "keeps starting Railway stops strict after inconclusive status ($status, refreshFirst=$refreshFirst)",
-    async ({ status, refreshFirst }) => {
+  it.each(
+    [
+      { status: "throws", refreshFirst: false },
+      { status: "throws", refreshFirst: true },
+      { status: "nonzero", refreshFirst: true },
+      { status: "missing-result", refreshFirst: true },
+    ].flatMap((test) => (["starting", "running"] as const).map((state) => ({ ...test, state }))),
+  )(
+    "keeps $state Railway stops strict after inconclusive status ($status, refreshFirst=$refreshFirst)",
+    async ({ status, refreshFirst, state }) => {
       const home = await homeWithStoredSwarm("vapi-swarm-starting-status-stop-");
-      const record = railwayRecordForRace("starting");
+      const record = railwayRecordForRace(state);
       await writeRunRecord(home, record);
       await writeSidecarFile(home, {
         runId: record.runId,
@@ -2324,7 +2326,7 @@ describe("vapi swarm railway runs", () => {
       if (refreshFirst) {
         const runtime = createRailwayRuntime({ home, exec });
         expect(await refreshRunRecord(home, record, runtime, deps.now)).toMatchObject({
-          state: "starting",
+          state,
           handle: record.handle,
         });
       }
@@ -2342,6 +2344,9 @@ describe("vapi swarm railway runs", () => {
         detail: expect.stringContaining("not found in project other"),
       });
       expect(await readdir(join(home, "runs"))).toContain(`${record.runId}.railway.json`);
+      const human = captureIo();
+      expect(await run(["swarm", "stop", "team", "--all"], human.io, deps)).toBe(1);
+      expect(human.stdout.join("\n")).toContain(confirmation);
       const blocked = captureIo();
       expect(await run(["swarm", "dissolve", "team", "--json"], blocked.io, deps)).toBe(1);
       expect(JSON.parse(onlyLine(blocked.stdout))).toMatchObject({ code: "swarm_workers_active" });
@@ -3171,7 +3176,7 @@ describe("vapi swarm railway runs", () => {
     ).toEqual([]);
   });
 
-  it("stop --all reports a failing stop, keeps that run running and stops the rest", async () => {
+  it("stop --all reports a failing stop, marks that run unknown and stops the rest", async () => {
     const home = await homeWithRailwaySwarm("vapi-swarm-railway-stop-fail-");
     const fake = fakeRailwayExec({
       destroy: (id) =>
@@ -3202,9 +3207,12 @@ describe("vapi swarm railway runs", () => {
       expect.objectContaining({ runId: runs[0]!.runId, member: "team-lead-1" }),
     ]);
     expect(result.failed[0]!.error).toContain("railway API unavailable");
+    expect(result.failed[0]!.error).toContain(
+      `vapi swarm forget-run team ${runs[0]!.runId} --confirm-destroyed`,
+    );
     expect(result.sandboxes).toEqual([]);
     const records = await listRunRecords(home, { swarm: "team" });
-    expect(records.find(({ runId }) => runId === runs[0]!.runId)?.state).toBe("running");
+    expect(records.find(({ runId }) => runId === runs[0]!.runId)?.state).toBe("unknown");
     expect(fake.destroyed).toEqual(["sbx_2"]);
     await expectNoMemberSecrets(home, [stopped.stdout.join("\n")]);
   });

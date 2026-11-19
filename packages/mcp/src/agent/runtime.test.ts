@@ -554,6 +554,63 @@ describe("run registry", () => {
     },
   );
 
+  it.each([
+    { kind: "railway", state: "running", fails: true },
+    { kind: "railway", state: "running", fails: false },
+    { kind: "railway", state: "starting", fails: true },
+    { kind: "railway", state: "unknown", fails: true },
+    { kind: "local", state: "running", fails: false },
+    { kind: "local", state: "running", fails: true },
+  ] as const)(
+    "requires strict Railway stops and preserves local behavior ($kind, $state, fails=$fails)",
+    async ({ kind, state, fails }) => {
+      const home = await temporaryHome();
+      const sample = sampleRecord(runId(58));
+      const record: RunRecord = {
+        ...sample,
+        kind,
+        state,
+        handle: { ...sample.handle, kind, ref: kind === "railway" ? "sbx_9" : sample.handle.ref },
+      };
+      await writeRunRecord(home, record);
+      const stop = vi.fn<Runtime["stop"]>(async () => {
+        if (fails) throw new Error(`sandbox destroy failed near ${PRIVATE_KEY}`);
+      });
+      const runtime: Runtime = {
+        kind,
+        start: vi.fn(),
+        status: async () => ({ state: "running" }),
+        stop,
+      };
+      const operation = stopRun({ home, runtime, record, now: () => new Date(ENDED_AT) });
+      if (fails) {
+        const error = await operation.catch((error: unknown) => error);
+        expect(error).toBeInstanceOf(Error);
+        const stored = await readRunRecord(home, record.runId);
+        if (kind === "railway" && state !== "unknown") {
+          expect(stored).toMatchObject({
+            state: "unknown",
+            endedAt: ENDED_AT,
+            detail: "sandbox destroy failed near [redacted private key]",
+          });
+          expect((error as Error).message).toContain(
+            `vapi swarm forget-run team ${record.runId} --confirm-destroyed`,
+          );
+          expect((error as Error).message).not.toContain(PRIVATE_KEY);
+        } else {
+          expect(stored).toEqual(record);
+        }
+      } else {
+        await expect(operation).resolves.toMatchObject({ state: "stopped", endedAt: ENDED_AT });
+        expect((await readRunRecord(home, record.runId))?.state).toBe("stopped");
+      }
+      expect(stop).toHaveBeenCalledOnce();
+      if (kind === "railway")
+        expect(stop).toHaveBeenCalledWith(record.handle, { requireSuccessfulExit: true });
+      else expect(stop).toHaveBeenCalledWith(record.handle);
+    },
+  );
+
   it("stops only the registry handle and never stops a terminal record", async () => {
     const home = await temporaryHome();
     const runtime = new FakeRuntime();
@@ -757,8 +814,13 @@ describe("detached each-mode start failures", () => {
     expect(failure.message).toContain("timed out");
     expect(failure.message).toContain(`vapi swarm stop team ${runId(101)}`);
     expect(failure.message).not.toContain("Stopped team-lead-1");
+    expect(failure.message).toContain(
+      `vapi swarm forget-run team ${runId(101)} --confirm-destroyed`,
+    );
     await expect(readRunRecord(fixture.home, runId(101))).resolves.toMatchObject({
-      state: "running",
+      state: "unknown",
+      endedAt: STARTED_AT,
+      detail: "railway sandbox destroy pid-1 failed (exit 1): timed out",
     });
   });
 

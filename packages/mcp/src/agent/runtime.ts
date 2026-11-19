@@ -683,10 +683,7 @@ export async function stopRun(args: {
           }
           await args.runtime.retireUnreconciledStart?.(current);
         } else {
-          if (
-            current.kind === "railway" &&
-            (current.state === "unknown" || current.state === "starting")
-          ) {
+          if (current.kind === "railway") {
             try {
               await args.runtime.stop(current.handle, { requireSuccessfulExit: true });
             } catch (error) {
@@ -694,7 +691,7 @@ export async function stopRun(args: {
                 error instanceof Error ? error.message : String(error),
                 process.env,
               );
-              if (current.state === "starting") {
+              if (current.state === "starting" || current.state === "running") {
                 await writeRunRecord(args.home, {
                   ...current,
                   state: "unknown",
@@ -702,7 +699,18 @@ export async function stopRun(args: {
                   detail,
                 });
               }
-              throw error;
+              const message = [
+                detail,
+                ...(current.member.swarm === undefined
+                  ? []
+                  : [
+                      `Destroy it yourself with: railway sandbox destroy ${current.handle.ref}`,
+                      `Verify destruction in the original Railway project/environment, then run vapi swarm forget-run ${current.member.swarm} ${current.runId} --confirm-destroyed.`,
+                    ]),
+              ].join("\n");
+              throw error instanceof RuntimeError
+                ? new RuntimeError(error.code, message)
+                : new Error(message, { cause: error });
             }
           } else {
             await args.runtime.stop(current.handle);
