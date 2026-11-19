@@ -37,6 +37,13 @@ is already set; no shell startup files are modified by setup:
 source scripts/cloud-env.sh
 ```
 
+Cloud commits carry the project identity, `vAPI Development`. The helper exports it
+as `GIT_AUTHOR_*` and `GIT_COMMITTER_*` for Bash, and setup runs
+`scripts/cloud-git-identity.sh`, which writes the same name and address into the
+checkout's own git config, so a tool that starts git without Bash uses it too.
+In a cloud workspace created before this setup, run that script once from the
+workspace root. Locally it does nothing.
+
 The helper does nothing locally, never evaluates values as shell code, and turns
 off shell tracing before expanding them, then restores the caller's tracing state.
 The repo does not load a `.env` file, so

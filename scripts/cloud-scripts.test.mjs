@@ -223,3 +223,54 @@ test("cloud shells commit as the project identity; local shells keep their own",
   passed(local);
   assert.equal(local.stdout, "Someone|someone@example.com|Someone|someone@example.com");
 });
+
+test("cloud setup writes the project identity into the checkout, for agents that do not run Bash", (t) => {
+  const checkout = temporaryDirectory(t);
+  const git = (args, env) =>
+    spawnSync("git", args, {
+      cwd: checkout,
+      encoding: "utf8",
+      // No GIT_AUTHOR_*, no BASH_ENV: what an agent that starts git directly has.
+      env: {
+        PATH: process.env.PATH,
+        HOME: checkout,
+        GIT_CONFIG_GLOBAL: join(checkout, "global.gitconfig"),
+        GIT_CONFIG_NOSYSTEM: "1",
+        ...env,
+      },
+    });
+  passed(git(["init", "--quiet"]));
+  writeFileSync(
+    join(checkout, "global.gitconfig"),
+    "[user]\n\tname = Someone\n\temail = someone@example.com\n",
+  );
+  const identityScript = join(root, "scripts/cloud-git-identity.sh");
+  const author = () => {
+    passed(git(["commit", "--quiet", "--allow-empty", "-m", "probe"]));
+    return git(["log", "-1", "--format=%an <%ae>|%cn <%ce>"]).stdout.trim();
+  };
+
+  passed(
+    spawnSync(bash, [identityScript], {
+      cwd: checkout,
+      env: { PATH: process.env.PATH, CONDUCTOR_IS_LOCAL: "1" },
+    }),
+  );
+  assert.equal(author(), "Someone <someone@example.com>|Someone <someone@example.com>");
+
+  passed(
+    spawnSync(bash, [identityScript], {
+      cwd: checkout,
+      env: { PATH: process.env.PATH, CONDUCTOR_IS_LOCAL: "0" },
+    }),
+  );
+  const project = "vAPI Development <336934719+vapi-development@users.noreply.github.com>";
+  assert.equal(author(), `${project}|${project}`);
+
+  // Setup runs it before the steps that can fail.
+  const setupScript = readFileSync(join(root, "scripts/cloud-setup.sh"), "utf8");
+  assert.ok(
+    setupScript.indexOf("scripts/cloud-git-identity.sh") > 0 &&
+      setupScript.indexOf("scripts/cloud-git-identity.sh") < setupScript.indexOf("command -v node"),
+  );
+});
