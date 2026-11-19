@@ -72,9 +72,9 @@ describe("vapi router models", () => {
 });
 
 describe("vapi router clear-pending", () => {
-  it.each([false, true])(
-    "syncs an existing receipt before clearing and retains the journal on sync failure (%s)",
-    async (fails) => {
+  it.each(["none", "file", "directory"] as const)(
+    "syncs an existing receipt and directory before clearing and retains the journal on %s sync failure",
+    async (failure) => {
       const home = await initializedHome();
       const store = await WalletStore.open(home);
       const pending = pendingPurchase();
@@ -93,12 +93,16 @@ describe("vapi router clear-pending", () => {
       );
       const events: string[] = [];
       __setReceiptTestHooks({
-        beforeSync: () => {
-          if (fails) throw new Error("ledger sync failed");
+        beforeSync: (target) => {
+          if (
+            (failure === "file" && target === path) ||
+            (failure === "directory" && target === home)
+          )
+            throw new Error("ledger sync failed");
         },
         afterSync: (target) => {
-          expect(target).toBe(path);
-          events.push("sync");
+          expect([path, home]).toContain(target);
+          events.push(target === path ? "file-sync" : "directory-sync");
         },
       });
       const original = WalletStore.prototype.setRouterPendingPurchase;
@@ -106,7 +110,7 @@ describe("vapi router clear-pending", () => {
         .spyOn(WalletStore.prototype, "setRouterPendingPurchase")
         .mockImplementation(async function (this: WalletStore, name, value, expected) {
           if (value === null) {
-            expect(events).toEqual(["sync"]);
+            expect(events).toEqual(["file-sync", "directory-sync"]);
             events.push("clear");
           }
           return await original.call(this, name, value, expected);
@@ -119,15 +123,15 @@ describe("vapi router clear-pending", () => {
             captured.io,
             commandDependencies(),
           ),
-        ).toBe(fails ? 1 : 0);
-        if (fails) {
-          expect(events).toEqual([]);
+        ).toBe(failure === "none" ? 0 : 1);
+        if (failure !== "none") {
+          expect(events).toEqual(failure === "file" ? [] : ["file-sync"]);
           expect(JSON.parse(captured.stdout[0]!)).toMatchObject({ error: "ledger sync failed" });
           expect((await WalletStore.open(home)).entry(WALLET)?.routerPendingPurchase).toEqual(
             pending,
           );
         } else {
-          expect(events).toEqual(["sync", "clear"]);
+          expect(events).toEqual(["file-sync", "directory-sync", "clear"]);
           expect(JSON.parse(captured.stdout[0]!)).toMatchObject({
             cleared: true,
             receiptAppended: false,

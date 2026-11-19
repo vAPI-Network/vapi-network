@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   __setReceiptTestHooks,
@@ -43,9 +43,94 @@ describe("receipts ledger", () => {
     expect(synced).toEqual([path, directory]);
     await appendReceipt({ ...receipt, id: "next" }, path);
     expect(synced).toEqual([path, directory, path]);
+    synced.length = 0;
+    await syncReceipts(path);
+    expect(synced).toEqual([path, directory]);
     await expect(syncReceipts(join(directory, "missing"))).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  it("syncs only the ledger file at the durability gate on Windows", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-win32-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "receipts.jsonl");
+    await writeFile(path, "");
+    const attempts: string[] = [];
+    __setReceiptTestHooks({
+      beforeSync: (candidate) => {
+        attempts.push(candidate);
+        if (candidate === directory) throw new Error("directory sync is not supported");
+      },
+    });
+    const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    try {
+      await syncReceipts(path);
+    } finally {
+      platform.mockRestore();
+    }
+    expect(attempts).toEqual([path]);
+  });
+
+  it.each(["file", "directory"] as const)(
+    "rejects a %s sync failure at the strict durability gate",
+    async (target) => {
+      const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-strict-"));
+      temporaryDirectories.push(directory);
+      const path = join(directory, "receipts.jsonl");
+      await writeFile(path, "");
+      const attempts: string[] = [];
+      __setReceiptTestHooks({
+        beforeSync: (candidate) => {
+          attempts.push(candidate);
+          if (candidate === (target === "file" ? path : directory)) throw new Error("sync failed");
+        },
+      });
+      await expect(syncReceipts(path)).rejects.toThrow("sync failed");
+      expect(attempts).toEqual(target === "file" ? [path] : [path, directory]);
+    },
+  );
+
+  it.each(["file", "directory"] as const)(
+    "returns the written receipt despite a %s sync failure at append",
+    async (target) => {
+      const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-best-effort-"));
+      temporaryDirectories.push(directory);
+      const path = join(directory, "receipts.jsonl");
+      const row: Receipt = {
+        id: "written",
+        timestamp: "2026-09-10T08:00:00.000Z",
+        resourceUrl: "https://api.example/paid",
+      };
+      const attempts: string[] = [];
+      __setReceiptTestHooks({
+        beforeSync: (candidate) => {
+          attempts.push(candidate);
+          if (candidate === (target === "file" ? path : directory)) throw new Error("sync failed");
+        },
+      });
+      await expect(appendReceipt(row, path)).resolves.toEqual(row);
+      expect(attempts).toEqual([path, directory]);
+      expect(await readReceipts(path)).toEqual([row]);
+    },
+  );
+
+  it("rejects when the receipt destination cannot be written", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-write-failure-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "receipts.jsonl");
+    await mkdir(path);
+    await expect(
+      appendReceipt(
+        {
+          id: "unwritten",
+          timestamp: "2026-09-10T08:00:00.000Z",
+          resourceUrl: "https://api.example/paid",
+        },
+        path,
+      ),
+    ).rejects.toMatchObject({ code: "EISDIR" });
+    expect(await readdir(path)).toEqual([]);
   });
 
   it("syncs the rename temporary file before replacement and the directory afterward", async () => {
@@ -70,12 +155,18 @@ describe("receipts ledger", () => {
     });
     expect(await renameReceiptWallet("main", "renamed", path)).toBe(1);
     expect(synced).toEqual([expect.stringMatching(/\.tmp$/), directory]);
+    const before = await readFile(path);
+    const attempts: string[] = [];
     __setReceiptTestHooks({
-      beforeSync: () => {
+      beforeSync: (target) => {
+        attempts.push(target);
         throw new Error("sync failed");
       },
     });
     await expect(renameReceiptWallet("renamed", "other", path)).rejects.toThrow("sync failed");
+    expect(attempts).toEqual([expect.stringMatching(/\.tmp$/)]);
+    expect(await readFile(path)).toEqual(before);
+    expect(await readdir(directory)).toEqual(["receipts.jsonl"]);
     expect((await readReceipts(path))[0]?.wallet).toBe("renamed");
   });
 

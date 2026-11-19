@@ -9,7 +9,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { agentSecretAccounts } from "./agent-link.js";
 import { readAuditLog } from "./audit.js";
 import { getVapiPaths, type SpendCaps } from "./config.js";
-import { readReceipts } from "./receipts.js";
+import { __setReceiptTestHooks, readReceipts } from "./receipts.js";
 import type { SecretStore } from "./secret-store.js";
 import { readSpendLedger, reserveSpend } from "./spend-policy.js";
 import {
@@ -69,6 +69,7 @@ type TestFixture = {
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  __setReceiptTestHooks(undefined);
   vi.restoreAllMocks();
   await Promise.all(
     temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
@@ -200,6 +201,36 @@ describe("transferBetweenAccounts", () => {
       transfer: { status: "sent", replayed: true, txHash: TX_HASH },
       settlement: { outcome: "succeeded", transaction: TX_HASH },
     });
+  });
+
+  it("returns sent evidence after a successful relay when the terminal receipt sync fails", async () => {
+    const fixture = await linkedFixture();
+    const path = getVapiPaths(fixture.home).receipts;
+    let terminalSyncs = 0;
+    const transport = fakeTransport(fixture, {
+      relay: async (body) => {
+        __setReceiptTestHooks({
+          beforeSync: (target) => {
+            if (target === path) {
+              terminalSyncs += 1;
+              throw new Error("terminal receipt sync failed");
+            }
+          },
+        });
+        return successfulRelay(body);
+      },
+    });
+
+    await expect(runTransfer(fixture, transport.fetchImpl)).resolves.toMatchObject({
+      status: "sent",
+      txHash: TX_HASH,
+      nonce: NONCE,
+    });
+    expect(terminalSyncs).toBe(1);
+    expect(relayCalls(transport.calls)).toHaveLength(1);
+    expect(await readReceipts(path)).toMatchObject([
+      { transfer: { status: "sent", txHash: TX_HASH, nonce: NONCE } },
+    ]);
   });
 
   it("5. refuses a revoked sibling before signing", async () => {

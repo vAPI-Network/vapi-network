@@ -20,7 +20,6 @@ import {
   saveAgentLink,
   startDeviceLink,
   trustedLinkBearer,
-  withAgentCredentialLock,
   type AgentTokens,
   type DeviceLinkStart,
   type LinkResult,
@@ -969,6 +968,63 @@ describe("agentAccessToken", () => {
     });
   });
 
+  it.each(["cleared", "relinked", "different-client"] as const)(
+    "does not store a refresh response when its link was %s in flight",
+    async (change) => {
+      const home = await temporaryHome();
+      const wallets = await walletStore(home);
+      const link = agentLink();
+      await wallets.setLink("main", link);
+      const accounts = agentSecretAccounts("main");
+      const originalTokens = JSON.stringify({ ...linkResult().tokens, expiresAt: 0 });
+      const secrets = memorySecretStore({ [accounts.tokens]: originalTokens });
+      let reached!: () => void;
+      const started = new Promise<void>((resolve) => {
+        reached = resolve;
+      });
+      let finish!: (response: Response) => void;
+      const response = new Promise<Response>((resolve) => {
+        finish = resolve;
+      });
+      const fetchImpl = vi.fn<typeof fetch>(async () => {
+        reached();
+        return await response;
+      });
+      const refresh = agentAccessToken({
+        secrets,
+        wallets,
+        wallet: "main",
+        fetchImpl,
+        now: () => 1_000,
+      });
+      const rejected = expect(refresh).rejects.toMatchObject({
+        code: "not_linked",
+        message: "Run vapi login first.",
+      });
+      await started;
+      const competing = await WalletStore.open(home);
+      if (change === "cleared") await competing.clearLink("main");
+      else
+        await competing.setLink("main", {
+          ...link,
+          ...(change === "relinked"
+            ? { linkedAt: "2026-09-23T11:00:00.000Z" }
+            : { clientId: "different-client" }),
+        });
+      finish(
+        Response.json({
+          access_token: "new-access",
+          refresh_token: "new-refresh",
+          expires_in: 3600,
+        }),
+      );
+      await rejected;
+      expect(secrets.setCalls).toEqual([]);
+      expect(secrets.entries[accounts.tokens]).toBe(originalTokens);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("reports not_linked when the refresh token was revoked", async () => {
     const home = await temporaryHome();
     const wallets = await walletStore(home);
@@ -1242,60 +1298,108 @@ describe("agentFetch", () => {
 });
 
 describe("forgetAgentLink", () => {
-  it("expires the revocation deadline while waiting for the refresh credential lock", async () => {
+  it("waits for another refresh past the revocation deadline before removing all credentials", async () => {
     const home = await temporaryHome();
     const wallets = await walletStore(home);
-    const link = agentLink();
-    await wallets.setLink("main", link);
+    await wallets.setLink("main", agentLink());
     const accounts = agentSecretAccounts("main");
     const secrets = memorySecretStore({
       [accounts.tokens]: JSON.stringify({ ...linkResult().tokens, expiresAt: 0 }),
       [accounts.routerStake]: ROUTER_KEY,
+      [accounts.routerBalance]: "balance-router-key",
     });
-    let acquired!: () => void;
-    let release!: () => void;
-    const locked = new Promise<void>((resolve) => {
-      acquired = resolve;
+    let started!: () => void;
+    const refreshing = new Promise<void>((resolve) => {
+      started = resolve;
     });
-    const blocked = new Promise<void>((resolve) => {
-      release = resolve;
+    let finish!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => {
+      finish = resolve;
     });
-    const holder = withAgentCredentialLock(wallets, link.clientId, async () => {
-      acquired();
-      await blocked;
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      expect(new URL(String(input)).pathname).toBe("/oauth/token");
+      started();
+      return await response;
     });
-    await locked;
+    const refresh = agentAccessToken({
+      secrets,
+      wallets,
+      wallet: "main",
+      fetchImpl,
+      now: () => 1_000,
+    });
+    await refreshing;
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    let reading!: () => void;
-    const tokenRead = new Promise<void>((resolve) => {
-      reading = resolve;
+    let waiting!: () => void;
+    const lockWait = new Promise<void>((resolve) => {
+      waiting = resolve;
     });
-    const get = secrets.get.bind(secrets);
-    secrets.get = async (name) => {
-      reading();
-      return await get(name);
+    let retrying!: () => void;
+    const lockRetry = new Promise<"retry">((resolve) => {
+      retrying = () => resolve("retry");
+    });
+    let removing!: () => void;
+    const cleanup = new Promise<"cleanup">((resolve) => {
+      removing = () => resolve("cleanup");
+    });
+    const remove = secrets.remove.bind(secrets);
+    secrets.remove = async (name) => {
+      removing();
+      return await remove(name);
     };
-    const fetchImpl = vi.fn<typeof fetch>();
+    let waits = 0;
+    const schedule = setTimeout;
+    const timerSpy = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockImplementation((callback, delay, ...args) => {
+        if (delay === 20) {
+          waits += 1;
+          if (waits === 1) waiting();
+          if (waits === 2) retrying();
+        }
+        return schedule(callback, delay, ...args);
+      });
+    let completed = false;
     const logout = forgetAgentLink({
       secrets,
       wallets,
       wallet: "main",
       fetchImpl,
       revocationTimeoutMs: 10,
+    }).then(() => {
+      completed = true;
     });
     try {
-      await tokenRead;
+      await lockWait;
       await vi.advanceTimersByTimeAsync(10);
-      await expect(logout).resolves.toBeUndefined();
-      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(completed).toBe(false);
+      expect(secrets.removeCalls).toEqual([]);
+      expect(wallets.entry("main")?.link).toBeDefined();
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(Promise.race([lockRetry, cleanup])).resolves.toBe("retry");
+      finish(
+        Response.json({
+          access_token: "rotated-access",
+          refresh_token: "rotated-refresh",
+          expires_in: 3600,
+        }),
+      );
+      await expect(refresh).resolves.toBe("rotated-access");
+      await vi.waitFor(() => expect(completed).toBe(true), { interval: 1 });
+      await logout;
+      expect(secrets.setCalls).toHaveLength(1);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
       expect(secrets.entries).toEqual({});
       expect((await WalletStore.open(home)).entry("main")?.link).toBeUndefined();
       expect(await readAuditLog(home)).toEqual([
         expect.objectContaining({ event: "agent.unlinked" }),
       ]);
     } finally {
-      release();
-      await holder;
+      finish(Response.json({ access_token: "rotated-access", expires_in: 3600 }));
+      await refresh.catch(() => undefined);
+      await vi.waitFor(() => expect(completed).toBe(true), { interval: 1 });
+      await logout;
+      timerSpy.mockRestore();
     }
   });
 
