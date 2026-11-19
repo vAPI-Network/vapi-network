@@ -2856,7 +2856,7 @@ describe("Router purchase credit and receipt guards", () => {
         paymentId: "purchase_1234567890",
         phases: { requestMs: 100 },
         policy: { capsApplied: true },
-        client: { name: "vapi-network", version: "0.14.0" },
+        client: { name: "vapi-network", version: "0.15.0" },
         resourceUrl: `${API_BASE}/api/router/top-up/5`,
         settlement: { outcome: "unknown" },
         outcome: "settlement_unknown",
@@ -2903,7 +2903,7 @@ describe("Router purchase credit and receipt guards", () => {
       paymentId: "purchase_1234567890",
       phases: { requestMs: 100 },
       policy: { capsApplied: true },
-      client: { name: "vapi-network", version: "0.14.0" },
+      client: { name: "vapi-network", version: "0.15.0" },
       outcome: "paid",
     });
     const raw = await readFile(receiptsPath, "utf8");

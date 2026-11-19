@@ -12,6 +12,8 @@ sentence under it is the summary shown on the
 
 ## Unreleased
 
+## 0.15.0 - 2026-11-19
+
 Router purchases recover after an interruption without a second charge, swarm dissolution refuses while a worker is active or unresolved, and `vapi login` works on more Linux keyrings.
 
 ### Added

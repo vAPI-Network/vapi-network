@@ -18,7 +18,7 @@ vAPI Network is not related to Vapi.ai, the voice AI company.
 
 ## Quickstart
 
-This README describes client 0.14.0. `npm view vapi-network version` shows the latest published release.
+This README describes client 0.15.0. `npm view vapi-network version` shows the latest published release.
 The client needs Node.js 22 or newer.
 
 ```bash
