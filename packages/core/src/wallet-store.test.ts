@@ -30,6 +30,7 @@ import {
   unlockKeystore,
 } from "./keystore.js";
 import {
+  __setReceiptTestHooks,
   appendReceipt,
   filterReceiptsByWallet,
   readReceipts,
@@ -69,6 +70,7 @@ const secretStores = new Map<string, SecretStore>();
 afterEach(async () => {
   vi.unstubAllEnvs();
   __setAtomicFileTestHooks(undefined);
+  __setReceiptTestHooks(undefined);
   delete process.env.VAPI_WALLET;
   const directories = temporaryDirectories.splice(0);
   for (const directory of directories) secretStores.delete(directory);
@@ -1072,6 +1074,39 @@ describe("wallet store", () => {
     },
     SLOW,
   );
+
+  it("completes a wallet rename when the receipt directory sync fails after replacement", async () => {
+    const home = await makeHome();
+    const store = await openStore(home);
+    await store.create("main", PASSPHRASE);
+    const paths = getVapiPaths(home);
+    await appendReceipt(receipt("renamed-receipt", "main"), paths.receipts);
+    let directorySyncs = 0;
+    __setReceiptTestHooks({
+      beforeSync: (target) => {
+        if (target === home) {
+          directorySyncs += 1;
+          throw new Error("receipt directory sync failed");
+        }
+      },
+    });
+
+    await expect(store.rename("main", "research")).resolves.toMatchObject({ name: "research" });
+    expect(directorySyncs).toBe(1);
+    const reopened = await openStore(home);
+    expect(reopened.has("main")).toBe(false);
+    expect(reopened.has("research")).toBe(true);
+    expect((await reopened.unlock("research", PASSPHRASE)).address).toBeDefined();
+    expect(
+      (await readVaultFileUnlocked(join(home, "vault.json"))).accounts.map(
+        (account) => account.name,
+      ),
+    ).toEqual(["research"]);
+    expect(await readReceipts(paths.receipts)).toMatchObject([
+      { id: "renamed-receipt", wallet: "research" },
+    ]);
+    expect(await temporaryFiles(home)).toEqual([]);
+  });
 
   it(
     "rolls back an account rename when the receipt journal stays busy",

@@ -312,11 +312,12 @@ export async function appendReceipt(
     const handle = await open(path, "a", 0o600);
     try {
       await handle.writeFile(`${JSON.stringify(parsed)}\n`, "utf8");
-      await syncReceiptHandle(handle, path);
+      // Retirement retries durability strictly; a written row must still be returned.
+      await syncReceiptHandle(handle, path).catch(() => undefined);
     } finally {
       await handle.close();
     }
-    if (created) await syncReceipts(dirname(path));
+    if (created) await syncReceiptDirectory(dirname(path)).catch(() => undefined);
   });
   return parsed;
 }
@@ -327,8 +328,20 @@ async function syncReceiptHandle(handle: FileHandle, path: string): Promise<void
   await receiptTestHooks?.afterSync?.(path);
 }
 
-/** Flush existing receipt evidence before retiring its purchase journal. Missing files fail. */
+/** Flush the ledger and its directory before retirement. Missing files and sync failures throw. */
 export async function syncReceipts(path = getVapiPaths().receipts): Promise<void> {
+  await syncReceiptPath(path);
+  await syncReceiptDirectory(dirname(path));
+}
+
+async function syncReceiptDirectory(path: string): Promise<void> {
+  // Windows cannot flush a directory handle; NTFS journals the entry itself.
+  // Requiring it there would keep every settled purchase from retiring.
+  if (process.platform === "win32") return;
+  await syncReceiptPath(path);
+}
+
+async function syncReceiptPath(path: string): Promise<void> {
   const handle = await open(path, "r");
   try {
     await syncReceiptHandle(handle, path);
@@ -446,7 +459,8 @@ export async function renameReceiptWallet(
         await handle.close();
       }
       await rename(temporaryPath, path);
-      await syncReceipts(dirname(path));
+      // Replacement committed: rejecting here would roll back only the wallet name.
+      await syncReceiptDirectory(dirname(path)).catch(() => undefined);
     } finally {
       await unlink(temporaryPath).catch(() => undefined);
     }

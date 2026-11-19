@@ -2542,14 +2542,14 @@ describe("Router purchase credit and receipt guards", () => {
     const events: string[] = [];
     __setReceiptTestHooks({
       afterSync: (path) => {
-        if (path.endsWith("receipts.jsonl")) events.push("sync");
+        events.push(path.endsWith("receipts.jsonl") ? "file-sync" : "directory-sync");
       },
     });
     const original = deps.wallets.setRouterPendingPurchase.bind(deps.wallets);
     vi.spyOn(deps.wallets, "setRouterPendingPurchase").mockImplementation(
       async (wallet, pending, expected) => {
         if (pending === null) {
-          expect(events).toEqual(["sync"]);
+          expect(events).toEqual(["file-sync", "directory-sync"]);
           events.push("clear");
         }
         return await original(wallet, pending, expected);
@@ -2567,11 +2567,75 @@ describe("Router purchase credit and receipt guards", () => {
       5,
     );
     expect(result.warnings?.some(({ code }) => code === "credit_pending")).not.toBe(true);
-    expect(events).toEqual(["sync", "clear"]);
+    expect(events).toEqual(["file-sync", "directory-sync", "clear"]);
     expect(transport.calls.paid).toBe(0);
     expect(
       (await WalletStore.open(deps.wallets.home)).entry("main")?.routerPendingPurchase,
     ).toBeUndefined();
+  });
+
+  it("retries a failed receipt creation directory sync before retiring a settled purchase", async () => {
+    const deps = await linkedDeps(vi.fn());
+    const record = {
+      receiptId: "creation-directory-failure",
+      status: "settled" as const,
+      createdAt: NOW.toISOString(),
+      tierUsd: 5 as const,
+      link: agentLink(),
+      network: BASE_MAINNET_CAIP2,
+      amountAtomic: "5000000",
+      baselinePurchasedUsd: 0,
+    };
+    await deps.wallets.setRouterPendingPurchase("main", record);
+    const path = join(deps.wallets.home, "receipts.jsonl");
+    let fail = true;
+    let directorySyncs = 0;
+    __setReceiptTestHooks({
+      beforeSync: (target) => {
+        if (target === deps.wallets.home) {
+          directorySyncs += 1;
+          if (fail) throw new Error("receipt directory sync failed");
+        }
+      },
+    });
+    await expect(ensureRouterPurchaseReceipt(deps, record)).resolves.toMatchObject({
+      receipt: { id: record.receiptId },
+      appended: true,
+    });
+    expect(directorySyncs).toBe(1);
+    expect(await readReceipts(path)).toMatchObject([
+      { id: record.receiptId, settlement: { outcome: "succeeded" } },
+    ]);
+    const transport = purchaseTransport(deps.wallets.home, "key-store", ROUTER_BASE);
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      if (new URL(req.url).pathname === "/api/agents/self/router")
+        return Response.json(usageResponse());
+      return transport.fetchImpl(input, init);
+    };
+    const options = { ...deps, fetchImpl, ...refillOptions(deps.wallets) };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const before = directorySyncs;
+      const result = await buyRouterBalance(options, 5);
+      expect(directorySyncs).toBeGreaterThan(before);
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([expect.objectContaining({ code: "credit_pending" })]),
+      );
+      expect(
+        (await WalletStore.open(deps.wallets.home)).entry("main")?.routerPendingPurchase,
+      ).toMatchObject({ receiptId: record.receiptId, status: "settled" });
+    }
+    fail = false;
+    const before = directorySyncs;
+    const result = await buyRouterBalance(options, 5);
+    expect(directorySyncs).toBeGreaterThan(before);
+    expect(result.warnings?.some(({ code }) => code === "credit_pending")).not.toBe(true);
+    expect(
+      (await WalletStore.open(deps.wallets.home)).entry("main")?.routerPendingPurchase,
+    ).toBeUndefined();
+    expect(await readReceipts(path)).toHaveLength(1);
+    expect((await readFile(path, "utf8")).trim().split("\n")).toHaveLength(1);
+    expect(transport.calls.paid).toBe(0);
   });
 
   it.each(["usage-sync", "chat-sync", "chat-journal"] as const)(
