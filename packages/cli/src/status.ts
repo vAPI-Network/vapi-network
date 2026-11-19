@@ -22,15 +22,13 @@ import { routerUsage } from "@vapi-network/core/router-client";
 
 import {
   baseUsdcBalanceReader,
-  getEnvironment,
   getSecretStore,
   openWalletStore,
   registryBaseUrl,
   unlockTarget,
-  type CliDependencies,
-  type CliIo,
   type WalletTarget,
 } from "./cli.js";
+import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
 import { UsageError } from "./args.js";
 import { agentLinkStatus } from "./login.js";
 import { routerDeps } from "./router.js";

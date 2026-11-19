@@ -11,18 +11,16 @@ import {
   writeDefaultConfig,
 } from "@vapi-network/core";
 
+import { fileExists, getSecretStore, recordAudit } from "./cli.js";
 import {
-  fileExists,
   getEnvironment,
   getPrompts,
-  getSecretStore,
   isStdinInteractive,
   output,
   readConfig,
-  recordAudit,
   type CliDependencies,
   type CliIo,
-} from "./cli.js";
+} from "./cli-context.js";
 import { UsageError, parseArguments } from "./args.js";
 import { restoreFromOwnerCommand } from "./cloud-backup.js";
 import { restoreVaultFromPhrase } from "./setup.js";

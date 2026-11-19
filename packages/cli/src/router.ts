@@ -33,10 +33,9 @@ import {
   requireSecretsAllowed,
   targetWallet,
   unlockTarget,
-  type CliDependencies,
-  type CliIo,
   type WalletTarget,
 } from "./cli.js";
+import { type CliDependencies, type CliIo } from "./cli-context.js";
 import { UsageError, parseArguments } from "./args.js";
 
 const WALLET_OPTION = "--wallet";

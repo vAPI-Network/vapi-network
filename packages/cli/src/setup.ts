@@ -20,17 +20,19 @@ import {
   CUSTODY_NOTICE,
   baseUsdcBalanceReader,
   fileExists,
-  getEnvironment,
   getSecretStore,
-  isInteractive,
   openWalletStore,
-  promptForLine,
-  readConfig,
   recordAudit,
   showRecoveryPhrase,
+} from "./cli.js";
+import {
+  getEnvironment,
+  isInteractive,
+  promptForLine,
+  readConfig,
   type CliDependencies,
   type CliIo,
-} from "./cli.js";
+} from "./cli-context.js";
 import { UsageError, parseArguments } from "./args.js";
 import { cloudBackupSetupChoice } from "./cloud-backup.js";
 import { runLoginFlow } from "./login.js";

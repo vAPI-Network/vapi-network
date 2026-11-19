@@ -28,7 +28,8 @@ import {
   redactAgentRunResult,
   printAgentRefills,
 } from "./agent.js";
-import { getEnvironment, redactDetachedRunValue, type CliDependencies, type CliIo } from "./cli.js";
+import { redactDetachedRunValue } from "./cli.js";
+import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
 import { UsageError } from "./args.js";
 
 /**

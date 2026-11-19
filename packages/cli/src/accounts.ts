@@ -37,16 +37,13 @@ import {
   baseUsdcBalanceReader,
   confirmWalletName,
   getSecretStore,
-  getEnvironment,
-  isInteractive,
   openWalletStore,
   recordAudit,
   registryBaseUrl,
   targetWallet,
   unlockTarget,
-  type CliDependencies,
-  type CliIo,
 } from "./cli.js";
+import { getEnvironment, isInteractive, type CliDependencies, type CliIo } from "./cli-context.js";
 import { UsageError, parseArguments, requiredPositional } from "./args.js";
 import { offerDashboardLink } from "./dashboard.js";
 import { runLoginFlow } from "./login.js";

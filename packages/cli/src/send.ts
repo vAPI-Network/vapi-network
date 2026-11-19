@@ -16,15 +16,8 @@ import {
   type CallPort,
 } from "@vapi-network/mcp";
 
-import {
-  getEnvironment,
-  getSecretStore,
-  openWalletStore,
-  registryBaseUrl,
-  unlockTarget,
-  type CliDependencies,
-  type CliIo,
-} from "./cli.js";
+import { getSecretStore, openWalletStore, registryBaseUrl, unlockTarget } from "./cli.js";
+import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
 import { UsageError, parseArguments, requiredPositional } from "./args.js";
 
 const SEND_USAGE =

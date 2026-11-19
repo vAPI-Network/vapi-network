@@ -7,15 +7,8 @@ import {
 import { AGENT_LINK_REVOKED_MESSAGE } from "@vapi-network/core/agent-link";
 import { formatUnits } from "viem";
 
-import {
-  getEnvironment,
-  getSecretStore,
-  openInBrowser,
-  targetWallet,
-  type CliDependencies,
-  type CliIo,
-  type WalletTarget,
-} from "./cli.js";
+import { getSecretStore, openInBrowser, targetWallet, type WalletTarget } from "./cli.js";
+import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
 import { UsageError, parseArguments } from "./args.js";
 
 const WALLET_OPTION = "--wallet";

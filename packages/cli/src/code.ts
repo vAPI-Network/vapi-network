@@ -12,15 +12,15 @@ import {
   routerUsage,
 } from "@vapi-network/core/router-client";
 
+import { targetWallet } from "./cli.js";
 import {
   getEnvironment,
   getLinePrompt,
   isInteractive,
   isStdinInteractive,
-  targetWallet,
   type CliDependencies,
   type CliIo,
-} from "./cli.js";
+} from "./cli-context.js";
 import { UsageError, parseArguments } from "./args.js";
 import { runLoginFlow } from "./login.js";
 import { routerDeps } from "./router.js";

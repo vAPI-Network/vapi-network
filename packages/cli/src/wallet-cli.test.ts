@@ -19,12 +19,8 @@ import {
 } from "@vapi-network/core";
 import { createKeystoreWithPhrase } from "@vapi-network/core/secrets";
 
-import {
-  runCli as runCliWithDependencies,
-  type CliDependencies,
-  type CliIo,
-  type CliPrompts,
-} from "./cli.js";
+import { runCli as runCliWithDependencies, type CliDependencies, type CliIo } from "./cli.js";
+import { type CliPrompts } from "./cli-context.js";
 
 const VECTOR_PHRASE =
   "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";

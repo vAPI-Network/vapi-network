@@ -10,7 +10,8 @@ import { API_KEY_SECRET_ACCOUNT } from "@vapi-network/core/api-key";
 import { type AuditEntry, type SecretStore, WalletStore } from "@vapi-network/core";
 import { agentSecretAccounts } from "@vapi-network/core/agent-link";
 
-import { runCli, type CliDependencies, type CliIo, type CliPrompts } from "./cli.js";
+import { runCli, type CliDependencies, type CliIo } from "./cli.js";
+import { type CliPrompts } from "./cli-context.js";
 
 const KEY = "vapi_sk_0123456789abcdefghij";
 const WALLET = /^0x[0-9a-fA-F]{40}$/u;
