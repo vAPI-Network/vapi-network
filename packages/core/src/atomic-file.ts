@@ -201,8 +201,9 @@ async function removeOwnedLock(path: string, owners: readonly string[]): Promise
   }
 
   let pendingError: unknown;
+  let renamedOwner: string | undefined;
   try {
-    const renamedOwner = await readFile(tombPath, "utf8");
+    renamedOwner = await readFile(tombPath, "utf8");
     if (!owners.includes(renamedOwner) && !lockOwnerReleased(renamedOwner)) {
       await atomicFileTestHooks?.afterMismatchedLockRename?.(path);
       const currentOwner = await readFile(tombPath, "utf8");
@@ -217,7 +218,10 @@ async function removeOwnedLock(path: string, owners: readonly string[]): Promise
     await atomicFileTestHooks?.beforeTombUnlink?.(tombPath);
     await unlink(tombPath);
   } catch (error) {
-    if (!hasCode(error, "ENOENT") && pendingError === undefined) {
+    if (
+      !tombUnlinkTolerated(error, renamedOwner !== undefined && lockOwnerReleased(renamedOwner)) &&
+      pendingError === undefined
+    ) {
       pendingError = error;
     }
   }
@@ -247,7 +251,7 @@ async function removeAbandonedLockTombs(path: string): Promise<void> {
         (pid === undefined || !processIsAlive(pid)));
     if (!abandoned) continue;
     await unlink(tombPath).catch((error: unknown) => {
-      if (!tombAlreadyGoing(error)) throw error;
+      if (!tombUnlinkTolerated(error, true)) throw error;
     });
   }
 }
@@ -260,9 +264,12 @@ async function removeOwnedTombs(path: string, owners: readonly string[]): Promis
     const tombPath = join(directory, entry);
     const owner = await readFile(tombPath, "utf8").catch(() => undefined);
     if (owner === undefined || !owners.includes(owner)) continue;
-    await unlink(tombPath).catch((error: unknown) => {
-      if (!tombAlreadyGoing(error)) throw error;
-    });
+    try {
+      await atomicFileTestHooks?.beforeTombUnlink?.(tombPath);
+      await unlink(tombPath);
+    } catch (error) {
+      if (!tombUnlinkTolerated(error, lockOwnerReleased(owner))) throw error;
+    }
   }
 }
 
@@ -319,14 +326,16 @@ function processIsAlive(pid: number): boolean {
 }
 
 /**
- * Applies when a contender removes a tomb another contender created and is
- * deleting. Windows answers an unlink of a file whose delete is pending, or
- * that is held open, with a permission or busy error; a later pass reaps it.
+ * Windows permission or busy errors are tolerated only for reapable tombs.
+ * A released or abandoned tomb left behind is reaped by any later pass; an
+ * unreleased tomb belonging to a live process never is.
  */
-function tombAlreadyGoing(error: unknown): boolean {
+function tombUnlinkTolerated(error: unknown, reapable: boolean): boolean {
   return (
     hasCode(error, "ENOENT") ||
-    (process.platform === "win32" && (hasCode(error, "EPERM") || hasCode(error, "EBUSY")))
+    (reapable &&
+      process.platform === "win32" &&
+      (hasCode(error, "EPERM") || hasCode(error, "EBUSY")))
   );
 }
 

@@ -108,7 +108,8 @@ describe("withFileLock", () => {
       await expect(withFileLock(lockPath, async () => undefined, { timeoutMs: 0 })).rejects.toBe(
         failure,
       );
-      expect(beforeTombUnlink).toHaveBeenCalledTimes(1);
+      expect(beforeTombUnlink).toHaveBeenCalledTimes(2);
+      expect(beforeTombUnlink.mock.calls[1]).toEqual(beforeTombUnlink.mock.calls[0]);
       expect(owner).not.toBe("");
       const records = await Promise.all(
         (await readdir(directory)).map((entry) => readFile(join(directory, entry), "utf8")),
@@ -119,6 +120,292 @@ describe("withFileLock", () => {
       );
       expect(await readdir(directory)).toEqual([]);
     } finally {
+      platform.mockRestore();
+    }
+  });
+
+  it("rejects a Windows unreleased tomb unlink failure during stale-lock takeover", async () => {
+    const directory = await temporaryDirectory();
+    const lockPath = join(directory, "state.lock");
+    const now = Date.now();
+    await writeFile(lockPath, JSON.stringify({ pid: 999_999_999, token: "dead-owner" }), "utf8");
+    const staleTime = new Date(now - 180_000);
+    await utimes(lockPath, staleTime, staleTime);
+
+    let resumePausedBreak!: () => void;
+    let reportPausedBreak!: () => void;
+    let resumeCandidate!: () => void;
+    let reportCandidateCreated!: () => void;
+    let resumeRestore!: () => void;
+    let reportCandidateRenamed!: () => void;
+    const pausedBreak = new Promise<void>((resolve) => {
+      reportPausedBreak = resolve;
+    });
+    const mayResumePausedBreak = new Promise<void>((resolve) => {
+      resumePausedBreak = resolve;
+    });
+    const candidateCreated = new Promise<void>((resolve) => {
+      reportCandidateCreated = resolve;
+    });
+    const mayResumeCandidate = new Promise<void>((resolve) => {
+      resumeCandidate = resolve;
+    });
+    const candidateRenamed = new Promise<void>((resolve) => {
+      reportCandidateRenamed = resolve;
+    });
+    const mayRestoreCandidate = new Promise<void>((resolve) => {
+      resumeRestore = resolve;
+    });
+    const failure = Object.assign(new Error("unreleased tomb unlink failed"), { code: "EPERM" });
+    let staleBreaks = 0;
+    let owner = "";
+    let failedTomb: string | undefined;
+    const beforeTombUnlink = vi.fn(async (tombPath: string) => {
+      if (failedTomb !== undefined || owner === "") return;
+      if ((await readFile(tombPath, "utf8")) !== owner) return;
+      failedTomb = tombPath;
+      vi.setSystemTime(now + 1_000);
+      throw failure;
+    });
+    __setAtomicFileTestHooks({
+      beforeStaleLockBreak: async () => {
+        staleBreaks += 1;
+        if (staleBreaks !== 1) return;
+        reportPausedBreak();
+        await mayResumePausedBreak;
+      },
+      afterLockCreate: async () => {
+        if (owner !== "") return;
+        owner = await readFile(lockPath, "utf8");
+        reportCandidateCreated();
+        await mayResumeCandidate;
+      },
+      afterMismatchedLockRename: async () => {
+        reportCandidateRenamed();
+        await mayRestoreCandidate;
+      },
+      beforeTombUnlink,
+      isProcessAlive: (pid) => pid === process.pid,
+    });
+    const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+    const contenderB = withFileLock(lockPath, async () => "B");
+    let contenderA: Promise<string> | undefined;
+    try {
+      await pausedBreak;
+      contenderA = withFileLock(lockPath, async () => "A", { timeoutMs: 100 });
+      await candidateCreated;
+      resumePausedBreak();
+      await candidateRenamed;
+      resumeCandidate();
+
+      await expect(contenderA).rejects.toBe(failure);
+      expect(failedTomb).toBeDefined();
+      expect(beforeTombUnlink.mock.calls.filter(([path]) => path === failedTomb)).toHaveLength(2);
+      resumeRestore();
+      await expect(contenderB).resolves.toBe("B");
+      expect(await readdir(directory)).toEqual([]);
+      await expect(
+        withFileLock(lockPath, async () => "acquired again", { timeoutMs: 0 }),
+      ).resolves.toBe("acquired again");
+      expect(await readdir(directory)).toEqual([]);
+    } finally {
+      resumePausedBreak();
+      resumeCandidate();
+      resumeRestore();
+      await Promise.allSettled([contenderA, contenderB]);
+      platform.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("tolerates a Windows released tomb unlink failure while waiting for a lock", async () => {
+    const directory = await temporaryDirectory();
+    const lockPath = join(directory, "state.lock");
+    await writeFile(
+      lockPath,
+      JSON.stringify({ pid: process.pid, token: "released-owner", released: true }),
+      "utf8",
+    );
+    const failure = Object.assign(new Error("released tomb unlink failed"), { code: "EPERM" });
+    const beforeTombUnlink = vi.fn().mockImplementationOnce(() => {
+      throw failure;
+    });
+    __setAtomicFileTestHooks({ beforeTombUnlink });
+    const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    try {
+      await expect(withFileLock(lockPath, async () => "acquired")).resolves.toBe("acquired");
+      expect(beforeTombUnlink).toHaveBeenCalledTimes(3);
+      expect(await readdir(directory)).toEqual([]);
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "rejects a POSIX released tomb unlink failure and lets the next caller reap it",
+    async () => {
+      const directory = await temporaryDirectory();
+      const lockPath = join(directory, "state.lock");
+      const releasedOwner = JSON.stringify({
+        pid: process.pid,
+        token: "released-owner",
+        released: true,
+      });
+      await writeFile(lockPath, releasedOwner, "utf8");
+      const failure = Object.assign(new Error("released tomb unlink failed"), { code: "EPERM" });
+      const beforeTombUnlink = vi.fn().mockImplementationOnce(() => {
+        throw failure;
+      });
+      __setAtomicFileTestHooks({ beforeTombUnlink });
+
+      await expect(withFileLock(lockPath, async () => "acquired")).rejects.toBe(failure);
+      expect(beforeTombUnlink).toHaveBeenCalledTimes(1);
+      const entries = await readdir(directory);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatch(/^state\.lock\.stale\./);
+      expect(await readFile(join(directory, entries[0]!), "utf8")).toBe(releasedOwner);
+      await expect(withFileLock(lockPath, async () => "acquired again")).resolves.toBe(
+        "acquired again",
+      );
+      expect(await readdir(directory)).toEqual([]);
+    },
+  );
+
+  it("tolerates a Windows released tomb unlink failure in the owner's sweep while a waiter waits", async () => {
+    const directory = await temporaryDirectory();
+    const lockPath = join(directory, "state.lock");
+    await writeFile(lockPath, JSON.stringify({ pid: 999_999_999, token: "dead-owner" }), "utf8");
+    const staleTime = new Date(Date.now() - 180_000);
+    await utimes(lockPath, staleTime, staleTime);
+
+    let resumePausedBreak!: () => void;
+    let reportPausedBreak!: () => void;
+    let finishOwner!: () => void;
+    let reportOwnerEntered!: () => void;
+    let resumeStaleRemoval!: () => void;
+    let reportOwnerRestored!: () => void;
+    let resumeOwner!: () => void;
+    let reportOwnerClosed!: () => void;
+    let resumeWaiter!: () => void;
+    let reportWaiterRenamed!: () => void;
+    const pausedBreak = new Promise<void>((resolve) => {
+      reportPausedBreak = resolve;
+    });
+    const mayResumePausedBreak = new Promise<void>((resolve) => {
+      resumePausedBreak = resolve;
+    });
+    const ownerEntered = new Promise<void>((resolve) => {
+      reportOwnerEntered = resolve;
+    });
+    const ownerMayFinish = new Promise<void>((resolve) => {
+      finishOwner = resolve;
+    });
+    const ownerRestored = new Promise<void>((resolve) => {
+      reportOwnerRestored = resolve;
+    });
+    const mayRemoveStaleTomb = new Promise<void>((resolve) => {
+      resumeStaleRemoval = resolve;
+    });
+    const ownerClosed = new Promise<void>((resolve) => {
+      reportOwnerClosed = resolve;
+    });
+    const mayResumeOwner = new Promise<void>((resolve) => {
+      resumeOwner = resolve;
+    });
+    const waiterRenamed = new Promise<void>((resolve) => {
+      reportWaiterRenamed = resolve;
+    });
+    const mayResumeWaiter = new Promise<void>((resolve) => {
+      resumeWaiter = resolve;
+    });
+    const failure = Object.assign(new Error("released tomb sweep failed"), { code: "EPERM" });
+    let staleBreaks = 0;
+    let releasedOwner = "";
+    let waiterStarted = false;
+    let waiterTomb: string | undefined;
+    let sweeping = false;
+    const sweptTombs: string[] = [];
+    const sweptRecords: string[] = [];
+    const beforeTombUnlink = vi.fn(async (tombPath: string) => {
+      if (waiterStarted && waiterTomb === undefined) {
+        waiterTomb = tombPath;
+        releasedOwner = await readFile(tombPath, "utf8");
+        reportWaiterRenamed();
+        await mayResumeWaiter;
+      } else if (sweeping) {
+        sweptTombs.push(tombPath);
+        sweptRecords.push(await readFile(tombPath, "utf8"));
+        if (sweptTombs.length === 1) throw failure;
+      }
+    });
+    __setAtomicFileTestHooks({
+      beforeStaleLockBreak: async () => {
+        staleBreaks += 1;
+        if (staleBreaks !== 1) return;
+        reportPausedBreak();
+        await mayResumePausedBreak;
+      },
+      afterMismatchedLockRestore: async () => {
+        reportOwnerRestored();
+        await mayRemoveStaleTomb;
+      },
+      afterLockHandleClose: async () => {
+        reportOwnerClosed();
+        await mayResumeOwner;
+      },
+      beforeTombUnlink,
+      isProcessAlive: (pid) => pid === process.pid,
+    });
+    const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    const staleContender = withFileLock(lockPath, async () => "stale contender");
+    const waiterOperation = vi.fn(async () => "waiter");
+    let owner: Promise<string> | undefined;
+    let waiter: Promise<string> | undefined;
+    try {
+      await pausedBreak;
+      owner = withFileLock(lockPath, async () => {
+        reportOwnerEntered();
+        await ownerMayFinish;
+        return "owner";
+      });
+      await ownerEntered;
+      resumePausedBreak();
+      await ownerRestored;
+      // The restored lock and the stale contender's tomb share the owner's inode.
+      // Releasing the lock marks both records, giving the sweep two released tombs.
+      finishOwner();
+      await ownerClosed;
+      waiterStarted = true;
+      waiter = withFileLock(lockPath, waiterOperation);
+      await waiterRenamed;
+      expect(JSON.parse(releasedOwner)).toMatchObject({ pid: process.pid, released: true });
+      sweeping = true;
+      resumeOwner();
+      await expect(owner).resolves.toBe("owner");
+      sweeping = false;
+      expect(sweptTombs).toHaveLength(2);
+      expect(new Set(sweptTombs).size).toBe(2);
+      expect(sweptRecords).toEqual([releasedOwner, releasedOwner]);
+      expect((await readdir(directory)).map((entry) => join(directory, entry))).toEqual([
+        sweptTombs[0],
+      ]);
+      expect(waiterOperation).not.toHaveBeenCalled();
+      resumeStaleRemoval();
+      resumeWaiter();
+      await expect(staleContender).resolves.toBe("stale contender");
+      await expect(waiter).resolves.toBe("waiter");
+      expect(waiterOperation).toHaveBeenCalledTimes(1);
+      expect(await readdir(directory)).toEqual([]);
+    } finally {
+      sweeping = false;
+      resumePausedBreak();
+      finishOwner();
+      resumeStaleRemoval();
+      resumeOwner();
+      resumeWaiter();
+      await Promise.allSettled([staleContender, owner, waiter]);
       platform.mockRestore();
     }
   });
