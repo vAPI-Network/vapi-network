@@ -947,6 +947,7 @@ describe("vapi agent run", () => {
               id: refill.receipt.id,
               amountUsd: 5,
               network: "eip155:8453",
+              settlement: "succeeded",
               transaction: refill.receipt.settlement!.transaction,
             },
             balance: refill.balance,
