@@ -1468,7 +1468,7 @@ describe("task MCP tools", () => {
       env: {},
       tasks: { client, chain, now: () => new Date("2026-10-08T12:00:00Z") },
     });
-    const readme = await readFile(new URL("../../../../README.md", import.meta.url), "utf8");
+    const guide = await readFile(new URL("../../../../docs/mcp.md", import.meta.url), "utf8");
 
     try {
       const allTools = (await server.listTools()).tools;
@@ -1482,7 +1482,7 @@ describe("task MCP tools", () => {
 
       for (const tool of tools) {
         const verb = tool.name.slice("tasks.".length);
-        expect(readme).toContain(`\`${tool.name}\``);
+        expect(guide).toContain(`\`${tool.name}\``);
         if (
           [
             "fund",

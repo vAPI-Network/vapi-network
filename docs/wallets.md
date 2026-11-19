@@ -80,6 +80,22 @@ VAPI_VAULT_PASSWORD="$VAULT_PASSWORD" vapi vault unlock
 VAPI_KEYSTORE_PASSWORD is deprecated for vault passwords; use VAPI_VAULT_PASSWORD instead.
 ```
 
+## Linux without a keyring
+
+On Linux without a working keyring (servers, containers, GitHub Codespaces), set
+`VAPI_VAULT_PASSWORD` before `vapi setup`; the device key and agent link are then
+kept in `~/.vapi/secrets.json`, encrypted with that password. The choice is made once
+per vault.
+
+```bash
+read -rs -p 'Vault password (at least 12 characters): ' VAPI_VAULT_PASSWORD
+export VAPI_VAULT_PASSWORD
+vapi setup
+```
+
+In GitHub Codespaces, add `VAPI_VAULT_PASSWORD` as a Codespaces secret with at least
+12 characters before running setup.
+
 ## Three layers against loss
 
 Losing a device should cost as little as possible. Three layers cover it, cheapest first.

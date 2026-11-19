@@ -12,7 +12,7 @@
   "scripts": {
     "build": "pnpm -r --if-present build",
     "test": "pnpm test:scripts && pnpm -r --if-present --filter '!@vapi/desktop' test",
-    "test:scripts": "node --test scripts/cloud-scripts.test.mjs",
+    "test:scripts": "node --test scripts/cloud-scripts.test.mjs scripts/changelog-section.test.mjs",
     "typecheck": "pnpm -r --if-present --filter '!@vapi/desktop' typecheck && tsc -p examples/tsconfig.json",
     "lint": "eslint . --max-warnings 0",
     "lint:copy": "node scripts/lint-copy.mjs",

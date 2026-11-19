@@ -78,8 +78,9 @@ Never run Railway/infra writes or enable `VAPI_RAILWAY_SMOKE` in cloud workspace
   provenance.
 - MCP tools use product namespaces. Deprecated aliases must identify themselves
   with a one-line deprecation notice and may not silently diverge in behavior.
-  Every registered tool name is named in the root README; `tool-docs.test.ts`
-  enforces it, as `help-alignment.test.ts` does for every CLI command.
+  Every registered tool name is named in `docs/mcp.md`; `tool-docs.test.ts`
+  enforces it. `help-alignment.test.ts` keeps the CLI help and its commands
+  aligned, and `docs/cli.md` is the command reference.
 - Protect every outbound service request with the network guard. Treat redirects
   and resolved IP addresses as new destinations that need validation.
 - Published package versions move together. Every `package.json` carries the

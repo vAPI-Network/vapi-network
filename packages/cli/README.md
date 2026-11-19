@@ -36,4 +36,4 @@ Most users should install or run the unscoped `vapi-network` package instead.
 | `HELP`            | constant HELP: CLI usage, commands and options, including dashboard linking and `--no-link`.                                                                                                                                                                         | 0.5.0 or earlier |
 | `runCli`          | function (argv = process.argv.slice(2), io: CliIo = processIo, dependencies: CliDependencies = {}): Promise<number>                                                                                                                                                  | 0.5.0 or earlier |
 
-See the [root README](https://github.com/vAPI-Network/vapi-network/blob/main/README.md#cli-reference) for the full command reference.
+See the [CLI reference](https://github.com/vAPI-Network/vapi-network/blob/main/docs/cli.md) for every command.

@@ -1,20 +1,27 @@
 name: Feature request
-description: New capability, source adapter, signer, or protocol support
-labels: [enhancement]
+description: A new capability or protocol support in the client
+labels: [enhancement, needs-triage]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        An early idea is easier to shape in [Discussions](https://github.com/vAPI-Network/vapi-network/discussions). To have your own API found by vAPI clients, list it with `vapi publish`; the client carries no provider-specific examples or adapters.
   - type: textarea
     id: problem
     attributes:
-      { label: Problem, description: "What can't you do today, as an agent user or a provider?" }
+      label: Problem
+      description: What can't you do today, as an agent user or a provider?
     validations: { required: true }
   - type: textarea
     id: proposal
     attributes:
-      {
-        label: Proposal,
-        description: "What should happen. If it's a source/signer, link the upstream spec or API.",
-      }
+      label: Proposal
+      description: What should happen. Link the upstream spec or API if there is one.
     validations: { required: true }
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
   - type: checkboxes
     id: invariants
     attributes:

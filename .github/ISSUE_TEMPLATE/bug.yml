@@ -1,36 +1,58 @@
 name: Bug report
-description: Something is broken
-labels: [bug]
+description: Something in the CLI, MCP server, SDK or docs is broken
+labels: [bug, needs-triage]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Two things first:
+
+        - Questions about your **account, points or a quest** are answered on [Discord](https://discord.gg/vapinetwork), not here. Maintainers cannot look up an account from a public issue.
+        - **Never paste** a recovery phrase, a private key, a vault password, a Router key or an API key.
+
+        [Troubleshooting](https://github.com/vAPI-Network/vapi-network/blob/main/docs/troubleshooting.md) covers the login, vault and secret-store failures reported most often.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you file
+      options:
+        - label: I am on the latest release (`npm view vapi-network version`) or I say below why I cannot update
+          required: true
+        - label: I searched open and closed issues for this message
+          required: true
   - type: input
     id: version
     attributes:
-      {
-        label: Version,
-        description: "Output of `vapi --version` (or the npm version)",
-        placeholder: "0.2.0-dev.1",
-      }
+      label: Version
+      description: Output of `vapi --version`
+      placeholder: "0.14.0"
     validations: { required: true }
   - type: dropdown
     id: surface
-    attributes: { label: Surface, options: [CLI, MCP server, SDK (core/sources), Gateway, Docs] }
+    attributes:
+      label: Surface
+      options: [CLI, MCP server, SDK (core/sources), vAPI Desktop, Docs]
+    validations: { required: true }
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [macOS, Linux, Windows, "Container, CI or cloud sandbox"]
     validations: { required: true }
   - type: textarea
     id: repro
     attributes:
-      {
-        label: Steps to reproduce,
-        description: "Exact commands. Never paste private keys, passphrases, or full receipts with addresses you want private.",
-      }
+      label: Steps to reproduce
+      description: The exact commands, in order. Remove addresses you want to keep private.
     validations: { required: true }
   - type: textarea
     id: expected
-    attributes: { label: Expected vs actual }
+    attributes:
+      label: Expected and actual result
+      description: Paste the complete message the command printed.
     validations: { required: true }
   - type: textarea
     id: env
     attributes:
-      {
-        label: Environment,
-        description: "OS, Node version, agent client (Claude, Cursor, ...), network (eip155:8453, ...)",
-      }
+      label: Environment
+      description: "Node.js version, agent client (Claude Code, Cursor, Codex, ...), keyring or `VAPI_VAULT_PASSWORD`, and any proxy between this machine and the internet"
