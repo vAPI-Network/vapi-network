@@ -84,6 +84,7 @@ export type SwarmRunMemberResult = {
   budgetUsd: number;
   status: "finished" | "stopped" | "error" | "skipped";
   reason?: string;
+  refills?: RunAgentResult["refills"];
 };
 
 export type SwarmRunResult = {
@@ -586,6 +587,7 @@ function completedMemberResult(
     },
     spentUsd: atomicUsd(budget.spentAtomic()),
     budgetUsd: atomicUsd(budget.limitAtomic),
+    ...(result.refills === undefined ? {} : { refills: result.refills }),
     status: result.stoppedBecause.reason === "finished" ? "finished" : "stopped",
   };
 }
@@ -657,6 +659,7 @@ function delegateResult(result: SwarmRunMemberResult): SwarmDelegateResult {
     stoppedBecause: result.stoppedBecause,
     spentUsd: result.spentUsd,
     budgetUsd: result.budgetUsd,
+    ...(result.refills === undefined ? {} : { refills: result.refills }),
   };
 }
 
@@ -672,6 +675,7 @@ function delegationRecordResult(
     stoppedBecause: result.stoppedBecause,
     spentUsd: result.spentUsd,
     budgetUsd: result.budgetUsd,
+    ...(result.refills === undefined ? {} : { refills: result.refills }),
   };
 }
 
@@ -708,6 +712,7 @@ function recoveredMemberResult(
     stoppedBecause: result.stoppedBecause,
     spentUsd: result.spentUsd,
     budgetUsd: result.budgetUsd,
+    ...(result.refills === undefined ? {} : { refills: result.refills }),
     status:
       result.stoppedBecause?.reason === "finished"
         ? "finished"

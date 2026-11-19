@@ -39,6 +39,8 @@ Router purchases recover after an interruption without a second charge, swarm di
 
 ### Fixed
 
+- Swarm member results and delegation replays retain public Router refill receipts and warnings.
+- Bundled agent runs print refill evidence to stderr and preserve public transaction hashes in JSON and result files while redacting secrets.
 - Agent runs retain Router refill evidence in `RunAgentResult.refills`, CLI stderr, JSON and result files, including purchases carried by failed chats. Stops preserve `refill_pending` recovery guidance.
 - SDK `client.router.buy()` returns `RouterPurchaseResult` so callers can read warnings. The main core entry exports `RouterPurchaseResult` and `RouterPurchaseWarning` types.
 - Linux: `vapi login` no longer fails with "The agent link could not be stored consistently" on keyrings where `secret-tool clear` exits 1 without a message when it matches nothing. An exit 1 without a message for an entry the lookup did not find now counts as nothing to remove; any other exit code, a failure with a reason, and a failure to remove an entry the lookup found are still reported. Reported in #41, first fixed by @Rizal9 in #31.
