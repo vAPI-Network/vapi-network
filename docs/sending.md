@@ -86,6 +86,8 @@ Cancellation releases the expired authorization's daily-cap reservation. It prin
 
 An interrupted relay can leave the outcome unknown: a timeout, a lost connection, a `409 in_progress`, or a `503` from the relay, which vAPI answers when it cannot yet tell whether the transfer landed. The spend stays reserved because the authorization may already be in progress. Do not start another transfer for the same intent.
 
+An outcome is also reported as unknown when the relay rejected the transfer but the rejection could not be saved to the receipts ledger. The spend stays reserved. Resuming either sends the transfer or records the rejection and frees the reservation.
+
 The local receipts ledger keeps the signed authorization needed to continue. Run the same command with the nonce printed by the first attempt. `--resume` sends that authorization again without signing another one.
 
 ```sh

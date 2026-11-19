@@ -325,6 +325,368 @@ describe("transferBetweenAccounts", () => {
     expect(rows[1]!.transfer?.request).toBeUndefined();
   });
 
+  it("keeps a rejected resume reserved when its failed row cannot be written and stays within the cap", async () => {
+    // $2 fits the $3 daily cap; another $2 only fits if the reservation is lost.
+    const fixture = await linkedFixture({
+      caps: { perCallAtomic: "2000000", perDayAtomic: "3000000" },
+    });
+    const paths = getVapiPaths(fixture.home);
+    const release = vi.spyOn(await import("./spend-policy.js"), "releaseSpend");
+    const accepted: Record<string, unknown>[] = [];
+    let relayAttempt = 0;
+    const transport = fakeTransport(fixture, {
+      relay: async (body) => {
+        relayAttempt += 1;
+        if (relayAttempt === 1) return Response.json({ error: "in_progress" }, { status: 409 });
+        if (relayAttempt === 2) return Response.json({ error: "relay_failed" }, { status: 502 });
+        accepted.push(body);
+        return successfulRelay(body);
+      },
+    });
+
+    await expect(runTransfer(fixture, transport.fetchImpl)).resolves.toMatchObject({
+      status: "unknown",
+      nonce: NONCE,
+    });
+    expect(release).not.toHaveBeenCalled();
+    const ledger = JSON.parse(await readFile(paths.ledger, "utf8"));
+    expect(ledger).toMatchObject({
+      rows: [
+        {
+          wallet: "research",
+          spentAtomic: "2000000",
+          reservations: [{ id: NONCE, amountAtomic: "2000000" }],
+        },
+      ],
+    });
+    const signedRows = await readFile(paths.receipts, "utf8");
+    const receipts = await import("./receipts.js");
+    const append = vi
+      .spyOn(receipts, "appendReceipt")
+      .mockRejectedValueOnce(new Error("failed row could not be appended"));
+
+    await expect(
+      runTransfer(fixture, transport.fetchImpl, { resume: NONCE }),
+    ).resolves.toMatchObject({
+      status: "unknown",
+      nonce: NONCE,
+      txHash: null,
+      replayed: false,
+    });
+    expect(append).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    expect(JSON.parse(await readFile(paths.ledger, "utf8"))).toEqual(ledger);
+    expect(await readFile(paths.receipts, "utf8")).toBe(signedRows);
+    expect((await readReceipts(paths.receipts)).at(-1)?.transfer).toMatchObject({
+      status: "unknown",
+      nonce: NONCE,
+      request: {
+        authorization: (relayCalls(transport.calls)[0]!.body as Record<string, unknown>)
+          .authorization,
+        signature: expect.any(String),
+      },
+    });
+    append.mockRestore();
+
+    const callsBeforeNewTransfer = relayCalls(transport.calls).length;
+    await expect(
+      runTransfer(fixture, transport.fetchImpl, { nonce: `0x${"cd".repeat(32)}`, amountUsd: "2" }),
+    ).rejects.toMatchObject({
+      name: "TransferError",
+      code: "per_day_cap_exceeded",
+      moneyMoved: false,
+    });
+    expect(fixture.unlock).toHaveBeenCalledTimes(1);
+    expect(fixture.signTypedData).toHaveBeenCalledTimes(1);
+    expect(relayCalls(transport.calls)).toHaveLength(callsBeforeNewTransfer);
+
+    const callsBeforeResume = relayCalls(transport.calls).length;
+    await expect(
+      runTransfer(fixture, transport.fetchImpl, { resume: NONCE }),
+    ).resolves.toMatchObject({
+      status: "sent",
+      nonce: NONCE,
+      txHash: TX_HASH,
+    });
+    const relays = relayCalls(transport.calls);
+    expect(relays).toHaveLength(callsBeforeResume + 1);
+    expect(relays.map((call) => call.body)).toEqual([
+      relays[0]!.body,
+      relays[0]!.body,
+      relays[0]!.body,
+    ]);
+    expect(fixture.signTypedData).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    expect(JSON.parse(await readFile(paths.ledger, "utf8"))).toEqual(ledger);
+    expect(accepted).toHaveLength(1);
+    const acceptedAtomic = accepted.reduce(
+      (total, body) => total + BigInt((body.authorization as { value: string }).value),
+      0n,
+    );
+    expect(acceptedAtomic).toBe(2_000_000n);
+    expect(acceptedAtomic).toBeLessThanOrEqual(3_000_000n);
+  });
+
+  it("releases a rejected resume only after its failed row is written on a later resume", async () => {
+    const fixture = await linkedFixture();
+    const paths = getVapiPaths(fixture.home);
+    const policy = await import("./spend-policy.js");
+    const releaseSpend = policy.releaseSpend;
+    const release = vi.spyOn(policy, "releaseSpend").mockImplementation(async (...args) => {
+      expect((await readReceipts(paths.receipts)).at(-1)?.transfer).toMatchObject({
+        status: "failed",
+        nonce: NONCE,
+      });
+      return await releaseSpend(...args);
+    });
+    let relayAttempt = 0;
+    const transport = fakeTransport(fixture, {
+      relay: async () => {
+        relayAttempt += 1;
+        return relayAttempt === 1
+          ? Response.json({ error: "in_progress" }, { status: 409 })
+          : Response.json({ error: "relay_failed" }, { status: 502 });
+      },
+    });
+    await expect(runTransfer(fixture, transport.fetchImpl)).resolves.toMatchObject({
+      status: "unknown",
+      nonce: NONCE,
+    });
+    const ledger = JSON.parse(await readFile(paths.ledger, "utf8"));
+    expect(ledger).toMatchObject({
+      rows: [{ spentAtomic: "2000000", reservations: [{ id: NONCE, amountAtomic: "2000000" }] }],
+    });
+    const signedRows = await readFile(paths.receipts, "utf8");
+    const append = vi
+      .spyOn(await import("./receipts.js"), "appendReceipt")
+      .mockRejectedValueOnce(new Error("failed row could not be appended"));
+
+    await expect(
+      runTransfer(fixture, transport.fetchImpl, { resume: NONCE }),
+    ).resolves.toMatchObject({ status: "unknown", nonce: NONCE, txHash: null, replayed: false });
+    expect(append).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    expect(relayCalls(transport.calls)).toHaveLength(2);
+    expect(JSON.parse(await readFile(paths.ledger, "utf8"))).toEqual(ledger);
+    expect(await readFile(paths.receipts, "utf8")).toBe(signedRows);
+    expect((await readReceipts(paths.receipts)).at(-1)?.transfer).toMatchObject({
+      status: "unknown",
+      nonce: NONCE,
+      request: expect.any(Object),
+    });
+    append.mockRestore();
+
+    await expect(
+      runTransfer(fixture, transport.fetchImpl, { resume: NONCE }),
+    ).rejects.toMatchObject({
+      name: "TransferError",
+      code: "relay_failed",
+      moneyMoved: false,
+      reservationReleased: true,
+    });
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(relayCalls(transport.calls)).toHaveLength(3);
+    const releasedLedger = await readFile(paths.ledger, "utf8");
+    expect(JSON.parse(releasedLedger)).toMatchObject({ rows: [{ spentAtomic: "0" }] });
+    const failed = (await readReceipts(paths.receipts)).at(-1)!;
+    expect(failed.transfer).toMatchObject({ status: "failed", nonce: NONCE });
+    expect(failed.transfer?.request).toBeUndefined();
+    expect(failed.error).toEqual({
+      code: "relay_failed",
+      message: "The vAPI relay failed. No money moved.",
+    });
+
+    await expect(
+      runTransfer(fixture, transport.fetchImpl, { resume: NONCE }),
+    ).rejects.toMatchObject({ name: "TransferError", code: "relay_failed", moneyMoved: false });
+    expect(relayCalls(transport.calls)).toHaveLength(3);
+    expect(await readFile(paths.ledger, "utf8")).toBe(releasedLedger);
+    expect(fixture.signTypedData).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a rejected first attempt unknown and reserved when its failed row cannot be written", async () => {
+    const fixture = await linkedFixture();
+    const paths = getVapiPaths(fixture.home);
+    const transport = fakeTransport(fixture, {
+      relay: async () => Response.json({ error: "relay_failed" }, { status: 502 }),
+    });
+    const receipts = await import("./receipts.js");
+    const appendReceipt = receipts.appendReceipt;
+    const append = vi
+      .spyOn(receipts, "appendReceipt")
+      .mockImplementationOnce(appendReceipt)
+      .mockRejectedValueOnce(new Error("failed row could not be appended"));
+    const release = vi.spyOn(await import("./spend-policy.js"), "releaseSpend");
+
+    await expect(runTransfer(fixture, transport.fetchImpl)).resolves.toMatchObject({
+      status: "unknown",
+      nonce: NONCE,
+      txHash: null,
+      replayed: false,
+    });
+    expect(append).toHaveBeenCalledTimes(2);
+    expect(release).not.toHaveBeenCalled();
+    expect(relayCalls(transport.calls)).toHaveLength(1);
+    expect(JSON.parse(await readFile(paths.ledger, "utf8"))).toMatchObject({
+      rows: [{ spentAtomic: "2000000", reservations: [{ id: NONCE, amountAtomic: "2000000" }] }],
+    });
+    expect(await readReceipts(paths.receipts)).toMatchObject([
+      { transfer: { status: "unknown", nonce: NONCE, request: expect.any(Object) } },
+    ]);
+  });
+
+  it("returns sent evidence when the sent row cannot be written and records a later replay", async () => {
+    const fixture = await linkedFixture();
+    const paths = getVapiPaths(fixture.home);
+    let relayAttempt = 0;
+    const transport = fakeTransport(fixture, {
+      relay: async (body) => {
+        relayAttempt += 1;
+        return relayAttempt === 1
+          ? successfulRelay(body)
+          : Response.json({ error: "authorization_used" }, { status: 409 });
+      },
+    });
+    const receipts = await import("./receipts.js");
+    const appendReceipt = receipts.appendReceipt;
+    const append = vi
+      .spyOn(receipts, "appendReceipt")
+      .mockImplementationOnce(appendReceipt)
+      .mockRejectedValueOnce(new Error("sent row could not be appended"));
+    const release = vi.spyOn(await import("./spend-policy.js"), "releaseSpend");
+
+    await expect(runTransfer(fixture, transport.fetchImpl)).resolves.toMatchObject({
+      status: "sent",
+      nonce: NONCE,
+      txHash: TX_HASH,
+      replayed: false,
+    });
+    expect(append).toHaveBeenCalledTimes(2);
+    expect(relayCalls(transport.calls)).toHaveLength(1);
+    const ledger = await readFile(paths.ledger, "utf8");
+    expect(JSON.parse(ledger)).toMatchObject({
+      rows: [{ spentAtomic: "2000000", reservations: [{ id: NONCE, amountAtomic: "2000000" }] }],
+    });
+    expect(await readReceipts(paths.receipts)).toMatchObject([
+      { transfer: { status: "unknown", nonce: NONCE, request: expect.any(Object) } },
+    ]);
+    append.mockRestore();
+
+    await expect(
+      runTransfer(fixture, transport.fetchImpl, { resume: NONCE }),
+    ).resolves.toMatchObject({ status: "sent", nonce: NONCE, txHash: null, replayed: true });
+    const rows = await readReceipts(paths.receipts);
+    expect(rows.map((row) => row.transfer?.status)).toEqual(["unknown", "sent"]);
+    expect(rows.filter((row) => row.transfer?.status === "sent")).toHaveLength(1);
+    expect(rows.at(-1)?.transfer).toMatchObject({ nonce: NONCE, replayed: true });
+    expect(rows.at(-1)?.transfer?.request).toBeUndefined();
+    const relays = relayCalls(transport.calls);
+    expect(relays).toHaveLength(2);
+    expect(relays[1]!.body).toEqual(relays[0]!.body);
+    expect(fixture.signTypedData).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    expect(await readFile(paths.ledger, "utf8")).toBe(ledger);
+  });
+
+  it("returns sent replay evidence when a resumed authorization_used row cannot be written", async () => {
+    const fixture = await linkedFixture();
+    const paths = getVapiPaths(fixture.home);
+    let relayAttempt = 0;
+    const transport = fakeTransport(fixture, {
+      relay: async () => {
+        relayAttempt += 1;
+        return Response.json(
+          { error: relayAttempt === 1 ? "in_progress" : "authorization_used" },
+          { status: 409 },
+        );
+      },
+    });
+    const release = vi.spyOn(await import("./spend-policy.js"), "releaseSpend");
+    await expect(runTransfer(fixture, transport.fetchImpl)).resolves.toMatchObject({
+      status: "unknown",
+      nonce: NONCE,
+    });
+    const ledger = await readFile(paths.ledger, "utf8");
+    const signedRows = await readFile(paths.receipts, "utf8");
+    const append = vi
+      .spyOn(await import("./receipts.js"), "appendReceipt")
+      .mockRejectedValueOnce(new Error("sent replay row could not be appended"));
+
+    await expect(
+      runTransfer(fixture, transport.fetchImpl, { resume: NONCE }),
+    ).resolves.toMatchObject({ status: "sent", nonce: NONCE, txHash: null, replayed: true });
+    expect(append).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    expect(await readFile(paths.ledger, "utf8")).toBe(ledger);
+    expect(await readFile(paths.receipts, "utf8")).toBe(signedRows);
+    expect((await readReceipts(paths.receipts)).at(-1)?.transfer).toMatchObject({
+      status: "unknown",
+      nonce: NONCE,
+      request: expect.any(Object),
+    });
+    const relays = relayCalls(transport.calls);
+    expect(relays).toHaveLength(2);
+    expect(relays[1]!.body).toEqual(relays[0]!.body);
+    expect(fixture.signTypedData).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns unknown when the second unknown row cannot be written and resumes the signed row", async () => {
+    const fixture = await linkedFixture();
+    const paths = getVapiPaths(fixture.home);
+    let relayAttempt = 0;
+    const transport = fakeTransport(fixture, {
+      relay: async (body) => {
+        relayAttempt += 1;
+        return relayAttempt === 1
+          ? Response.json({ error: "in_progress" }, { status: 409 })
+          : successfulRelay(body);
+      },
+    });
+    const receipts = await import("./receipts.js");
+    const appendReceipt = receipts.appendReceipt;
+    const append = vi
+      .spyOn(receipts, "appendReceipt")
+      .mockImplementationOnce(appendReceipt)
+      .mockRejectedValueOnce(new Error("unknown row could not be appended"));
+    const release = vi.spyOn(await import("./spend-policy.js"), "releaseSpend");
+
+    await expect(runTransfer(fixture, transport.fetchImpl)).resolves.toMatchObject({
+      status: "unknown",
+      nonce: NONCE,
+      txHash: null,
+      replayed: false,
+    });
+    expect(append).toHaveBeenCalledTimes(2);
+    expect(relayCalls(transport.calls)).toHaveLength(1);
+    const rows = await readReceipts(paths.receipts);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.transfer).toMatchObject({
+      status: "unknown",
+      nonce: NONCE,
+      request: expect.any(Object),
+    });
+    expect(rows[0]?.status).toBeUndefined();
+    const ledger = await readFile(paths.ledger, "utf8");
+    expect(JSON.parse(ledger)).toMatchObject({
+      rows: [{ spentAtomic: "2000000", reservations: [{ id: NONCE, amountAtomic: "2000000" }] }],
+    });
+    append.mockRestore();
+
+    await expect(
+      runTransfer(fixture, transport.fetchImpl, { resume: NONCE }),
+    ).resolves.toMatchObject({ status: "sent", nonce: NONCE, txHash: TX_HASH });
+    expect((await readReceipts(paths.receipts)).at(-1)?.transfer).toMatchObject({
+      status: "sent",
+      nonce: NONCE,
+    });
+    const relays = relayCalls(transport.calls);
+    expect(relays).toHaveLength(2);
+    expect(relays[1]!.body).toEqual(relays[0]!.body);
+    expect(fixture.signTypedData).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    expect(await readFile(paths.ledger, "utf8")).toBe(ledger);
+  });
+
   it("5. refuses a revoked sibling before signing", async () => {
     const fixture = await linkedFixture();
     const transport = fakeTransport(fixture, { writerStatus: "revoked" });
