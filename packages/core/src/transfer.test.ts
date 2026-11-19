@@ -233,6 +233,72 @@ describe("transferBetweenAccounts", () => {
     ]);
   });
 
+  it.each(["file", "directory"] as const)(
+    "does not relay and records failure when the authorization %s sync fails",
+    async (target) => {
+      const fixture = await linkedFixture();
+      const paths = getVapiPaths(fixture.home);
+      const transport = fakeTransport(fixture);
+      const release = vi.spyOn(await import("./spend-policy.js"), "releaseSpend");
+      __setReceiptTestHooks({
+        beforeSync: (path) => {
+          if (path === (target === "file" ? paths.receipts : fixture.home)) {
+            throw new Error("authorization sync failed");
+          }
+        },
+      });
+
+      await expect(runTransfer(fixture, transport.fetchImpl)).rejects.toMatchObject({
+        name: "TransferError",
+        code: "network_error",
+        message: expect.stringContaining("No money moved."),
+        moneyMoved: false,
+        reservationReleased: true,
+      });
+      expect(relayCalls(transport.calls)).toHaveLength(0);
+      expect(release).toHaveBeenCalledTimes(1);
+      expect(await readSpendLedger(paths.ledger, new Date(NOW_MS), "research")).toMatchObject({
+        spentAtomic: "0",
+      });
+      const rows = (await readFile(paths.receipts, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(rows.map((row) => row.transfer.status)).toEqual(["unknown", "failed"]);
+      expect(rows.at(-1).transfer.nonce).toBe(NONCE);
+      expect(rows.at(-1).transfer.request).toBeUndefined();
+    },
+  );
+
+  it("preserves the pre-relay error when appending its failed row also fails", async () => {
+    const fixture = await linkedFixture();
+    const paths = getVapiPaths(fixture.home);
+    const transport = fakeTransport(fixture);
+    const receipts = await import("./receipts.js");
+    const appendReceipt = receipts.appendReceipt;
+    const append = vi
+      .spyOn(receipts, "appendReceipt")
+      .mockImplementationOnce(appendReceipt)
+      .mockRejectedValueOnce(new Error("failed row could not be appended"));
+    const release = vi.spyOn(await import("./spend-policy.js"), "releaseSpend");
+    __setReceiptTestHooks({
+      beforeSync: (path) => {
+        if (path === paths.receipts)
+          throw new TransferError("network_error", "Original durability failure. No money moved.");
+      },
+    });
+
+    await expect(runTransfer(fixture, transport.fetchImpl)).rejects.toMatchObject({
+      name: "TransferError",
+      code: "network_error",
+      reservationReleased: true,
+      message: "Original durability failure. No money moved.",
+    });
+    expect(append).toHaveBeenCalledTimes(2);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(relayCalls(transport.calls)).toHaveLength(0);
+  });
+
   it("5. refuses a revoked sibling before signing", async () => {
     const fixture = await linkedFixture();
     const transport = fakeTransport(fixture, { writerStatus: "revoked" });

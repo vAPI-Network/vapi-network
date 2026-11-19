@@ -968,7 +968,14 @@ describe("agentAccessToken", () => {
     });
   });
 
-  it.each(["cleared", "relinked", "different-client"] as const)(
+  it.each([
+    "cleared",
+    "relinked",
+    "different-client",
+    "tokens-missing",
+    "refresh-changed",
+    "access-changed",
+  ] as const)(
     "does not store a refresh response when its link was %s in flight",
     async (change) => {
       const home = await temporaryHome();
@@ -1003,14 +1010,27 @@ describe("agentAccessToken", () => {
       });
       await started;
       const competing = await WalletStore.open(home);
-      if (change === "cleared") await competing.clearLink("main");
-      else
-        await competing.setLink("main", {
-          ...link,
-          ...(change === "relinked"
-            ? { linkedAt: "2026-09-23T11:00:00.000Z" }
-            : { clientId: "different-client" }),
-        });
+      const replacementTokens = JSON.stringify({
+        ...linkResult().tokens,
+        accessToken: change === "refresh-changed" ? ACCESS_TOKEN : "replacement-access",
+        refreshToken: change === "access-changed" ? REFRESH_TOKEN : "replacement-refresh",
+      });
+      if (change === "cleared") {
+        await competing.clearLink("main");
+        await secrets.remove(accounts.tokens);
+      } else if (change === "tokens-missing") {
+        await secrets.remove(accounts.tokens);
+      } else {
+        await secrets.set(accounts.tokens, replacementTokens);
+        if (change === "relinked" || change === "different-client")
+          await competing.setLink("main", {
+            ...link,
+            ...(change === "relinked"
+              ? { linkedAt: "2026-09-23T11:00:00.000Z" }
+              : { clientId: "different-client" }),
+          });
+      }
+      const writesBeforeResponse = [...secrets.setCalls];
       finish(
         Response.json({
           access_token: "new-access",
@@ -1019,9 +1039,101 @@ describe("agentAccessToken", () => {
         }),
       );
       await rejected;
-      expect(secrets.setCalls).toEqual([]);
-      expect(secrets.entries[accounts.tokens]).toBe(originalTokens);
+      expect(secrets.setCalls).toEqual(writesBeforeResponse);
+      expect(secrets.entries[accounts.tokens]).toBe(
+        change === "cleared" || change === "tokens-missing" ? undefined : replacementTokens,
+      );
       expect(fetchImpl).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(["same-client", "different-client"] as const)(
+    "stores a valid rotation when login publishes its link after its tokens (%s)",
+    async (client) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-23T11:00:00.000Z"));
+      const home = await temporaryHome();
+      const wallets = await walletStore(home);
+      const previousLink = agentLink();
+      await wallets.setLink("main", previousLink);
+      const accounts = agentSecretAccounts("main");
+      const secrets = memorySecretStore({
+        [accounts.tokens]: JSON.stringify({ ...linkResult().tokens, expiresAt: 0 }),
+      });
+      const competing = await WalletStore.open(home);
+      const setLink = competing.setLink.bind(competing);
+      let published!: () => void;
+      const tokensPublished = new Promise<void>((resolve) => {
+        published = resolve;
+      });
+      let finishLogin!: () => void;
+      const writeLink = new Promise<void>((resolve) => {
+        finishLogin = resolve;
+      });
+      vi.spyOn(competing, "setLink").mockImplementation(async (...args) => {
+        published();
+        await writeLink;
+        return await setLink(...args);
+      });
+      const login = saveAgentLink({
+        secrets,
+        wallets: competing,
+        wallet: "main",
+        start: deviceStart({
+          clientId: client === "same-client" ? previousLink.clientId : "new-client",
+        }),
+        result: linkResult({
+          tokens: {
+            ...linkResult().tokens,
+            accessToken: "login-access",
+            refreshToken: "login-refresh",
+            expiresAt: 0,
+          },
+        }),
+        apiBase: API_BASE,
+        label: "relinked",
+        home,
+      });
+      await tokensPublished;
+      let requested!: () => void;
+      const requestStarted = new Promise<void>((resolve) => {
+        requested = resolve;
+      });
+      let respond!: (response: Response) => void;
+      const response = new Promise<Response>((resolve) => {
+        respond = resolve;
+      });
+      const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
+        const body = new URLSearchParams(String(init?.body));
+        expect(body.get("refresh_token")).toBe("login-refresh");
+        requested();
+        return await response;
+      });
+      const refresh = agentAccessToken({
+        secrets,
+        wallets,
+        wallet: "main",
+        fetchImpl,
+        now: () => 1_000,
+      });
+      const resolved = expect(refresh).resolves.toBe("rotated-access");
+      await requestStarted;
+      finishLogin();
+      const newLink = await login;
+      expect(newLink.linkedAt).not.toBe(previousLink.linkedAt);
+      respond(
+        Response.json({
+          access_token: "rotated-access",
+          refresh_token: "rotated-refresh",
+          expires_in: 3600,
+        }),
+      );
+      await resolved;
+      expect(JSON.parse(secrets.entries[accounts.tokens]!)).toMatchObject({
+        accessToken: "rotated-access",
+        refreshToken: "rotated-refresh",
+      });
+      expect(secrets.setCalls.filter(([name]) => name === accounts.tokens)).toHaveLength(2);
     },
   );
 

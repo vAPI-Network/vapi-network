@@ -1605,6 +1605,54 @@ describe("railway runtime lifecycle", () => {
     expect(railway.calls.filter((call) => call[1] === "destroy")).toEqual([]);
   });
 
+  it.each(["identified", "id-less", "legacy"] as const)(
+    "retains an orphaned sidecar on text-only absence (%s)",
+    async (shape) => {
+      const f = await fixture();
+      const railway = fakeRailway({ cat: () => SANDBOX_GONE });
+      const sidecar =
+        shape === "legacy"
+          ? { v: 1, checkpoint: CHECKPOINT, keepSandbox: false, sandboxId: SANDBOX_ID }
+          : sidecarOf({
+              state: "running",
+              ...(shape === "identified" ? { sandboxId: SANDBOX_ID } : {}),
+            });
+      await mkdir(runsDirectory(f.home), { recursive: true });
+      await writeFile(railwaySidecarPath(f.home, RUN_ID), JSON.stringify(sidecar));
+      const scope = { projectId: "original-project", environmentId: "original-environment" };
+      const scopedHandle = handle({ railwayScope: scope });
+
+      await expect(
+        createRailwayRuntime({ home: f.home, exec: railway.exec }).status(scopedHandle),
+      ).resolves.toEqual({ state: "unknown", detail: "sandbox gone" });
+      expect(readSidecarFile(f)).toEqual(
+        sidecarOf({
+          state: "orphaned",
+          sandboxId: SANDBOX_ID,
+        }),
+      );
+      expect(scopedHandle.railwayScope).toEqual(scope);
+      expect(railway.calls.filter((call) => call[1] === "destroy")).toEqual([]);
+    },
+  );
+
+  it("keeps status unknown and the sidecar when orphan persistence fails", async () => {
+    const f = await fixture();
+    const railway = fakeRailway({ cat: () => SANDBOX_GONE });
+    const sidecar = sidecarOf({ state: "running", sandboxId: SANDBOX_ID });
+    await mkdir(runsDirectory(f.home), { recursive: true });
+    await writeFile(railwaySidecarPath(f.home, RUN_ID), JSON.stringify(sidecar));
+    const write = vi
+      .spyOn(await import("@vapi-network/core"), "writeJsonAtomic")
+      .mockRejectedValueOnce(new Error("sidecar write failed"));
+
+    await expect(
+      createRailwayRuntime({ home: f.home, exec: railway.exec }).status(handle()),
+    ).resolves.toEqual({ state: "unknown", detail: "sandbox gone" });
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(readSidecarFile(f)).toEqual(sidecar);
+  });
+
   it("rejects a handle whose ref could read as a railway option", async () => {
     const f = await fixture();
     const railway = fakeRailway();

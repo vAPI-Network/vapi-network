@@ -72,6 +72,27 @@ describe("receipts ledger", () => {
     expect(attempts).toEqual([path]);
   });
 
+  it("uses a writable file handle at the strict gate without creating a missing ledger", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-writable-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "receipts.jsonl");
+    await writeFile(path, "ledger");
+    const written = vi.fn();
+    __setReceiptTestHooks({
+      beforeSync: async (candidate, handle) => {
+        if (candidate !== path) return;
+        await handle.write("ledger", 0, "utf8");
+        written();
+      },
+    });
+    await syncReceipts(path);
+    expect(written).toHaveBeenCalledTimes(1);
+    expect(await readFile(path, "utf8")).toBe("ledger");
+    const missing = join(directory, "missing.jsonl");
+    await expect(syncReceipts(missing)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readdir(directory)).toEqual(["receipts.jsonl"]);
+  });
+
   it.each(["file", "directory"] as const)(
     "rejects a %s sync failure at the strict durability gate",
     async (target) => {

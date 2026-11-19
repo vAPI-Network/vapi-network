@@ -2248,11 +2248,9 @@ describe("vapi swarm railway runs", () => {
           const human = captureIo();
           expect(await run(["swarm", "stop", "team", "--all"], human.io, deps)).toBe(1);
           expect(human.stdout.join("\n")).toContain(instruction);
-          // A starting refresh may remove its sidecar, but its unknown record remains authoritative.
-          if (state !== "starting")
-            expect(
-              JSON.parse(await readFile(join(home, "runs", `${ORPHAN_RUN}.railway.json`), "utf8")),
-            ).toMatchObject({ state: "orphaned" });
+          expect(
+            JSON.parse(await readFile(join(home, "runs", `${ORPHAN_RUN}.railway.json`), "utf8")),
+          ).toMatchObject({ state: "orphaned" });
           const blocked = captureIo();
           expect(await run(["swarm", "dissolve", "team", "--json"], blocked.io, deps)).toBe(1);
           expect(JSON.parse(onlyLine(blocked.stdout))).toMatchObject({
@@ -2279,6 +2277,76 @@ describe("vapi swarm railway runs", () => {
         expect(JSON.parse(onlyLine(dissolved.stdout))).toMatchObject({ status: "dissolved" });
         expect(transfer).not.toHaveBeenCalled();
       }
+    },
+  );
+
+  it.each(["tracked", "sidecar-only"] as const)(
+    "blocks dissolution after text-only status until forget-run confirms destruction (%s)",
+    async (shape) => {
+      const home = await homeWithStoredSwarm("vapi-swarm-status-absence-");
+      const record = railwayRecordForRace("running");
+      record.handle.railwayScope = {
+        projectId: "original-project",
+        environmentId: "original-environment",
+      };
+      if (shape === "tracked") await writeRunRecord(home, record);
+      await writeSidecarFile(home, {
+        runId: ORPHAN_RUN,
+        account: record.member.account,
+        state: "running",
+        sandboxId: "sbx_9",
+      });
+      const exec = vi.fn<RailwayExec>(async () => ({
+        code: 1,
+        stdout: "",
+        stderr: "sandbox sbx_9 not found in project other",
+      }));
+      const runtime = createRailwayRuntime({ home, exec });
+      if (shape === "tracked") {
+        expect(await refreshRunRecord(home, record, runtime)).toMatchObject({
+          state: "unknown",
+          handle: { railwayScope: record.handle.railwayScope },
+        });
+      } else {
+        expect(await runtime.status(record.handle)).toEqual({
+          state: "unknown",
+          detail: "sandbox gone",
+        });
+        expect(await readRunRecord(home, ORPHAN_RUN)).toBeUndefined();
+      }
+      const path = join(home, "runs", `${ORPHAN_RUN}.railway.json`);
+      expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({
+        state: "orphaned",
+        sandboxId: "sbx_9",
+        swarm: "team",
+        account: record.member.account,
+      });
+      const balanceReader = vi.fn(async () => 0n);
+      const transfer = vi.fn<MovementTransfer>();
+      const deps = { ...railwayDependencies(exec), swarm: { balanceReader, transfer } };
+      const blocked = captureIo();
+      expect(await run(["swarm", "dissolve", "team", "--json"], blocked.io, deps)).toBe(1);
+      expect(JSON.parse(onlyLine(blocked.stdout))).toMatchObject({ code: "swarm_workers_active" });
+      expect(balanceReader).not.toHaveBeenCalled();
+      expect(transfer).not.toHaveBeenCalled();
+      exec.mockClear();
+      expect(
+        await run(
+          ["swarm", "forget-run", "team", ORPHAN_RUN, "--confirm-destroyed", "--json"],
+          captureIo().io,
+          deps,
+        ),
+      ).toBe(0);
+      expect(await readRunRecord(home, ORPHAN_RUN)).toMatchObject({
+        state: "forgotten",
+        confirmedBy: "cli",
+      });
+      expect(await readdir(join(home, "runs"))).not.toContain(`${ORPHAN_RUN}.railway.json`);
+      const dissolved = captureIo();
+      expect(await run(["swarm", "dissolve", "team", "--json"], dissolved.io, deps)).toBe(0);
+      expect(JSON.parse(onlyLine(dissolved.stdout))).toMatchObject({ status: "dissolved" });
+      expect(exec).not.toHaveBeenCalled();
+      expect(transfer).not.toHaveBeenCalled();
     },
   );
 
@@ -2611,7 +2679,10 @@ describe("vapi swarm railway runs", () => {
     expect((await listRunRecords(home))[0]?.state).toBe("unknown");
     expect(
       (await readdir(join(home, "runs"))).filter((file) => file.endsWith(".railway.json")),
-    ).toEqual([]);
+    ).toEqual([`${ORPHAN_RUN}.railway.json`]);
+    expect(
+      JSON.parse(await readFile(join(home, "runs", `${ORPHAN_RUN}.railway.json`), "utf8")),
+    ).toMatchObject({ state: "orphaned", sandboxId: handle.ref });
     const blocked = captureIo();
     expect(await run(["swarm", "dissolve", "team", "--json"], blocked.io, deps)).toBe(1);
     expect(onlyLine(blocked.stdout)).toContain("vapi swarm stop team --all");
@@ -2622,6 +2693,9 @@ describe("vapi swarm railway runs", () => {
     );
     expect(destroys).toEqual(["sbx_9"]);
     expect((await listRunRecords(home))[0]?.state).toBe(stopFails ? "unknown" : "stopped");
+    expect(
+      (await readdir(join(home, "runs"))).filter((file) => file.endsWith(".railway.json")),
+    ).toEqual(stopFails ? [`${ORPHAN_RUN}.railway.json`] : []);
     const dissolved = captureIo();
     expect(await run(["swarm", "dissolve", "team", "--json"], dissolved.io, deps)).toBe(
       stopFails ? 1 : 0,

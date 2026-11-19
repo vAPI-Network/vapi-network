@@ -35,7 +35,7 @@ While it remains pending, chat retries use the balance key and manual buys recov
 Normal retirement requires a succeeded receipt in the local ledger and proof that the purchased credit is usable.
 Usage proves credit when purchased balance reaches the recorded baseline plus the purchased tier under a current link with the same owner (case-insensitive) and API base.
 A successful balance-key chat also proves credit. Older entries without a baseline require a successful balance-key chat.
-Receipt appends sync best effort. Retirement requires syncing both the ledger file and its parent directory.
+`ensureRouterPurchaseReceipt` records the receipt; appends sync best effort. Retirement separately requires a strict sync of the ledger file and its parent directory. The file is opened with write access without creating it; directory sync is skipped on Windows.
 Receipt write or retirement sync failures retain the journal and allow balance-key chat to continue; `credit_pending` remains until retirement succeeds.
 
 Relinking to the same owner and API base lets recovery fetch the balance key under the current link.
@@ -44,7 +44,7 @@ A missing link or another owner or API base leaves the purchase pending and disa
 Stake-key chat can continue under a valid current link with usable credentials, including another owner or API base; `pending_purchase_unlinked` names the payment and the retirement command.
 With no link, chat returns `not_linked` and the error still carries `pending_purchase_unlinked`.
 Login and logout wait for the purchase lock before changing the link. Logout bounds best-effort remote revocation, including its token refresh requests and response bodies, to ten seconds.
-The deadline does not interrupt local credential-lock waits; cleanup waits for in-flight credential updates before removing the link and secrets.
+The deadline does not interrupt local waits for the wallet credential lock. Refresh checks that a link and its original token pair are still stored before writing rotated tokens; that read-compare-write is not atomic against login/logout, which use a different lock.
 
 Inspect a pending purchase without clearing it:
 
@@ -59,7 +59,7 @@ vapi router clear-pending --confirm-settled --account <name>
 ```
 
 The command saves any missing succeeded receipt and prints the receipt id, transaction, amount and network before clearing.
-It requires syncing the ledger file and its parent directory before clearing; if either sync fails, the journal stays pending.
+It separately requires syncing the ledger file and, except on Windows, its parent directory before clearing; if a required sync fails, the journal stays pending.
 Keep this evidence and contact support if the Router balance does not appear.
 Retirement removes the guard against another purchase; check the earlier purchase before buying again.
 The flag refuses prepared, signed and unknown entries, even if chain recovery might later prove settlement.

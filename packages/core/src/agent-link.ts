@@ -583,11 +583,13 @@ async function resolveAgentAccessToken(
           : splitScopes(requiredString(payload, "scope")),
     };
     await args.wallets.reload();
-    const latestLink = args.wallets.entry(args.wallet)?.link;
+    if (args.wallets.entry(args.wallet)?.link === undefined) throw notLinkedError();
+    // This read-compare-write is not atomic against login/logout's different lock.
+    const stored = parseTokens(await safeGetSecret(args.secrets, currentAccounts.tokens));
     if (
-      latestLink === undefined ||
-      latestLink.clientId !== currentLink.clientId ||
-      latestLink.linkedAt !== currentLink.linkedAt
+      stored === undefined ||
+      stored.refreshToken !== refreshToken ||
+      stored.accessToken !== current.accessToken
     ) {
       throw notLinkedError();
     }

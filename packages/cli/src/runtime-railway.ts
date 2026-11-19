@@ -1095,7 +1095,16 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
       if (outcome.code !== 0) {
         if (MISSING_FILE_PATTERN.test(outcome.stderr)) return { state: "running" };
         if (sandboxGone(outcome.stderr, id)) {
-          await removeSidecar(home, handle.runId);
+          const sidecar = await readSidecar(home, handle.runId);
+          if (sidecar !== undefined) {
+            await writeSidecar(home, handle.runId, {
+              ...sidecar,
+              sandboxId: sidecar.sandboxId ?? id,
+              account: sidecar.account || handle.member.account,
+              swarm: sidecar.swarm || (handle.member.swarm ?? ""),
+              state: "orphaned",
+            }).catch(() => undefined);
+          }
           return { state: "unknown", detail: "sandbox gone" };
         }
         // Not clearly gone: keep the run tracked and say why.

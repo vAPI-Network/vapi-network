@@ -15,7 +15,7 @@ import type { X402SettlementOutcome } from "./x402.js";
 
 interface ReceiptTestHooks {
   beforeRenameReplace?: (path: string) => void | Promise<void>;
-  beforeSync?: (path: string) => void | Promise<void>;
+  beforeSync?: (path: string, handle: FileHandle) => void | Promise<void>;
   afterSync?: (path: string) => void | Promise<void>;
 }
 
@@ -323,14 +323,14 @@ export async function appendReceipt(
 }
 
 async function syncReceiptHandle(handle: FileHandle, path: string): Promise<void> {
-  await receiptTestHooks?.beforeSync?.(path);
+  await receiptTestHooks?.beforeSync?.(path, handle);
   await handle.sync();
   await receiptTestHooks?.afterSync?.(path);
 }
 
 /** Flush the ledger and its directory before retirement. Missing files and sync failures throw. */
 export async function syncReceipts(path = getVapiPaths().receipts): Promise<void> {
-  await syncReceiptPath(path);
+  await syncReceiptPath(path, "r+");
   await syncReceiptDirectory(dirname(path));
 }
 
@@ -341,8 +341,8 @@ async function syncReceiptDirectory(path: string): Promise<void> {
   await syncReceiptPath(path);
 }
 
-async function syncReceiptPath(path: string): Promise<void> {
-  const handle = await open(path, "r");
+async function syncReceiptPath(path: string, flags: "r" | "r+" = "r"): Promise<void> {
+  const handle = await open(path, flags);
   try {
     await syncReceiptHandle(handle, path);
   } finally {
