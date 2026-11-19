@@ -219,7 +219,12 @@ async function removeOwnedLock(path: string, owners: readonly string[]): Promise
     await unlink(tombPath);
   } catch (error) {
     if (
-      !tombUnlinkTolerated(error, renamedOwner !== undefined && lockOwnerReleased(renamedOwner)) &&
+      !tombUnlinkTolerated(
+        error,
+        renamedOwner !== undefined &&
+          lockOwnerReleased(renamedOwner) &&
+          owners.includes(renamedOwner),
+      ) &&
       pendingError === undefined
     ) {
       pendingError = error;

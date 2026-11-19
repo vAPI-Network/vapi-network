@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -84,6 +84,226 @@ describe("writeJsonAtomic", () => {
 });
 
 describe("withFileLock", () => {
+  it("rejects a Windows displaced released tomb unlink failure without leaving its own record", async () => {
+    const directory = await temporaryDirectory();
+    const lockPath = join(directory, "state.lock");
+    const otherOwner = JSON.stringify({ pid: process.pid, token: "other", released: true });
+    const failure = Object.assign(new Error("displaced released tomb unlink failed"), {
+      code: "EPERM",
+    });
+    let owner = "";
+    let failedTomb: string | undefined;
+    __setAtomicFileTestHooks({
+      afterLockCreate: async () => {
+        if (owner !== "") return;
+        owner = await readFile(lockPath, "utf8");
+        // Move the open candidate as a paused contender would, including on Windows.
+        await rename(lockPath, `${lockPath}.stale.own`);
+        await writeFile(lockPath, otherOwner, { encoding: "utf8", flag: "wx" });
+      },
+      beforeTombUnlink: async (tombPath) => {
+        if (failedTomb !== undefined || (await readFile(tombPath, "utf8")) !== otherOwner) {
+          return;
+        }
+        failedTomb = tombPath;
+        throw failure;
+      },
+    });
+    const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    try {
+      await expect(withFileLock(lockPath, async () => undefined, { timeoutMs: 0 })).rejects.toBe(
+        failure,
+      );
+      expect(failedTomb).toBeDefined();
+      expect(owner).not.toBe("");
+      const records = await Promise.all(
+        (await readdir(directory)).map((entry) => readFile(join(directory, entry), "utf8")),
+      );
+      expect(records).not.toContain(owner);
+      await expect(withFileLock(lockPath, async () => "acquired again")).resolves.toBe(
+        "acquired again",
+      );
+      expect(await readdir(directory)).toEqual([]);
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
+  it("rejects a Windows displaced released tomb unlink failure with four contenders", async () => {
+    const directory = await temporaryDirectory();
+    const lockPath = join(directory, "state.lock");
+    const now = Date.now();
+    await writeFile(lockPath, JSON.stringify({ pid: 999_999_999, token: "dead-owner" }), "utf8");
+    const staleTime = new Date(now - 180_000);
+    await utimes(lockPath, staleTime, staleTime);
+
+    function pausePoint() {
+      let signal!: () => void;
+      let resume!: () => void;
+      const reached = new Promise<void>((resolve) => {
+        signal = resolve;
+      });
+      const mayResume = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      return {
+        reached,
+        resume,
+        pause: async () => {
+          signal();
+          await mayResume;
+        },
+      };
+    }
+    const firstBreak = pausePoint();
+    const secondBreak = pausePoint();
+    const ownerEntered = pausePoint();
+    const ownerRenamed = pausePoint();
+    const candidateCreated = pausePoint();
+    const candidateRenamed = pausePoint();
+    const ownerRestored = pausePoint();
+    const ownerClosed = pausePoint();
+    const candidateRestored = pausePoint();
+    const pauses = [
+      firstBreak,
+      secondBreak,
+      ownerEntered,
+      ownerRenamed,
+      candidateCreated,
+      candidateRenamed,
+      ownerRestored,
+      ownerClosed,
+      candidateRestored,
+    ];
+    const failure = Object.assign(new Error("four-contender released tomb unlink failed"), {
+      code: "EPERM",
+    });
+    let staleBreaks = 0;
+    let creates = 0;
+    let renames = 0;
+    let restores = 0;
+    let closes = 0;
+    let candidateOwner = "";
+    let releasedOwner = "";
+    let failedTomb: string | undefined;
+    let candidateRetried = false;
+    let candidateFinished = false;
+    __setAtomicFileTestHooks({
+      beforeStaleLockBreak: async () => {
+        staleBreaks += 1;
+        if (staleBreaks === 1) await firstBreak.pause();
+        else if (staleBreaks === 2) await secondBreak.pause();
+      },
+      afterLockCreate: async () => {
+        creates += 1;
+        if (creates !== 2) return;
+        candidateOwner = await readFile(lockPath, "utf8");
+        await candidateCreated.pause();
+      },
+      afterMismatchedLockRename: async () => {
+        renames += 1;
+        if (renames === 1) await ownerRenamed.pause();
+        else if (renames === 2) await candidateRenamed.pause();
+      },
+      afterMismatchedLockRestore: async () => {
+        restores += 1;
+        if (restores === 1) await ownerRestored.pause();
+        else if (restores === 2) await candidateRestored.pause();
+      },
+      afterLockHandleClose: async () => {
+        closes += 1;
+        if (closes === 1) await ownerClosed.pause();
+      },
+      beforeTombUnlink: async (tombPath) => {
+        if (releasedOwner === "" || failedTomb !== undefined) return;
+        if ((await readFile(tombPath, "utf8")) !== releasedOwner) return;
+        failedTomb = tombPath;
+        throw failure;
+      },
+      beforeLockAttempt: async () => {
+        if (failedTomb === undefined || candidateFinished || candidateRetried) return;
+        // A regression retries: restore its own live record before its timeout.
+        candidateRetried = true;
+        candidateRenamed.resume();
+        await candidateRestored.reached;
+        vi.setSystemTime(now + 1_000);
+      },
+      isProcessAlive: (pid) => pid === process.pid,
+    });
+    const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+    const first = withFileLock(lockPath, async () => "first");
+    let second: Promise<string> | undefined;
+    let owner: Promise<string> | undefined;
+    let candidate: Promise<string> | undefined;
+    try {
+      await firstBreak.reached;
+      second = withFileLock(lockPath, async () => "second");
+      await secondBreak.reached;
+      owner = withFileLock(lockPath, async () => {
+        await ownerEntered.pause();
+        return "owner";
+      });
+      await ownerEntered.reached;
+
+      // Two stale readers displace the owner, then the new candidate.
+      secondBreak.resume();
+      await ownerRenamed.reached;
+      candidate = withFileLock(lockPath, async () => "candidate", { timeoutMs: 100 });
+      const candidateResult = candidate.catch((error: unknown) => error);
+      await candidateCreated.reached;
+      firstBreak.resume();
+      await candidateRenamed.reached;
+      ownerRenamed.resume();
+      await ownerRestored.reached;
+
+      // The owner releases its restored inode while both stale readers pause.
+      ownerEntered.resume();
+      await ownerClosed.reached;
+      releasedOwner = await readFile(lockPath, "utf8");
+      expect(JSON.parse(releasedOwner)).toMatchObject({ pid: process.pid, released: true });
+      candidateCreated.resume();
+      const result = await candidateResult;
+      candidateFinished = true;
+      const ownRecordAtLock =
+        (await readFile(lockPath, "utf8").catch(() => undefined)) === candidateOwner;
+      expect(
+        result,
+        `candidate retried: ${candidateRetried}; own record at lock: ${ownRecordAtLock}`,
+      ).toBe(failure);
+      expect(failedTomb).toBeDefined();
+      expect(candidateRetried).toBe(false);
+      expect(candidateOwner).not.toBe("");
+      const records = await Promise.all(
+        (await readdir(directory)).map((entry) => readFile(join(directory, entry), "utf8")),
+      );
+      expect(records).not.toContain(candidateOwner);
+
+      for (const point of pauses) point.resume();
+      await expect(Promise.all([first, second, owner])).resolves.toEqual([
+        "first",
+        "second",
+        "owner",
+      ]);
+      expect(await readdir(directory)).toEqual([]);
+      await expect(withFileLock(lockPath, async () => "acquired again")).resolves.toBe(
+        "acquired again",
+      );
+      expect(await readdir(directory)).toEqual([]);
+    } finally {
+      candidateFinished = true;
+      // On regression the timed-out candidate can leave its own live lock behind.
+      if ((await readFile(lockPath, "utf8").catch(() => undefined)) === candidateOwner) {
+        await rm(lockPath);
+      }
+      for (const point of pauses) point.resume();
+      vi.useRealTimers();
+      await Promise.allSettled([first, second, owner, candidate]);
+      platform.mockRestore();
+    }
+  });
+
   it("rejects a Windows candidate tomb unlink failure without leaving its own record", async () => {
     const directory = await temporaryDirectory();
     const lockPath = join(directory, "state.lock");
