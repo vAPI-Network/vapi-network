@@ -1,5 +1,5 @@
 import type { SecretStore, VapiConfig, VapiPaymentAccount, WalletStore } from "@vapi-network/core";
-import { PAYMENT_WARNING_CODES, spendCapsForWallet, walletNameSchema } from "@vapi-network/core";
+import { spendCapsForWallet, swarmRunRefillSchema, walletNameSchema } from "@vapi-network/core";
 import {
   buyRouterBalance,
   listRouterModels,
@@ -89,17 +89,9 @@ export const routerUsageTool = {
 };
 
 const purchaseSchema = z.object({
-  receipt: z.object({
-    id: z.string(),
-    amountUsd: z.number().nullable(),
-    network: z.string(),
-    transaction: z.string().optional(),
-    settlement: z.enum(["succeeded", "rejected", "unknown"]).optional(),
-  }),
+  receipt: swarmRunRefillSchema.shape.receipt,
   balance: routerUsageSchema.balance,
-  warnings: z
-    .array(z.object({ code: z.enum(PAYMENT_WARNING_CODES), message: z.string() }))
-    .optional(),
+  warnings: swarmRunRefillSchema.shape.warnings,
 });
 
 export const routerChatTool = {

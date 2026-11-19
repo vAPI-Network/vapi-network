@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { inspect } from "node:util";
 
 import {
   BASE_MAINNET_CAIP2,
@@ -422,6 +423,7 @@ describe("run registry", () => {
     const runtime = new FakeRuntime();
     const originalStart = runtime.start.bind(runtime);
     const id = runId(58);
+    const stop = vi.spyOn(runtime, "stop");
     runtime.start = async (member, run) => {
       const handle = await originalStart(member, run);
       await rm(runsDirectory(home), { recursive: true, force: true });
@@ -443,6 +445,9 @@ describe("run registry", () => {
         member: expect.objectContaining({ account: "team-lead-1" }),
       }),
     ]);
+    expect(stop).toHaveBeenCalledWith(expect.objectContaining({ runId: id }), {
+      requireSuccessfulExit: true,
+    });
   });
 
   it("hands the runtime the exact task and stores only a scrubbed copy", async () => {
@@ -586,6 +591,10 @@ describe("run registry", () => {
       if (fails) {
         const error = await operation.catch((error: unknown) => error);
         expect(error).toBeInstanceOf(Error);
+        if (kind === "railway") {
+          expect(inspect(error)).not.toContain(PRIVATE_KEY);
+          expect(inspect(error)).toContain("[redacted private key]");
+        }
         const stored = await readRunRecord(home, record.runId);
         if (kind === "railway" && state !== "unknown") {
           expect(stored).toMatchObject({

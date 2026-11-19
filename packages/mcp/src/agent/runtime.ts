@@ -78,6 +78,7 @@ export interface Runtime {
   recover?(record: RunRecord): Promise<RuntimeHandle | undefined>;
   /** Retire this exact adapter-owned start after the owner confirms its worker is gone. */
   retireUnreconciledStart?(record: RunRecord): Promise<void>;
+  /** The Railway adapter always requires exit 0; the option remains for compatibility. */
   stop(handle: RuntimeHandle, options?: { requireSuccessfulExit: true }): Promise<void>;
   status(handle: RuntimeHandle): Promise<RuntimeStatus>;
 }
@@ -465,6 +466,8 @@ export async function startDetachedRun(args: {
       });
     } catch (error) {
       if (!(error instanceof RuntimeError && error.code === "launch_ambiguous")) {
+        // Known-id Railway cleanup failures retain an orphaned sidecar. Removing
+        // this reservation lets the owner clear that blocker with forget-run.
         await rm(runRecordPath(args.home, args.run.runId), { force: true }).catch(() => undefined);
       }
       throw error;
@@ -478,7 +481,7 @@ export async function startDetachedRun(args: {
     try {
       await writeRunRecord(args.home, record);
     } catch (error) {
-      const stopped = await args.runtime.stop(handle).then(
+      const stopped = await args.runtime.stop(handle, { requireSuccessfulExit: true }).then(
         () => true,
         () => false,
       );
@@ -710,7 +713,7 @@ export async function stopRun(args: {
               ].join("\n");
               throw error instanceof RuntimeError
                 ? new RuntimeError(error.code, message)
-                : new Error(message, { cause: error });
+                : new Error(message);
             }
           } else {
             await args.runtime.stop(current.handle);

@@ -61,6 +61,7 @@ import {
   redactRunText,
   redactRunValue,
   registeredAgentProfileSchema,
+  runRecordPath,
   runResultPath,
   runsDirectory,
   STARTING_RECONCILIATION_TIMEOUT_MS,
@@ -761,6 +762,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
       // Set just before `sandbox create` runs: from then on the key may have left.
       let attempted = false;
       let interrupted: NodeJS.Signals | undefined;
+      let launchPersistence: Promise<void> | undefined;
       const saveSidecar = (next: RailwaySidecar): void => {
         if (interrupted !== undefined) return;
         sidecar = next;
@@ -770,6 +772,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
         if (interrupted === undefined) rmSync(sidecarPath, { force: true });
       };
       const ambiguousInstruction = `After checking railway sandbox list and destroying any worker, wait for the five-minute reconciliation window, then run vapi swarm stop ${member.swarm ?? policy.swarm.name} ${run.runId} --confirm-worker-stopped.`;
+      const destroyedInstruction = `Verify destruction in the original Railway project/environment, then run vapi swarm forget-run ${member.swarm ?? policy.swarm.name} ${run.runId} --confirm-destroyed.`;
       const assertNotInterrupted = (): void => {
         if (interrupted !== undefined) {
           const message = `Starting ${account} on Railway was interrupted by ${interrupted}.`;
@@ -778,7 +781,10 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
               "launch_ambiguous",
               `${message} A sandbox may exist; check railway sandbox list. ${ambiguousInstruction}`,
             );
-          throw new Error(message);
+          if (sandboxId === undefined) throw new Error(message);
+          throw new Error(
+            `${message} Destroy it yourself with: railway sandbox destroy ${sandboxId}\n${destroyedInstruction}`,
+          );
         }
       };
 
@@ -786,6 +792,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
       // delete the env file, record the sandbox, try a bounded destroy, re-raise.
       const cleanUpAfterSignal = async (signal: NodeJS.Signals): Promise<void> => {
         const id = sandboxId;
+        let sidecarRecorded = false;
         try {
           if (directory !== undefined) rmSync(directory, { recursive: true, force: true });
         } catch {
@@ -798,13 +805,14 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
               ? { ...sidecar, state: "creating" }
               : { ...sidecar, state: "orphaned", sandboxId: id },
           );
+          sidecarRecorded = true;
         } catch {
           // The stderr line below still tells the owner what to destroy.
         }
         process.stderr.write(
           id === undefined
             ? `Interrupted while starting ${account} on Railway. A sandbox holding its private key may exist: find it with railway sandbox list and run railway sandbox destroy <id>.\n`
-            : `Interrupted while starting ${account} on Railway. Sandbox ${id} holds its private key; destroying it. If it is still listed, run: railway sandbox destroy ${id}\n`,
+            : `Interrupted while starting ${account} on Railway. Sandbox ${id} holds its private key; destroying it. If destroy does not exit 0, run: railway sandbox destroy ${id}\n${destroyedInstruction}\n`,
         );
         if (attempted) {
           try {
@@ -817,8 +825,29 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
           try {
             await withTimeout(destroySandbox(exec, id), signalDestroyTimeoutMs);
             rmSync(sidecarPath, { force: true });
+            sidecarRecorded = true; // Successful destruction also permits retiring the start.
           } catch {
             // The sidecar stays "orphaned" for `vapi swarm stop` to retry.
+          }
+        }
+        // A pending launch-reference write must settle before retiring the
+        // reservation, or its rename could recreate a starting blocker afterward.
+        await launchPersistence?.catch(() => undefined);
+        if (id !== undefined && sidecarRecorded) {
+          try {
+            const reservation = await readRunRecord(home, run.runId);
+            if (
+              reservation?.kind === "railway" &&
+              reservation.state === "starting" &&
+              reservation.member.account === account &&
+              (reservation.handle.ref === "" || reservation.handle.ref === id)
+            ) {
+              // The durable orphan permits forget-run even if the signal exits
+              // before startDetachedRun's catch runs.
+              rmSync(runRecordPath(home, run.runId), { force: true });
+            }
+          } catch {
+            // Retained metadata stays blocking and a normal stop can retry it.
           }
         }
         removeSignalHandlers();
@@ -968,7 +997,13 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
             ref: id,
             ...(railwayScope === undefined ? {} : { railwayScope }),
           };
-          await persistLaunch?.(handle);
+          assertNotInterrupted();
+          launchPersistence = Promise.resolve().then(async () => {
+            assertNotInterrupted();
+            await persistLaunch?.(handle);
+          });
+          await launchPersistence;
+          assertNotInterrupted();
           await audit(`runtime=railway sandbox=${id}`);
           if (leftover.length > 0) throw new Error(leftover.join("\n"));
           await waitUntilReady(id, secretValues);
@@ -1000,7 +1035,10 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
         } catch (error) {
           const cause = scrub(errorMessage(error), secretValues);
           // After a signal the handler destroys the sandbox and owns the sidecar.
-          if (interrupted !== undefined) throw new Error(cause);
+          if (interrupted !== undefined)
+            throw new Error(
+              `${cause}\nDestroy it yourself with: railway sandbox destroy ${id}\n${destroyedInstruction}`,
+            );
           try {
             await destroySandbox(exec, id);
           } catch (destroyError) {
@@ -1014,6 +1052,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
                 cause,
                 `Could not destroy sandbox ${id}, which holds ${account}'s private key: ${scrub(errorMessage(destroyError), secretValues)}`,
                 `Destroy it yourself with: railway sandbox destroy ${id}`,
+                destroyedInstruction,
               ].join("\n"),
             );
           }
@@ -1094,20 +1133,11 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
       return status;
     },
 
-    async stop(handle: RuntimeHandle, stopOptions): Promise<void> {
+    async stop(handle: RuntimeHandle): Promise<void> {
       const id = sandboxRef(handle);
       if (id === undefined) throw new Error("Invalid railway runtime sandbox id.");
-      if (stopOptions?.requireSuccessfulExit === true) {
-        // stopRun requires this for running, starting and unknown Railway workers.
-        // Only the destroy process's successful exit confirms this stop.
-        const outcome = await exec(RAILWAY_CLI.binary, RAILWAY_CLI.destroy(id));
-        if (outcome.code !== 0)
-          throw new Error(`railway sandbox destroy ${id} failed${describeFailure(outcome, [])}`);
-      } else {
-        // Retain the exported adapter's lenient default for direct callers and
-        // launch-persistence rollback; stopRun always requests strict destruction.
-        await destroySandbox(exec, id);
-      }
+      // The Railway adapter always requires exit 0, with or without requireSuccessfulExit.
+      await destroySandbox(exec, id);
       await removeSidecar(home, handle.runId);
     },
   };
@@ -1248,10 +1278,10 @@ function sidecarAccount(
   return record?.member.account || sidecar?.account || undefined;
 }
 
-/** Destroys a sandbox; a clear sandbox-scoped not-found counts as destroyed. */
+/** Only a successful destroy exit proves this sandbox is gone. */
 async function destroySandbox(exec: RailwayExec, id: string): Promise<void> {
   const outcome = await exec(RAILWAY_CLI.binary, RAILWAY_CLI.destroy(id));
-  if (outcome.code === 0 || sandboxGone(outcome.stderr, id)) return;
+  if (outcome.code === 0) return;
   throw new Error(`railway sandbox destroy ${id} failed${describeFailure(outcome, [])}`);
 }
 

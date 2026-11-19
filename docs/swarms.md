@@ -193,7 +193,9 @@ The CLI waits up to about 30 seconds for a new sandbox to answer before it start
 
 `vapi swarm runs` reads each sandbox's result and reconciles saved launch references. A finished run's sandbox is destroyed on that call. A failed cleanup leaves the run `running` with a sanitized detail and exits with code 1. `vapi swarm stop` attempts to stop recovered starts, running workers and unknown runs.
 
-For a **running** or **unknown** Railway run, or a **starting** run with a saved sandbox id, only `railway sandbox destroy <id>` exiting **0** permits `stopped` to be persisted. A Railway reservation stays `starting` through nonterminal status polls: a `running` response, including a failed request or missing result file, cannot confirm launch completion or relax this strict stop rule. Railway's experimental-feature warning on stderr is harmless on a successful exit. Every non-zero exit, timeout, interruption or thrown error keeps the run unknown and blocking (a refused starting or running run becomes unknown), even if its output says “not found.” Human CLI text does not verify absence in the original project/environment. Local-worker stops and terminal-status sandbox cleanup are unchanged. Sidecar cleanup also requires exit 0 for every sidecar it retires; failed destroys retain it as `orphaned`.
+Every Railway destroy requires `railway sandbox destroy <id>` to exit **0**, including failed-launch and signal cleanup, persistence rollback, terminal-status cleanup and direct adapter stops. Railway's experimental-feature warning on stderr is harmless on a successful exit. A non-zero exit, timeout, interruption or thrown error never proves destruction, even if its output says “not found”: human CLI text does not verify absence in the original project/environment. Failed stops of running or starting records with a saved sandbox id become `unknown` and keep blocking. Failed terminal-status cleanup stays `running` and retries on the next refresh; an explicit stop can then move it to `unknown` if destroy still fails. Failed launch cleanup with a known id retains an `orphaned` sidecar; the reservation can be removed because that sidecar blocks dissolution and allows owner confirmation. Sidecar cleanup also retains failed destroys as `orphaned`. Local-worker stops are unchanged.
+
+A Railway reservation stays `starting` through nonterminal status polls: a `running` response, including a failed request or missing result file, cannot confirm launch completion or relax the strict stop rule.
 
 If the sandbox was already destroyed and Railway cannot return a successful destroy, verify its destruction yourself in the **original** project and environment. Then explicitly confirm it in the CLI:
 
@@ -232,8 +234,10 @@ An unreconciled `starting` record remains fail-closed. After five minutes, `vapi
 A sandbox becomes orphaned in three ways:
 
 - `railway sandbox create` exits with an error, or prints no sandbox id; the sandbox may exist anyway, and the sidecar stays `creating`.
-- The start fails after `create` (readiness, `exec`), and destroying the sandbox fails too; the error names the sandbox id and the `railway sandbox destroy <id>` command.
-- Ctrl-C or SIGTERM arrives during the start. The CLI deletes the env file, records the sidecar, tries to destroy a known sandbox for up to 5 seconds, then exits on the signal.
+- The start fails after `create` (readiness, `exec`), and destroying the sandbox fails too; the error names `railway sandbox destroy <id>` and `vapi swarm forget-run <name> <runId> --confirm-destroyed`. The identified orphaned sidecar blocks dissolution even after the failed-launch reservation is removed.
+- Ctrl-C or SIGTERM arrives during the start. The CLI deletes the env file, records the sidecar, tries to destroy a known sandbox for up to 5 seconds, then exits on the signal. A known-id orphan retires its matching starting reservation once the sidecar is durable, so owner confirmation remains available even if the process exits before launch returns.
+
+After a failed persistence rollback or direct adapter stop, use `vapi swarm stop <name> <runId>` to retry cleanup. If it fails, verify destruction in the original Railway project/environment and use `vapi swarm forget-run <name> <runId> --confirm-destroyed`.
 
 A failed start also names the env file path if the CLI could not delete it, so you can remove it yourself.
 
