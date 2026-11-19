@@ -17,6 +17,7 @@ import {
 } from "@vapi-network/core";
 
 import { UsageError, parseArguments } from "./args.js";
+import { baseUsdcBalanceReader } from "./balance-reader.js";
 import {
   getEnvironment,
   isInteractive,
@@ -25,7 +26,7 @@ import {
   type CliDependencies,
   type CliIo,
 } from "./cli-context.js";
-import { CUSTODY_NOTICE, baseUsdcBalanceReader, showRecoveryPhrase } from "./cli.js";
+import { CUSTODY_NOTICE, showRecoveryPhrase } from "./cli.js";
 import { cloudBackupSetupChoice } from "./cloud-backup.js";
 import { runLoginFlow } from "./login.js";
 import { fileExists } from "./platform.js";
