@@ -306,6 +306,49 @@ describe("CLI JSON output", () => {
   });
 });
 
+describe("cli subpath exports", () => {
+  it("keeps every name @vapi-network/cli/cli exports", async () => {
+    // bin.ts forwards every export of cli.ts as the public `./cli` subpath. A helper that moves to another
+    // module keeps a re-export in cli.ts; removing a name here is a breaking change for SDK users.
+    expect(Object.keys(await import("./cli.js")).sort()).toEqual([
+      "CUSTODY_NOTICE",
+      "HELP",
+      "UsageError",
+      "baseUsdcBalanceReader",
+      "confirmWalletName",
+      "deviceVaultKey",
+      "fileExists",
+      "getEnvironment",
+      "getLinePrompt",
+      "getPrompts",
+      "getSecretStore",
+      "isInteractive",
+      "isStdinInteractive",
+      "openInBrowser",
+      "openWalletStore",
+      "output",
+      "parseArguments",
+      "promptForLine",
+      "readConfig",
+      "recordAudit",
+      "redactDetachedRunValue",
+      "registryBaseUrl",
+      "requireSecretsAllowed",
+      "requiredPositional",
+      "runCli",
+      "shouldAutoUploadAfterFailure",
+      "shouldAutoUploadBackup",
+      "showRecoveryPhrase",
+      "targetWallet",
+      "unlockTarget",
+      "verificationNotice",
+      "verificationTag",
+      "walletCapsCommand",
+      "walletCreateCommand",
+    ]);
+  });
+});
+
 describe("help invocation", () => {
   it("prints the usage list with its heading", async () => {
     const captured = captureIo();
