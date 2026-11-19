@@ -20,7 +20,7 @@ import { getVapiPaths, loadConfig } from "./config.js";
 import type { VapiPaymentAccount } from "./keystore.js";
 import { createPublicFetch } from "./net-guard.js";
 import { explorerAddressUrl, formatUsdc, getNetworkDefinition, requireRpcUrl } from "./networks.js";
-import { readReceipts, type Receipt } from "./receipts.js";
+import { appendReceipt, readReceipts, syncReceipts, type Receipt } from "./receipts.js";
 import type { PaymentWarning } from "./payment-warning.js";
 import type { RunBudget } from "./run-budget.js";
 import type { SecretStore } from "./secret-store.js";
@@ -280,6 +280,9 @@ export function routerPurchaseView(result: RouterPurchaseResult) {
     receipt: {
       id: result.receipt.id,
       ...routerPurchaseSummary(result.receipt),
+      ...(result.receipt.settlement === undefined
+        ? {}
+        : { settlement: result.receipt.settlement.outcome }),
       ...(result.receipt.settlement?.transaction === undefined
         ? {}
         : { transaction: result.receipt.settlement.transaction }),
@@ -355,7 +358,10 @@ async function purchaseRouterBalanceLocked(
     deps.config,
     deps.now,
   );
-  if (previous !== undefined) return previous.purchase;
+  if (previous !== undefined) {
+    if (previous.credentials === undefined) throw pendingPurchaseError(previous.purchase);
+    return previous.purchase;
+  }
   const { link, accessToken } = await purchaseCredentialSnapshot(deps);
   const prepared: RouterPendingPurchase = {
     receiptId: randomUUID(),
@@ -372,7 +378,10 @@ async function purchaseRouterBalanceLocked(
       deps.config,
       deps.now,
     );
-    if (competing !== undefined) return competing.purchase;
+    if (competing !== undefined) {
+      if (competing.credentials === undefined) throw pendingPurchaseError(competing.purchase);
+      return competing.purchase;
+    }
     // A concurrent purchase finished between the reservation and the read. This
     // request must not turn that successful recovery into another purchase.
     throw new RouterClientError(
@@ -385,6 +394,7 @@ async function purchaseRouterBalanceLocked(
       // A stale decision from another process must not become another payment,
       // even when its successful top-up is smaller than the refill threshold.
       const balance = (await routerUsage(deps)).balance;
+      prepared.baselinePurchasedUsd = balance?.purchasedUsd ?? 0;
       const completed = await deps.wallets.routerCompletedPurchase(deps.wallet);
       if (
         completed !== decision.completedReceiptId ||
@@ -396,6 +406,16 @@ async function purchaseRouterBalanceLocked(
     } catch (error) {
       await deps.wallets.setRouterPendingPurchase(deps.wallet, null, prepared.receiptId);
       throw error;
+    }
+  }
+  if (
+    decision === undefined &&
+    (deps.allowanceExpiresAt === undefined || deps.allowanceExpiresAt > (deps.now ?? new Date()))
+  ) {
+    try {
+      prepared.baselinePurchasedUsd = (await routerUsage(deps)).balance?.purchasedUsd ?? 0;
+    } catch {
+      // A manual purchase may proceed, but only a successful chat can prove credit.
     }
   }
   let current = prepared;
@@ -481,7 +501,16 @@ async function purchaseRouterBalanceLocked(
     throw error;
   }
   const { response, receipt, warnings: paymentWarnings } = paid;
+  const confirmed = receipt.settlement?.outcome === "succeeded";
+  const paymentState = confirmed ? "Payment succeeded" : "The payment authorization was sent";
   const warnings: RouterPurchaseWarning[] = [...(paymentWarnings ?? [])];
+  if (!confirmed && (receipt.payer !== undefined || receipt.authorization !== undefined)) {
+    warnings.push({
+      code: "settlement_unconfirmed",
+      message:
+        "The payment authorization was sent, but settlement is not confirmed yet. Do not repeat the purchase; the next Router request checks the chain.",
+    });
+  }
   if (receipt.settlement?.outcome === "succeeded") {
     try {
       current = settledPendingPurchase(current, receipt);
@@ -527,21 +556,18 @@ async function purchaseRouterBalanceLocked(
   } catch {
     warnings.push({
       code: "audit_unavailable",
-      message:
-        "Payment succeeded, but the local purchase audit could not be written. Keep the returned receipt; do not repeat the purchase.",
+      message: `${paymentState}, but the local purchase audit could not be written. Keep the returned receipt; do not repeat the purchase.`,
     });
   }
 
+  let keyAvailable = false;
   try {
     await ensureBalanceRouterKey(deps, link);
-    if (receipt.settlement?.outcome === "succeeded") {
-      await completePendingPurchase(deps, current);
-    }
+    keyAvailable = true;
   } catch {
     warnings.push({
       code: "router_key_unavailable",
-      message:
-        "Payment succeeded, but its Router balance key could not be fetched or stored. Retry chat to fetch the key; do not repeat the purchase.",
+      message: `${paymentState}, but its Router balance key could not be fetched or stored. Retry chat to fetch the key; do not repeat the purchase.`,
     });
   }
 
@@ -551,14 +577,30 @@ async function purchaseRouterBalanceLocked(
   } catch {
     warnings.push({
       code: "balance_unavailable",
-      message:
-        "Payment succeeded, but the Router balance is unavailable. Retry chat to recover access; do not repeat the purchase.",
+      message: `${paymentState}, but the Router balance is unavailable. Retry chat to recover access; do not repeat the purchase.`,
     });
+  }
+  if (
+    confirmed &&
+    (!keyAvailable ||
+      !(await completePendingPurchase(
+        deps,
+        current,
+        balance,
+        false,
+        deps.paths?.receiptsPath,
+      ).catch(() => false)))
+  ) {
+    warnings.push(creditPendingWarning(current));
   }
   return { receipt, balance, ...(warnings.length === 0 ? {} : { warnings }) };
 }
 
-type PendingRouterPurchase = { pending: RouterPendingPurchase; purchase: RouterPurchaseResult };
+type PendingRouterPurchase = {
+  pending: RouterPendingPurchase;
+  purchase: RouterPurchaseResult;
+  credentials?: RouterBalanceCredentials;
+};
 
 async function purchaseReceipt(
   deps: RouterClientDeps,
@@ -569,7 +611,51 @@ async function purchaseReceipt(
     receiptsPath ?? deps.refill?.paths?.receiptsPath ?? getVapiPaths(deps.wallets.home).receipts,
     { wallet: deps.wallet },
   );
-  return receipts.find((receipt) => receipt.id === pending.receiptId);
+  return (
+    receipts.find(
+      (receipt) => receipt.id === pending.receiptId && receipt.settlement?.outcome === "succeeded",
+    ) ?? receipts.find((receipt) => receipt.id === pending.receiptId)
+  );
+}
+
+/** Ensure paid evidence is in the append-only ledger. Caller holds the purchase lock. */
+export async function ensureRouterPurchaseReceipt(
+  deps: RouterClientDeps,
+  pending: RouterPendingPurchase,
+  options: { receiptsPath?: string } = {},
+): Promise<{ receipt: Receipt; appended: boolean }> {
+  if (pending.status !== "settled") {
+    throw new RouterClientError(
+      "refill_pending",
+      "Only a settled Router purchase can be recorded as paid.",
+    );
+  }
+  const recorded = await purchaseReceipt(deps, pending, options.receiptsPath);
+  if (recorded?.settlement?.outcome === "succeeded") return { receipt: recorded, appended: false };
+  const recovered = pendingReceipt(deps, pending);
+  const receipt = await appendReceipt(
+    recorded === undefined
+      ? recovered
+      : {
+          ...recorded,
+          outcome: recovered.outcome,
+          settlement: recovered.settlement,
+          ...(recorded.quote === undefined && recovered.quote !== undefined
+            ? { quote: recovered.quote }
+            : {}),
+          ...(recorded.payer === undefined && recovered.payer !== undefined
+            ? { payer: recovered.payer }
+            : {}),
+          ...(recorded.authorization === undefined && recovered.authorization !== undefined
+            ? { authorization: recovered.authorization }
+            : {}),
+        },
+    options.receiptsPath ??
+      deps.refill?.paths?.receiptsPath ??
+      getVapiPaths(deps.wallets.home).receipts,
+    { wallet: deps.wallet },
+  );
+  return { receipt, appended: true };
 }
 
 function pendingReceipt(deps: RouterClientDeps, pending: RouterPendingPurchase): Receipt {
@@ -584,7 +670,21 @@ function pendingReceipt(deps: RouterClientDeps, pending: RouterPendingPurchase):
     ...(pending.amountAtomic === undefined
       ? {}
       : {
-          quote: { network: pending.network ?? "unknown", amountAtomic: pending.amountAtomic },
+          quote: {
+            network: pending.network ?? "unknown",
+            amountAtomic: pending.amountAtomic,
+            ...(pending.authorization === undefined ? {} : { asset: pending.authorization.token }),
+          },
+        }),
+    ...(pending.authorization === undefined
+      ? {}
+      : {
+          payer: pending.authorization.from,
+          authorization: {
+            from: pending.authorization.from,
+            nonce: pending.authorization.nonce,
+            validBefore: pending.authorization.validBefore,
+          },
         }),
     settlement: {
       outcome: pending.status === "settled" ? "succeeded" : "unknown",
@@ -632,31 +732,65 @@ async function releaseUnpaidPurchase(
   }
 }
 
+function creditPendingWarning(pending: RouterPendingPurchase): RouterPurchaseWarning {
+  return {
+    code: "credit_pending",
+    message: `Router purchase ${pending.receiptId} is still awaiting usable credit or durable receipt recovery; no new payment was made on recovery. Retry chat; do not repeat the purchase.`,
+  };
+}
+
 async function completePendingPurchase(
   deps: RouterClientDeps,
   pending: RouterPendingPurchase,
-): Promise<RouterBalanceCredentials> {
+  balance: AgentRouterUsage["balance"],
+  chatSucceeded = false,
+  receiptsPath?: string,
+): Promise<boolean> {
+  if (pending.status !== "settled") return false;
+  const recordedPending = deps.wallets.entry(deps.wallet)?.routerPendingPurchase;
+  if (recordedPending?.receiptId !== pending.receiptId || recordedPending.status !== "settled")
+    return false;
   const link = await linkedWallet(deps);
-  if (!sameAgentLink(link, pending.link)) {
-    throw new RouterClientError("http", "The agent link changed after the Router purchase.");
-  }
-  const credentials = await routerBalanceCredentialSnapshot(deps);
-  if (credentials === undefined) {
-    throw new RouterClientError("no_router_key", "The Router balance key is not yet available.");
-  }
-  // Also leave a durable completion marker when settlement came from the ledger.
-  await deps.wallets.setRouterPendingPurchase(
-    deps.wallet,
-    { ...pending, status: "settled" },
-    pending.receiptId,
+  const creditEstablished =
+    chatSucceeded ||
+    (samePurchaseOwner(link, pending.link) &&
+      pending.baselinePurchasedUsd !== undefined &&
+      balance !== null &&
+      balance.purchasedUsd > pending.baselinePurchasedUsd &&
+      balance.purchasedUsd + 1e-9 >= pending.baselinePurchasedUsd + pending.tierUsd);
+  if (!creditEstablished) return false;
+  const receipt = await purchaseReceipt(deps, pending, receiptsPath);
+  if (receipt?.settlement?.outcome !== "succeeded") return false;
+  await syncReceipts(
+    receiptsPath ?? deps.refill?.paths?.receiptsPath ?? getVapiPaths(deps.wallets.home).receipts,
   );
   await deps.wallets.setRouterPendingPurchase(deps.wallet, null, pending.receiptId);
-  return credentials;
+  return true;
+}
+
+async function retireAfterBalanceChat(
+  deps: RouterClientDeps,
+  purchase: RouterPurchaseResult,
+  credentials: RouterBalanceCredentials,
+): Promise<void> {
+  // Chat runs outside the recovery lock. Never clear another process's purchase.
+  const retired = await withPurchaseLock(deps, async () => {
+    await deps.wallets.refreshRegistry();
+    const pending = deps.wallets.entry(deps.wallet)?.routerPendingPurchase;
+    if (pending?.receiptId !== purchase.receipt.id) return true;
+    const link = deps.wallets.entry(deps.wallet)?.link;
+    if (link === undefined || !sameAgentLink(link, credentials.link)) return false;
+    if (pending.status !== "settled") return false;
+    return await completePendingPurchase(deps, pending, null, true);
+  }).catch(() => false);
+  if (!retired) return;
+  purchase.warnings = purchase.warnings?.filter(({ code }) => code !== "credit_pending");
+  if (purchase.warnings?.length === 0) delete purchase.warnings;
 }
 
 async function recoverPendingPurchase(
   deps: RouterClientDeps,
-): Promise<(PendingRouterPurchase & { credentials: RouterBalanceCredentials }) | undefined> {
+): Promise<PendingRouterPurchase | undefined> {
   return await withPurchaseLock(deps, () => recoverPendingPurchaseLocked(deps));
 }
 
@@ -665,7 +799,7 @@ async function recoverPendingPurchaseLocked(
   receiptsPath?: string,
   config?: VapiConfig,
   now?: Date,
-): Promise<(PendingRouterPurchase & { credentials: RouterBalanceCredentials }) | undefined> {
+): Promise<PendingRouterPurchase | undefined> {
   await deps.wallets.refreshRegistry();
   let pending = deps.wallets.snapshot().wallets[deps.wallet]?.routerPendingPurchase;
   if (pending === undefined) return undefined;
@@ -691,12 +825,52 @@ async function recoverPendingPurchaseLocked(
   pending = settledPendingPurchase(pending, purchase.receipt);
   try {
     await deps.wallets.setRouterPendingPurchase(deps.wallet, pending, pending.receiptId);
-    const link = await linkedWallet(deps);
-    if (!sameAgentLink(link, pending.link)) {
-      throw new RouterClientError("http", "The agent link changed after the Router purchase.");
+    try {
+      purchase.receipt = (
+        await ensureRouterPurchaseReceipt(
+          deps,
+          pending,
+          receiptsPath === undefined ? {} : { receiptsPath },
+        )
+      ).receipt;
+    } catch {
+      purchase.warnings = [
+        {
+          code: "receipt_unavailable",
+          message:
+            "Payment settled, but its receipt could not be saved. The purchase journal is retained; retry chat without repeating the purchase.",
+        },
+      ];
     }
-    await ensureBalanceRouterKey(deps, pending.link);
-    const credentials = await completePendingPurchase(deps, pending);
+    const link = deps.wallets.entry(deps.wallet)?.link;
+    if (link === undefined || !samePurchaseOwner(link, pending.link)) {
+      purchase.warnings = [
+        ...(purchase.warnings ?? []),
+        {
+          code: "pending_purchase_unlinked",
+          message: `Router purchase ${pending.receiptId} belongs to a different or missing link; no new payment was made. Restore its owner and API base, or keep its payment evidence and run vapi router clear-pending --confirm-settled --account ${deps.wallet}.`,
+        },
+      ];
+      return { pending, purchase };
+    }
+    purchase.warnings = [...(purchase.warnings ?? []), creditPendingWarning(pending)];
+    await ensureBalanceRouterKey(deps, link);
+    const credentials = await routerBalanceCredentialSnapshot(deps);
+    if (credentials === undefined)
+      throw new RouterClientError("no_router_key", "The Router balance key is not yet available.");
+    try {
+      purchase.balance = (await routerUsage(deps)).balance;
+    } catch {
+      // A successful balance-key chat can establish credit when usage is unavailable.
+    }
+    if (
+      await completePendingPurchase(deps, pending, purchase.balance, false, receiptsPath).catch(
+        () => false,
+      )
+    ) {
+      purchase.warnings = purchase.warnings.filter(({ code }) => code !== "credit_pending");
+      if (purchase.warnings.length === 0) delete purchase.warnings;
+    }
     return { pending, purchase, credentials };
   } catch (error) {
     throw pendingPurchaseError(purchase, false, error);
@@ -868,7 +1042,7 @@ export async function routerChat(
   // Recovery precedes all credential reads, usage checks and refill decisions,
   // and is independent of the automatic-refill setting or payment account.
   const recovered = await recoverPendingPurchase(deps);
-  if (recovered !== undefined) {
+  if (recovered?.credentials !== undefined) {
     try {
       const result = await sendRouterChat(
         deps,
@@ -877,6 +1051,7 @@ export async function routerChat(
         request,
         "balance",
       );
+      await retireAfterBalanceChat(deps, recovered.purchase, recovered.credentials);
       return { ...result, refill: recovered.purchase };
     } catch (error) {
       if (
@@ -887,6 +1062,18 @@ export async function routerChat(
         await removeRejectedBalanceKey(deps, recovered.credentials).catch(() => undefined);
       }
       throw pendingPurchaseError(recovered.purchase, true, error);
+    }
+  }
+  if (recovered !== undefined) {
+    try {
+      const { routerBaseUrl, routerKey } = await routerCredentialSnapshot(deps);
+      const result = await sendRouterChat(deps, routerBaseUrl, routerKey, request, "stake");
+      return { ...result, refill: recovered.purchase };
+    } catch (error) {
+      if (error instanceof RouterClientError) {
+        throw new RouterClientError(error.code, error.message, error.status, recovered.purchase);
+      }
+      throw error;
     }
   }
   const { routerBaseUrl, routerKey } = await routerCredentialSnapshot(deps);
@@ -990,6 +1177,8 @@ export async function routerChat(
               request,
               "balance",
             );
+            if (purchase !== undefined)
+              await retireAfterBalanceChat(deps, purchase, balanceCredentials);
             return { ...result, ...(purchase === undefined ? {} : { refill: purchase }) };
           } catch (balanceError) {
             if (
@@ -1178,6 +1367,7 @@ async function ensureBalanceRouterKey(deps: RouterClientDeps, paidLink: AgentLin
 }
 
 type RouterBalanceCredentials = {
+  link: AgentLink;
   clientId: string;
   routerBaseUrl: string;
   routerKey: string;
@@ -1205,6 +1395,7 @@ async function routerBalanceCredentialSnapshot(
       }
       if (routerKey === undefined || routerKey.length === 0) return undefined;
       return {
+        link,
         clientId: link.clientId,
         routerBaseUrl: validRouterBaseUrl(link.routerBaseUrl ?? DEFAULT_ROUTER_BASE_URL),
         routerKey,
@@ -1473,6 +1664,10 @@ async function storedRouterKey(deps: RouterClientDeps): Promise<string> {
   }
   if (key === undefined || key.length === 0) throw noRouterKeyError();
   return key;
+}
+
+function samePurchaseOwner(left: AgentLink, right: AgentLink): boolean {
+  return left.owner.toLowerCase() === right.owner.toLowerCase() && left.apiBase === right.apiBase;
 }
 
 function sameAgentLink(left: AgentLink, right: AgentLink): boolean {

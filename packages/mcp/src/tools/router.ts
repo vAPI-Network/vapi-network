@@ -94,12 +94,16 @@ const purchaseSchema = z.object({
     amountUsd: z.number().nullable(),
     network: z.string(),
     transaction: z.string().optional(),
+    settlement: z.enum(["succeeded", "rejected", "unknown"]).optional(),
   }),
   balance: routerUsageSchema.balance,
   warnings: z
     .array(
       z.object({
         code: z.enum([
+          "settlement_unconfirmed",
+          "credit_pending",
+          "pending_purchase_unlinked",
           "audit_unavailable",
           "router_key_unavailable",
           "balance_unavailable",

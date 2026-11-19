@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,6 +9,9 @@ import {
   SpendCapExceededError,
   getDefaultConfig,
   appendReceipt,
+  __setReceiptTestHooks,
+  readReceipts,
+  type RouterPendingPurchase,
   getVapiPaths,
   drainCeilingSweeps,
   type Receipt,
@@ -41,6 +44,7 @@ let activeSecretStore: SecretStore | undefined;
 let activeSecretEntries: Record<string, string> | undefined;
 
 afterEach(async () => {
+  __setReceiptTestHooks(undefined);
   await drainCeilingSweeps();
   restoreEnvironment("VAPI_HOME", originalHome);
   activeSecretStore = undefined;
@@ -68,6 +72,347 @@ describe("vapi router models", () => {
 });
 
 describe("vapi router clear-pending", () => {
+  it.each([false, true])(
+    "syncs an existing receipt before clearing and retains the journal on sync failure (%s)",
+    async (fails) => {
+      const home = await initializedHome();
+      const store = await WalletStore.open(home);
+      const pending = pendingPurchase();
+      await store.setRouterPendingPurchase(WALLET, pending);
+      const path = getVapiPaths(home).receipts;
+      await appendReceipt(
+        {
+          id: pending.receiptId,
+          timestamp: pending.createdAt,
+          wallet: WALLET,
+          resourceUrl: `${pending.link.apiBase}/api/router/top-up/5`,
+          source: "router.topup",
+          settlement: { outcome: "succeeded" },
+        },
+        path,
+      );
+      const events: string[] = [];
+      __setReceiptTestHooks({
+        beforeSync: () => {
+          if (fails) throw new Error("ledger sync failed");
+        },
+        afterSync: (target) => {
+          expect(target).toBe(path);
+          events.push("sync");
+        },
+      });
+      const original = WalletStore.prototype.setRouterPendingPurchase;
+      const clear = vi
+        .spyOn(WalletStore.prototype, "setRouterPendingPurchase")
+        .mockImplementation(async function (this: WalletStore, name, value, expected) {
+          if (value === null) {
+            expect(events).toEqual(["sync"]);
+            events.push("clear");
+          }
+          return await original.call(this, name, value, expected);
+        });
+      try {
+        const captured = captureIo();
+        expect(
+          await runCli(
+            ["router", "clear-pending", "--confirm-settled", "--account", WALLET, "--json"],
+            captured.io,
+            commandDependencies(),
+          ),
+        ).toBe(fails ? 1 : 0);
+        if (fails) {
+          expect(events).toEqual([]);
+          expect(JSON.parse(captured.stdout[0]!)).toMatchObject({ error: "ledger sync failed" });
+          expect((await WalletStore.open(home)).entry(WALLET)?.routerPendingPurchase).toEqual(
+            pending,
+          );
+        } else {
+          expect(events).toEqual(["sync", "clear"]);
+          expect(JSON.parse(captured.stdout[0]!)).toMatchObject({
+            cleared: true,
+            receiptAppended: false,
+          });
+          expect(
+            (await WalletStore.open(home)).entry(WALLET)?.routerPendingPurchase,
+          ).toBeUndefined();
+        }
+      } finally {
+        clear.mockRestore();
+      }
+    },
+  );
+
+  it.each([false, true])(
+    "records and prints settled evidence before retiring (JSON %s)",
+    async (json) => {
+      const home = await initializedHome();
+      const store = await WalletStore.open(home);
+      const pending = pendingPurchase();
+      await store.setRouterPendingPurchase(WALLET, pending);
+      const captured = captureIo();
+      const original = WalletStore.prototype.setRouterPendingPurchase;
+      const clear = vi
+        .spyOn(WalletStore.prototype, "setRouterPendingPurchase")
+        .mockImplementation(async function (this: WalletStore, name, value, expected) {
+          if (value === null) {
+            expect(expected).toBe(pending.receiptId);
+            const rows = await readReceipts(getVapiPaths(home).receipts);
+            expect(rows).toHaveLength(1);
+            expect(rows[0]).toMatchObject({
+              id: pending.receiptId,
+              payer: pending.authorization!.from,
+              authorization: { nonce: pending.authorization!.nonce },
+              settlement: { outcome: "succeeded", transaction: pending.transaction },
+            });
+            if (json) expect(captured.stdout).toEqual([]);
+            else {
+              const output = captured.stdout.join("\n");
+              expect(output).toContain(pending.receiptId);
+              expect(output).toContain(pending.transaction);
+              expect(output).toContain("$4.75 USDC");
+              expect(output).toContain("Base");
+              expect(output).toMatch(/keep.*evidence.*contact support/i);
+            }
+          }
+          return original.call(this, name, value, expected);
+        });
+      try {
+        const args = [
+          "router",
+          "clear-pending",
+          "--confirm-settled",
+          "--account",
+          WALLET,
+          ...(json ? ["--json"] : []),
+        ];
+        expect(await runCli(args, captured.io, commandDependencies())).toBe(0);
+        if (json) {
+          expect(captured.stdout).toHaveLength(1);
+          expect(JSON.parse(captured.stdout[0]!)).toMatchObject({
+            wallet: WALLET,
+            pending: { receiptId: pending.receiptId, status: "settled" },
+            cleared: true,
+            receipt: {
+              id: pending.receiptId,
+              amountUsd: 4.75,
+              network: "eip155:8453",
+              transaction: pending.transaction,
+            },
+            receiptAppended: true,
+            notice: expect.stringMatching(/keep.*evidence.*contact support/i),
+          });
+        } else expect(captured.stdout.at(-1)).toBe("Cleared the settled Router purchase.");
+        expect((await WalletStore.open(home)).entry(WALLET)?.routerPendingPurchase).toBeUndefined();
+        const again = captureIo();
+        expect(await runCli(args, again.io, commandDependencies())).toBe(0);
+        expect(await readReceipts(getVapiPaths(home).receipts)).toHaveLength(1);
+        expect(again.stdout).toEqual([
+          json
+            ? JSON.stringify({ wallet: WALLET, pending: null, cleared: false })
+            : "No pending Router purchase.",
+        ]);
+      } finally {
+        clear.mockRestore();
+      }
+    },
+  );
+
+  it("emits one JSON error and retains evidence if settled clearing cannot be persisted", async () => {
+    const home = await initializedHome();
+    const store = await WalletStore.open(home);
+    const pending = pendingPurchase();
+    await store.setRouterPendingPurchase(WALLET, pending);
+    const failure = vi
+      .spyOn(WalletStore.prototype, "setRouterPendingPurchase")
+      .mockRejectedValue(new Error("pending file is read-only"));
+    try {
+      const captured = captureIo();
+      expect(
+        await runCli(
+          ["router", "clear-pending", "--confirm-settled", "--account", WALLET, "--json"],
+          captured.io,
+          commandDependencies(),
+        ),
+      ).toBe(1);
+      expect(captured.stdout).toHaveLength(1);
+      expect(JSON.parse(captured.stdout[0]!)).toMatchObject({
+        error: "pending file is read-only",
+        exitCode: 1,
+      });
+      expect((await WalletStore.open(home)).entry(WALLET)?.routerPendingPurchase).toEqual(pending);
+      expect(await readReceipts(getVapiPaths(home).receipts)).toHaveLength(1);
+    } finally {
+      failure.mockRestore();
+    }
+  });
+
+  it("reuses a durable receipt and reports an absent transaction", async () => {
+    const home = await initializedHome();
+    const store = await WalletStore.open(home);
+    const pending = pendingPurchase();
+    delete pending.transaction;
+    await store.setRouterPendingPurchase(WALLET, pending);
+    await appendReceipt(
+      {
+        id: pending.receiptId,
+        timestamp: pending.createdAt,
+        wallet: WALLET,
+        resourceUrl: `${pending.link.apiBase}/api/router/top-up/5`,
+        quote: { network: pending.network!, amountAtomic: pending.amountAtomic! },
+        settlement: { outcome: "succeeded" },
+      },
+      getVapiPaths(home).receipts,
+    );
+    const captured = captureIo();
+    expect(
+      await runCli(
+        ["router", "clear-pending", "--confirm-settled", "--account", WALLET, "--json"],
+        captured.io,
+        commandDependencies(),
+      ),
+    ).toBe(0);
+    const output = JSON.parse(captured.stdout[0]!);
+    expect(output.receiptAppended).toBe(false);
+    expect(output.receipt).toEqual({
+      id: pending.receiptId,
+      amountUsd: 4.75,
+      network: pending.network,
+    });
+    expect(await readReceipts(getVapiPaths(home).receipts)).toHaveLength(1);
+    await store.setRouterPendingPurchase(WALLET, pending);
+    const human = captureIo();
+    expect(
+      await runCli(
+        ["router", "clear-pending", "--confirm-settled", "--account", WALLET],
+        human.io,
+        commandDependencies(),
+      ),
+    ).toBe(0);
+    expect(human.stdout).toContain("Transaction: none recorded");
+    expect(await readReceipts(getVapiPaths(home).receipts)).toHaveLength(1);
+  });
+
+  it.each(["prepared", "signed", "unknown"] as const)(
+    "refuses settled retirement of %s without resolving or clearing it",
+    async (status) => {
+      const home = await initializedHome();
+      const store = await WalletStore.open(home);
+      const pending = pendingPurchase(status);
+      await store.setRouterPendingPurchase(WALLET, pending);
+      const path = join(home, "router-pending", `${WALLET}.json`);
+      const before = await readFile(path, "utf8");
+      const captured = captureIo();
+      const fetchImpl = vi.fn<typeof fetch>();
+      expect(
+        await runCli(
+          ["router", "clear-pending", "--confirm-settled", "--account", WALLET, "--json"],
+          captured.io,
+          commandDependencies({ fetchImpl }),
+        ),
+      ).toBe(1);
+      expect(JSON.parse(captured.stdout[0]!).error).toMatch(
+        /retry vapi router chat.*check the chain.*--confirm-unpaid/i,
+      );
+      expect(await readFile(path, "utf8")).toBe(before);
+      expect(await readReceipts(getVapiPaths(home).receipts)).toEqual([]);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps settled evidence when the receipt ledger cannot be appended", async () => {
+    const home = await initializedHome();
+    const store = await WalletStore.open(home);
+    const pending = pendingPurchase();
+    await store.setRouterPendingPurchase(WALLET, pending);
+    await mkdir(getVapiPaths(home).receipts);
+    const captured = captureIo();
+    expect(
+      await runCli(
+        ["router", "clear-pending", "--confirm-settled", "--account", WALLET, "--json"],
+        captured.io,
+        commandDependencies(),
+      ),
+    ).toBe(1);
+    expect(captured.stdout).toHaveLength(1);
+    expect(JSON.parse(captured.stdout[0]!)).toHaveProperty("error");
+    expect((await WalletStore.open(home)).entry(WALLET)?.routerPendingPurchase).toEqual(pending);
+  });
+
+  it("does not clear if human payment evidence cannot be printed", async () => {
+    const home = await initializedHome();
+    const store = await WalletStore.open(home);
+    const pending = pendingPurchase();
+    await store.setRouterPendingPurchase(WALLET, pending);
+    const captured = captureIo();
+    const io = {
+      ...captured.io,
+      stdout: () => {
+        throw new Error("output unavailable");
+      },
+    };
+    expect(
+      await runCli(
+        ["router", "clear-pending", "--confirm-settled", "--account", WALLET],
+        io,
+        commandDependencies(),
+      ),
+    ).toBe(1);
+    expect((await WalletStore.open(home)).entry(WALLET)?.routerPendingPurchase).toEqual(pending);
+    expect(await readReceipts(getVapiPaths(home).receipts)).toHaveLength(1);
+  });
+
+  it("rejects conflicting confirmation flags", async () => {
+    const home = await initializedHome();
+    const store = await WalletStore.open(home);
+    await store.setRouterPendingPurchase(WALLET, pendingPurchase());
+    const captured = captureIo();
+    expect(
+      await runCli(
+        [
+          "router",
+          "clear-pending",
+          "--confirm-settled",
+          "--confirm-unpaid",
+          "--account",
+          WALLET,
+          "--json",
+        ],
+        captured.io,
+        commandDependencies(),
+      ),
+    ).toBe(2);
+    expect(JSON.parse(captured.stdout[0]!).error).toContain("cannot be used together");
+    expect((await WalletStore.open(home)).entry(WALLET)?.routerPendingPurchase).toEqual(
+      pendingPurchase(),
+    );
+  });
+
+  it.each(["rename", "remove"] as const)(
+    "permits %s after explicit settled retirement",
+    async (operation) => {
+      const home = await initializedHome();
+      const store = await WalletStore.open(home, { secrets: currentSecretStore() });
+      await store.create("other", PASSPHRASE);
+      await store.setDefault("other");
+      await store.setRouterPendingPurchase(WALLET, pendingPurchase());
+      const change = () =>
+        operation === "rename"
+          ? store.rename(WALLET, "renamed")
+          : store.remove(WALLET, { force: true });
+      await expect(change()).rejects.toThrow(/pending Router purchase/);
+      expect(
+        await runCli(
+          ["router", "clear-pending", "--confirm-settled", "--account", WALLET],
+          captureIo().io,
+          commandDependencies(),
+        ),
+      ).toBe(0);
+      await expect(change()).resolves.toMatchObject({
+        name: operation === "rename" ? "renamed" : WALLET,
+      });
+    },
+  );
+
   it.each([
     "receipt",
     "settled",
@@ -318,6 +663,72 @@ describe("vapi router usage", () => {
 });
 
 describe("vapi router buy", () => {
+  it("does not claim payment succeeded when settlement was rejected", async () => {
+    await initializedHome();
+    const purchase = purchaseResult(null);
+    const captured = captureIo();
+    const dependencies = commandDependencies({
+      router: {
+        buyRouterBalance: async () => ({
+          ...purchase,
+          receipt: {
+            ...purchase.receipt,
+            settlement: { outcome: "rejected", transaction: "0xtransaction" },
+          },
+        }),
+      },
+    });
+    expect(
+      await runCli(["router", "buy", "5", "--account", WALLET], captured.io, dependencies),
+    ).toBe(0);
+    expect(captured.stdout[0]).toContain("settlement was rejected");
+    expect(allOutput(captured)).not.toMatch(/\bPaid\b|Payment succeeded/);
+    expect(captured.stdout).toContain("Transaction: 0xtransaction");
+  });
+
+  it.each([false, true])(
+    "reports an unconfirmed authorization through real payment (JSON %s)",
+    async (json) => {
+      const dependencies = await linkedRouterDependencies(async (input, init) =>
+        transport.fetchImpl(input, init),
+      );
+      const home = process.env.VAPI_HOME!;
+      const transport = purchaseTransport(home, "key-store", "https://router.example", {
+        noSettlementHeader: true,
+      });
+      await writeFile(
+        join(home, "config.json"),
+        JSON.stringify({ ...getDefaultConfig({}), allowPrivateNetwork: true }),
+      );
+      const store = await WalletStore.open(home, { secrets: currentSecretStore() });
+      await store.setSpendCaps(WALLET, { perCallAtomic: "5000000", perDayAtomic: "20000000" });
+      const captured = captureIo();
+      expect(
+        await runCli(
+          ["router", "buy", "5", "--account", WALLET, ...(json ? ["--json"] : [])],
+          captured.io,
+          dependencies,
+        ),
+      ).toBe(0);
+      const pending = (await WalletStore.open(home)).entry(WALLET)?.routerPendingPurchase;
+      expect(pending?.status).toBe("signed");
+      expect(transport.calls.paid).toBe(1);
+      if (json)
+        expect(JSON.parse(captured.stdout[0]!)).toMatchObject({
+          receipt: { id: pending!.receiptId, settlement: "unknown" },
+          warnings: [{ code: "settlement_unconfirmed" }],
+        });
+      else {
+        expect(captured.stdout[0]).toMatch(
+          /authorization was sent.*settlement is not confirmed yet.*do not repeat/i,
+        );
+        expect(allOutput(captured)).not.toMatch(/\bPaid\b|Payment succeeded/);
+        expect(captured.stdout).toContain(`Receipt: ${pending!.receiptId}`);
+        expect(captured.stderr.join("\n")).toContain("settlement is not confirmed yet");
+      }
+    },
+  );
+
   it.each(["audit", "key", "balance"] as const)(
     "returns success through real payment when %s follow-up fails",
     async (failure) => {
@@ -352,6 +763,7 @@ describe("vapi router buy", () => {
                   ? "router_key_unavailable"
                   : "balance_unavailable",
           },
+          ...(failure === "key" || failure === "balance" ? [{ code: "credit_pending" }] : []),
         ],
       });
       expect(allOutput(captured)).not.toContain("private-follow-up-error-must-not-leak");
@@ -474,6 +886,7 @@ describe("vapi router buy", () => {
         amountUsd: 5,
         network: "eip155:8453",
         transaction: "0xtransaction",
+        settlement: "succeeded",
         id: "router-receipt",
       },
       balance: null,
@@ -599,6 +1012,123 @@ describe("vapi router buy", () => {
 });
 
 describe("vapi router chat", () => {
+  it.each([
+    { mode: "stake", json: false },
+    { mode: "stake", json: true },
+    { mode: "budget", json: false },
+    { mode: "budget", json: true },
+    { mode: "missing", json: false },
+    { mode: "missing", json: true },
+  ])(
+    "preserves unlinked payment warnings during $mode chat (JSON $json)",
+    async ({ mode, json }) => {
+      const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+        const req = input instanceof Request ? input : new Request(input, init);
+        expect(req.url).toBe("https://router.example/v1/chat/completions");
+        expect(req.headers.get("authorization")).toBe(`Bearer ${REVOKED_ROUTER_KEY}`);
+        return mode === "budget"
+          ? new Response("Budget has been exceeded", { status: 429 })
+          : Response.json({ choices: [{ message: { content: "stake answer" } }] });
+      });
+      const dependencies = await linkedRouterDependencies(fetchImpl);
+      const home = process.env.VAPI_HOME!;
+      const store = await WalletStore.open(home, { secrets: currentSecretStore() });
+      const pending = pendingPurchase();
+      await store.setRouterPendingPurchase(WALLET, pending);
+      await store.setRouterRefill(WALLET, { belowUsd: 1, tierUsd: 5 });
+      if (mode === "missing") await store.clearLink(WALLET);
+      else
+        await store.setLink(WALLET, {
+          ...pending.link,
+          owner: "0x2222222222222222222222222222222222222222",
+        });
+      const captured = captureIo();
+      expect(
+        await runCli(
+          [
+            "router",
+            "chat",
+            "--model",
+            "m",
+            "hi",
+            "--account",
+            WALLET,
+            ...(json ? ["--json"] : []),
+          ],
+          captured.io,
+          dependencies,
+        ),
+      ).toBe(mode === "stake" ? 0 : 1);
+      if (json) {
+        const output = JSON.parse(captured.stdout[0]!);
+        expect(output.refill).toMatchObject({
+          receipt: { id: pending.receiptId, settlement: "succeeded" },
+          balance: null,
+          warnings: [
+            {
+              code: "pending_purchase_unlinked",
+              message: expect.stringContaining(
+                `vapi router clear-pending --confirm-settled --account ${WALLET}`,
+              ),
+            },
+          ],
+        });
+        if (mode === "stake") expect(output.content).toBe("stake answer");
+        else expect(output.code).toBe(mode === "missing" ? "not_linked" : "budget_exhausted");
+        if (mode === "missing") expect(output.error).toBe("Not linked. Run vapi login.");
+      } else {
+        expect(captured.stderr.join("\n")).toContain(pending.receiptId);
+        expect(captured.stderr.join("\n")).toContain(
+          `vapi router clear-pending --confirm-settled --account ${WALLET}`,
+        );
+        if (mode === "stake") expect(captured.stdout).toEqual(["stake answer"]);
+        if (mode === "missing") expect(captured.stderr).toContain("Not linked. Run vapi login.");
+      }
+      expect(fetchImpl).toHaveBeenCalledTimes(mode === "missing" ? 0 : 1);
+      expect((await WalletStore.open(home)).entry(WALLET)?.routerPendingPurchase).toEqual(pending);
+    },
+  );
+
+  it.each(["chat", "buy"] as const)(
+    "preserves refill while normalizing not_linked %s errors",
+    async (command) => {
+      await initializedHome();
+      const refill = {
+        ...purchaseResult(null),
+        warnings: [
+          {
+            code: "pending_purchase_unlinked" as const,
+            message: `Keep router-receipt; run vapi router clear-pending --confirm-settled --account ${WALLET}.`,
+          },
+        ],
+      };
+      const fail = async () => {
+        throw new RouterClientError("not_linked", "Original missing-link message", 401, refill);
+      };
+      const dependencies = commandDependencies({
+        router: { routerChat: fail, buyRouterBalance: fail },
+      });
+      const args =
+        command === "chat"
+          ? ["router", "chat", "--model", "m", "hi", "--account", WALLET]
+          : ["router", "buy", "5", "--account", WALLET];
+      const json = captureIo();
+      expect(await runCli([...args, "--json"], json.io, dependencies)).toBe(1);
+      expect(JSON.parse(json.stdout[0]!)).toMatchObject({
+        error: "Not linked. Run vapi login.",
+        code: "not_linked",
+        refill: {
+          receipt: { id: "router-receipt", settlement: "succeeded" },
+          warnings: refill.warnings,
+        },
+      });
+      const human = captureIo();
+      expect(await runCli(args, human.io, dependencies)).toBe(1);
+      expect(human.stderr).toContain(refill.warnings[0]!.message);
+      expect(human.stderr).toContain("Not linked. Run vapi login.");
+    },
+  );
+
   it("does not unlock the payment account for a credential-only retry", async () => {
     const home = await initializedHome();
     const store = await WalletStore.open(home, { secrets: currentSecretStore() });
@@ -1212,4 +1742,33 @@ async function initializedHome(): Promise<string> {
 function restoreEnvironment(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
+}
+
+function pendingPurchase(
+  status: RouterPendingPurchase["status"] = "settled",
+): RouterPendingPurchase {
+  return {
+    receiptId: "settled-purchase",
+    status,
+    createdAt: "2026-09-23T10:00:00.000Z",
+    tierUsd: 5,
+    link: {
+      apiBase: "https://console.example",
+      clientId: "agent_researcher",
+      owner: "0x1111111111111111111111111111111111111111",
+      label: WALLET,
+      scopes: ["mcp:call", "router.use"],
+      linkedAt: "2026-09-23T10:00:00.000Z",
+      routerBaseUrl: "https://router.example",
+    },
+    network: "eip155:8453",
+    amountAtomic: "4750000",
+    transaction: `0x${"33".repeat(32)}`,
+    authorization: {
+      token: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      from: "0x1111111111111111111111111111111111111111",
+      nonce: `0x${"ab".repeat(32)}`,
+      validBefore: "1790157600",
+    },
+  };
 }

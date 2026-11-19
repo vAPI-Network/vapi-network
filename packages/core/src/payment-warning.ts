@@ -1,6 +1,9 @@
-/** A confirmed payment remains successful when local persistence or follow-up work fails. */
+/** Payment evidence and recovery guidance, including authorizations not yet confirmed settled. */
 export type PaymentWarning = {
   code:
+    | "settlement_unconfirmed"
+    | "credit_pending"
+    | "pending_purchase_unlinked"
     | "audit_unavailable"
     | "router_key_unavailable"
     | "balance_unavailable"

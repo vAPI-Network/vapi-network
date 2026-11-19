@@ -8,6 +8,7 @@ export function purchaseTransport(
   home: string,
   failure: "audit" | "key" | "balance" | "all" | "response" | "receipt" | "key-store",
   routerBase = "https://router.example",
+  options: { creditNeverAppears?: boolean; noSettlementHeader?: boolean } = {},
 ) {
   const calls = { paid: 0, key: 0, balance: 0 };
   const fetchImpl: typeof fetch = async (input, init) => {
@@ -44,15 +45,17 @@ export function purchaseTransport(
         { status: "accepted" },
         {
           status: failure === "response" ? 503 : 200,
-          headers: {
-            "payment-response": Buffer.from(
-              JSON.stringify({
-                success: true,
-                network: BASE_MAINNET_CAIP2,
-                transaction: `0x${"33".repeat(32)}`,
-              }),
-            ).toString("base64"),
-          },
+          headers: options.noSettlementHeader
+            ? {}
+            : {
+                "payment-response": Buffer.from(
+                  JSON.stringify({
+                    success: true,
+                    network: BASE_MAINNET_CAIP2,
+                    transaction: `0x${"33".repeat(32)}`,
+                  }),
+                ).toString("base64"),
+              },
         },
       );
     }
@@ -75,7 +78,11 @@ export function purchaseTransport(
               ownerLimitUsd: 0,
               ownerSpentUsd: 0,
             },
-            balance: { purchasedUsd: 5, spentUsd: 0, remainingUsd: 5 },
+            balance: {
+              purchasedUsd: options.creditNeverAppears ? 0 : calls.paid * 5,
+              spentUsd: 0,
+              remainingUsd: options.creditNeverAppears ? 0 : calls.paid * 5,
+            },
           });
     }
     // A scheduled ceiling sweep sees zero balances and never sends a transfer.

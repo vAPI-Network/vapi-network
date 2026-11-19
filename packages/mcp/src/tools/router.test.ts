@@ -16,6 +16,7 @@ import {
 } from "@vapi-network/core/router-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { routerBuyTool, routerChatTool } from "./router.js";
 import { createVapiServer, type VapiServerOptions } from "../server.js";
 import { purchaseTransport } from "../../../../test-fixtures/router-purchase.js";
 import { agentSecretAccounts } from "@vapi-network/core/agent-link";
@@ -38,6 +39,99 @@ afterEach(async () => {
 });
 
 describe("vAPI Router MCP tools", () => {
+  it("returns and validates an unconfirmed settlement through real payment", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-router-unconfirmed-"));
+    temporaryDirectories.push(home);
+    const secrets = memoryStore();
+    const store = await WalletStore.open(home, { secrets });
+    const main = await store.create("main", "", {
+      phrase: "test test test test test test test test test test test junk",
+    });
+    await store.setSpendCaps("main", { perCallAtomic: "5000000", perDayAtomic: "20000000" });
+    await store.setLink("main", {
+      apiBase: API_BASE,
+      clientId: "agent_main",
+      owner: OWNER,
+      label: "main",
+      scopes: ["mcp:call", "router.use"],
+      linkedAt: "2026-11-06T00:00:00.000Z",
+      routerBaseUrl: "https://router.example",
+    });
+    await secrets.set(
+      agentSecretAccounts("main").tokens,
+      JSON.stringify({
+        accessToken: "test-access-token",
+        refreshToken: "test-refresh-token",
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        scopes: ["mcp:call", "router.use"],
+      }),
+    );
+    const { fetchImpl, calls } = purchaseTransport(home, "key-store", "https://router.example", {
+      noSettlementHeader: true,
+    });
+    const config = getDefaultConfig({});
+    config.allowPrivateNetwork = true;
+    const server = createVapiServer({
+      account: main.account,
+      config,
+      store,
+      secretStore: secrets,
+      env: {},
+      fetchImpl,
+      ledgerPath: join(home, "spend-ledger.json"),
+      receiptsPath: join(home, "receipts.jsonl"),
+    });
+    try {
+      const result = await server.callTool({ name: "router.buy", arguments: { usd: 5 } });
+      expect(result.isError, JSON.stringify(result)).not.toBe(true);
+      expect(calls.paid).toBe(1);
+      expect(result.structuredContent).toMatchObject({
+        receipt: { settlement: "unknown" },
+        warnings: [{ code: "settlement_unconfirmed" }],
+      });
+      expect(routerBuyTool.outputSchema.parse(result.structuredContent)).toEqual(
+        result.structuredContent,
+      );
+      expect((await WalletStore.open(home)).entry("main")?.routerPendingPurchase?.status).toBe(
+        "signed",
+      );
+      expectPublicValue(result);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it.each(["settlement_unconfirmed", "credit_pending", "pending_purchase_unlinked"] as const)(
+    "validates %s warnings in both purchase and chat output",
+    async (code) => {
+      const refill = {
+        receipt: {
+          id: "warning-purchase",
+          timestamp: RESET_TIME,
+          resourceUrl: `${API_BASE}api/router/top-up/5`,
+          settlement: { outcome: "unknown" as const },
+        },
+        balance: null,
+        warnings: [{ code, message: "Keep the purchase evidence." }],
+      };
+      const { server } = await routerServer({
+        routerChat: async () => ({ ...chatResult(), refill }),
+      });
+      try {
+        const result = await server.callTool({
+          name: "router.chat",
+          arguments: { model: "m", messages: [{ role: "user", content: "hi" }] },
+        });
+        expect(result.isError).not.toBe(true);
+        const parsed = routerChatTool.outputSchema.parse(result.structuredContent);
+        expect(parsed.refill?.warnings?.[0]?.code).toBe(code);
+        expect(routerBuyTool.outputSchema.parse(parsed.refill).warnings?.[0]?.code).toBe(code);
+      } finally {
+        await server.close();
+      }
+    },
+  );
+
   it.each(["audit", "key", "balance"] as const)(
     "returns success through real payment when %s follow-up fails",
     async (failure) => {
@@ -95,6 +189,7 @@ describe("vAPI Router MCP tools", () => {
                     ? "router_key_unavailable"
                     : "balance_unavailable",
             },
+            ...(failure === "key" || failure === "balance" ? [{ code: "credit_pending" }] : []),
           ],
         });
         expectPublicValue(result);
@@ -113,6 +208,12 @@ describe("vAPI Router MCP tools", () => {
     expect(names).toEqual(
       expect.arrayContaining(["router.models", "router.usage", "router.chat", "router.buy"]),
     );
+    expect(names.filter((name) => name.startsWith("router.")).sort()).toEqual([
+      "router.buy",
+      "router.chat",
+      "router.models",
+      "router.usage",
+    ]);
     expect(names).not.toContain("router.key");
     for (const name of ["router.models", "router.usage", "router.chat", "router.buy"]) {
       const tool = tools.find((candidate) => candidate.name === name);
@@ -494,7 +595,7 @@ describe("vAPI Router MCP tools", () => {
 
       expect(result.isError, JSON.stringify(result)).not.toBe(true);
       expect(result.structuredContent).toEqual({
-        receipt: { id: receipt.id, amountUsd, network },
+        receipt: { id: receipt.id, amountUsd, network, settlement: "succeeded" },
         balance: null,
       });
       expect(buyRouterBalance).toHaveBeenCalledTimes(1);
@@ -543,6 +644,7 @@ describe("vAPI Router MCP tools", () => {
         amountUsd: 5,
         network: "eip155:8453",
         transaction: "0xrouter-topup-transaction",
+        settlement: "succeeded",
       },
       balance: { purchasedUsd: 5, spentUsd: 0, remainingUsd: 5 },
     });

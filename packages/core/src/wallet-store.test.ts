@@ -914,6 +914,37 @@ describe("wallet store", () => {
     SLOW,
   );
 
+  it.each([undefined, 0, 7.25, -1, Infinity, NaN])(
+    "validates and persists the Router purchased baseline %s",
+    async (baseline) => {
+      const home = await makeHome();
+      const store = await openStore(home);
+      await store.create("main", PASSPHRASE);
+      const pending = {
+        receiptId: "baseline-journal",
+        status: "settled" as const,
+        createdAt: "2026-11-07T10:00:00.000Z",
+        tierUsd: 5 as const,
+        link: {
+          apiBase: "https://console.example",
+          clientId: "client",
+          owner: "0x1111111111111111111111111111111111111111" as const,
+          label: "test",
+          scopes: [],
+          linkedAt: "2026-11-07T10:00:00.000Z",
+        },
+        ...(baseline === undefined ? {} : { baselinePurchasedUsd: baseline }),
+      };
+      if (baseline !== undefined && (!Number.isFinite(baseline) || baseline < 0)) {
+        await expect(store.setRouterPendingPurchase("main", pending)).rejects.toThrow();
+        expect((await openStore(home)).entry("main")?.routerPendingPurchase).toBeUndefined();
+      } else {
+        await store.setRouterPendingPurchase("main", pending);
+        expect((await openStore(home)).entry("main")?.routerPendingPurchase).toEqual(pending);
+      }
+    },
+  );
+
   it.each(["rename", "remove"] as const)(
     "refuses %s while a Router purchase is pending, then permits it after clearing",
     async (operation) => {

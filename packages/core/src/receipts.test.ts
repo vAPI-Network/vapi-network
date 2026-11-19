@@ -4,17 +4,106 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { appendReceipt, parseReceipt, readReceipts, type Receipt } from "./receipts.js";
+import {
+  __setReceiptTestHooks,
+  appendReceipt,
+  parseReceipt,
+  readReceipts,
+  renameReceiptWallet,
+  syncReceipts,
+  type Receipt,
+} from "./receipts.js";
 
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  __setReceiptTestHooks(undefined);
   await Promise.all(
     temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
   );
 });
 
 describe("receipts ledger", () => {
+  it("syncs each append and the directory on creation, and rejects a missing sync target", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-sync-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "receipts.jsonl");
+    const synced: string[] = [];
+    __setReceiptTestHooks({
+      afterSync: (path) => {
+        synced.push(path);
+      },
+    });
+    const receipt: Receipt = {
+      id: "durable",
+      timestamp: "2026-09-10T08:00:00.000Z",
+      resourceUrl: "https://api.example/paid",
+    };
+    await appendReceipt(receipt, path);
+    expect(synced).toEqual([path, directory]);
+    await appendReceipt({ ...receipt, id: "next" }, path);
+    expect(synced).toEqual([path, directory, path]);
+    await expect(syncReceipts(join(directory, "missing"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("syncs the rename temporary file before replacement and the directory afterward", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-rename-sync-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "receipts.jsonl");
+    const receipt: Receipt = {
+      id: "rename",
+      timestamp: "2026-09-10T08:00:00.000Z",
+      resourceUrl: "https://api.example/paid",
+      wallet: "main",
+    };
+    await appendReceipt(receipt, path);
+    const synced: string[] = [];
+    __setReceiptTestHooks({
+      afterSync: async (target) => {
+        synced.push(target);
+        expect((await readReceipts(path))[0]?.wallet).toBe(
+          target === directory ? "renamed" : "main",
+        );
+      },
+    });
+    expect(await renameReceiptWallet("main", "renamed", path)).toBe(1);
+    expect(synced).toEqual([expect.stringMatching(/\.tmp$/), directory]);
+    __setReceiptTestHooks({
+      beforeSync: () => {
+        throw new Error("sync failed");
+      },
+    });
+    await expect(renameReceiptWallet("renamed", "other", path)).rejects.toThrow("sync failed");
+    expect((await readReceipts(path))[0]?.wallet).toBe("renamed");
+  });
+
+  it("coalesces Router revisions at the original position before wallet filtering", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-revisions-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "receipts.jsonl");
+    const original: Receipt = {
+      id: "purchase",
+      timestamp: "2026-09-10T08:00:00.000Z",
+      resourceUrl: "https://api.example/top-up/5",
+      source: "router.topup",
+      wallet: "main",
+      settlement: { outcome: "unknown" },
+    };
+    const ordinary: Receipt = { ...original, id: "ordinary", source: "other" };
+    const revision: Receipt = {
+      ...original,
+      wallet: "research",
+      settlement: { outcome: "succeeded" },
+    };
+    for (const row of [original, ordinary, revision, ordinary]) await appendReceipt(row, path);
+    expect(await readReceipts(path)).toEqual([revision, ordinary, ordinary]);
+    expect(await readReceipts(path, { wallet: "main" })).toEqual([ordinary, ordinary]);
+    expect(await readReceipts(path, { wallet: "research" })).toEqual([revision]);
+    expect((await readFile(path, "utf8")).trim().split("\n")).toHaveLength(4);
+  });
+
   it("appends one JSON object per line and reads the newest limit", async () => {
     const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-"));
     temporaryDirectories.push(directory);
