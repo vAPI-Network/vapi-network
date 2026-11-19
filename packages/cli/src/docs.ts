@@ -1,14 +1,7 @@
 import { askDocs, readDocs, searchDocs } from "@vapi-network/core";
 
-import {
-  UsageError,
-  getEnvironment,
-  output,
-  parseArguments,
-  requiredPositional,
-  type CliDependencies,
-  type CliIo,
-} from "./cli.js";
+import { getEnvironment, output, type CliDependencies, type CliIo } from "./cli.js";
+import { UsageError, parseArguments, requiredPositional } from "./args.js";
 
 const DOCS_USAGE =
   'Usage: vapi docs "<question>", vapi docs search "<query>", or vapi docs read <url-or-path> [--json].';

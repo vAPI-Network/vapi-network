@@ -12,19 +12,18 @@ import {
 } from "@vapi-network/core";
 
 import {
-  UsageError,
   fileExists,
   getEnvironment,
   getPrompts,
   getSecretStore,
   isStdinInteractive,
   output,
-  parseArguments,
   readConfig,
   recordAudit,
   type CliDependencies,
   type CliIo,
 } from "./cli.js";
+import { UsageError, parseArguments } from "./args.js";
 import { restoreFromOwnerCommand } from "./cloud-backup.js";
 import { restoreVaultFromPhrase } from "./setup.js";
 import { collectStatus } from "./status.js";

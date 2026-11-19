@@ -8,13 +8,13 @@ import {
   getSecretStore,
   isInteractive,
   openInBrowser,
-  parseArguments,
   readConfig,
   registryBaseUrl,
   targetWallet,
   type CliDependencies,
   type CliIo,
 } from "./cli.js";
+import { parseArguments } from "./args.js";
 import { runLoginFlow } from "./login.js";
 
 type DashboardLink =

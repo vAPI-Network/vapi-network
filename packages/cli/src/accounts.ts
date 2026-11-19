@@ -34,22 +34,20 @@ import { renameAgentLinkWallet } from "@vapi-network/core/agent-link";
 import { exportKeystoreKeys } from "@vapi-network/core/secrets";
 
 import {
-  UsageError,
   baseUsdcBalanceReader,
   confirmWalletName,
   getSecretStore,
   getEnvironment,
   isInteractive,
   openWalletStore,
-  parseArguments,
   recordAudit,
   registryBaseUrl,
-  requiredPositional,
   targetWallet,
   unlockTarget,
   type CliDependencies,
   type CliIo,
 } from "./cli.js";
+import { UsageError, parseArguments, requiredPositional } from "./args.js";
 import { offerDashboardLink } from "./dashboard.js";
 import { runLoginFlow } from "./login.js";
 import { accountNameWidth, collectStatus, formatAccountLine } from "./status.js";

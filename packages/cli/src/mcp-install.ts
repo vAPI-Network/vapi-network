@@ -6,9 +6,7 @@ import { dirname, posix, win32 } from "node:path";
 import { getVapiPaths, isMissingFile, resolveRegistryUrl, WalletStore } from "@vapi-network/core";
 
 import {
-  UsageError,
   output,
-  parseArguments,
   getEnvironment,
   getSecretStore,
   readConfig,
@@ -16,6 +14,7 @@ import {
   type CliDependencies,
   type CliIo,
 } from "./cli.js";
+import { UsageError, parseArguments } from "./args.js";
 
 import { escapeToml, removeTomlTables, tomlSeparator } from "./toml-config.js";
 

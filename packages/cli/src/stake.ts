@@ -8,16 +8,15 @@ import { AGENT_LINK_REVOKED_MESSAGE } from "@vapi-network/core/agent-link";
 import { formatUnits } from "viem";
 
 import {
-  UsageError,
   getEnvironment,
   getSecretStore,
   openInBrowser,
-  parseArguments,
   targetWallet,
   type CliDependencies,
   type CliIo,
   type WalletTarget,
 } from "./cli.js";
+import { UsageError, parseArguments } from "./args.js";
 
 const WALLET_OPTION = "--wallet";
 export const STAKE_URL = "https://api.vapinetwork.ai/stake";

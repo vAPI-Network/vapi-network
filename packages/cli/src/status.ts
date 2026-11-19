@@ -21,7 +21,6 @@ import { readCloudBackupState } from "@vapi-network/core/cloud-backup";
 import { routerUsage } from "@vapi-network/core/router-client";
 
 import {
-  UsageError,
   baseUsdcBalanceReader,
   getEnvironment,
   getSecretStore,
@@ -32,6 +31,7 @@ import {
   type CliIo,
   type WalletTarget,
 } from "./cli.js";
+import { UsageError } from "./args.js";
 import { agentLinkStatus } from "./login.js";
 import { routerDeps } from "./router.js";
 import { CLI_VERSION } from "./version.js";
