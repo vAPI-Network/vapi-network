@@ -20,13 +20,8 @@ import {
   withAgentCredentialLock,
 } from "@vapi-network/core/agent-link";
 
-import {
-  getSecretStore,
-  openInBrowser,
-  registryBaseUrl,
-  targetWallet,
-  unlockTarget,
-} from "./cli.js";
+import { openInBrowser, registryBaseUrl } from "./cli.js";
+import { getSecretStore, targetWallet, unlockTarget } from "./wallet-session.js";
 import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
 import { parseArguments } from "./args.js";
 import { fetchWalletIdentity, formatIdentityLines } from "./identity.js";

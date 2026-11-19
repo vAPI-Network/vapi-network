@@ -55,15 +55,14 @@ import {
 } from "@vapi-network/mcp";
 
 import { buildAgentRunDeps } from "./agent.js";
+import { redactDetachedRunValue, registryBaseUrl } from "./cli.js";
 import {
   confirmWalletName,
   getSecretStore,
   openWalletStore,
   recordAudit,
-  redactDetachedRunValue,
-  registryBaseUrl,
   unlockTarget,
-} from "./cli.js";
+} from "./wallet-session.js";
 import {
   getEnvironment,
   isStdinInteractive,

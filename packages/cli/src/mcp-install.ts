@@ -5,7 +5,8 @@ import { dirname, posix, win32 } from "node:path";
 
 import { getVapiPaths, isMissingFile, resolveRegistryUrl, WalletStore } from "@vapi-network/core";
 
-import { getSecretStore, registryBaseUrl } from "./cli.js";
+import { registryBaseUrl } from "./cli.js";
+import { getSecretStore } from "./wallet-session.js";
 import {
   output,
   getEnvironment,
