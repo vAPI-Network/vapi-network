@@ -3,6 +3,13 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
+versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
+1.0.0 a breaking change raises the minor version and is listed under a Breaking
+heading. Each heading carries the date the version was published to npm, and the
+sentence under it is the summary shown on the
+[GitHub release](https://github.com/vAPI-Network/vapi-network/releases).
+
 ## Unreleased
 
 ### Fixed
@@ -10,13 +17,17 @@ scoped packages. The packages share one version and are released together.
 - Linux: `vapi login` no longer fails with "The agent link could not be stored consistently" on keyrings where `secret-tool clear` exits 1 without a message when it matches nothing. An exit 1 without a message for an entry the lookup did not find now counts as nothing to remove; any other exit code, a failure with a reason, and a failure to remove an entry the lookup found are still reported. Reported in #41, first fixed by @Rizal9 in #31.
 - A refused agent link now names the HTTP status and the server's error code, for example `The vAPI agent link request failed (HTTP 429, rate_limited).` Earlier versions printed only "The vAPI agent link request failed." for a rate limit, a refusal and a proxy error alike (#30, #42). A gateway or proxy error page without a JSON body is reported the same way and no longer as "response was invalid".
 
-## 0.14.0 — 2026-11-17
+## 0.14.0 - 2026-11-17
+
+Send ETH that landed on an agent account back to its owner with `vapi sweep --asset eth`.
 
 ### Added
 
 - `vapi sweep --asset eth` sends an account's ETH on Base back to an address, or to the linked owner when no address is given. It keeps the Base network fee (gas plus the L1 data fee, with a 20% margin) and checks gas for the exact amount before signing. It works on Base and Base Sepolia only; Arc and Solana are refused. Without `--asset`, `vapi sweep` moves USDC exactly as before.
 
-## 0.13.0 — 2026-11-10
+## 0.13.0 - 2026-11-10
+
+`vapi setup` works on Linux machines without a keyring, such as servers, containers and GitHub Codespaces.
 
 ### Added
 
@@ -26,7 +37,9 @@ scoped packages. The packages share one version and are released together.
 
 - The Linux device-key failure hint now names `VAPI_VAULT_PASSWORD`.
 
-## 0.12.1 — 2026-11-09
+## 0.12.1 - 2026-11-10
+
+Setup says why the device key could not be stored, and secret-store errors no longer repeat raw keyring output.
 
 ### Fixed
 
@@ -34,7 +47,9 @@ scoped packages. The packages share one version and are released together.
 - When `vapi setup` cannot store the device vault key, it now says why, for example that `secret-tool` is not installed. On Linux it adds that a server, container or GitHub Codespace usually has no keyring. Run vapi on your own computer or connect Claude from https://api.vapinetwork.ai/connect.
 - OS secret-store errors no longer repeat the keyring tool's raw output, which could contain a secret. They name a known reason (such as no keyring daemon, a locked collection, or no D-Bus) or only the exit code.
 
-## 0.12.0 — 2026-10-30
+## 0.12.0 - 2026-11-05
+
+Run Claude Code and Codex on vAPI Compute with `vapi code install`, `vapi claude` and `vapi codex`. Fixes the Windows secret store.
 
 ### Added
 
@@ -50,12 +65,13 @@ scoped packages. The packages share one version and are released together.
 
 - Claude Code on vAPI Compute needs the Router's `/v1/messages` fix and prompt-cache pricing, live on vAPI production since v3.26.0.
 
-## 0.11.0 — 2026-10-29
+## 0.11.0 - 2026-10-29
+
+vAPI Call takes no fee. The package ships an agent skill, and search shows health, alternatives and next-step hints.
 
 ### Added
 
 - The public `vapi-network` package ships `SKILL.md` with setup, discovery, payment and recovery guidance for agents.
-
 - API search results can include registry health and cheaper or healthier alternatives, and inspected endpoints can include response schemas and example requests.
 - CLI JSON and MCP results for search, inspect and pay include up to four hints naming next actions.
 - `vapi search --include-outage` and MCP `call.search`'s `includeOutage` input request listings hidden by the hosted registry's default outage filter.
@@ -72,7 +88,9 @@ scoped packages. The packages share one version and are released together.
 - Discovery pages accept any `rankingVersion` label, so a registry that re-ranks no longer breaks installed clients. Required before the registry ships `marketplace-ranking-v2`.
 - The hidden-outage hint appears only when the registry reports `totals.hiddenOutage` above zero.
 
-## 0.10.0 — 2026-10-28
+## 0.10.0 - 2026-10-28
+
+MCP tools carry titles and annotations, the server identifies itself, and Call results can render interactively in Claude Desktop.
 
 ### Added
 
@@ -80,7 +98,7 @@ scoped packages. The packages share one version and are released together.
 - The MCP server identifies itself as vAPI Network with a title, website URL and light/dark icons. `server.json` lists the same icons for the MCP Registry.
 - `call.search` and `call.inspect` support interactive MCP Apps results in Claude Desktop. Views load from the hosted asset route and fall back to text when offline.
 
-## 0.9.7 (2026-10-26)
+## 0.9.7 - 2026-10-26
 
 ### Fixed
 
@@ -88,7 +106,7 @@ scoped packages. The packages share one version and are released together.
 - `vapi publish` sends each endpoint's `metadataEvidence` from the probe back with the listing, so an endpoint with a request schema is no longer refused with HTTP 422.
 - `--mode` is a hint: the registry accepts it and detects the kind of URL itself. Registries before 2026-10-26 refused it with HTTP 400 "Unrecognized key: mode".
 
-## 0.9.6 (2026-10-23)
+## 0.9.6 - 2026-10-24
 
 ### Fixed
 
@@ -96,7 +114,7 @@ scoped packages. The packages share one version and are released together.
 - `wallet.list` reports the current default from `wallets.json`, matching the `isDefault` marker on its rows.
 - Re-reading the account list never wipes the vault key an in-flight payment is still signing with.
 
-## 0.9.5 (2026-10-22)
+## 0.9.5 - 2026-10-23
 
 ### Added
 
@@ -107,7 +125,7 @@ scoped packages. The packages share one version and are released together.
 - `vapi init`, `vapi wallet create` and `vapi mcp install` offer to link the new or default wallet to your vAPI dashboard in an interactive terminal. Press Enter to accept, or use `--no-link` to skip the prompt.
 - Non-interactive runs print a login hint; JSON results include `linked: false` and a `next` link step when the wallet is unlinked. A failed link never fails wallet creation or MCP installation.
 
-## 0.9.4 (2026-10-15)
+## 0.9.4 - 2026-10-16
 
 ### Added
 
@@ -121,7 +139,9 @@ scoped packages. The packages share one version and are released together.
 
 - Interactive CLI runs report when a newer release is available. The check is skipped for JSON, MCP server, CI and non-TTY runs, uses a daily cache, and adds at most 1.5 seconds. Update with `npm i -g vapi-network@latest`.
 
-## 0.9.3 (2026-10-15)
+## 0.9.3 - not published
+
+Never published to npm on its own. These changes shipped in 0.9.4.
 
 ### Fixed
 
@@ -133,7 +153,7 @@ scoped packages. The packages share one version and are released together.
 - Phrase recovery scans through gaps until five consecutive addresses have no Base USDC. `--accounts <n>` restores a fixed count, and recovery reports how many addresses it scanned.
 - Inspect documentation describes the registry's last observed quote; a fresh quote is fetched when paying.
 
-## 0.9.2 (2026-10-15)
+## 0.9.2 - 2026-10-15
 
 0.9.1 was never published to npm; 0.9.2 is the first npm release carrying its changes.
 
@@ -156,7 +176,9 @@ scoped packages. The packages share one version and are released together.
 
 - Clients ≤ 0.9.0 fail every search whose results include a Solana row. Update to 0.9.2 with `npm i -g vapi-network@latest`.
 
-## 0.9.1 (2026-10-13)
+## 0.9.1 - not published
+
+Never published to npm on its own. These changes shipped in 0.9.2.
 
 ### Fixed
 
@@ -179,7 +201,7 @@ scoped packages. The packages share one version and are released together.
 - A polling error still fails the command or tool after a confirmed transaction; it never repeats the chain mutation.
 - Authentication errors may include sign-in or scope guidance, and chain errors include the HTTP status beside the code.
 
-## 0.9.0 (2026-10-12)
+## 0.9.0 - 2026-10-12
 
 ### Added
 
@@ -194,7 +216,7 @@ scoped packages. The packages share one version and are released together.
 - Dispute and counter-evidence pay the verified contract fee under the local spend policy.
 - The pinned Base Sepolia factory predates escrow V2, so V2 dispute actions refuse until a V2 deployment is pinned in a later release.
 
-## 0.8.0 (2026-10-01)
+## 0.8.0 - 2026-10-01
 
 ### Added
 
@@ -281,7 +303,7 @@ scoped packages. The packages share one version and are released together.
 - Backup size fallback now checks both the encrypted envelope and the owner restore relay payload against the 64 KB limit.
 - Backup export now applies the normal agent profile defaults. Invalid profiles are reported as skipped, and the CLI warns for each one.
 
-## 0.7.0 (2026-09-30)
+## 0.7.0 - 2026-09-30
 
 ### Added
 
@@ -326,7 +348,9 @@ scoped packages. The packages share one version and are released together.
 - Backup export now applies the normal agent profile defaults. Invalid profiles are reported as skipped, and the CLI warns for each one.
 - `vapi` installed with `npm i -g` (a symlink in the global bin directory) now runs; before, it exited 0 without output because the entry check compared the symlink path with the resolved module path.
 
-## 0.6.0 (2026-09-29)
+## 0.6.0 - not published
+
+Never published to npm on its own. These changes shipped in 0.7.0.
 
 ### Added
 
@@ -356,7 +380,9 @@ scoped packages. The packages share one version and are released together.
 - Top-level `vapi unlock` and `vapi lock` are deprecated; use `vapi vault unlock` and `vapi vault lock`. The old names work for one release.
 - `createVapiClient({ wallet })` is deprecated; use `createVapiClient({ account })`. The option remains accepted until 0.7.
 
-## 0.5.1 (2026-09-28)
+## 0.5.1 - not published
+
+Never published to npm on its own. These changes shipped in 0.7.0.
 
 ### Fixed
 
@@ -366,7 +392,7 @@ scoped packages. The packages share one version and are released together.
   whatever was typed there instead of the value the client sent. Every keychain write now goes over
   the pipe, in a terminal or not.
 
-## 0.5.0 (2026-09-25)
+## 0.5.0 - 2026-09-25
 
 ### Added
 
@@ -454,7 +480,9 @@ open` opens the console's stake page. Staking itself stays in the console.
   in one sentence and exit code 1 instead of a stack trace. A sweep without ETH
   for gas names the address to fund.
 
-## 0.4.0
+## 0.4.0 - not published
+
+Never published to npm on its own. These changes shipped in 0.5.0.
 
 Listing on vAPI became permissionless, so "is this listed?" stopped being a
 useful question and "how far did vAPI review it?" took its place. The registry
@@ -564,7 +592,7 @@ nonce)`, whether the signed authorization was used — `settled` (do not pay
 - Every package, `scripts/pack-check.mjs`, `CLI_VERSION` and
   `VAPI_CLIENT_VERSION` move to 0.4.0.
 
-## 0.3.0
+## 0.3.0 - 2026-09-19
 
 Several wallets on one machine, a passphrase that no longer has to sit in an
 editor's configuration file, and a hard line between what a person may see and
@@ -704,7 +732,9 @@ live on the wallet rather than in `config.json`; set them with `vapi wallet caps
 honoured, and is still checked first — `vapi unlock` is the new option, not a
 replacement.
 
-## 0.2.5
+## 0.2.5 - not published
+
+Never published to npm on its own. These changes shipped in 0.3.0.
 
 ### Added
 
@@ -752,7 +782,7 @@ replacement.
 - `createOnrampSession` stays exported for backwards compatibility but is no
   longer used by the CLI or the MCP server. Use the new `fundingPageUrl`.
 
-## 0.2.3
+## 0.2.3 - 2026-09-18
 
 ### Added
 
@@ -773,7 +803,7 @@ replacement.
 - The `bin` entries no longer use a `./` prefix, which npm stripped from the
   published manifest with a `"bin[vapi]" script name … was invalid` warning.
 
-## 0.2.1
+## 0.2.1 - 2026-09-18
 
 ### Changed
 
@@ -783,7 +813,7 @@ replacement.
   version beside it. `vapi init` and bare `vapi` show it; `--json`, `NO_COLOR`,
   `CI` and non-TTY output get the plain frame.
 
-## 0.2.0
+## 0.2.0 - 2026-09-18
 
 First release published to the npm `latest` tag. `0.2.0-dev.x` preview builds
 remain on `next`.

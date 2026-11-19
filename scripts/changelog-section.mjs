@@ -23,11 +23,39 @@ export function changelogSection(changelog, version) {
   return body;
 }
 
+const REPOSITORY_URL = "https://github.com/vAPI-Network/vapi-network";
+
+/**
+ * The body of a GitHub release: the changelog section, then one line with the
+ * install command, the npm page and, when the previous tag is known, the
+ * comparison with it.
+ */
+export function releaseNotes(changelog, version, previousTag) {
+  const links = [
+    `Install: \`npm i -g vapi-network@${version}\``,
+    `[npm](https://www.npmjs.com/package/vapi-network/v/${version})`,
+  ];
+  if (previousTag !== undefined && previousTag.length > 0) {
+    if (!VERSION.test(previousTag.replace(/^v/u, ""))) {
+      throw new Error(`Not a release tag: ${previousTag}`);
+    }
+    links.push(
+      `[Changes since ${previousTag}](${REPOSITORY_URL}/compare/${previousTag}...v${version})`,
+    );
+  }
+  return `${changelogSection(changelog, version)}\n\n---\n\n${links.join(" · ")}`;
+}
+
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    const version = (process.argv[2] ?? "").replace(/^v/u, "");
+    const [tag = "", mode, previousTag] = process.argv.slice(2);
+    const version = tag.replace(/^v/u, "");
     const changelog = await readFile(join(repositoryRoot, "CHANGELOG.md"), "utf8");
-    console.log(changelogSection(changelog, version));
+    console.log(
+      mode === "--release"
+        ? releaseNotes(changelog, version, previousTag)
+        : changelogSection(changelog, version),
+    );
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

@@ -16,7 +16,7 @@ Every `package.json` carries the same version. These files pin it as well and mo
 | `README.md`                           | The "describes client" line in the quickstart |
 | `packages/core/README.md`             | The `VAPI_CLIENT_VERSION` row                 |
 
-Rename the `Unreleased` heading in `CHANGELOG.md` to `## <version> — <date>` and add an empty `Unreleased` heading above it. Follow semantic versioning: before 1.0.0 a breaking change raises the minor version and is marked as breaking in the changelog.
+Rename the `Unreleased` heading in `CHANGELOG.md` to `## <version> - <date>`, with the date as `YYYY-MM-DD`, and add an empty `Unreleased` heading above it. Write one sentence directly under the new heading that says what the release is for; it becomes the first line of the GitHub release. Group the entries under `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security` and, when needed, `Breaking`. Each entry names the command, tool or function a reader would search for and says what changes for them. Follow semantic versioning: before 1.0.0 a breaking change raises the minor version and is marked as breaking in the changelog.
 
 Open the release as a pull request titled `chore: release <version>`. Merge it once `verify` and `dco` are green.
 
@@ -52,7 +52,7 @@ git tag -a v<version> -m "vapi-network <version>"
 git push origin v<version>
 ```
 
-The "GitHub release" workflow checks the tag against the package version and publishes a GitHub release with that version's changelog section as its notes. A tag with a hyphen, such as `v0.15.0-rc.1`, is published as a pre-release. vAPI Desktop has its own tags, `desktop-v<version>`, described in [the desktop release guide](../apps/desktop/RELEASE.md).
+The "GitHub release" workflow checks the tag against the package version and publishes a GitHub release titled with the tag. Its notes are that version's changelog section, followed by the install command, the npm page and a comparison with the previous release. A tag with a hyphen, such as `v0.15.0-rc.1`, is published as a pre-release. vAPI Desktop has its own tags, `desktop-v<version>`, described in [the desktop release guide](../apps/desktop/RELEASE.md).
 
 ## After the release
 
