@@ -20,7 +20,8 @@ import {
 import { readCloudBackupState } from "@vapi-network/core/cloud-backup";
 import { routerUsage } from "@vapi-network/core/router-client";
 
-import { baseUsdcBalanceReader, registryBaseUrl } from "./cli.js";
+import { baseUsdcBalanceReader } from "./cli.js";
+import { registryBaseUrl } from "./publish-cli.js";
 import {
   getSecretStore,
   openWalletStore,
