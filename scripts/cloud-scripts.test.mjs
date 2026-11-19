@@ -200,3 +200,26 @@ test("preflight remains advisory by default and strict for level 1 failures", ()
   assert.equal(strict.status, 1);
   assert.equal(shell("bash scripts/cloud-preflight.sh --invalid").status, 2);
 });
+
+test("cloud shells commit as the project identity; local shells keep their own", () => {
+  const identity =
+    'printf "%s|%s|%s|%s" "${GIT_AUTHOR_NAME-}" "${GIT_AUTHOR_EMAIL-}" "${GIT_COMMITTER_NAME-}" "${GIT_COMMITTER_EMAIL-}"';
+  const personal = {
+    GIT_AUTHOR_NAME: "Someone",
+    GIT_AUTHOR_EMAIL: "someone@example.com",
+    GIT_COMMITTER_NAME: "Someone",
+    GIT_COMMITTER_EMAIL: "someone@example.com",
+  };
+  const project = "vAPI Development|336934719+vapi-development@users.noreply.github.com";
+
+  const cloud = shell(identity, personal);
+  passed(cloud);
+  assert.equal(cloud.stdout, `${project}|${project}`);
+
+  const local = shell(`source scripts/cloud-env.sh; ${identity}`, {
+    ...personal,
+    CONDUCTOR_IS_LOCAL: "1",
+  });
+  passed(local);
+  assert.equal(local.stdout, "Someone|someone@example.com|Someone|someone@example.com");
+});
