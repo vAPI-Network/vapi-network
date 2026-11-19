@@ -1163,6 +1163,63 @@ describe("agentAccessToken", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
+  it("refreshes without deadlock when the client id is publish:main", async () => {
+    const home = await temporaryHome();
+    const wallets = await walletStore(home);
+    await wallets.setLink("main", agentLink({ clientId: "publish:main" }));
+    const accounts = agentSecretAccounts("main");
+    const secrets = memorySecretStore({
+      [accounts.tokens]: JSON.stringify({ ...linkResult().tokens, expiresAt: 0 }),
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      expect(new URL(String(input)).pathname).toBe("/oauth/token");
+      return Response.json({
+        access_token: "rotated-access",
+        refresh_token: "rotated-refresh",
+        expires_in: 3600,
+      });
+    });
+    let waiting!: () => void;
+    const lockWait = new Promise<"lock-wait">((resolve) => {
+      waiting = () => resolve("lock-wait");
+    });
+    const schedule = setTimeout;
+    const timerSpy = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockImplementation((callback, delay, ...args) => {
+        if (delay === 20) {
+          waiting();
+          // Stop a self-deadlocked refresh so failure cleanup does not wait 30 seconds.
+          throw new Error("Unexpected credential lock retry.");
+        }
+        return schedule(callback, delay, ...args);
+      });
+    const refresh = agentAccessToken({
+      secrets,
+      wallets,
+      wallet: "main",
+      fetchImpl,
+      now: () => 1_000,
+    });
+    try {
+      await expect(Promise.race([refresh.then(() => "refreshed"), lockWait])).resolves.toBe(
+        "refreshed",
+      );
+      expect(timerSpy.mock.calls.some(([, delay]) => delay === 20)).toBe(false);
+      await expect(refresh).resolves.toBe("rotated-access");
+      expect(JSON.parse(secrets.entries[accounts.tokens]!)).toEqual({
+        accessToken: "rotated-access",
+        refreshToken: "rotated-refresh",
+        expiresAt: 3_601_000,
+        scopes: linkResult().tokens.scopes,
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    } finally {
+      await Promise.allSettled([refresh]);
+      timerSpy.mockRestore();
+    }
+  });
+
   it("fails clearly without rotating credentials when a remote access token expires", async () => {
     const home = await temporaryHome();
     const wallets = await walletStore(home);
@@ -1370,6 +1427,17 @@ describe("agentAccessToken", () => {
         requested();
         return await response;
       });
+      let waiting!: () => void;
+      const lockWait = new Promise<void>((resolve) => {
+        waiting = resolve;
+      });
+      const schedule = setTimeout;
+      const timerSpy = vi
+        .spyOn(globalThis, "setTimeout")
+        .mockImplementation((callback, delay, ...args) => {
+          if (delay === 20) waiting();
+          return schedule(callback, delay, ...args);
+        });
       const refresh = agentAccessToken({
         secrets,
         wallets,
@@ -1378,26 +1446,34 @@ describe("agentAccessToken", () => {
         now: () => 1_000,
       });
       const resolved = expect(refresh).resolves.toBe("rotated-access");
-      // Login holds the publish lock, so the refresh cannot act on a half-published link.
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      expect(fetchImpl).not.toHaveBeenCalled();
-      finishLogin();
-      const newLink = await login;
-      expect(newLink.linkedAt).not.toBe(previousLink.linkedAt);
-      await requestStarted;
-      respond(
-        Response.json({
-          access_token: "rotated-access",
-          refresh_token: "rotated-refresh",
-          expires_in: 3600,
-        }),
-      );
-      await resolved;
-      expect(JSON.parse(secrets.entries[accounts.tokens]!)).toMatchObject({
-        accessToken: "rotated-access",
-        refreshToken: "rotated-refresh",
-      });
-      expect(secrets.setCalls.filter(([name]) => name === accounts.tokens)).toHaveLength(2);
+      try {
+        // Login holds the publish lock, so the refresh cannot act on a half-published link.
+        await lockWait;
+        expect(fetchImpl).not.toHaveBeenCalled();
+        finishLogin();
+        const newLink = await login;
+        expect(newLink.linkedAt).not.toBe(previousLink.linkedAt);
+        await requestStarted;
+        respond(
+          Response.json({
+            access_token: "rotated-access",
+            refresh_token: "rotated-refresh",
+            expires_in: 3600,
+          }),
+        );
+        await resolved;
+        expect(JSON.parse(secrets.entries[accounts.tokens]!)).toMatchObject({
+          accessToken: "rotated-access",
+          refreshToken: "rotated-refresh",
+        });
+        expect(secrets.setCalls.filter(([name]) => name === accounts.tokens)).toHaveLength(2);
+      } finally {
+        finishLogin();
+        respond(Response.json({ access_token: "rotated-access", expires_in: 3600 }));
+        await Promise.allSettled([login, resolved]);
+        timerSpy.mockRestore();
+        vi.useRealTimers();
+      }
     },
   );
 

@@ -328,7 +328,9 @@ async function withCredentialPublishLock<T>(
   wallet: WalletName,
   operation: () => Promise<T>,
 ): Promise<T> {
-  return await withAgentCredentialLock(wallets, `publish:${wallet}`, operation);
+  const digest = createHash("sha256").update(wallet).digest("hex").slice(0, 24);
+  const lockPath = `${wallets.registryPath}.${digest}.agent-publish.lock`;
+  return await withCredentialLockFile(lockPath, operation);
 }
 
 export async function saveAgentLink(args: {
@@ -726,6 +728,13 @@ export async function withAgentCredentialLock<T>(
 ): Promise<T> {
   const digest = createHash("sha256").update(clientId).digest("hex").slice(0, 24);
   const lockPath = `${wallets.registryPath}.${digest}.agent-link.lock`;
+  return await withCredentialLockFile(lockPath, operation);
+}
+
+async function withCredentialLockFile<T>(
+  lockPath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
   await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
   const deadline = Date.now() + 30_000;
   let handle: FileHandle | undefined;
