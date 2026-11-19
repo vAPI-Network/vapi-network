@@ -55,7 +55,8 @@ import {
 } from "@vapi-network/mcp";
 
 import { buildAgentRunDeps } from "./agent.js";
-import { redactDetachedRunValue, registryBaseUrl } from "./cli.js";
+import { redactDetachedRunValue } from "./cli.js";
+import { registryBaseUrl } from "./publish-cli.js";
 import {
   confirmWalletName,
   getSecretStore,

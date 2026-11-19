@@ -26,7 +26,7 @@ import {
 } from "@vapi-network/core/router-client";
 import { AGENT_LINK_REVOKED_MESSAGE } from "@vapi-network/core/agent-link";
 
-import { registryBaseUrl } from "./cli.js";
+import { registryBaseUrl } from "./publish-cli.js";
 import {
   getSecretStore,
   recordAudit,
