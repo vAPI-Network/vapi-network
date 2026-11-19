@@ -136,6 +136,8 @@ export const RAILWAY_CHECKPOINT_RULE =
   "1-64 letters, digits, '.', '_' or '-', starting with a letter or digit";
 
 const SANDBOX_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
+const UNREADABLE_SANDBOX_ID_MESSAGE =
+  "Could not read a sandbox id from the railway sandbox create output (expected JSON with id or sandboxId).";
 const MISSING_FILE_PATTERN = /no such file or directory/iu;
 const HTTP_NOT_FOUND_PATTERN = /\b404\b/u;
 /** Any other thing a Railway error can report missing; its not-found says nothing about the sandbox. */
@@ -186,9 +188,7 @@ export function parseSandboxId(stdout: string): string {
     const id = sandboxIdOf(parsed);
     if (id !== undefined) return id;
   }
-  throw new Error(
-    "Could not read a sandbox id from the railway sandbox create output (expected JSON with id or sandboxId).",
-  );
+  throw new Error(UNREADABLE_SANDBOX_ID_MESSAGE);
 }
 
 function sandboxIdOf(value: unknown): string | undefined {
@@ -729,6 +729,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
         ...(run.parentRunId === undefined ? {} : { parentRunId: run.parentRunId }),
       });
       const secretValues = collectSecrets([bundle, privateKey, privateKey.slice(2)], credentials);
+      const credentialValues = collectSecretValues([], credentials);
 
       // One `agent.remote_key_exported` line per export: once `sandbox create`
       // ran, whether this path or the signal handler gets to write it.
@@ -832,7 +833,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
         }
         if (id !== undefined) {
           try {
-            await withTimeout(destroySandbox(exec, id), signalDestroyTimeoutMs);
+            await withTimeout(destroySandbox(exec, id, secretValues), signalDestroyTimeoutMs);
             rmSync(sidecarPath, { force: true });
             sidecarRecorded = true; // Successful destruction also permits retiring the start.
           } catch {
@@ -904,7 +905,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
           // here on destroys this sandbox rather than pointing at a list.
           if (created.code === 0) {
             try {
-              sandboxId = parseSandboxId(created.stdout);
+              sandboxId = readSandboxId(created.stdout, secretValues, credentialValues);
               saveSidecar({ ...sidecar, sandboxId });
             } catch {
               // An unreadable id is reported below; the sidecar is written again there.
@@ -994,7 +995,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
 
         let id: string;
         try {
-          id = sandboxId ?? parseSandboxId(created.stdout);
+          id = sandboxId ?? readSandboxId(created.stdout, secretValues, credentialValues);
         } catch (error) {
           // Without an id nothing here can destroy it, so the owner must.
           const failure = new RuntimeError(
@@ -1063,11 +1064,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
           saveSidecar({ ...sidecar, state: "running" });
         } catch (error) {
           const cause = scrub(errorMessage(error), secretValues);
-          const displayId = displaySandboxId(
-            id,
-            secretValues,
-            collectSecretValues([], credentials),
-          );
+          const displayId = displaySandboxId(id, secretValues, credentialValues);
           // After a signal the handler destroys the sandbox and owns the sidecar.
           if (interrupted !== undefined) {
             if (recordedSandboxId === undefined) assertNotInterrupted();
@@ -1076,7 +1073,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
             );
           }
           try {
-            await destroySandbox(exec, id);
+            await destroySandbox(exec, id, secretValues);
           } catch (destroyError) {
             try {
               saveSidecar({ ...sidecar, state: "orphaned", sandboxId: id });
@@ -1179,7 +1176,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
       // A finished member's key must not sit in an idle VM. Until the destroy
       // succeeds the run stays running, so the next refresh retries it.
       try {
-        await destroySandbox(exec, id);
+        await destroySandbox(exec, id, []);
       } catch (error) {
         return {
           state: "running",
@@ -1194,7 +1191,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
       const id = sandboxRef(handle);
       if (id === undefined) throw new Error("Invalid railway runtime sandbox id.");
       // The Railway adapter always requires exit 0, with or without requireSuccessfulExit.
-      await destroySandbox(exec, id);
+      await destroySandbox(exec, id, []);
       await removeSidecar(home, handle.runId);
     },
   };
@@ -1336,10 +1333,14 @@ function sidecarAccount(
 }
 
 /** Only a successful destroy exit proves this sandbox is gone. */
-async function destroySandbox(exec: RailwayExec, id: string): Promise<void> {
+async function destroySandbox(
+  exec: RailwayExec,
+  id: string,
+  secrets: readonly string[],
+): Promise<void> {
   const outcome = await exec(RAILWAY_CLI.binary, RAILWAY_CLI.destroy(id));
   if (outcome.code === 0) return;
-  throw new Error(`railway sandbox destroy ${id} failed${describeFailure(outcome, [])}`);
+  throw new Error(`railway sandbox destroy ${id} failed${describeFailure(outcome, secrets)}`);
 }
 
 /**
@@ -1806,6 +1807,22 @@ function displaySandboxId(
   return displayed;
 }
 
+function readSandboxId(
+  stdout: string,
+  secrets: readonly string[],
+  credentialValues: readonly string[],
+): string {
+  const id = parseSandboxId(stdout);
+  const normalized = id.toLowerCase();
+  if (
+    credentialValues.some((value) => normalized === value.toLowerCase()) ||
+    secrets.some((value) => normalized.includes(value.toLowerCase()))
+  ) {
+    throw new Error(UNREADABLE_SANDBOX_ID_MESSAGE);
+  }
+  return id;
+}
+
 function describeFailure(outcome: RailwayExecResult, secrets: readonly string[]): string {
   const line = outcome.stderr
     .split(/\r?\n/u)
@@ -1813,7 +1830,12 @@ function describeFailure(outcome: RailwayExecResult, secrets: readonly string[])
     .find((part) => part.length > 0);
   const exit = outcome.code === null ? "no exit code" : `exit ${outcome.code}`;
   if (line === undefined) return ` (${exit}).`;
-  return ` (${exit}): ${scrub(line, secrets).slice(0, 300)}`;
+  // The bundle is base64url text; a shorter word after the name is a diagnostic, not a value.
+  const redacted = line.replace(
+    new RegExp(`${RAILWAY_CLI.bundleVariable}["']?\\s*[=:]\\s*["']?[A-Za-z0-9_-]{32,}`, "gu"),
+    `${RAILWAY_CLI.bundleVariable}=[redacted]`,
+  );
+  return ` (${exit}): ${scrub(redacted, secrets).slice(0, 300)}`;
 }
 
 function errorMessage(error: unknown): string {

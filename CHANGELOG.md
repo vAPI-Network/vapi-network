@@ -86,6 +86,7 @@ Router purchases recover after an interruption without a second charge, swarm di
 - On Windows, a caller waiting for a file lock keeps waiting when the released lock it is removing is deleted by another caller at the same moment, instead of failing with a permission error.
 - A failure while releasing a file lock no longer replaces the result of the operation that ran under it, so a saved receipt or a completed wallet rename is not reported as failed.
 - A failed Railway launch that leaves a launch marker without a sandbox id, because the id could not be saved or the marker could not be removed, now keeps its starting reservation and returns `launch_ambiguous`, so `vapi swarm stop <swarm> <runId> --confirm-worker-stopped` can clear the marker after the five-minute window. Identified sidecars still use `vapi swarm stop <swarm> <runId>` and `vapi swarm forget-run <swarm> <runId> --confirm-destroyed` after verified destruction.
+- Railway launches treat a sandbox id in the `railway sandbox create` output that matches the member key, the bundle or a credential exported with the member as unreadable. The launch returns `launch_ambiguous` and the value is not written to the sidecar, the run record or a `railway` command line. Failure text from `railway` is scrubbed before it is shortened, and an echoed `VAPI_MEMBER_BUNDLE` value is always removed.
 
 ### Internal
 
