@@ -1,6 +1,6 @@
 import { askDocs, readDocs, searchDocs } from "@vapi-network/core";
 
-import { getEnvironment, output, type CliDependencies, type CliIo } from "./cli.js";
+import { getEnvironment, output, type CliDependencies, type CliIo } from "./cli-context.js";
 import { UsageError, parseArguments, requiredPositional } from "./args.js";
 
 const DOCS_USAGE =

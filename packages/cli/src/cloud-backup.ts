@@ -27,21 +27,23 @@ import { registeredAgentProfileSchema } from "@vapi-network/mcp";
 import { detectColorLevel } from "./brand.js";
 import {
   fileExists,
+  getSecretStore,
+  openInBrowser,
+  openWalletStore,
+  recordAudit,
+  registryBaseUrl,
+} from "./cli.js";
+import {
   getEnvironment,
   getLinePrompt,
   getPrompts,
-  getSecretStore,
   isInteractive,
   isStdinInteractive,
-  openInBrowser,
-  openWalletStore,
   output,
   readConfig,
-  recordAudit,
-  registryBaseUrl,
   type CliDependencies,
   type CliIo,
-} from "./cli.js";
+} from "./cli-context.js";
 import { UsageError, parseArguments } from "./args.js";
 
 const CLOUD_BACKUP_USAGE = "Usage: vapi backup --cloud [off] [--json]";

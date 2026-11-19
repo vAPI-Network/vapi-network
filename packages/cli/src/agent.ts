@@ -47,7 +47,6 @@ import {
 } from "@vapi-network/mcp";
 
 import {
-  getEnvironment,
   getSecretStore,
   openWalletStore,
   redactDetachedRunValue,
@@ -55,9 +54,8 @@ import {
   unlockTarget,
   walletCapsCommand,
   walletCreateCommand,
-  type CliDependencies,
-  type CliIo,
 } from "./cli.js";
+import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
 import { UsageError, parseArguments } from "./args.js";
 import { runHeadlessAgent } from "./headless.js";
 import { runLoginFlow } from "./login.js";

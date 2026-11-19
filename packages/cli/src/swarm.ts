@@ -57,17 +57,19 @@ import {
 import { buildAgentRunDeps } from "./agent.js";
 import {
   confirmWalletName,
-  getEnvironment,
   getSecretStore,
-  isStdinInteractive,
   openWalletStore,
   recordAudit,
   redactDetachedRunValue,
   registryBaseUrl,
   unlockTarget,
+} from "./cli.js";
+import {
+  getEnvironment,
+  isStdinInteractive,
   type CliDependencies,
   type CliIo,
-} from "./cli.js";
+} from "./cli-context.js";
 import { UsageError, parseArguments, requiredPositional } from "./args.js";
 import { parseRuntimeKind, resolveRuntime } from "./runtime-local.js";
 import {

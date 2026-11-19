@@ -5,15 +5,14 @@ import { dirname, posix, win32 } from "node:path";
 
 import { getVapiPaths, isMissingFile, resolveRegistryUrl, WalletStore } from "@vapi-network/core";
 
+import { getSecretStore, registryBaseUrl } from "./cli.js";
 import {
   output,
   getEnvironment,
-  getSecretStore,
   readConfig,
-  registryBaseUrl,
   type CliDependencies,
   type CliIo,
-} from "./cli.js";
+} from "./cli-context.js";
 import { UsageError, parseArguments } from "./args.js";
 
 import { escapeToml, removeTomlTables, tomlSeparator } from "./toml-config.js";

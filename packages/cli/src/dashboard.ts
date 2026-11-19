@@ -2,18 +2,15 @@ import { resolve } from "node:path";
 
 import { activeAgentMarker, getVapiPaths, WalletStore } from "@vapi-network/core";
 
+import { getSecretStore, openInBrowser, registryBaseUrl, targetWallet } from "./cli.js";
 import {
   getEnvironment,
   getLinePrompt,
-  getSecretStore,
   isInteractive,
-  openInBrowser,
   readConfig,
-  registryBaseUrl,
-  targetWallet,
   type CliDependencies,
   type CliIo,
-} from "./cli.js";
+} from "./cli-context.js";
 import { parseArguments } from "./args.js";
 import { runLoginFlow } from "./login.js";
 

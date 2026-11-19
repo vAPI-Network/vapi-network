@@ -21,12 +21,8 @@ import type {
 } from "@vapi-network/core/agent-link";
 import type { AgentRouterUsage } from "@vapi-network/core/router-client";
 
-import {
-  runCli as runCliWithDependencies,
-  type CliDependencies,
-  type CliIo,
-  type CliPrompts,
-} from "./cli.js";
+import { runCli as runCliWithDependencies, type CliDependencies, type CliIo } from "./cli.js";
+import { type CliPrompts } from "./cli-context.js";
 import { CLI_VERSION } from "./version.js";
 
 vi.mock("@vapi-network/core", async (importOriginal) => {

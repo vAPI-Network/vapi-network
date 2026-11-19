@@ -27,8 +27,8 @@ import {
   verificationNotice,
   type CliDependencies,
   type CliIo,
-  type CliPrompts,
 } from "./cli.js";
+import { type CliPrompts } from "./cli-context.js";
 
 /** BIP-39's own test phrase, and the Base account every wallet derives from it. */
 const VECTOR_PHRASE =

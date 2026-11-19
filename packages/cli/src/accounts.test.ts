@@ -25,12 +25,8 @@ import {
 } from "@vapi-network/core/agent-link";
 import type { Hex } from "viem";
 
-import {
-  runCli as runCliWithDependencies,
-  type CliDependencies,
-  type CliIo,
-  type CliPrompts,
-} from "./cli.js";
+import { runCli as runCliWithDependencies, type CliDependencies, type CliIo } from "./cli.js";
+import { type CliPrompts } from "./cli-context.js";
 
 const PRIVATE_KEYS = [
   `0x${"11".repeat(32)}`,

@@ -21,15 +21,13 @@ import {
 } from "@vapi-network/core/agent-link";
 
 import {
-  getEnvironment,
   getSecretStore,
   openInBrowser,
   registryBaseUrl,
   targetWallet,
   unlockTarget,
-  type CliDependencies,
-  type CliIo,
 } from "./cli.js";
+import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
 import { parseArguments } from "./args.js";
 import { fetchWalletIdentity, formatIdentityLines } from "./identity.js";
 

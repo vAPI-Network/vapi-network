@@ -1,4 +1,5 @@
-export { HELP, runCli, type CliDependencies, type CliIo } from "./cli.js";
+export { HELP, runCli } from "./cli.js";
+export type { CliDependencies, CliIo } from "./cli-context.js";
 export { runCliWithUpdateCheck } from "./update-check.js";
 export {
   createLocalRuntime,
