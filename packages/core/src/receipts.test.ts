@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { __setAtomicFileTestHooks } from "./atomic-file.js";
 import {
   __setReceiptTestHooks,
   appendReceipt,
@@ -17,6 +18,7 @@ import {
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+  __setAtomicFileTestHooks(undefined);
   __setReceiptTestHooks(undefined);
   await Promise.all(
     temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
@@ -39,13 +41,14 @@ describe("receipts ledger", () => {
       timestamp: "2026-09-10T08:00:00.000Z",
       resourceUrl: "https://api.example/paid",
     };
+    const expected = process.platform === "win32" ? [path] : [path, directory];
     await appendReceipt(receipt, path);
-    expect(synced).toEqual([path, directory]);
+    expect(synced).toEqual(expected);
     await appendReceipt({ ...receipt, id: "next" }, path);
-    expect(synced).toEqual([path, directory, path]);
+    expect(synced).toEqual([...expected, path]);
     synced.length = 0;
     await syncReceipts(path);
-    expect(synced).toEqual([path, directory]);
+    expect(synced).toEqual(expected);
     await expect(syncReceipts(join(directory, "missing"))).rejects.toMatchObject({
       code: "ENOENT",
     });
@@ -122,48 +125,73 @@ describe("receipts ledger", () => {
     expect(await readFile(path, "utf8")).toBe("ledger");
   });
 
-  it.each(["file", "directory"] as const)(
-    "rejects a %s sync failure at the strict durability gate",
-    async (target) => {
-      const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-strict-"));
-      temporaryDirectories.push(directory);
-      const path = join(directory, "receipts.jsonl");
-      await writeFile(path, "");
-      const attempts: string[] = [];
-      __setReceiptTestHooks({
-        beforeSync: (candidate) => {
-          attempts.push(candidate);
-          if (candidate === (target === "file" ? path : directory)) throw new Error("sync failed");
-        },
-      });
-      await expect(syncReceipts(path)).rejects.toThrow("sync failed");
-      expect(attempts).toEqual(target === "file" ? [path] : [path, directory]);
-    },
-  );
+  for (const target of ["file", "directory"] as const) {
+    it.skipIf(process.platform === "win32" && target === "directory")(
+      `rejects a ${target} sync failure at the strict durability gate`,
+      async () => {
+        const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-strict-"));
+        temporaryDirectories.push(directory);
+        const path = join(directory, "receipts.jsonl");
+        await writeFile(path, "");
+        const attempts: string[] = [];
+        __setReceiptTestHooks({
+          beforeSync: (candidate) => {
+            attempts.push(candidate);
+            if (candidate === (target === "file" ? path : directory))
+              throw new Error("sync failed");
+          },
+        });
+        await expect(syncReceipts(path)).rejects.toThrow("sync failed");
+        expect(attempts).toEqual(target === "file" ? [path] : [path, directory]);
+      },
+    );
+  }
 
-  it.each(["file", "directory"] as const)(
-    "returns the written receipt despite a %s sync failure at append",
-    async (target) => {
-      const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-best-effort-"));
-      temporaryDirectories.push(directory);
-      const path = join(directory, "receipts.jsonl");
-      const row: Receipt = {
-        id: "written",
-        timestamp: "2026-09-10T08:00:00.000Z",
-        resourceUrl: "https://api.example/paid",
-      };
-      const attempts: string[] = [];
-      __setReceiptTestHooks({
-        beforeSync: (candidate) => {
-          attempts.push(candidate);
-          if (candidate === (target === "file" ? path : directory)) throw new Error("sync failed");
-        },
-      });
-      await expect(appendReceipt(row, path)).resolves.toEqual(row);
-      expect(attempts).toEqual([path, directory]);
-      expect(await readReceipts(path)).toEqual([row]);
-    },
-  );
+  for (const target of ["file", "directory"] as const) {
+    it.skipIf(process.platform === "win32" && target === "directory")(
+      `returns the written receipt despite a ${target} sync failure at append`,
+      async () => {
+        const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-best-effort-"));
+        temporaryDirectories.push(directory);
+        const path = join(directory, "receipts.jsonl");
+        const row: Receipt = {
+          id: "written",
+          timestamp: "2026-09-10T08:00:00.000Z",
+          resourceUrl: "https://api.example/paid",
+        };
+        const attempts: string[] = [];
+        __setReceiptTestHooks({
+          beforeSync: (candidate) => {
+            attempts.push(candidate);
+            if (candidate === (target === "file" ? path : directory))
+              throw new Error("sync failed");
+          },
+        });
+        await expect(appendReceipt(row, path)).resolves.toEqual(row);
+        expect(attempts).toEqual(process.platform === "win32" ? [path] : [path, directory]);
+        expect(await readReceipts(path)).toEqual([row]);
+      },
+    );
+  }
+
+  it("returns the written receipt exactly once when the lock release marker fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-release-failure-"));
+    temporaryDirectories.push(directory);
+    const path = join(directory, "receipts.jsonl");
+    const row: Receipt = {
+      id: "written",
+      timestamp: "2026-09-10T08:00:00.000Z",
+      resourceUrl: "https://api.example/paid",
+    };
+    const beforeLockRelease = vi.fn(() => {
+      throw new Error("release marker failed");
+    });
+    __setAtomicFileTestHooks({ beforeLockRelease });
+
+    await expect(appendReceipt(row, path)).resolves.toEqual(row);
+    expect(beforeLockRelease).toHaveBeenCalledExactlyOnceWith(`${path}.lock`);
+    expect(await readReceipts(path)).toEqual([row]);
+  });
 
   it("rejects when the receipt destination cannot be written", async () => {
     const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-write-failure-"));
@@ -204,7 +232,11 @@ describe("receipts ledger", () => {
       },
     });
     expect(await renameReceiptWallet("main", "renamed", path)).toBe(1);
-    expect(synced).toEqual([expect.stringMatching(/\.tmp$/), directory]);
+    expect(synced).toEqual(
+      process.platform === "win32"
+        ? [expect.stringMatching(/\.tmp$/)]
+        : [expect.stringMatching(/\.tmp$/), directory],
+    );
     const before = await readFile(path);
     const attempts: string[] = [];
     __setReceiptTestHooks({

@@ -18,6 +18,8 @@ export interface FileLockOptions {
 }
 
 interface AtomicFileTestHooks {
+  beforeDirectorySync?: (directory: string) => void | Promise<void>;
+  beforeLockRelease?: (path: string) => void | Promise<void>;
   beforeLockAttempt?: (path: string) => void | Promise<void>;
   afterLockCreate?: (path: string) => void | Promise<void>;
   beforeStaleLockBreak?: (path: string) => void | Promise<void>;
@@ -59,11 +61,15 @@ export async function writeJsonAtomic(
     handle = undefined;
     await rename(temporaryPath, path);
 
-    const directoryHandle = await open(directory, "r");
-    try {
-      await directoryHandle.sync();
-    } finally {
-      await directoryHandle.close();
+    // Windows cannot flush a directory handle; NTFS journals the entry itself.
+    if (process.platform !== "win32") {
+      const directoryHandle = await open(directory, "r");
+      try {
+        await atomicFileTestHooks?.beforeDirectorySync?.(directory);
+        await directoryHandle.sync();
+      } finally {
+        await directoryHandle.close();
+      }
     }
   } catch (error) {
     await handle?.close().catch(() => undefined);
@@ -133,13 +139,19 @@ export async function withFileLock<T>(
   } finally {
     clearInterval(heartbeat);
     try {
-      await markLockReleased(ownedHandle, releasedOwner);
-    } finally {
       try {
-        await ownedHandle.close();
+        await atomicFileTestHooks?.beforeLockRelease?.(lockPath);
+        await markLockReleased(ownedHandle, releasedOwner);
       } finally {
-        await removeOwnedLock(lockPath, [owner, releasedOwner]);
+        try {
+          await ownedHandle.close();
+        } finally {
+          await removeOwnedLock(lockPath, [owner, releasedOwner]);
+        }
       }
+    } catch {
+      // Release failures cannot undo the finished operation; an unremoved lock
+      // is reported as busy by the next caller.
     }
   }
 }

@@ -2,7 +2,7 @@ import { mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   __setAtomicFileTestHooks,
@@ -34,12 +34,92 @@ describe("writeJsonAtomic", () => {
     await writeJsonAtomic(path, { value: "saved" });
 
     expect(await readFile(path, "utf8")).toBe('{\n  "value": "saved"\n}\n');
-    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") {
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
+    }
     expect(await readdir(join(directory, "nested"))).toEqual(["state.json"]);
+  });
+
+  it("skips the directory sync on Windows after writing the JSON file", async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, "state.json");
+    const beforeDirectorySync = vi.fn(() => {
+      throw new Error("directory sync is not supported");
+    });
+    __setAtomicFileTestHooks({ beforeDirectorySync });
+    const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    try {
+      await expect(writeJsonAtomic(path, { value: "saved" })).resolves.toBeUndefined();
+    } finally {
+      platform.mockRestore();
+    }
+
+    expect(await readFile(path, "utf8")).toBe('{\n  "value": "saved"\n}\n');
+    expect(beforeDirectorySync).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(process.platform === "win32")("syncs the parent directory on POSIX", async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, "state.json");
+    const beforeDirectorySync = vi.fn();
+    __setAtomicFileTestHooks({ beforeDirectorySync });
+
+    await writeJsonAtomic(path, { value: "saved" });
+
+    expect(beforeDirectorySync).toHaveBeenCalledExactlyOnceWith(directory);
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a directory sync failure on POSIX", async () => {
+    const directory = await temporaryDirectory();
+    const path = join(directory, "state.json");
+    const failure = new Error("directory sync failed");
+    const beforeDirectorySync = vi.fn(() => {
+      throw failure;
+    });
+    __setAtomicFileTestHooks({ beforeDirectorySync });
+
+    await expect(writeJsonAtomic(path, { value: "saved" })).rejects.toBe(failure);
+    expect(beforeDirectorySync).toHaveBeenCalledExactlyOnceWith(directory);
   });
 });
 
 describe("withFileLock", () => {
+  it("preserves the returned value and releases the lock when its release marker fails", async () => {
+    const directory = await temporaryDirectory();
+    const lockPath = join(directory, "state.lock");
+    const value = { saved: true };
+    const beforeLockRelease = vi.fn(() => {
+      throw new Error("release marker failed");
+    });
+    __setAtomicFileTestHooks({ beforeLockRelease });
+
+    await expect(withFileLock(lockPath, async () => value)).resolves.toBe(value);
+    expect(beforeLockRelease).toHaveBeenCalledExactlyOnceWith(lockPath);
+    expect(await readdir(directory)).toEqual([]);
+    await expect(
+      withFileLock(lockPath, async () => "acquired again", { timeoutMs: 0 }),
+    ).resolves.toBe("acquired again");
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  it("preserves the operation error when its lock release marker also fails", async () => {
+    const directory = await temporaryDirectory();
+    const lockPath = join(directory, "state.lock");
+    const operationError = new Error("operation failed");
+    const beforeLockRelease = vi.fn(() => {
+      throw new Error("release marker failed");
+    });
+    __setAtomicFileTestHooks({ beforeLockRelease });
+
+    await expect(
+      withFileLock(lockPath, async () => {
+        throw operationError;
+      }),
+    ).rejects.toBe(operationError);
+    expect(beforeLockRelease).toHaveBeenCalledExactlyOnceWith(lockPath);
+    expect(await readdir(directory)).toEqual([]);
+  });
+
   it("does not remove a fresh lock during concurrent stale-lock takeover", async () => {
     const directory = await temporaryDirectory();
     const lockPath = join(directory, "state.lock");
