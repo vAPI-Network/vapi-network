@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { fileExists, openInBrowser } from "./platform.js";
+import { redactDetachedRunText } from "./run-redaction.js";
 
 import { RouterClientError } from "@vapi-network/core/router-client";
 import { formatEther } from "viem";
@@ -101,8 +102,6 @@ import {
   callSearch,
   createCallPort,
   getWallet,
-  redactRunText,
-  redactRunValue,
   runAction,
   startStdioServer,
   type ActionContext,
@@ -207,6 +206,8 @@ export {
 } from "./wallet-session.js";
 
 export { fileExists, openInBrowser } from "./platform.js";
+
+export { redactDetachedRunValue } from "./run-redaction.js";
 
 const HELP_HEADING = "vAPI Network";
 
@@ -675,23 +676,6 @@ export async function runCli(
     }
     return code;
   }
-}
-
-export function redactDetachedRunValue<T>(value: T, environment: NodeJS.ProcessEnv): T {
-  return redactRunValue(value, environment);
-}
-
-/** Redacts one output line of a detached child; a JSON line stays valid JSON. */
-function redactDetachedRunText(value: string, environment: NodeJS.ProcessEnv): string {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    if (typeof parsed === "object" && parsed !== null) {
-      return JSON.stringify(redactRunValue(parsed, environment));
-    }
-  } catch {
-    // Not a JSON line: redact it as text.
-  }
-  return redactRunText(value, environment);
 }
 
 function runResultFile(argv: readonly string[]): string | undefined {

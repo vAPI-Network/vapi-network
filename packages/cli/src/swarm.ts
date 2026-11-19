@@ -2,11 +2,10 @@ import { rm } from "node:fs/promises";
 
 import {
   activeAgentMarker,
-  ARC_MAINNET_CAIP2,
-  BASE_MAINNET_CAIP2,
-  SWARM_ROLE_PATTERN,
   addSwarmMember,
+  ARC_MAINNET_CAIP2,
   assertWalletName,
+  BASE_MAINNET_CAIP2,
   createPublicFetch,
   createRunId,
   dissolveSwarm,
@@ -18,9 +17,10 @@ import {
   isRunId,
   leaveSwarm,
   loadConfig,
-  rebalanceSwarm,
   readSwarm,
+  rebalanceSwarm,
   setupSwarm,
+  SWARM_ROLE_PATTERN,
   SwarmError,
   swarmStatus,
   usdToAtomic,
@@ -44,8 +44,8 @@ import {
   startDetachedSwarmRun,
   stopRun,
   summarizeRunRecord,
-  writeRunRecord,
   withMemberRunLock,
+  writeRunRecord,
   type AgentEvent,
   type DetachedRunSummary,
   type RunRecord,
@@ -55,22 +55,15 @@ import {
 } from "@vapi-network/mcp";
 
 import { buildAgentRunDeps } from "./agent.js";
-import { redactDetachedRunValue } from "./cli.js";
-import { registryBaseUrl } from "./publish-cli.js";
-import {
-  confirmWalletName,
-  getSecretStore,
-  openWalletStore,
-  recordAudit,
-  unlockTarget,
-} from "./wallet-session.js";
+import { parseArguments, requiredPositional, UsageError } from "./args.js";
 import {
   getEnvironment,
   isStdinInteractive,
   type CliDependencies,
   type CliIo,
 } from "./cli-context.js";
-import { UsageError, parseArguments, requiredPositional } from "./args.js";
+import { registryBaseUrl } from "./publish-cli.js";
+import { redactDetachedRunValue } from "./run-redaction.js";
 import { parseRuntimeKind, resolveRuntime } from "./runtime-local.js";
 import {
   agentMarkerRefusal,
@@ -78,13 +71,20 @@ import {
   assertRemoteSafeMember,
   destroyRailwaySidecar,
   listRailwaySidecars,
-  railwaySidecarPath,
   ownerBalanceReader,
   RAILWAY_CHECKPOINT_PATTERN,
   RAILWAY_CHECKPOINT_RULE,
+  railwaySidecarPath,
   RemoteKeyRefusedError,
   type RailwaySidecar,
 } from "./runtime-railway.js";
+import {
+  confirmWalletName,
+  getSecretStore,
+  openWalletStore,
+  recordAudit,
+  unlockTarget,
+} from "./wallet-session.js";
 
 const SWARM_USAGE =
   "Usage: vapi swarm [create|add|remove|fund|rebalance|status|dissolve|run|runs|stop|forget-run] …";

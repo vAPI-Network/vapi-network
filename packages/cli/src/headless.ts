@@ -1,5 +1,5 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { rmSync } from "node:fs";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir as osTmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -28,9 +28,9 @@ import {
   redactAgentRunResult,
   printAgentRefills,
 } from "./agent.js";
-import { redactDetachedRunValue } from "./cli.js";
-import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
 import { UsageError } from "./args.js";
+import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
+import { redactDetachedRunValue } from "./run-redaction.js";
 
 /**
  * Headless `vapi agent run --bundle-env <VAR>`: one swarm member running on a

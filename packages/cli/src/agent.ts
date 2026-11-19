@@ -6,6 +6,7 @@ import {
   BASE_MAINNET_CAIP2,
   DEFAULT_AUTO_RELEASE_BELOW_USD,
   DEFAULT_MAX_PER_TASK_USD,
+  SWARM_NAME_PATTERN,
   assertWalletName,
   createRunBudget,
   createRunId,
@@ -17,12 +18,11 @@ import {
   listAgentProfiles,
   loadConfig,
   readAgentProfile,
-  readSwarm,
   readSpendLedgerRows,
+  readSwarm,
   removeAgentProfile,
   resolveRegistryUrl,
   spendCapsForWallet,
-  SWARM_NAME_PATTERN,
   swarmParentResolver,
   sweepAboveCeiling,
   usdToAtomic,
@@ -39,21 +39,22 @@ import {
   createAgentRunDeps,
   getWallet,
   registeredAgentProfileSchema,
-  runLogPath,
   runAgent,
+  runLogPath,
   startDetachedRun,
   type AgentEvent,
   type RunAgentDeps,
   type RunAgentResult,
 } from "@vapi-network/mcp";
 
-import { redactDetachedRunValue, walletCapsCommand, walletCreateCommand } from "./cli.js";
-import { getSecretStore, openWalletStore, targetWallet, unlockTarget } from "./wallet-session.js";
-import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
 import { UsageError, parseArguments } from "./args.js";
+import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
+import { walletCapsCommand, walletCreateCommand } from "./cli.js";
 import { runHeadlessAgent } from "./headless.js";
 import { runLoginFlow } from "./login.js";
+import { redactDetachedRunValue } from "./run-redaction.js";
 import { parseRuntimeKind, resolveRuntime } from "./runtime-local.js";
+import { getSecretStore, openWalletStore, targetWallet, unlockTarget } from "./wallet-session.js";
 
 export type AgentCommandDependencies = {
   readAgentProfile?: typeof readAgentProfile;
