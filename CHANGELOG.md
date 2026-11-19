@@ -12,10 +12,55 @@ sentence under it is the summary shown on the
 
 ## Unreleased
 
+Router purchases recover after an interruption without a second charge, swarm dissolution refuses while a worker is active or unresolved, and `vapi login` works on more Linux keyrings.
+
+### Added
+
+- `vapi router clear-pending [--confirm-unpaid]` prints public payment evidence and explorer instructions. Before clearing, the CLI uses the same receipt/authorization-state resolution as automatic recovery: paid attempts and live authorizations are refused, and unused expired authorizations can clear. Only when chain evidence is unavailable may explicit human confirmation override the guard; output identifies that confirmation as lacking chain evidence. There is no MCP equivalent.
+- CLI `vapi swarm forget-run <swarm> <runId> --confirm-destroyed` lets an owner confirm a verified unknown/orphaned sandbox is destroyed. It prints the original recorded scope and check command, retains a timestamped `forgotten` run record and retires the matching sidecar. Missing scope is reported rather than guessed.
+- MCP adds `swarm.stop` with `name` and exactly one of `runId` or `all: true`. `VapiServerOptions.runtimeForStop` optionally resolves stop-only adapters by runtime kind. The CLI-hosted server supplies local/Railway stop adapters without enabling remote startup or stale-start confirmation over MCP.
+- `PayRequestArgs` adds optional `beforeSign` (also on x402 payment builders) for durable public authorization journaling before signing, and optional `receiptId` to correlate a durable purchase reservation with its receipt ledger entry. The Router subentry exports `routerPurchaseView`, the shared public receipt/warning projection.
+- Core exports the `PaymentWarning` type. The Router subentry exports `RouterPurchaseResult`, `RouterPurchaseWarning` and `routerPurchaseSummary`.
+- Core exports `RouterPendingPurchase`. Wallet entries expose its public recovery metadata in memory, while `WalletStore.setRouterPendingPurchase` atomically reserves, updates or clears the matching record in `router-pending/<wallet>.json`, separate from the v1 wallet registry. Older registry writers cannot erase it. Existing registry records migrate on read; legacy `prepared` records remain `unknown` because older clients did not journal signing. Empty tombstones prevent stale registry snapshots from resurrecting cleared purchases.
+
+### Breaking
+
+- CLI Router purchase/refill JSON now matches MCP: `receipt.id`, `receipt.amountUsd`, `receipt.network` and optional `receipt.transaction` replace the flat `receiptId`, `amountUsd`, `network` and `transaction` fields. Human output includes the public receipt and transaction references.
+- `buyRouterBalance` returns `RouterPurchaseResult` with optional `PaymentWarning` entries. `routerPurchaseSummary`, CLI purchase JSON and MCP purchase output allow `amountUsd: null` and `network: "unknown"` when charged metadata is absent.
+- `payRequest` returns a confirmed in-memory receipt with warnings when receipt persistence or post-settlement processing fails, instead of rejecting. Callers must retain the receipt and must not repeat the payment for these warnings.
+- `RouterClientError` adds `refill_pending`, an optional prior `refill` purchase (fourth constructor argument, including interrupted purchases awaiting confirmation), and a public `toJSON()` summary. `ChatResult` adds optional `refill: RouterPurchaseResult`; CLI/MCP chat results and errors preserve public payment evidence and warnings.
+- `refreshRunRecord` now acquires the member lock, re-reads the stored record and returns its fresh state. Unknown and terminal records are never polled from stale snapshots. Missing records reject with `RuntimeError("run_not_found")`, changed member identity with `runtime_unavailable`, and lock contention with `member_busy`. MCP exports `withMemberRunLock(home, account, operation)` for the same lifecycle lock; no run-record schema or function argument changes in this round.
+- `destroyRailwaySidecar` serializes cleanup on the recorded member and re-reads ownership/state before acting. Concurrent completed confirmation with no sidecar returns `destroyed: true` without another Railway call; conflicting/current metadata or contention returns a failed cleanup result. Unattributed legacy cleanup is serialized by run id and does not rewrite failed metadata without a member lock.
+- Unknown Railway stops require destroy exit code zero; stderr warnings are accepted on success. Non-zero, interrupted and timeout outcomes reject even when text claims the sandbox was not found. Ordinary stop/status and `destroyRailwaySidecar` retain their base behavior.
+- MCP runtime `RunState` adds `orphaned` and `forgotten`; `RunRecord` and `DetachedRunSummary` add optional `forgottenAt` and `confirmedBy: "cli"`. A forgotten record requires both confirmation fields. `RuntimeHandle` adds optional `railwayScope: { projectId?, environmentId? }` for original creation metadata when available. MCP read-only run summaries include these states/confirmation fields; no forget tool is exposed.
+- `SwarmErrorCode` adds `swarm_workers_active` for active/unresolved-worker dissolution refusals. CLI JSON and MCP return that shared domain code instead of an untyped error.
+- Exported MCP `stopRun` now attempts to stop `unknown` workers and can reject when destruction cannot be confirmed; successful adapter completion is required before persisting `stopped`. `Runtime.stop` adds an optional `{ requireSuccessfulExit: true }` argument, passed by `stopRun` for unknown Railway records; adapters must honor it without text-based absence inference.
+
 ### Fixed
 
 - Linux: `vapi login` no longer fails with "The agent link could not be stored consistently" on keyrings where `secret-tool clear` exits 1 without a message when it matches nothing. An exit 1 without a message for an entry the lookup did not find now counts as nothing to remove; any other exit code, a failure with a reason, and a failure to remove an entry the lookup found are still reported. Reported in #41, first fixed by @Rizal9 in #31.
 - A refused agent link now names the HTTP status and the server's error code, for example `The vAPI agent link request failed (HTTP 429, rate_limited).` Earlier versions printed only "The vAPI agent link request failed." for a rate limit, a refusal and a proxy error alike (#30, #42). A gateway or proxy error page without a JSON body is reported the same way and no longer as "response was invalid".
+- Pending Router purchases survive process restarts and are recovered before any refill decision, including manual purchases with automatic refill disabled. An unresolved purchase blocks another payment; credential-only chat retries do not unlock the payment account.
+- Router reservations now distinguish unsigned `prepared`, journaled `signed`, confirmed `settled`, and legacy/unsupported `unknown` attempts. Recovery under a per-wallet purchase lock clears unsigned reservations. Signed EIP-3009 attempts query the token's `authorizationState(from, nonce)` on the configured network RPC: used nonces recover the original purchase; unused nonces clear only after `validBefore` plus a 30-second clock margin. Live authorizations return `refill_pending` with a retry time. RPC errors and unsupported networks fail closed with CLI recovery guidance.
+- Concurrent automatic Router refills re-read balance and the durable completion marker under the purchase reservation, so stale low-balance decisions cannot buy twice after a successful first purchase, even if the configured threshold exceeds the purchased tier.
+- Accounts with pending Router purchases cannot be renamed or removed, even with forced removal. The check and mutation hold the purchase lock so an in-flight reservation cannot lose its guard; errors point to `vapi router clear-pending`.
+- Confirmed Router purchases retain their receipts when audit, key retrieval/storage, balance lookup, receipt persistence or later response processing fails. Explicit warnings report these failures; unavailable balance is `null`.
+- First automatic Router refills retain settled receipts through console, credential and chat failures. Payment-aware guidance explains pending key recovery; the next chat request fetches the missing balance key without a second purchase.
+- CLI and MCP report the charged quote amount and network from available receipt evidence. Missing network metadata no longer throws after payment or silently guesses a network.
+- x402 settlement evidence is captured before post-response timing reads; throwing timing clocks cannot discard settlement or interrupt response consumption.
+- Confirmed x402 payments retain their receipt and report a warning when an injected timing clock throws during final receipt construction.
+- x402 receipt metadata is snapshotted and validated before payment. Failures after confirmed settlement return the receipt and warnings instead of rejecting.
+- Swarm dissolution performs one shared core check before any balance lookup, pending movement resumption or transfer. CLI and MCP refresh tracked runs before that check and refuse active or unresolved Railway runs and sidecars with the same stop guidance. The core check also fails closed without a runtime adapter.
+- `SwarmCapitalDeps` adds an optional `reconcileRuns` port; local run records remain the authority for the final eligibility check. Existing capital locks and movement-journal formats are unchanged.
+- Unknown Railway runs no longer permanently block dissolution after a sandbox disappears. CLI `swarm stop --all` and MCP `swarm.stop` attempt destruction even when status is unknown, persist `stopped` only after adapter success (destroy exit zero for unknown Railway runs), and retain blocking records on stop failure. The dissolution error names the applicable stop and CLI confirmation commands.
+- Unknown-run recovery never infers absence from human CLI text. Only a successful destroy or explicit CLI confirmation unblocks dissolution; failures move no funds. Railway experimental warnings no longer turn successful destroys into failures.
+- Concurrent Railway refreshes cannot turn a stored unknown run into finished through stale ordinary cleanup, or overwrite stopped/forgotten records and their confirmation metadata. Start and stop refresh through an internal helper while already holding the member lock.
+- Orphan-sidecar cleanup and CLI confirmation share the member lock. Failed cleanup cannot recreate a stale orphan after `forget-run` has retired it and retained the confirmation.
+
+### Internal
+
+- Core uses current path helpers and declared Tasks entry points, shares provenance deduplication in core, breaks the HD/keystore and Solana/x402 runtime import cycles, and refreshes the deprecated wallet option's removal notice without changing behavior.
+- The CLI all-networks gas-error test injects deterministic balance RPC responses during Arc setup instead of contacting live RPCs.
 
 ## 0.14.0 - 2026-11-17
 
