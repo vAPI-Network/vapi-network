@@ -84,6 +84,85 @@ describe("writeJsonAtomic", () => {
 });
 
 describe("withFileLock", () => {
+  it("rejects a Windows candidate tomb unlink failure without leaving its own record", async () => {
+    const directory = await temporaryDirectory();
+    const lockPath = join(directory, "state.lock");
+    await writeFile(
+      `${lockPath}.stale.released`,
+      JSON.stringify({ pid: process.pid, token: "released-owner", released: true }),
+      "utf8",
+    );
+    const failure = Object.assign(new Error("tomb unlink failed"), { code: "EPERM" });
+    let owner = "";
+    const beforeTombUnlink = vi.fn().mockImplementationOnce(() => {
+      throw failure;
+    });
+    __setAtomicFileTestHooks({
+      afterLockCreate: async () => {
+        owner = await readFile(lockPath, "utf8");
+      },
+      beforeTombUnlink,
+    });
+    const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    try {
+      await expect(withFileLock(lockPath, async () => undefined, { timeoutMs: 0 })).rejects.toBe(
+        failure,
+      );
+      expect(beforeTombUnlink).toHaveBeenCalledTimes(1);
+      expect(owner).not.toBe("");
+      const records = await Promise.all(
+        (await readdir(directory)).map((entry) => readFile(join(directory, entry), "utf8")),
+      );
+      expect(records).not.toContain(owner);
+      await expect(withFileLock(lockPath, async () => "acquired again")).resolves.toBe(
+        "acquired again",
+      );
+      expect(await readdir(directory)).toEqual([]);
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
+  it("removes its own tomb on outer timeout without changing another live owner's lock", async () => {
+    const directory = await temporaryDirectory();
+    const lockPath = join(directory, "state.lock");
+    const otherOwner = JSON.stringify({ pid: process.pid, token: "other" });
+    const now = Date.now();
+    let attempts = 0;
+    let owner = "";
+    __setAtomicFileTestHooks({
+      afterLockCreate: async () => {
+        if (owner !== "") return;
+        owner = await readFile(lockPath, "utf8");
+        await writeFile(`${lockPath}.stale.own`, owner, "utf8");
+      },
+      beforeLockAttempt: async () => {
+        attempts += 1;
+        if (attempts !== 2) return;
+        await writeFile(lockPath, otherOwner, { encoding: "utf8", flag: "wx" });
+        vi.setSystemTime(now + 1_000);
+      },
+    });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
+    try {
+      await expect(
+        withFileLock(lockPath, async () => undefined, { timeoutMs: 100 }),
+      ).rejects.toBeInstanceOf(FileLockedError);
+      expect(attempts).toBe(2);
+      expect(owner).not.toBe("");
+      expect((await readdir(directory)).filter((entry) => entry.includes(".stale."))).toEqual([]);
+      expect(await readFile(lockPath, "utf8")).toBe(otherOwner);
+      await rm(lockPath);
+      await expect(
+        withFileLock(lockPath, async () => "acquired again", { timeoutMs: 0 }),
+      ).resolves.toBe("acquired again");
+      expect(await readdir(directory)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("preserves the returned value and releases the lock when its release marker fails", async () => {
     const directory = await temporaryDirectory();
     const lockPath = join(directory, "state.lock");
@@ -117,6 +196,100 @@ describe("withFileLock", () => {
       }),
     ).rejects.toBe(operationError);
     expect(beforeLockRelease).toHaveBeenCalledExactlyOnceWith(lockPath);
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  it("preserves the returned value and removes the lock when closing its handle fails", async () => {
+    const directory = await temporaryDirectory();
+    const lockPath = join(directory, "state.lock");
+    const value = { saved: true };
+    const afterLockHandleClose = vi.fn(() => {
+      throw new Error("lock handle close failed");
+    });
+    __setAtomicFileTestHooks({ afterLockHandleClose });
+
+    await expect(withFileLock(lockPath, async () => value)).resolves.toBe(value);
+    expect(afterLockHandleClose).toHaveBeenCalledExactlyOnceWith(lockPath);
+    expect(await readdir(directory)).toEqual([]);
+    await expect(
+      withFileLock(lockPath, async () => "acquired again", { timeoutMs: 0 }),
+    ).resolves.toBe("acquired again");
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  it("preserves the operation error and removes the lock when closing its handle fails", async () => {
+    const directory = await temporaryDirectory();
+    const lockPath = join(directory, "state.lock");
+    const operationError = new Error("operation failed");
+    const afterLockHandleClose = vi.fn(() => {
+      throw new Error("lock handle close failed");
+    });
+    __setAtomicFileTestHooks({ afterLockHandleClose });
+
+    await expect(
+      withFileLock(lockPath, async () => {
+        throw operationError;
+      }),
+    ).rejects.toBe(operationError);
+    expect(afterLockHandleClose).toHaveBeenCalledExactlyOnceWith(lockPath);
+    expect(await readdir(directory)).toEqual([]);
+    await expect(
+      withFileLock(lockPath, async () => "acquired again", { timeoutMs: 0 }),
+    ).resolves.toBe("acquired again");
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  it("preserves the returned value and marks the tomb released when removal fails", async () => {
+    const directory = await temporaryDirectory();
+    const lockPath = join(directory, "state.lock");
+    const value = { saved: true };
+    const beforeTombUnlink = vi.fn().mockImplementationOnce(() => {
+      throw new Error("tomb unlink failed");
+    });
+    __setAtomicFileTestHooks({ beforeTombUnlink });
+
+    await expect(withFileLock(lockPath, async () => value)).resolves.toBe(value);
+    expect(beforeTombUnlink).toHaveBeenCalledTimes(1);
+    const entries = await readdir(directory);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatch(/^state\.lock\.stale\./);
+    expect(JSON.parse(await readFile(join(directory, entries[0]!), "utf8"))).toEqual({
+      pid: process.pid,
+      token: expect.any(String),
+      released: true,
+    });
+    await expect(withFileLock(lockPath, async () => "acquired again")).resolves.toBe(
+      "acquired again",
+    );
+    expect(await readdir(directory)).toEqual([]);
+  });
+
+  it("preserves the operation error and marks the tomb released when removal fails", async () => {
+    const directory = await temporaryDirectory();
+    const lockPath = join(directory, "state.lock");
+    const operationError = new Error("operation failed");
+    const beforeTombUnlink = vi.fn().mockImplementationOnce(() => {
+      throw new Error("tomb unlink failed");
+    });
+    __setAtomicFileTestHooks({ beforeTombUnlink });
+
+    await expect(
+      withFileLock(lockPath, async () => {
+        throw operationError;
+      }),
+    ).rejects.toBe(operationError);
+    expect(beforeTombUnlink).toHaveBeenCalledTimes(1);
+    const entries = await readdir(directory);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatch(/^state\.lock\.stale\./);
+    expect(JSON.parse(await readFile(join(directory, entries[0]!), "utf8"))).toEqual({
+      pid: process.pid,
+      token: expect.any(String),
+      released: true,
+    });
+    await expect(withFileLock(lockPath, async () => "acquired again")).resolves.toBe(
+      "acquired again",
+    );
     expect(await readdir(directory)).toEqual([]);
   });
 

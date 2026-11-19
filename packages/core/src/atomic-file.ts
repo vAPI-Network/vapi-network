@@ -20,6 +20,8 @@ export interface FileLockOptions {
 interface AtomicFileTestHooks {
   beforeDirectorySync?: (directory: string) => void | Promise<void>;
   beforeLockRelease?: (path: string) => void | Promise<void>;
+  afterLockHandleClose?: (path: string) => void | Promise<void>;
+  beforeTombUnlink?: (tombPath: string) => void | Promise<void>;
   beforeLockAttempt?: (path: string) => void | Promise<void>;
   afterLockCreate?: (path: string) => void | Promise<void>;
   beforeStaleLockBreak?: (path: string) => void | Promise<void>;
@@ -93,38 +95,45 @@ export async function withFileLock<T>(
   const releasedOwner = JSON.stringify({ ...ownerRecord, released: true });
   let handle: FileHandle | undefined;
 
-  while (handle === undefined) {
-    await atomicFileTestHooks?.beforeLockAttempt?.(lockPath);
-    try {
-      const candidate = await open(lockPath, "wx", 0o600);
+  try {
+    while (handle === undefined) {
+      await atomicFileTestHooks?.beforeLockAttempt?.(lockPath);
       try {
-        await candidate.writeFile(owner, "utf8");
-        await candidate.sync();
-        await atomicFileTestHooks?.afterLockCreate?.(lockPath);
-        if (await lockTakeoverInProgress(lockPath)) {
-          await candidate.close();
-          await removeOwnedLock(lockPath, [owner]);
-          await removeAbandonedLockTombs(lockPath);
-          if (Date.now() >= deadline) {
-            throw new FileLockedError(options.lockedMessage);
+        const candidate = await open(lockPath, "wx", 0o600);
+        try {
+          await candidate.writeFile(owner, "utf8");
+          await candidate.sync();
+          await atomicFileTestHooks?.afterLockCreate?.(lockPath);
+          if (await lockTakeoverInProgress(lockPath)) {
+            await candidate.close();
+            await removeOwnedLock(lockPath, [owner]);
+            await removeAbandonedLockTombs(lockPath);
+            if (Date.now() >= deadline) {
+              throw new FileLockedError(options.lockedMessage);
+            }
+            await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+            continue;
           }
-          await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
-          continue;
+          handle = candidate;
+        } catch (error) {
+          await candidate.close().catch(() => undefined);
+          await removeOwnedLock(lockPath, [owner]).catch(() => undefined);
+          throw error;
         }
-        handle = candidate;
       } catch (error) {
-        await candidate.close().catch(() => undefined);
-        await removeOwnedLock(lockPath, [owner]).catch(() => undefined);
-        throw error;
+        if (!hasCode(error, "EEXIST")) throw error;
+        await removeStaleLock(lockPath);
+        if (Date.now() >= deadline) {
+          throw new FileLockedError(options.lockedMessage);
+        }
+        await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
       }
-    } catch (error) {
-      if (!hasCode(error, "EEXIST")) throw error;
-      await removeStaleLock(lockPath);
-      if (Date.now() >= deadline) {
-        throw new FileLockedError(options.lockedMessage);
-      }
-      await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
     }
+  } catch (error) {
+    // A failed attempt leaves no tomb with its own record: a live process's
+    // unreleased tomb blocks every later caller.
+    await removeOwnedTombs(lockPath, [owner]).catch(() => undefined);
+    throw error;
   }
 
   const ownedHandle = handle;
@@ -145,6 +154,7 @@ export async function withFileLock<T>(
       } finally {
         try {
           await ownedHandle.close();
+          await atomicFileTestHooks?.afterLockHandleClose?.(lockPath);
         } finally {
           await removeOwnedLock(lockPath, [owner, releasedOwner]);
         }
@@ -204,9 +214,10 @@ async function removeOwnedLock(path: string, owners: readonly string[]): Promise
   }
 
   try {
+    await atomicFileTestHooks?.beforeTombUnlink?.(tombPath);
     await unlink(tombPath);
   } catch (error) {
-    if (!tombAlreadyGoing(error) && pendingError === undefined) {
+    if (!hasCode(error, "ENOENT") && pendingError === undefined) {
       pendingError = error;
     }
   }
@@ -308,9 +319,9 @@ function processIsAlive(pid: number): boolean {
 }
 
 /**
- * Another contender removed this tomb or is removing it. Windows answers an
- * unlink of a file whose delete is pending, or that is held open, with a
- * permission or busy error; a later pass reaps what is left.
+ * Applies when a contender removes a tomb another contender created and is
+ * deleting. Windows answers an unlink of a file whose delete is pending, or
+ * that is held open, with a permission or busy error; a later pass reaps it.
  */
 function tombAlreadyGoing(error: unknown): boolean {
   return (
