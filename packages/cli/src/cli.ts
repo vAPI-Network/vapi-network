@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { baseUsdcBalanceReader } from "./balance-reader.js";
 import { fileExists, openInBrowser } from "./platform.js";
+import { CUSTODY_NOTICE, formatRecoveryPhrase, showRecoveryPhrase } from "./recovery-phrase.js";
 import { redactDetachedRunText } from "./run-redaction.js";
 import { deviceVaultKey } from "./wallet-session.js";
 
@@ -169,7 +170,6 @@ import {
   outputForWallet,
   recordAudit,
   requireSecretsAllowed,
-  secretsDecision,
   selectWallet,
   targetWallet,
   unlockTarget,
@@ -211,6 +211,8 @@ export { redactDetachedRunValue } from "./run-redaction.js";
 export { baseUsdcBalanceReader } from "./balance-reader.js";
 
 export { deviceVaultKey } from "./wallet-session.js";
+
+export { CUSTODY_NOTICE, showRecoveryPhrase } from "./recovery-phrase.js";
 
 const HELP_HEADING = "vAPI Network";
 
@@ -2632,44 +2634,6 @@ function formatFund(address: string, url: string, opened: boolean): string {
     "The page takes a card via Coinbase (needs a Coinbase account; US guest checkout), a transfer from MetaMask/Coinbase Wallet/WalletConnect, or a bridge from another chain. vAPI never holds your funds.",
     ONRAMP_FALLBACK_INSTRUCTIONS,
   ].join("\n");
-}
-
-export const CUSTODY_NOTICE = [
-  "This wallet is yours. vAPI has no copy of the key and cannot recover it.",
-  "If you lose this machine and your recovery phrase, the funds are gone.",
-].join("\n");
-
-const PHRASE_GATE = "Write these 12 words down, then press Enter.";
-const PHRASE_HIDDEN = "Recovery phrase: run vapi backup yourself in a terminal to see it.";
-
-/**
- * The phrase is shown once, to a person, and waits until they say they have it.
- * A script, a piped run or anything an agent drives gets the pointer to
- * `vapi backup` instead: the wallet is still created, but nothing here may end
- * up in a transcript or a log file.
- */
-export async function showRecoveryPhrase(
-  phrase: string,
-  io: CliIo,
-  dependencies: CliDependencies,
-): Promise<void> {
-  if (!secretsDecision(dependencies).allowed) {
-    io.stdout(PHRASE_HIDDEN);
-    return;
-  }
-  io.stdout("");
-  io.stdout("Recovery phrase. These 12 words restore this wallet, and nothing else does:");
-  io.stdout(formatRecoveryPhrase(phrase));
-  io.stdout("");
-  await getPrompts(dependencies).secret(`${PHRASE_GATE} `);
-}
-
-/** One numbered word per line: the shape people copy onto paper without slips. */
-function formatRecoveryPhrase(phrase: string): string {
-  return phrase
-    .split(" ")
-    .map((word, index) => `${String(index + 1).padStart(2, " ")}. ${word}`)
-    .join("\n");
 }
 
 function buildNextSteps(address: string): string[] {
