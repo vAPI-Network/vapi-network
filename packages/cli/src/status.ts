@@ -20,19 +20,19 @@ import {
 import { readCloudBackupState } from "@vapi-network/core/cloud-backup";
 import { routerUsage } from "@vapi-network/core/router-client";
 
-import { baseUsdcBalanceReader } from "./cli.js";
+import { UsageError } from "./args.js";
+import { baseUsdcBalanceReader } from "./balance-reader.js";
+import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
+import { agentLinkStatus } from "./login.js";
 import { registryBaseUrl } from "./publish-cli.js";
+import { routerDeps } from "./router.js";
+import { CLI_VERSION } from "./version.js";
 import {
   getSecretStore,
   openWalletStore,
   unlockTarget,
   type WalletTarget,
 } from "./wallet-session.js";
-import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
-import { UsageError } from "./args.js";
-import { agentLinkStatus } from "./login.js";
-import { routerDeps } from "./router.js";
-import { CLI_VERSION } from "./version.js";
 
 export async function statusCommand(
   argv: string[],
