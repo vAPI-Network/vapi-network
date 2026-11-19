@@ -769,9 +769,16 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
       const dropSidecar = (): void => {
         if (interrupted === undefined) rmSync(sidecarPath, { force: true });
       };
+      const ambiguousInstruction = `After checking railway sandbox list and destroying any worker, wait for the five-minute reconciliation window, then run vapi swarm stop ${member.swarm ?? policy.swarm.name} ${run.runId} --confirm-worker-stopped.`;
       const assertNotInterrupted = (): void => {
         if (interrupted !== undefined) {
-          throw new Error(`Starting ${account} on Railway was interrupted by ${interrupted}.`);
+          const message = `Starting ${account} on Railway was interrupted by ${interrupted}.`;
+          if (attempted && (sandboxId === undefined || sidecar.sandboxId === undefined))
+            throw new RuntimeError(
+              "launch_ambiguous",
+              `${message} A sandbox may exist; check railway sandbox list. ${ambiguousInstruction}`,
+            );
+          throw new Error(message);
         }
       };
 
@@ -908,31 +915,45 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
               ]),
             );
           }
-          await audit("runtime=railway sandbox=none create_failed");
           // The sidecar stays "creating": create may have gone through before it failed.
-          throw new Error(
+          const failure = new RuntimeError(
+            "launch_ambiguous",
             withLeftover([
               createError !== undefined || created === undefined
                 ? `railway sandbox create failed: ${scrub(errorMessage(createError), secretValues)}`
                 : `railway sandbox create failed${describeFailure(created, secretValues)}`,
               `A sandbox holding ${account}'s private key may still exist. Check with railway sandbox list and destroy it with railway sandbox destroy <id>.`,
+              ambiguousInstruction,
             ]),
           );
+          try {
+            await audit("runtime=railway sandbox=none create_failed");
+          } catch (error) {
+            failure.message += `\nCould not record export audit: ${scrub(errorMessage(error), secretValues)}`;
+          }
+          throw failure;
         }
 
         let id: string;
         try {
           id = sandboxId ?? parseSandboxId(created.stdout);
         } catch (error) {
-          await audit("runtime=railway sandbox=unknown create_unparsed");
           // Without an id nothing here can destroy it, so the owner must.
-          throw new Error(
+          const failure = new RuntimeError(
+            "launch_ambiguous",
             withLeftover([
               errorMessage(error),
               `A sandbox holding ${account}'s private key may be running. Find it with railway sandbox list and destroy it with railway sandbox destroy <id>.`,
               `Until then that key can spend ${account}'s balance; it stops at the idle timeout (${idleTimeoutMinutes} minutes).`,
+              ambiguousInstruction,
             ]),
           );
+          try {
+            await audit("runtime=railway sandbox=unknown create_unparsed");
+          } catch (auditError) {
+            failure.message += `\nCould not record export audit: ${scrub(errorMessage(auditError), secretValues)}`;
+          }
+          throw failure;
         }
 
         sandboxId = id;
@@ -1158,7 +1179,12 @@ export async function destroyRailwaySidecar(
         };
       }
       try {
-        await destroySandbox(options.exec ?? defaultRailwayExec, id);
+        const outcome = await (options.exec ?? defaultRailwayExec)(
+          RAILWAY_CLI.binary,
+          RAILWAY_CLI.destroy(id),
+        );
+        if (outcome.code !== 0)
+          throw new Error(`railway sandbox destroy ${id} failed${describeFailure(outcome, [])}`);
       } catch (error) {
         // An unattributed legacy sidecar is already unresolved. Preserve its
         // existing metadata rather than rewriting it without a member lock.

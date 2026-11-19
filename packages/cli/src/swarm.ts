@@ -791,7 +791,20 @@ async function stopCommand(
       failed.push({
         runId: record.runId,
         member: record.member.account,
-        error: redactRunText(error instanceof Error ? error.message : String(error), environment),
+        error: redactRunText(
+          [
+            error instanceof Error ? error.message : String(error),
+            ...(record.kind === "railway" &&
+            record.handle.ref !== "" &&
+            (record.state === "starting" || record.state === "unknown")
+              ? [
+                  `Destroy it yourself with: railway sandbox destroy ${record.handle.ref}`,
+                  `Verify destruction in the original Railway project/environment, then run vapi swarm forget-run ${name} ${record.runId} --confirm-destroyed.`,
+                ]
+              : []),
+          ].join("\n"),
+          environment,
+        ),
       });
       continue;
     }
@@ -810,7 +823,13 @@ async function stopCommand(
     sandboxes.push(
       outcome.error === undefined
         ? outcome
-        : { ...outcome, error: redactRunText(outcome.error, environment) },
+        : {
+            ...outcome,
+            error: redactRunText(
+              `${outcome.error}${sidecar.sandboxId === undefined ? "" : `\nVerify destruction in the original Railway project/environment, then run vapi swarm forget-run ${name} ${sidecar.runId} --confirm-destroyed.`}`,
+              environment,
+            ),
+          },
     );
   }
 
@@ -866,6 +885,11 @@ async function forgetRunCommand(
         "runtime_unavailable",
         `Run ${runId} has a mismatched Railway sidecar; nothing was forgotten.`,
       );
+    if (sidecar !== undefined && !sidecar.sandboxId)
+      throw new RuntimeError(
+        "runtime_unavailable",
+        "An id-less Railway sidecar cannot be forgotten. Confirm a stale starting reservation with swarm stop --confirm-worker-stopped instead.",
+      );
     if (record === undefined) {
       if (sidecar?.state !== "orphaned")
         throw new RuntimeError(
@@ -893,7 +917,14 @@ async function forgetRunCommand(
           "Recovered from an orphaned Railway sidecar; original start time and scope were not recorded.",
       };
     }
-    if (record.kind !== "railway" || (record.state !== "unknown" && record.state !== "orphaned"))
+    const terminalOrphan =
+      sidecar?.state === "orphaned" &&
+      !!sidecar.sandboxId &&
+      (record.state === "finished" || record.state === "failed" || record.state === "stopped");
+    if (
+      record.kind !== "railway" ||
+      (record.state !== "unknown" && record.state !== "orphaned" && !terminalOrphan)
+    )
       throw new RuntimeError(
         "runtime_unavailable",
         "Only an unknown or orphaned Railway run can be forgotten.",
@@ -967,7 +998,9 @@ async function strandedSandboxes(
   );
   return (await listRailwaySidecars(home)).filter(
     (sidecar) =>
-      sidecar.swarm === name && (sidecar.state === "kept" || !running.has(sidecar.runId)),
+      (sidecar.swarm === name ||
+        (sidecar.swarm === "" && records.some((record) => record.runId === sidecar.runId))) &&
+      (sidecar.state === "kept" || !running.has(sidecar.runId)),
   );
 }
 

@@ -4,7 +4,11 @@ import { join } from "node:path";
 
 import {
   BASE_MAINNET_CAIP2,
+  __setAtomicFileTestHooks,
+  FileLockedError,
   withSwarmLock,
+  readSwarm,
+  swarmFilePath,
   writeSwarm,
   type AgentProfile,
   type SwarmFile,
@@ -50,6 +54,7 @@ const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  __setAtomicFileTestHooks(undefined);
   await Promise.all(
     temporaryDirectories
       .splice(0)
@@ -221,6 +226,89 @@ describe("run registry", () => {
     expect(await listRunRecords(home)).toHaveLength(1);
   });
 
+  it.each(["gone", "removed"] as const)(
+    "refuses a swarm member start when the swarm is %s",
+    async (state) => {
+      const home = await temporaryHome();
+      if (state === "gone") await rm(swarmFilePath(home, "team"));
+      else {
+        const swarm = await readSwarm(home, "team");
+        await writeSwarm(home, {
+          ...swarm,
+          members: swarm.members.filter((member) => member.account !== "team-lead-1"),
+        });
+      }
+      const runtime = new FakeRuntime();
+      await expect(
+        startDetachedRun({
+          home,
+          runtime,
+          member: sampleRecord(runId(95)).member,
+          run: sampleRun(runId(95)),
+        }),
+      ).rejects.toMatchObject({ code: "swarm_unavailable" });
+      expect(runtime.starts).toEqual([]);
+      expect(await listRunRecords(home)).toEqual([]);
+    },
+  );
+
+  it("starts a standalone agent without a swarm file or swarm lock", async () => {
+    const home = await temporaryHome();
+    await rm(swarmFilePath(home, "team"));
+    const runtime = new FakeRuntime();
+    __setAtomicFileTestHooks({
+      beforeLockAttempt: (path) => {
+        expect(path).not.toContain("/swarms/");
+      },
+    });
+    const record = await startDetachedRun({
+      home,
+      runtime,
+      member: { account: "solo", profile: "solo" },
+      run: sampleRun(runId(96)),
+    });
+    expect(record.state).toBe("running");
+    expect(runtime.starts).toHaveLength(1);
+  });
+
+  it.each(["lock-failed", "io-error", "changed", "removed"] as const)(
+    "does not launch after a reservation handoff is %s",
+    async (outcome) => {
+      const home = await temporaryHome();
+      const runtime = new FakeRuntime();
+      const id = runId(97);
+      let locks = 0;
+      __setAtomicFileTestHooks({
+        beforeLockAttempt: async (path) => {
+          if (!path.endsWith(".member-team-lead-1.lock") || ++locks !== 2) return;
+          if (outcome === "lock-failed") throw new FileLockedError();
+          if (outcome === "io-error") throw new Error("lock unavailable");
+          const reservation = (await readRunRecord(home, id))!;
+          if (outcome === "removed") await rm(runRecordPath(home, id));
+          else await writeRunRecord(home, { ...reservation, state: "stopped" });
+        },
+      });
+      const failure = await startDetachedRun({
+        home,
+        runtime,
+        member: sampleRecord(id).member,
+        run: sampleRun(id),
+      }).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(RuntimeError);
+      expect(failure).toMatchObject({
+        code: outcome === "lock-failed" ? "member_busy" : "runtime_unavailable",
+        message: expect.stringContaining(`vapi swarm stop team ${id} --confirm-worker-stopped`),
+      });
+      expect(runtime.starts).toEqual([]);
+      const record = await readRunRecord(home, id);
+      if (outcome === "removed") expect(record).toBeUndefined();
+      else
+        expect(record?.state).toBe(
+          outcome === "lock-failed" || outcome === "io-error" ? "starting" : "stopped",
+        );
+    },
+  );
+
   it("persists a starting reservation before launching the worker", async () => {
     const home = await temporaryHome();
     const runtime = new FakeRuntime();
@@ -229,6 +317,9 @@ describe("run registry", () => {
     let reservation: RunRecord | undefined;
     runtime.start = async (member, run) => {
       reservation = await readRunRecord(home, id);
+      await expect(readFile(join(home, "swarms", ".team.lock"), "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
       return await originalStart(member, run);
     };
 
@@ -509,13 +600,12 @@ describe("run registry", () => {
 });
 
 describe("detached swarm orchestration", () => {
-  it("starts the selected lead without waiting for or taking the held swarm lock", async () => {
+  it("refuses the selected lead under a held swarm lock and starts with it free", async () => {
     const fixture = await detachedSwarmFixture();
     const runtime = new FakeRuntime();
-    let result: Awaited<ReturnType<typeof startDetachedSwarmRun>> | undefined;
 
-    await withSwarmLock(fixture.home, "team", async () => {
-      result = await startDetachedSwarmRun(
+    const start = () =>
+      startDetachedSwarmRun(
         {
           name: "team",
           task: "Lead the detached work",
@@ -523,13 +613,23 @@ describe("detached swarm orchestration", () => {
           budgetUsd: "0.50",
           drawUsd: "1.25",
         },
-        {
-          ...fixture.deps,
-          runtime,
-          newRunId: () => runId(60),
-        },
+        { ...fixture.deps, runtime, newRunId: () => runId(60) },
       );
+    await withSwarmLock(fixture.home, "team", async () => {
+      __setAtomicFileTestHooks({
+        beforeLockAttempt: (path) => {
+          if (path.endsWith(".team.lock")) throw new FileLockedError();
+        },
+      });
+      await expect(start()).rejects.toMatchObject({
+        name: "RuntimeError",
+        code: "swarm_unavailable",
+      });
+      expect(runtime.starts).toEqual([]);
+      expect(await listRunRecords(fixture.home)).toEqual([]);
     });
+    __setAtomicFileTestHooks(undefined);
+    const result = await start();
 
     expect(result).toMatchObject({
       detached: true,
@@ -788,7 +888,30 @@ class FakeRuntime implements Runtime {
 async function temporaryHome(): Promise<string> {
   const home = await mkdtemp(join(tmpdir(), "vapi-runtime-"));
   temporaryDirectories.push(home);
+  await writeRuntimeSwarm(home, [
+    swarmMember("team-lead-1", "lead"),
+    swarmMember("team-helper-1", "helper"),
+  ]);
   return home;
+}
+
+async function writeRuntimeSwarm(home: string, members: SwarmFile["members"]): Promise<void> {
+  await writeSwarm(home, {
+    v: 1,
+    name: "team",
+    device: "test-device",
+    network: BASE_MAINNET_CAIP2,
+    createdAt: STARTED_AT,
+    treasury: {
+      account: "team-treasury",
+      steps: { creating: false, created: false, capped: false, linked: false },
+    },
+    members,
+    policy: {
+      strategy: "targets",
+      treasuryCaps: { perCallAtomic: "5000000", perDayAtomic: "20000000" },
+    },
+  });
 }
 
 function runId(value: number): string {
@@ -829,22 +952,7 @@ async function detachedSwarmFixture(): Promise<{
     swarmMember("team-writer-1", "writer"),
     swarmMember("team-zero-1", "analyst"),
   ];
-  await writeSwarm(home, {
-    v: 1,
-    name: "team",
-    device: "test-device",
-    network: BASE_MAINNET_CAIP2,
-    createdAt: STARTED_AT,
-    treasury: {
-      account: "team-treasury",
-      steps: { creating: false, created: false, capped: false, linked: false },
-    },
-    members,
-    policy: {
-      strategy: "targets",
-      treasuryCaps: { perCallAtomic: "5000000", perDayAtomic: "20000000" },
-    },
-  });
+  await writeRuntimeSwarm(home, members);
   const caps = new Map<string, string>([
     ["team-lead-1", "1234567"],
     ["team-helper-1", "2500000"],

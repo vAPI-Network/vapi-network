@@ -105,7 +105,7 @@ export async function assertSwarmWorkersStopped(home: string, swarm: SwarmFile):
     blockers.push(
       `${sidecar.account || run?.member.account || "a member"} (run ${match[1]}, sandbox ${sidecar.sandboxId ?? "id unknown"})`,
     );
-    if (run === undefined && sidecar.state === "orphaned")
+    if (sidecar.state === "orphaned" && sidecar.sandboxId)
       confirmations.push(`vapi swarm forget-run ${swarm.name} ${match[1]} --confirm-destroyed`);
   }
   if (blockers.length > 0) {

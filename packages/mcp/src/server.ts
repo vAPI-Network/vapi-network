@@ -1337,7 +1337,7 @@ export function createVapiServer(options: VapiServerOptions = {}) {
     "swarm.stop",
     {
       description:
-        "Stop one or all tracked workers of a swarm, including unknown runs. Unknown Railway runs require a successful destroy exit; not-found text never clears them. Failed stops remain unresolved. Does not move money or expose CLI-only human confirmation.",
+        "Stop one or all tracked workers of a swarm, including unknown runs. Unknown Railway runs and starting Railway runs with a saved sandbox id require a successful destroy exit; not-found text never clears them. Failed stops remain unresolved. Does not move money or expose CLI-only human confirmation.",
       inputSchema: stopInput.shape,
       strictInput: true,
       outputSchema: z.object({
