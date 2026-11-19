@@ -15,6 +15,7 @@ sentence under it is the summary shown on the
 ### Fixed
 
 - A rejected transfer releases its spend reservation only after its failed receipt row is written. If that write fails, it returns `unknown`, keeps the reservation and can be resumed. A relayed transfer whose receipt row cannot be written still returns `sent` (with the transaction when the relay reported one) or `unknown` with the nonce instead of a filesystem error. `--resume` with that nonce records the result once the receipt can be written.
+- Token refresh checks and stores rotated tokens under a credential lock shared with login and logout, so a refresh that finishes after logout stores nothing and cannot overwrite a newer login. Logout does not wait for a refresh's network request.
 
 ## 0.15.0 - 2026-11-19
 

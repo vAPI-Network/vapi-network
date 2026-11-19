@@ -44,7 +44,7 @@ A missing link or another owner or API base leaves the purchase pending and disa
 Stake-key chat can continue under a valid current link with usable credentials, including another owner or API base; `pending_purchase_unlinked` names the payment and the retirement command.
 With no link, chat returns `not_linked` and the error still carries `pending_purchase_unlinked`.
 Login and logout wait for the purchase lock before changing the link. Logout bounds best-effort remote revocation, including its token refresh requests and response bodies, to ten seconds.
-The deadline does not interrupt local waits for the wallet credential lock. Refresh checks that a link and its original token pair are still stored before writing rotated tokens; that read-compare-write is not atomic against login/logout, which use a different lock.
+The deadline does not interrupt local waits for the wallet credential lock. Refresh checks that a link and its original token pair are still stored before writing rotated tokens; a shared credential publication lock makes that re-check and write exclusive with login and logout, without making logout wait for a refresh's network request.
 
 Inspect a pending purchase without clearing it:
 

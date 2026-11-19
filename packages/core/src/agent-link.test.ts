@@ -20,6 +20,7 @@ import {
   saveAgentLink,
   startDeviceLink,
   trustedLinkBearer,
+  withAgentCredentialLock,
   type AgentTokens,
   type DeviceLinkStart,
   type LinkResult,
@@ -902,6 +903,266 @@ describe("stored agent links", () => {
 });
 
 describe("agentAccessToken", () => {
+  it("keeps logout from interleaving with a refresh token store", async () => {
+    const home = await temporaryHome();
+    const wallets = await walletStore(home);
+    await wallets.setLink("main", agentLink());
+    const accounts = agentSecretAccounts("main");
+    const expiresAt = Number.MAX_SAFE_INTEGER - 7_200_000;
+    const secrets = memorySecretStore({
+      [accounts.tokens]: JSON.stringify({ ...linkResult().tokens, expiresAt }),
+      [accounts.routerStake]: ROUTER_KEY,
+      [accounts.routerBalance]: "balance-router-key",
+    });
+    let started!: () => void;
+    const writing = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let finish!: () => void;
+    const release = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const order: string[] = [];
+    const set = secrets.set.bind(secrets);
+    secrets.set = async (name, value) => {
+      if (name === accounts.tokens && JSON.parse(value).accessToken === "rotated-access") {
+        started();
+        await release;
+        await set(name, value);
+        order.push("set");
+      } else await set(name, value);
+    };
+    const remove = secrets.remove.bind(secrets);
+    secrets.remove = async (name) => {
+      order.push("remove");
+      return await remove(name);
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      if (new URL(String(input)).pathname === "/oauth/token") {
+        return Response.json({
+          access_token: "rotated-access",
+          refresh_token: "rotated-refresh",
+          expires_in: 3600,
+        });
+      }
+      expect(init?.method).toBe("DELETE");
+      expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${ACCESS_TOKEN}`);
+      return new Response(null, { status: 200 });
+    });
+    const refresh = agentAccessToken({
+      secrets,
+      wallets,
+      wallet: "main",
+      fetchImpl,
+      now: () => expiresAt + 1,
+    });
+    await writing;
+    let waiting!: () => void;
+    const lockWait = new Promise<void>((resolve) => {
+      waiting = resolve;
+    });
+    const schedule = setTimeout;
+    const timerSpy = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockImplementation((callback, delay, ...args) => {
+        if (delay === 20) waiting();
+        return schedule(callback, delay, ...args);
+      });
+    const logout = forgetAgentLink({ secrets, wallets, wallet: "main", fetchImpl });
+    try {
+      await Promise.race([lockWait, logout]);
+      expect(secrets.removeCalls).toEqual([]);
+      expect(wallets.entry("main")?.link).toBeDefined();
+      expect(timerSpy.mock.calls.some(([, delay]) => delay === 20)).toBe(true);
+      finish();
+      await expect(refresh).resolves.toBe("rotated-access");
+      await logout;
+      expect(order).toEqual(["set", "remove", "remove", "remove"]);
+      expect(secrets.entries).toEqual({});
+      expect((await WalletStore.open(home)).entry("main")?.link).toBeUndefined();
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    } finally {
+      finish();
+      await Promise.allSettled([refresh, logout]);
+      timerSpy.mockRestore();
+    }
+  });
+
+  it("keeps a refresh token store from overwriting a newer login", async () => {
+    const home = await temporaryHome();
+    const wallets = await walletStore(home);
+    await wallets.setLink("main", agentLink());
+    const accounts = agentSecretAccounts("main");
+    const expiresAt = Number.MAX_SAFE_INTEGER - 7_200_000;
+    const secrets = memorySecretStore({
+      [accounts.tokens]: JSON.stringify({ ...linkResult().tokens, expiresAt }),
+    });
+    let started!: () => void;
+    const writing = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let finish!: () => void;
+    const release = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const set = secrets.set.bind(secrets);
+    secrets.set = async (name, value) => {
+      if (name === accounts.tokens && JSON.parse(value).accessToken === "rotated-access") {
+        started();
+        await release;
+      }
+      await set(name, value);
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      Response.json({
+        access_token: "rotated-access",
+        refresh_token: "rotated-refresh",
+        expires_in: 3600,
+      }),
+    );
+    const refresh = agentAccessToken({
+      secrets,
+      wallets,
+      wallet: "main",
+      fetchImpl,
+      now: () => expiresAt + 1,
+    });
+    await writing;
+    let waiting!: () => void;
+    const lockWait = new Promise<void>((resolve) => {
+      waiting = resolve;
+    });
+    const schedule = setTimeout;
+    const timerSpy = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockImplementation((callback, delay, ...args) => {
+        if (delay === 20) waiting();
+        return schedule(callback, delay, ...args);
+      });
+    const result = linkResult({
+      tokens: {
+        accessToken: "login-access",
+        refreshToken: "login-refresh",
+        expiresAt,
+        scopes: ["mcp:call", "router.use"],
+      },
+    });
+    const login = saveAgentLink({
+      secrets,
+      wallets,
+      wallet: "main",
+      start: deviceStart({ clientId: "new-client" }),
+      result,
+      apiBase: API_BASE,
+      label: "relinked",
+    });
+    try {
+      await Promise.race([lockWait, login]);
+      finish();
+      await expect(refresh).resolves.toBe("rotated-access");
+      await login;
+      expect(JSON.parse(secrets.entries[accounts.tokens]!)).toEqual(result.tokens);
+      expect((await WalletStore.open(home)).entry("main")?.link?.clientId).toBe("new-client");
+    } finally {
+      finish();
+      await Promise.allSettled([refresh, login]);
+      timerSpy.mockRestore();
+    }
+  });
+
+  it("lets logout finish while another refresh request is pending and rejects its late response", async () => {
+    const home = await temporaryHome();
+    const wallets = await walletStore(home);
+    await wallets.setLink("main", agentLink());
+    const accounts = agentSecretAccounts("main");
+    const expiresAt = Number.MAX_SAFE_INTEGER - 7_200_000;
+    const secrets = memorySecretStore({
+      [accounts.tokens]: JSON.stringify({ ...linkResult().tokens, expiresAt }),
+      [accounts.routerStake]: ROUTER_KEY,
+      [accounts.routerBalance]: "balance-router-key",
+    });
+    let started!: () => void;
+    const requested = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let respond!: (response: Response) => void;
+    const response = new Promise<Response>((resolve) => {
+      respond = resolve;
+    });
+    let requestPending = true;
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      if (new URL(String(input)).pathname === "/oauth/token") {
+        started();
+        const result = await response;
+        requestPending = false;
+        return result;
+      }
+      expect(init?.method).toBe("DELETE");
+      expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${ACCESS_TOKEN}`);
+      return new Response(null, { status: 200 });
+    });
+    const refresh = agentAccessToken({
+      secrets,
+      wallets,
+      wallet: "main",
+      fetchImpl,
+      now: () => expiresAt + 1,
+    });
+    const rejected = expect(refresh).rejects.toMatchObject({ code: "not_linked" });
+    await requested;
+    try {
+      await forgetAgentLink({ secrets, wallets, wallet: "main", fetchImpl });
+      expect(requestPending).toBe(true);
+      expect(secrets.entries).toEqual({});
+      expect((await WalletStore.open(home)).entry("main")?.link).toBeUndefined();
+      const writesBeforeResponse = secrets.setCalls.length;
+      respond(
+        Response.json({
+          access_token: "rotated-access",
+          refresh_token: "rotated-refresh",
+          expires_in: 3600,
+        }),
+      );
+      await rejected;
+      expect(secrets.setCalls).toHaveLength(writesBeforeResponse);
+      expect(secrets.entries).toEqual({});
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    } finally {
+      respond(Response.json({ access_token: "rotated-access", expires_in: 3600 }));
+      await rejected;
+    }
+  });
+
+  it("refreshes without deadlock while its caller holds the wallet credential lock", async () => {
+    const home = await temporaryHome();
+    const wallets = await walletStore(home);
+    await wallets.setLink("main", agentLink());
+    const accounts = agentSecretAccounts("main");
+    const secrets = memorySecretStore({
+      [accounts.tokens]: JSON.stringify({ ...linkResult().tokens, expiresAt: 0 }),
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      Response.json({
+        access_token: "rotated-access",
+        refresh_token: "rotated-refresh",
+        expires_in: 3600,
+      }),
+    );
+
+    await expect(
+      withAgentCredentialLock(wallets, "wallet:main", async () =>
+        agentAccessToken({ secrets, wallets, wallet: "main", fetchImpl, now: () => 1_000 }),
+      ),
+    ).resolves.toBe("rotated-access");
+    expect(JSON.parse(secrets.entries[accounts.tokens]!)).toEqual({
+      accessToken: "rotated-access",
+      refreshToken: "rotated-refresh",
+      expiresAt: 3_601_000,
+      scopes: linkResult().tokens.scopes,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("fails clearly without rotating credentials when a remote access token expires", async () => {
     const home = await temporaryHome();
     const wallets = await walletStore(home);
@@ -1117,10 +1378,13 @@ describe("agentAccessToken", () => {
         now: () => 1_000,
       });
       const resolved = expect(refresh).resolves.toBe("rotated-access");
-      await requestStarted;
+      // Login holds the publish lock, so the refresh cannot act on a half-published link.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(fetchImpl).not.toHaveBeenCalled();
       finishLogin();
       const newLink = await login;
       expect(newLink.linkedAt).not.toBe(previousLink.linkedAt);
+      await requestStarted;
       respond(
         Response.json({
           access_token: "rotated-access",

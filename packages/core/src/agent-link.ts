@@ -320,6 +320,17 @@ async function withLinkPurchaseLock<T>(
   }
 }
 
+// Lock order: wallet → client-id → publish.
+// The publish lock is a leaf; acquire no other credential locks while holding it.
+// Hold it only across local reads and writes, never a network request.
+async function withCredentialPublishLock<T>(
+  wallets: WalletStore,
+  wallet: WalletName,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return await withAgentCredentialLock(wallets, `publish:${wallet}`, operation);
+}
+
 export async function saveAgentLink(args: {
   secrets: SecretStore;
   wallets: WalletStore;
@@ -350,33 +361,39 @@ export async function saveAgentLink(args: {
     };
 
     await withAgentCredentialLock(args.wallets, `wallet:${args.wallet}`, async () => {
-      await args.wallets.reload();
-      const previousLink = args.wallets.entry(args.wallet)?.link;
-      const accounts = agentSecretAccounts(args.wallet);
-      const previousSecrets = await readSecretSnapshot(args.secrets, accounts);
+      await withCredentialPublishLock(args.wallets, args.wallet, async () => {
+        await args.wallets.reload();
+        const previousLink = args.wallets.entry(args.wallet)?.link;
+        const accounts = agentSecretAccounts(args.wallet);
+        const previousSecrets = await readSecretSnapshot(args.secrets, accounts);
 
-      try {
-        await safeSetSecret(args.secrets, accounts.tokens, JSON.stringify(args.result.tokens));
-        await writeOptionalSecret(args.secrets, accounts.routerStake, args.result.routerKey);
-        // Balance keys belong to the prior owner/link generation and are never returned here.
-        await writeOptionalSecret(args.secrets, accounts.routerBalance, undefined);
-        await args.wallets.setLink(args.wallet, link);
-      } catch (error) {
-        const secretsRestored = await restoreSecretSnapshot(
-          args.secrets,
-          accounts,
-          previousSecrets,
-        );
-        const metadataRestored = await restoreLinkMetadata(args.wallets, args.wallet, previousLink);
-        if (!secretsRestored || !metadataRestored) {
-          // A missing link is safer than metadata that can select the wrong owner's credentials.
-          await args.wallets.clearLink(args.wallet).catch(() => undefined);
-          throw httpError(
-            "The agent link could not be stored consistently. Local link metadata was cleared; run vapi login again.",
+        try {
+          await safeSetSecret(args.secrets, accounts.tokens, JSON.stringify(args.result.tokens));
+          await writeOptionalSecret(args.secrets, accounts.routerStake, args.result.routerKey);
+          // Balance keys belong to the prior owner/link generation and are never returned here.
+          await writeOptionalSecret(args.secrets, accounts.routerBalance, undefined);
+          await args.wallets.setLink(args.wallet, link);
+        } catch (error) {
+          const secretsRestored = await restoreSecretSnapshot(
+            args.secrets,
+            accounts,
+            previousSecrets,
           );
+          const metadataRestored = await restoreLinkMetadata(
+            args.wallets,
+            args.wallet,
+            previousLink,
+          );
+          if (!secretsRestored || !metadataRestored) {
+            // A missing link is safer than metadata that can select the wrong owner's credentials.
+            await args.wallets.clearLink(args.wallet).catch(() => undefined);
+            throw httpError(
+              "The agent link could not be stored consistently. Local link metadata was cleared; run vapi login again.",
+            );
+          }
+          throw error;
         }
-        throw error;
-      }
+      });
     });
 
     await appendAudit(args.home ?? args.wallets.home, {
@@ -486,12 +503,15 @@ export async function forgetAgentLink(args: {
     }
 
     await withAgentCredentialLock(args.wallets, `wallet:${args.wallet}`, async () => {
-      if (args.secrets.available) {
-        if (link !== undefined) {
-          await removeSecretAccounts(args.secrets, agentSecretAccounts(args.wallet));
+      await withCredentialPublishLock(args.wallets, args.wallet, async () => {
+        if (args.secrets.available) {
+          if (link !== undefined) {
+            await removeSecretAccounts(args.secrets, agentSecretAccounts(args.wallet));
+          }
         }
-      }
-      if (args.wallets.entry(args.wallet) !== undefined) await args.wallets.clearLink(args.wallet);
+        if (args.wallets.entry(args.wallet) !== undefined)
+          await args.wallets.clearLink(args.wallet);
+      });
     });
     if (link !== undefined) {
       await appendAudit(args.home ?? args.wallets.home, {
@@ -528,12 +548,19 @@ async function resolveAgentAccessToken(
 
   return await withAgentCredentialLock(args.wallets, link.clientId, async () => {
     options.signal?.throwIfAborted();
-    await args.wallets.reload();
-    const currentLink = args.wallets.entry(args.wallet)?.link;
-    if (currentLink === undefined) throw notLinkedError();
-    const currentAccounts = agentSecretAccounts(args.wallet);
-    const current = parseTokens(await safeGetSecret(args.secrets, currentAccounts.tokens));
-    if (current === undefined) throw notLinkedError();
+    const { currentLink, currentAccounts, current } = await withCredentialPublishLock(
+      args.wallets,
+      args.wallet,
+      async () => {
+        await args.wallets.reload();
+        const currentLink = args.wallets.entry(args.wallet)?.link;
+        if (currentLink === undefined) throw notLinkedError();
+        const currentAccounts = agentSecretAccounts(args.wallet);
+        const current = parseTokens(await safeGetSecret(args.secrets, currentAccounts.tokens));
+        if (current === undefined) throw notLinkedError();
+        return { currentLink, currentAccounts, current };
+      },
+    );
     if (
       options.rejectedAccessToken !== undefined &&
       current.accessToken !== options.rejectedAccessToken
@@ -582,20 +609,22 @@ async function resolveAgentAccessToken(
           ? [...current.scopes]
           : splitScopes(requiredString(payload, "scope")),
     };
-    await args.wallets.reload();
-    if (args.wallets.entry(args.wallet)?.link === undefined) throw notLinkedError();
-    // This read-compare-write is not atomic against login/logout's different lock.
-    const stored = parseTokens(await safeGetSecret(args.secrets, currentAccounts.tokens));
-    if (
-      stored === undefined ||
-      stored.refreshToken !== refreshToken ||
-      stored.accessToken !== current.accessToken
-    ) {
-      throw notLinkedError();
-    }
-    options.signal?.throwIfAborted();
-    await safeSetSecret(args.secrets, currentAccounts.tokens, JSON.stringify(refreshed));
-    return refreshed.accessToken;
+    return await withCredentialPublishLock(args.wallets, args.wallet, async () => {
+      await args.wallets.reload();
+      if (args.wallets.entry(args.wallet)?.link === undefined) throw notLinkedError();
+      // The publish lock makes this re-check and write exclusive with login and logout.
+      const stored = parseTokens(await safeGetSecret(args.secrets, currentAccounts.tokens));
+      if (
+        stored === undefined ||
+        stored.refreshToken !== refreshToken ||
+        stored.accessToken !== current.accessToken
+      ) {
+        throw notLinkedError();
+      }
+      options.signal?.throwIfAborted();
+      await safeSetSecret(args.secrets, currentAccounts.tokens, JSON.stringify(refreshed));
+      return refreshed.accessToken;
+    });
   });
 }
 
