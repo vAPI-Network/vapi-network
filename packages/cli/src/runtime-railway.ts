@@ -1063,6 +1063,11 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
           saveSidecar({ ...sidecar, state: "running" });
         } catch (error) {
           const cause = scrub(errorMessage(error), secretValues);
+          const displayId = displaySandboxId(
+            id,
+            secretValues,
+            collectSecretValues([], credentials),
+          );
           // After a signal the handler destroys the sandbox and owns the sidecar.
           if (interrupted !== undefined) {
             if (recordedSandboxId === undefined) assertNotInterrupted();
@@ -1078,19 +1083,19 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
             } catch {
               // The error below still names the sandbox and the command.
             }
-            const lines = [
+            const lines = (sandboxId: string): string[] => [
               cause,
-              `Could not destroy sandbox ${id}, which holds ${account}'s private key: ${scrub(errorMessage(destroyError), secretValues)}`,
-              `Destroy it yourself with: railway sandbox destroy ${id}`,
+              `Could not destroy sandbox ${sandboxId}, which holds ${account}'s private key: ${scrub(errorMessage(destroyError), secretValues).replaceAll(id, sandboxId)}`,
+              `Destroy it yourself with: railway sandbox destroy ${sandboxId}`,
             ];
             if (recordedSandboxId === undefined)
               throw new RuntimeError(
                 "launch_ambiguous",
-                scrub([...lines, ambiguousInstruction].join("\n"), secretValues),
+                [...lines(displayId), ambiguousInstruction].join("\n"),
               );
             throw new Error(
               [
-                ...lines,
+                ...lines(id),
                 ...(orphanOnDisk
                   ? []
                   : [
@@ -1107,14 +1112,11 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
             if (recordedSandboxId === undefined)
               throw new RuntimeError(
                 "launch_ambiguous",
-                scrub(
-                  [
-                    cause,
-                    `Sandbox ${id} was destroyed; only the local launch marker could not be removed: ${scrub(errorMessage(removalError), secretValues)}`,
-                    ambiguousInstruction,
-                  ].join("\n"),
-                  secretValues,
-                ),
+                [
+                  cause,
+                  `Sandbox ${displayId} was destroyed; only the local launch marker could not be removed: ${scrub(errorMessage(removalError), secretValues)}`,
+                  ambiguousInstruction,
+                ].join("\n"),
               );
           }
           throw new Error(cause);
@@ -1759,6 +1761,15 @@ function collectSecrets(
   base: readonly string[],
   credentials: { tokens: string; routerStake?: string; routerBalance?: string },
 ): string[] {
+  return collectSecretValues(base, credentials).filter(
+    (value) => value.length >= MINIMUM_SECRET_LENGTH,
+  );
+}
+
+function collectSecretValues(
+  base: readonly string[],
+  credentials: { tokens: string; routerStake?: string; routerBalance?: string },
+): string[] {
   const values = [...base, credentials.tokens];
   if (credentials.routerStake !== undefined) values.push(credentials.routerStake);
   if (credentials.routerBalance !== undefined) values.push(credentials.routerBalance);
@@ -1767,7 +1778,7 @@ function collectSecrets(
   } catch {
     // Opaque token text is already covered as a whole.
   }
-  return values.filter((value) => value.length >= MINIMUM_SECRET_LENGTH);
+  return values;
 }
 
 function collectStrings(value: unknown, into: string[]): void {
@@ -1782,6 +1793,17 @@ function scrub(text: string, secrets: readonly string[]): string {
   let scrubbed = text;
   for (const secret of secrets) scrubbed = scrubbed.replaceAll(secret, "[redacted]");
   return redactRunText(scrubbed);
+}
+
+function displaySandboxId(
+  id: string,
+  secrets: readonly string[],
+  credentialValues: readonly string[],
+): string {
+  if (credentialValues.includes(id) || secrets.includes(id)) return "[redacted]";
+  let displayed = id;
+  for (const secret of secrets) displayed = displayed.replaceAll(secret, "[redacted]");
+  return displayed;
 }
 
 function describeFailure(outcome: RailwayExecResult, secrets: readonly string[]): string {

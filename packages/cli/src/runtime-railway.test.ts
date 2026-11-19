@@ -2445,6 +2445,75 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       },
     );
 
+    it.each(["succeeds", "fails"] as const)(
+      "redacts a short credential sandbox id when destroy %s and the id-less marker remains",
+      async (destroy) => {
+        const f = await fixture();
+        const id = "abc1234";
+        await f.secrets.set(agentSecretAccounts(ALPHA).tokens, tokens(id, ALPHA_REFRESH));
+        const railway = fakeRailway({
+          create: () => {
+            chmodSync(runsDirectory(f.home), 0o500);
+            return { ...CREATED, stdout: `${JSON.stringify({ id })}\n` };
+          },
+          destroy: () =>
+            destroy === "succeeds" ? OK : { code: 1, stdout: "", stderr: "destroy failed" },
+        });
+        const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec));
+
+        const failure = (await startDetachedRun({
+          home: f.home,
+          runtime,
+          member: MEMBER,
+          run: RUN,
+        }).catch((error: unknown) => error)) as RuntimeError;
+
+        expect(failure).toMatchObject({ code: "launch_ambiguous" });
+        expect(readSidecarFile(f)).toEqual(sidecarOf());
+        expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+          state: "starting",
+          handle: { ref: "" },
+        });
+        expect(railway.calls.map((args) => args[1])).toEqual(["create", "destroy"]);
+        expect(railway.calls.at(-1)?.at(-1) === id).toBe(true);
+        // Boolean assertions keep the credential out of regression-failure output.
+        expect(/\babc1234\b/u.test(failure.message)).toBe(false);
+        expect(failure.message).toContain("[redacted]");
+        expect(failure.message).toMatch(/--confirm-worker-stopped\.$/u);
+      },
+    );
+
+    it.each(["succeeds", "fails"] as const)(
+      "preserves the bearer swarm recovery command when destroy %s and the id-less marker remains",
+      async (destroy) => {
+        const f = await fixture();
+        await writeSwarm(f.home, { ...f.swarm, name: "bearer" });
+        const railway = fakeRailway({
+          create: () => {
+            chmodSync(runsDirectory(f.home), 0o500);
+            return CREATED;
+          },
+          destroy: () =>
+            destroy === "succeeds" ? OK : { code: 1, stdout: "", stderr: "destroy failed" },
+        });
+        const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec));
+
+        const failure = (await startDetachedRun({
+          home: f.home,
+          runtime,
+          member: { ...MEMBER, swarm: "bearer" },
+          run: RUN,
+        }).catch((error: unknown) => error)) as RuntimeError;
+
+        expect(failure).toMatchObject({ code: "launch_ambiguous" });
+        expect(readSidecarFile(f)).toEqual(sidecarOf({ swarm: "bearer" }));
+        expect(railway.calls.map((args) => args[1])).toEqual(["create", "destroy"]);
+        expect(failure.message).toContain(
+          `vapi swarm stop bearer ${RUN_ID} --confirm-worker-stopped.`,
+        );
+      },
+    );
+
     it.each(["before-create", "ENOENT"] as const)(
       "retains ambiguity when %s cleanup cannot remove the local launch marker",
       async (stage) => {
