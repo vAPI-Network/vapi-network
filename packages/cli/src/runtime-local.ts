@@ -21,11 +21,10 @@ import {
   type RuntimeStatus,
 } from "@vapi-network/mcp";
 
-import { deviceVaultKey } from "./cli.js";
-import { getSecretStore } from "./wallet-session.js";
-import { getEnvironment, isInteractive, type CliDependencies } from "./cli-context.js";
 import { UsageError } from "./args.js";
+import { getEnvironment, isInteractive, type CliDependencies } from "./cli-context.js";
 import { createRailwayRuntime, type RailwayRuntimeOptions } from "./runtime-railway.js";
+import { deviceVaultKey, getSecretStore } from "./wallet-session.js";
 
 type Spawn = (
   command: string,
