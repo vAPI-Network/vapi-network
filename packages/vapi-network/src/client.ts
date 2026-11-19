@@ -24,7 +24,7 @@ import {
   type DocsAskResponse,
   type DocsReadResponse,
   type DocsSearchResponse,
-  type Receipt,
+  type RouterPurchaseResult,
   type RouterModel,
   type ResolvedWallet,
   type SecretStore,
@@ -88,7 +88,7 @@ export type VapiClient = {
   router: {
     models(): Promise<RouterModel[]>;
     usage(): Promise<AgentRouterUsage>;
-    buy(usd: RouterTopupTier): Promise<{ receipt: Receipt; balance: AgentRouterUsage["balance"] }>;
+    buy(usd: RouterTopupTier): Promise<RouterPurchaseResult>;
     chat(req: ChatRequest): Promise<ChatResult>;
     /**
      * Base URL and key for any OpenAI-compatible framework. The key stays in

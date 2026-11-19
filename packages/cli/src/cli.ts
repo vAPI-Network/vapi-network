@@ -854,7 +854,12 @@ export async function runCli(
         exitCode = 0;
         break;
       case "agent":
-        exitCode = await agentCommand(args.slice(1), json, runIo, dependencies);
+        exitCode = await agentCommand(
+          args.slice(1),
+          json,
+          args[1] === "run" && args.includes("--bundle-env") ? io : runIo,
+          dependencies,
+        );
         break;
       case "dashboard":
         await dashboardCommand(args.slice(1), json, io, dependencies);

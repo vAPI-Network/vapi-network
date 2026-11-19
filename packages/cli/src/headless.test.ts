@@ -56,6 +56,87 @@ afterEach(async () => {
 });
 
 describe("vapi agent run --bundle-env", () => {
+  it.each([
+    { json: false, file: false },
+    { json: true, file: false },
+    { json: false, file: true },
+    { json: true, file: true },
+  ])("retains bundled refill evidence (json: $json, file: $file)", async ({ json, file }) => {
+    const outer = await temporaryDirectory();
+    const resultFile = join(outer, "refill.result.json");
+    const transaction = `0x${"ab".repeat(32)}`;
+    const refills: NonNullable<RunAgentResult["refills"]> = [
+      {
+        receipt: {
+          id: "refill-evidence",
+          amountUsd: 5,
+          network: BASE_MAINNET_CAIP2,
+          transaction,
+        },
+        balance: null,
+        warnings: [
+          {
+            code: "receipt_unavailable",
+            message: `Keep this receipt; do not repeat the purchase. ${ROUTER_STAKE}`,
+          },
+        ],
+      },
+    ];
+    const captured = captureIo();
+    const text = bundleText();
+    expect(
+      await runCli(
+        [
+          "agent",
+          "run",
+          "--bundle-env",
+          VARIABLE,
+          TASK,
+          ...(file ? ["--result-file", resultFile] : []),
+          ...(json ? ["--json"] : []),
+        ],
+        captured.io,
+        dependencies({
+          env: { [VARIABLE]: text },
+          agent: {
+            runAgent: async () => ({
+              ...result(`Done. ${PRIVATE_KEY} ${ACCESS_TOKEN} ${transaction}`),
+              refills,
+            }),
+          },
+        }),
+      ),
+    ).toBe(0);
+    const envelope = file ? JSON.parse(await readFile(resultFile, "utf8")) : undefined;
+    const output = json ? JSON.parse(onlyStdout(captured)) : undefined;
+    for (const value of [envelope?.result, output].filter((item) => item !== undefined)) {
+      expect(value.refills[0]).toEqual({
+        ...refills[0],
+        warnings: [
+          {
+            code: "receipt_unavailable",
+            message: "Keep this receipt; do not repeat the purchase. [redacted]",
+          },
+        ],
+      });
+      expect(value.answer).not.toContain(transaction);
+    }
+    if (json) {
+      if (file) expect(output).toEqual(envelope.result);
+      expect(captured.stderr).toEqual([]);
+    } else {
+      expect(captured.stderr).toEqual([
+        "Receipt: refill-evidence",
+        `Transaction: ${transaction}`,
+        "Keep this receipt; do not repeat the purchase. [redacted]",
+      ]);
+      expect(onlyStdout(captured)).toContain("Done.");
+      expect(onlyStdout(captured)).not.toContain(transaction);
+      if (file) expect(onlyStdout(captured)).toBe(envelope.result.answer);
+    }
+    expectNoSecrets(`${allOutput(captured)}\n${JSON.stringify(envelope)}`, text);
+  });
+
   it("runs the loop in an ephemeral 0700 home and removes it afterwards", async () => {
     const outer = await temporaryDirectory();
     process.env.VAPI_HOME = outer;

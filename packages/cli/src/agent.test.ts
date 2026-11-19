@@ -924,6 +924,80 @@ describe("vapi agent run", () => {
     expect(noSecrets(allOutput(captured))).toBe(true);
   });
 
+  it.each([false, true])(
+    "shows public refill evidence in attached output (json: %s)",
+    async (json) => {
+      await homeWithAgent();
+      const refill = refillPurchase();
+      const captured = captureIo();
+      expect(
+        await runCli(
+          ["agent", "run", "researcher", "Answer", ...(json ? ["--json"] : [])],
+          captured.io,
+          {
+            ...createDependencies(),
+            router: { routerChat: async () => ({ ...textReply("Done."), refill }) },
+          },
+        ),
+      ).toBe(0);
+      if (json) {
+        expect(JSON.parse(onlyStdout(captured)).refills).toEqual([
+          {
+            receipt: {
+              id: refill.receipt.id,
+              amountUsd: 5,
+              network: "eip155:8453",
+              transaction: refill.receipt.settlement!.transaction,
+            },
+            balance: refill.balance,
+            warnings: refill.warnings,
+          },
+        ]);
+      } else {
+        expect(onlyStdout(captured)).toBe("Done.");
+        expect(captured.stderr).toEqual([
+          `Receipt: ${refill.receipt.id}`,
+          `Transaction: ${refill.receipt.settlement!.transaction}`,
+          refill.warnings![0]!.message,
+        ]);
+      }
+      expect(allOutput(captured)).not.toContain("private-receipt-sentinel");
+    },
+  );
+
+  it("keeps only the public refill transaction through result-file redaction", async () => {
+    const home = await homeWithAgent();
+    const resultFile = join(home, "runs", "refill.result.json");
+    const refill = refillPurchase();
+    refill.warnings![0]!.message += ` ${API_KEY}`;
+    const captured = captureIo();
+    expect(
+      await runCli(
+        ["agent", "run", "researcher", "Answer", "--result-file", resultFile, "--json"],
+        captured.io,
+        {
+          ...createDependencies({ env: { VAPI_API_KEY: API_KEY } }),
+          router: {
+            routerChat: async () => ({
+              ...textReply(`Done. ${API_KEY} ${refill.receipt.settlement!.transaction}`),
+              refill,
+            }),
+          },
+        },
+      ),
+    ).toBe(0);
+    const envelope = JSON.parse(await readFile(resultFile, "utf8"));
+    expect(envelope.result.refills[0]).toMatchObject({
+      receipt: { id: refill.receipt.id, transaction: refill.receipt.settlement!.transaction },
+      warnings: [{ code: "receipt_unavailable", message: expect.stringContaining("[redacted]") }],
+    });
+    expect(envelope.result.answer).not.toContain(API_KEY);
+    expect(envelope.result.answer).not.toContain(refill.receipt.settlement!.transaction);
+    expect(envelope.result.answer).toContain("[redacted private key]");
+    expect(JSON.stringify(envelope)).not.toContain("private-receipt-sentinel");
+    expect(JSON.stringify(envelope)).not.toContain(API_KEY);
+  });
+
   it("writes an atomic success envelope, honours env run ids, and keeps secrets out", async () => {
     const home = await homeWithAgent();
     const runId = "run_111111111111111111111111";
@@ -1677,4 +1751,20 @@ function noSecrets(text: string): boolean {
 function restoreEnvironment(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
+}
+
+function refillPurchase(): NonNullable<ChatResult["refill"]> {
+  return {
+    receipt: {
+      id: "refill-receipt",
+      timestamp: "2026-09-23T12:00:00.000Z",
+      resourceUrl: "https://example.com/private-receipt-sentinel",
+      quote: { network: "eip155:8453", amountAtomic: "5000000" },
+      settlement: { outcome: "succeeded", transaction: `0x${"ab".repeat(32)}` },
+    },
+    balance: { purchasedUsd: 5, spentUsd: 0, remainingUsd: 5 },
+    warnings: [
+      { code: "receipt_unavailable", message: "Keep this receipt; do not repeat the purchase." },
+    ],
+  };
 }

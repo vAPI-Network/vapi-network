@@ -44,6 +44,7 @@ import {
   startDetachedRun,
   type AgentEvent,
   type RunAgentDeps,
+  type RunAgentResult,
 } from "@vapi-network/mcp";
 
 import {
@@ -423,8 +424,8 @@ async function runCommand(
   });
   const execute = dependencies.agent?.runAgent ?? runAgent;
   const executed = await execute(task, runDependencies);
-  const result =
-    resultFile === undefined ? executed : redactDetachedRunValue(executed, environment);
+  const result = resultFile === undefined ? executed : redactAgentRunResult(executed, environment);
+  if (!json) printAgentRefills(result, io);
   const exitCode = result.stoppedBecause.reason === "finished" ? 0 : 1;
 
   if (resultFile !== undefined) {
@@ -439,6 +440,35 @@ async function runCommand(
     io.stderr(result.stoppedBecause.detail ?? result.stoppedBecause.reason);
   }
   return exitCode;
+}
+
+/** Redact all strings, then restore only public EVM settlement references. */
+export function redactAgentRunResult(
+  executed: RunAgentResult,
+  environment: NodeJS.ProcessEnv,
+): RunAgentResult {
+  const result = redactDetachedRunValue(executed, environment);
+  for (const [index, refill] of (executed.refills ?? []).entries()) {
+    const transaction = refill.receipt.transaction;
+    const redacted = result.refills?.[index];
+    if (
+      redacted !== undefined &&
+      transaction !== undefined &&
+      /^0x[0-9a-fA-F]{64}$/u.test(transaction)
+    ) {
+      redacted.receipt.transaction = transaction;
+    }
+  }
+  return result;
+}
+
+export function printAgentRefills(result: RunAgentResult, io: CliIo): void {
+  for (const refill of result.refills ?? []) {
+    io.stderr(`Receipt: ${refill.receipt.id}`);
+    if (refill.receipt.transaction !== undefined)
+      io.stderr(`Transaction: ${refill.receipt.transaction}`);
+    for (const warning of refill.warnings ?? []) io.stderr(warning.message);
+  }
 }
 
 function environmentSwarm(environment: NodeJS.ProcessEnv): string | undefined {

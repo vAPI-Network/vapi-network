@@ -29,8 +29,12 @@ const result = await vapi.call.pay({ id: "base-dex-volume", maxPriceUsd: 0.05 })
 console.log(result.body);
 
 const purchase = await vapi.router.buy(5);
-console.log(purchase.balance);
+const receipt = purchase.receipt; // Keep the proof of payment.
+console.log(receipt, purchase.balance);
+for (const warning of purchase.warnings ?? []) console.warn(warning.message);
 ```
+
+Never repeat a purchase because of a warning; the receipt is the proof of payment.
 
 The `docs` namespace needs no wallet, account, credential or payment. It is
 available before `vapi init` or `vapi setup`:

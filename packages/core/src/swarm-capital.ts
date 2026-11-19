@@ -102,6 +102,34 @@ const treasuryRequestRecordSchema = z.strictObject({
   blocked: z.array(blockedLegSchema),
 });
 type TreasuryRequestRecord = z.infer<typeof treasuryRequestRecordSchema>;
+/** Public Router refill evidence retained in member results and delegation replays. */
+export const swarmRunRefillSchema = z.object({
+  receipt: z.object({
+    id: z.string(),
+    amountUsd: z.number().nullable(),
+    network: z.string(),
+    transaction: z.string().optional(),
+  }),
+  balance: z
+    .object({ purchasedUsd: z.number(), spentUsd: z.number(), remainingUsd: z.number() })
+    .nullable(),
+  warnings: z
+    .array(
+      z.object({
+        code: z.enum([
+          "audit_unavailable",
+          "router_key_unavailable",
+          "balance_unavailable",
+          "purchase_response_unavailable",
+          "receipt_unavailable",
+          "payment_followup_unavailable",
+        ]),
+        message: z.string(),
+      }),
+    )
+    .optional(),
+});
+
 const delegationRecordSchema = z.strictObject({
   v: z.literal(1),
   movementId: movementIdSchema,
@@ -123,6 +151,7 @@ const delegationRecordSchema = z.strictObject({
         .nullable(),
       spentUsd: z.number(),
       budgetUsd: z.number(),
+      refills: z.array(swarmRunRefillSchema).optional(),
     })
     .optional(),
 });
