@@ -1,4 +1,13 @@
 import {
+  loadOrCreateDeviceKey,
+  readVaultFileUnlocked,
+  unlockProtectedVault,
+  WalletStore,
+} from "@vapi-network/core";
+import { join } from "node:path";
+import { type CliDependencies, getEnvironment } from "./cli-context.js";
+
+import {
   activeAgentMarker,
   appendAudit,
   type AuditEvent,
@@ -15,17 +24,10 @@ import {
   type VapiPaymentAccount,
   type WalletEntry,
   type WalletName,
-  WalletStore,
 } from "@vapi-network/core";
 
 import { WALLET_OPTION } from "./args.js";
-import {
-  type CliDependencies,
-  type CliIo,
-  getEnvironment,
-  getLinePrompt,
-  isInteractive,
-} from "./cli-context.js";
+import { type CliIo, getLinePrompt, isInteractive } from "./cli-context.js";
 
 /** The wallet one invocation acts on, resolved before any passphrase is read. */
 export type WalletTarget = {
@@ -228,4 +230,23 @@ export async function confirmWalletName(
 ): Promise<void> {
   const typed = await getLinePrompt(dependencies)(prompt);
   if (typed.trim() !== name) throw new KeystoreError(refusal);
+}
+
+/** The device vault key, read the one way every CLI key export reads it. */
+export async function deviceVaultKey(
+  store: Pick<WalletStore, "home">,
+  dependencies: CliDependencies,
+): Promise<{ path: string; key: Uint8Array }> {
+  const path = join(store.home, "vault.json");
+  const metadata = await readVaultFileUnlocked(path);
+  const secrets = getSecretStore(dependencies);
+  const key = metadata.protected
+    ? await unlockProtectedVault({
+        path,
+        secrets,
+        env: getEnvironment(dependencies),
+        ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
+      })
+    : await loadOrCreateDeviceKey({ secrets });
+  return { path, key };
 }

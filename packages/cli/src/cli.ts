@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { baseUsdcBalanceReader } from "./balance-reader.js";
 import { fileExists, openInBrowser } from "./platform.js";
 import { redactDetachedRunText } from "./run-redaction.js";
+import { deviceVaultKey } from "./wallet-session.js";
 
 import { RouterClientError } from "@vapi-network/core/router-client";
 import { formatEther } from "viem";
@@ -43,7 +44,6 @@ import {
   listAccounts,
   listUnfinishedMovements,
   loadConfig,
-  loadOrCreateDeviceKey,
   lockVault,
   migrateLegacyRegistryConfig,
   migrateLegacyVapiHome,
@@ -60,7 +60,6 @@ import {
   sweepAboveCeiling,
   sweepBack,
   sweepNativeEth,
-  unlockProtectedVault,
   usesUsdcGas,
   validatePrivateKey,
   validateRecoveryPhrase,
@@ -210,6 +209,8 @@ export { fileExists, openInBrowser } from "./platform.js";
 export { redactDetachedRunValue } from "./run-redaction.js";
 
 export { baseUsdcBalanceReader } from "./balance-reader.js";
+
+export { deviceVaultKey } from "./wallet-session.js";
 
 const HELP_HEADING = "vAPI Network";
 
@@ -1935,25 +1936,6 @@ async function authClearCommand(
 
 const EXPORT_KEY_WARNING =
   "Anyone with this key can spend the wallet. Never paste it into a website or chat.";
-
-/** The device vault key, read the one way every CLI key export reads it. */
-export async function deviceVaultKey(
-  store: Pick<WalletStore, "home">,
-  dependencies: CliDependencies,
-): Promise<{ path: string; key: Uint8Array }> {
-  const path = join(store.home, "vault.json");
-  const metadata = await readVaultFileUnlocked(path);
-  const secrets = getSecretStore(dependencies);
-  const key = metadata.protected
-    ? await unlockProtectedVault({
-        path,
-        secrets,
-        env: getEnvironment(dependencies),
-        ...(dependencies.now === undefined ? {} : { now: dependencies.now }),
-      })
-    : await loadOrCreateDeviceKey({ secrets });
-  return { path, key };
-}
 
 /**
  * Prints the private key of one wallet, to a person, on a terminal. The agent
