@@ -24,10 +24,8 @@ import {
 } from "@vapi-network/core/cloud-backup";
 import { registeredAgentProfileSchema } from "@vapi-network/mcp";
 
+import { UsageError, parseArguments } from "./args.js";
 import { detectColorLevel } from "./brand.js";
-import { fileExists, openInBrowser } from "./cli.js";
-import { registryBaseUrl } from "./publish-cli.js";
-import { getSecretStore, openWalletStore, recordAudit } from "./wallet-session.js";
 import {
   getEnvironment,
   getLinePrompt,
@@ -39,7 +37,9 @@ import {
   type CliDependencies,
   type CliIo,
 } from "./cli-context.js";
-import { UsageError, parseArguments } from "./args.js";
+import { fileExists, openInBrowser } from "./platform.js";
+import { registryBaseUrl } from "./publish-cli.js";
+import { getSecretStore, openWalletStore, recordAudit } from "./wallet-session.js";
 
 const CLOUD_BACKUP_USAGE = "Usage: vapi backup --cloud [off] [--json]";
 const OWNER_RESTORE_USAGE = "Usage: vapi restore --from-owner [--owner <0x…>] [--json]";

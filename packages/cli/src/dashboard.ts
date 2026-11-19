@@ -2,9 +2,7 @@ import { resolve } from "node:path";
 
 import { activeAgentMarker, getVapiPaths, WalletStore } from "@vapi-network/core";
 
-import { openInBrowser } from "./cli.js";
-import { registryBaseUrl } from "./publish-cli.js";
-import { getSecretStore, targetWallet } from "./wallet-session.js";
+import { parseArguments } from "./args.js";
 import {
   getEnvironment,
   getLinePrompt,
@@ -13,8 +11,10 @@ import {
   type CliDependencies,
   type CliIo,
 } from "./cli-context.js";
-import { parseArguments } from "./args.js";
 import { runLoginFlow } from "./login.js";
+import { openInBrowser } from "./platform.js";
+import { registryBaseUrl } from "./publish-cli.js";
+import { getSecretStore, targetWallet } from "./wallet-session.js";
 
 type DashboardLink =
   { linked: true } | { linked: false; next: { kind: "link"; account: string; command: string }[] };
