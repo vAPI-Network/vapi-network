@@ -11,7 +11,8 @@ import {
   writeDefaultConfig,
 } from "@vapi-network/core";
 
-import { fileExists, getSecretStore, recordAudit } from "./cli.js";
+import { fileExists } from "./cli.js";
+import { getSecretStore, recordAudit } from "./wallet-session.js";
 import {
   getEnvironment,
   getPrompts,

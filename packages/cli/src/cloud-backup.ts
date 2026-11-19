@@ -25,14 +25,8 @@ import {
 import { registeredAgentProfileSchema } from "@vapi-network/mcp";
 
 import { detectColorLevel } from "./brand.js";
-import {
-  fileExists,
-  getSecretStore,
-  openInBrowser,
-  openWalletStore,
-  recordAudit,
-  registryBaseUrl,
-} from "./cli.js";
+import { fileExists, openInBrowser, registryBaseUrl } from "./cli.js";
+import { getSecretStore, openWalletStore, recordAudit } from "./wallet-session.js";
 import {
   getEnvironment,
   getLinePrompt,

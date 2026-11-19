@@ -16,15 +16,8 @@ import {
   type VapiConfig,
 } from "@vapi-network/core";
 
-import {
-  CUSTODY_NOTICE,
-  baseUsdcBalanceReader,
-  fileExists,
-  getSecretStore,
-  openWalletStore,
-  recordAudit,
-  showRecoveryPhrase,
-} from "./cli.js";
+import { CUSTODY_NOTICE, baseUsdcBalanceReader, fileExists, showRecoveryPhrase } from "./cli.js";
+import { getSecretStore, openWalletStore, recordAudit } from "./wallet-session.js";
 import {
   getEnvironment,
   isInteractive,

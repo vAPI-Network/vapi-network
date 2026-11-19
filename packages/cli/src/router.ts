@@ -26,15 +26,15 @@ import {
 } from "@vapi-network/core/router-client";
 import { AGENT_LINK_REVOKED_MESSAGE } from "@vapi-network/core/agent-link";
 
+import { registryBaseUrl } from "./cli.js";
 import {
   getSecretStore,
   recordAudit,
-  registryBaseUrl,
   requireSecretsAllowed,
   targetWallet,
   unlockTarget,
   type WalletTarget,
-} from "./cli.js";
+} from "./wallet-session.js";
 import { type CliDependencies, type CliIo } from "./cli-context.js";
 import { UsageError, parseArguments } from "./args.js";
 

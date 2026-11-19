@@ -21,7 +21,8 @@ import {
   type RuntimeStatus,
 } from "@vapi-network/mcp";
 
-import { deviceVaultKey, getSecretStore } from "./cli.js";
+import { deviceVaultKey } from "./cli.js";
+import { getSecretStore } from "./wallet-session.js";
 import { getEnvironment, isInteractive, type CliDependencies } from "./cli-context.js";
 import { UsageError } from "./args.js";
 import { createRailwayRuntime, type RailwayRuntimeOptions } from "./runtime-railway.js";

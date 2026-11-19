@@ -20,14 +20,13 @@ import {
 import { readCloudBackupState } from "@vapi-network/core/cloud-backup";
 import { routerUsage } from "@vapi-network/core/router-client";
 
+import { baseUsdcBalanceReader, registryBaseUrl } from "./cli.js";
 import {
-  baseUsdcBalanceReader,
   getSecretStore,
   openWalletStore,
-  registryBaseUrl,
   unlockTarget,
   type WalletTarget,
-} from "./cli.js";
+} from "./wallet-session.js";
 import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
 import { UsageError } from "./args.js";
 import { agentLinkStatus } from "./login.js";

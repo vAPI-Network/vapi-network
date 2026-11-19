@@ -2,7 +2,8 @@ import { resolve } from "node:path";
 
 import { activeAgentMarker, getVapiPaths, WalletStore } from "@vapi-network/core";
 
-import { getSecretStore, openInBrowser, registryBaseUrl, targetWallet } from "./cli.js";
+import { openInBrowser, registryBaseUrl } from "./cli.js";
+import { getSecretStore, targetWallet } from "./wallet-session.js";
 import {
   getEnvironment,
   getLinePrompt,

@@ -33,16 +33,15 @@ import {
 import { renameAgentLinkWallet } from "@vapi-network/core/agent-link";
 import { exportKeystoreKeys } from "@vapi-network/core/secrets";
 
+import { baseUsdcBalanceReader, registryBaseUrl } from "./cli.js";
 import {
-  baseUsdcBalanceReader,
   confirmWalletName,
   getSecretStore,
   openWalletStore,
   recordAudit,
-  registryBaseUrl,
   targetWallet,
   unlockTarget,
-} from "./cli.js";
+} from "./wallet-session.js";
 import { getEnvironment, isInteractive, type CliDependencies, type CliIo } from "./cli-context.js";
 import { UsageError, parseArguments, requiredPositional } from "./args.js";
 import { offerDashboardLink } from "./dashboard.js";
