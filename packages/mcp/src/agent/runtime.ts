@@ -325,14 +325,17 @@ async function refreshRunRecordLocked(
   } catch {
     return current;
   }
-  const state: RunState =
-    current.state === "starting" && status.state === "unknown" ? "starting" : status.state;
+  // Railway also reports running when a poll fails or no result exists. That
+  // cannot confirm launch completion or relax a starting run's strict stop.
+  const unresolvedStart =
+    current.state === "starting" &&
+    (status.state === "unknown" || (current.kind === "railway" && status.state === "running"));
+  const state: RunState = unresolvedStart ? "starting" : status.state;
   const statusDetail =
     status.detail === undefined ? undefined : redactRunText(status.detail, process.env);
-  const detail =
-    current.state === "starting" && status.state === "unknown"
-      ? `${statusDetail ?? "Worker status is unknown"}. ${startingStopInstruction(current)}`
-      : statusDetail;
+  const detail = unresolvedStart
+    ? `${statusDetail ?? (status.state === "running" ? "Worker launch is still unconfirmed" : "Worker status is unknown")}. ${startingStopInstruction(current)}`
+    : statusDetail;
   if (state === current.state && detail === current.detail) return current;
 
   const updated: RunRecord = {
