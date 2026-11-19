@@ -225,7 +225,7 @@ export async function pollDeviceLink(args: {
         throw new AgentLinkError("access_denied", "The owner denied the agent link.");
       }
       if (response.status === 400 && error === "expired_token") throw expiredLinkError();
-      throw httpError("The vAPI agent link request failed.");
+      throw linkRequestError(response.status, payload);
     }
   } finally {
     clearTimeout(expiryTimer);
@@ -736,7 +736,26 @@ function deviceAuthorizationError(
   if (status === 400 && error === "invalid_scope") {
     return new AgentLinkError("invalid_scope", "The requested agent scope is not allowed.");
   }
-  return httpError("The vAPI agent link request failed.");
+  return linkRequestError(status, payload);
+}
+
+const SERVER_ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/u;
+
+/**
+ * Names the HTTP status and the server's error code, so a refused link can be
+ * told apart from a rate limit or a proxy answering in vAPI's place. Only a
+ * short snake_case code is repeated; free text from the response never is,
+ * because this message reaches terminals and MCP clients.
+ */
+function linkRequestError(status: number, payload: Record<string, unknown>): AgentLinkError {
+  const code = stringField(payload, "error");
+  const detail =
+    code !== undefined && SERVER_ERROR_CODE.test(code)
+      ? `HTTP ${status}, ${code}`
+      : `HTTP ${status}`;
+  const hint =
+    status === 429 ? " Too many link requests; wait a few minutes and run vapi login again." : "";
+  return httpError(`The vAPI agent link request failed (${detail}).${hint}`);
 }
 
 function notLinkedError(): AgentLinkError {
@@ -758,14 +777,23 @@ function apiEndpoint(apiBase: string, path: string): string {
   return new URL(path, new URL(apiBase).origin).toString();
 }
 
+/**
+ * A failed response often has no JSON body (a gateway or proxy error page), so
+ * it reads as an empty record and the caller reports the HTTP status. Only a
+ * successful response must be a JSON object.
+ */
 async function responseRecord(response: Response): Promise<Record<string, unknown>> {
   let payload: unknown;
   try {
     payload = await response.json();
   } catch {
+    if (!response.ok) return {};
     throw httpError("The vAPI agent link response was invalid.");
   }
-  if (!isRecord(payload)) throw httpError("The vAPI agent link response was invalid.");
+  if (!isRecord(payload)) {
+    if (!response.ok) return {};
+    throw httpError("The vAPI agent link response was invalid.");
+  }
   return payload;
 }
 
