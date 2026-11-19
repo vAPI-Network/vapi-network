@@ -12,17 +12,6 @@ sentence under it is the summary shown on the
 
 ## Unreleased
 
-### Fixed
-
-- A rejected transfer releases its spend reservation only after its failed receipt row is written. If that write fails, it returns `unknown`, keeps the reservation and can be resumed. A relayed transfer whose receipt row cannot be written still returns `sent` (with the transaction when the relay reported one) or `unknown` with the nonce instead of a filesystem error. `--resume` with that nonce records the result once the receipt can be written.
-- Token refresh checks and stores rotated tokens under a credential lock shared with login and logout, so a refresh that finishes after logout stores nothing and cannot overwrite a newer login. The new lock adds no wait for a refresh's network request.
-- A wallet named `constructor` can now be created on a machine that has none. Earlier versions reported it as an existing wallet, so creating it failed with "already exists" while `vapi wallet list` showed nothing. Reported and fixed by @goranai in #48 and #49.
-- Setting spend caps, a ceiling or provisioning limits for a wallet named `constructor` that does not exist now says "No wallet named constructor" instead of failing with a JavaScript error, and the ceiling sweep no longer claims a window for it. Reported by @goranai in #48.
-- Atomic JSON writes no longer fail on Windows: the parent directory flush that Windows rejects is skipped there. Other platforms still flush it.
-- On Windows, a caller waiting for a file lock keeps waiting when the released lock it is removing is deleted by another caller at the same moment, instead of failing with a permission error.
-- A failure while releasing a file lock no longer replaces the result of the operation that ran under it, so a saved receipt or a completed wallet rename is not reported as failed.
-- A failed Railway launch that leaves a launch marker without a sandbox id, because the id could not be saved or the marker could not be removed, now keeps its starting reservation and returns `launch_ambiguous`, so `vapi swarm stop <swarm> <runId> --confirm-worker-stopped` can clear the marker after the five-minute window. Identified sidecars still use `vapi swarm stop <swarm> <runId>` and `vapi swarm forget-run <swarm> <runId> --confirm-destroyed` after verified destruction.
-
 ## 0.15.0 - 2026-11-19
 
 Router purchases recover after an interruption without a second charge, swarm dissolution refuses while a worker is active or unresolved, and `vapi login` works on more Linux keyrings.
@@ -66,7 +55,7 @@ Router purchases recover after an interruption without a second charge, swarm di
 - SDK `client.router.buy()` returns `RouterPurchaseResult` so callers can read warnings. The main core entry exports `RouterPurchaseResult` and `RouterPurchaseWarning` types.
 - Receipt appends sync payment evidence best effort; settled Router journals retire only after a separate strict sync of the ledger and its parent directory, including receipts saved by older clients. The file is opened without creating it, writable only on Windows; directory sync is skipped there. Fresh transfers strictly sync their signed authorization file and parent directory (except the directory on Windows) before calling the relay. If sync fails, no relay request is sent. A successful failed-row append releases the reservation and reports that no money moved. If that append also fails, the transfer returns `unknown`, keeps its reservation and can be resumed. Wallet renames require the receipt rewrite to sync before replacement and sync its directory best effort afterward.
 - Recovered Router purchases appear once in receipt listings, JSON/CSV exports and stats, preserving original metadata through append-only settlement revisions.
-- Logout bounds remote revocation and its token refresh requests and response bodies to ten seconds. Local cleanup uses the wallet credential lock even after that deadline. Refresh re-checks the link and stored token pair before publishing a rotation, accepting login metadata changes when the tokens still match. That read-compare-write is not atomic against login/logout, which use a different lock.
+- Logout bounds remote revocation and its token refresh requests and response bodies to ten seconds. Local cleanup uses the wallet credential lock even after that deadline. Refresh re-checks the link and stored token pair before publishing a rotation, accepting login metadata changes when the tokens still match.
 - CLI Router purchases with unknown settlement now say that the authorization was sent, settlement is not confirmed and the purchase must not be repeated. Rejected settlements are also identified without a successful payment claim.
 - CLI Router chat and buy errors preserve `refill` evidence when a missing link message is normalized. Human errors print purchase warnings, including the settled-retirement command; JSON retains the warning codes and messages.
 - Settled Router purchases keep blocking another payment until their receipt is in the ledger and purchased credit is established by usage under a current link with the same owner (case-insensitive) and API base or a successful balance-key chat. Repeated failed chats and manual buys recover the earlier purchase without paying again.
@@ -89,6 +78,14 @@ Router purchases recover after an interruption without a second charge, swarm di
 - `SwarmCapitalDeps` adds an optional `reconcileRuns` port; local run records remain the authority for the final eligibility check. Existing capital locks and movement-journal formats are unchanged.
 - Concurrent Railway refreshes cannot turn a stored unknown run into finished through stale ordinary cleanup, or overwrite stopped/forgotten records and their confirmation metadata. Start and stop refresh through an internal helper while already holding the member lock.
 - Orphan-sidecar cleanup and CLI confirmation share the member lock. Failed cleanup cannot recreate a stale orphan after `forget-run` has retired it and retained the confirmation.
+- A rejected transfer releases its spend reservation only after its failed receipt row is written. If that write fails, it returns `unknown`, keeps the reservation and can be resumed. A relayed transfer whose receipt row cannot be written still returns `sent` (with the transaction when the relay reported one) or `unknown` with the nonce instead of a filesystem error. `--resume` with that nonce records the result once the receipt can be written.
+- Token refresh checks and stores rotated tokens under a credential lock shared with login and logout, so a refresh that finishes after logout stores nothing and cannot overwrite a newer login. The new lock adds no wait for a refresh's network request.
+- A wallet named `constructor` can now be created on a machine that has none. Earlier versions reported it as an existing wallet, so creating it failed with "already exists" while `vapi wallet list` showed nothing. Reported and fixed by @goranai in #48 and #49.
+- Setting spend caps, a ceiling or provisioning limits for a wallet named `constructor` that does not exist now says "No wallet named constructor" instead of failing with a JavaScript error, and the ceiling sweep no longer claims a window for it. Reported by @goranai in #48.
+- Atomic JSON writes no longer fail on Windows: the parent directory flush that Windows rejects is skipped there. Other platforms still flush it.
+- On Windows, a caller waiting for a file lock keeps waiting when the released lock it is removing is deleted by another caller at the same moment, instead of failing with a permission error.
+- A failure while releasing a file lock no longer replaces the result of the operation that ran under it, so a saved receipt or a completed wallet rename is not reported as failed.
+- A failed Railway launch that leaves a launch marker without a sandbox id, because the id could not be saved or the marker could not be removed, now keeps its starting reservation and returns `launch_ambiguous`, so `vapi swarm stop <swarm> <runId> --confirm-worker-stopped` can clear the marker after the five-minute window. Identified sidecars still use `vapi swarm stop <swarm> <runId>` and `vapi swarm forget-run <swarm> <runId> --confirm-destroyed` after verified destruction.
 
 ### Internal
 
