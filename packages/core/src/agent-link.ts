@@ -739,13 +739,14 @@ function deviceAuthorizationError(
   return linkRequestError(status, payload);
 }
 
-const SERVER_ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/u;
+const SERVER_ERROR_CODE = /^[a-z][a-z0-9_]{0,31}$/u;
 
 /**
  * Names the HTTP status and the server's error code, so a refused link can be
- * told apart from a rate limit or a proxy answering in vAPI's place. Only a
- * short snake_case code is repeated; free text from the response never is,
- * because this message reaches terminals and MCP clients.
+ * told apart from a rate limit or a proxy answering in vAPI's place. Only an
+ * error code of at most 32 lowercase letters, digits and underscores is
+ * repeated. Sentences, descriptions and any other field of the response never
+ * are, because this message reaches terminals and MCP clients.
  */
 function linkRequestError(status: number, payload: Record<string, unknown>): AgentLinkError {
   const code = stringField(payload, "error");

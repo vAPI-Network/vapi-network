@@ -490,9 +490,10 @@ function libsecretStore(
       ]);
       requireBinary(result);
       // Some libsecret builds exit 1 with nothing on stderr when `clear` matches
-      // no item. Removing an absent entry is not a failure; a silent failure to
-      // remove an entry that was there still is.
-      if (!existed && result.code !== 0 && result.stderr.trim().length === 0) return false;
+      // no item. Removing an entry the lookup did not find is not a failure.
+      // Any other exit code, any message, and a silent failure to remove an
+      // entry the lookup did find are still reported.
+      if (!existed && result.code === 1 && result.stderr.trim().length === 0) return false;
       requireSuccess(result, `remove the passphrase of ${name} from the secret service`);
       return existed;
     },

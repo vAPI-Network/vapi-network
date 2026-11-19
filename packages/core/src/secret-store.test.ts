@@ -459,6 +459,14 @@ describe("the libsecret store", () => {
     );
   });
 
+  it("still fails when clearing an absent entry exits with another code", async () => {
+    const { run } = recordingRunner([{ code: 1 }, { code: 2 }]);
+
+    await expect(secretStore({ platform: "linux", run }).remove("main")).rejects.toThrow(
+      "Could not remove the passphrase of main from the secret service (exit 2).",
+    );
+  });
+
   it("still fails when an entry that was there is not cleared", async () => {
     const { run } = recordingRunner([{ code: 0, stdout: "test-only-passphrase\n" }, { code: 1 }]);
 

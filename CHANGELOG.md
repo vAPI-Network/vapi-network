@@ -7,7 +7,7 @@ scoped packages. The packages share one version and are released together.
 
 ### Fixed
 
-- Linux: `vapi login` no longer fails with "The agent link could not be stored consistently" on keyrings where `secret-tool clear` exits 1 without a message when it matches nothing. Removing an absent entry now counts as nothing to remove; a failure with a reason, or a failure to remove an entry that was there, is still reported. Reported in #41, first fixed by @Rizal9 in #31.
+- Linux: `vapi login` no longer fails with "The agent link could not be stored consistently" on keyrings where `secret-tool clear` exits 1 without a message when it matches nothing. An exit 1 without a message for an entry the lookup did not find now counts as nothing to remove; any other exit code, a failure with a reason, and a failure to remove an entry the lookup found are still reported. Reported in #41, first fixed by @Rizal9 in #31.
 - A refused agent link now names the HTTP status and the server's error code, for example `The vAPI agent link request failed (HTTP 429, rate_limited).` Earlier versions printed only "The vAPI agent link request failed." for a rate limit, a refusal and a proxy error alike (#30, #42). A gateway or proxy error page without a JSON body is reported the same way and no longer as "response was invalid".
 
 ## 0.14.0 — 2026-11-17
