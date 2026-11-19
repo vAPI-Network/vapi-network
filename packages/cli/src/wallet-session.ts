@@ -250,3 +250,5 @@ export async function deviceVaultKey(
     : await loadOrCreateDeviceKey({ secrets });
   return { path, key };
 }
+
+export const SOLANA_VAULT_UNAVAILABLE = "Solana keys are not part of the device vault yet.";
