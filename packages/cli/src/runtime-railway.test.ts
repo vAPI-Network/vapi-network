@@ -1595,6 +1595,42 @@ describe("railway runtime lifecycle", () => {
     ).rejects.toThrow(`railway sandbox destroy ${SANDBOX_ID} failed`);
   });
 
+  it.each(["env", "JSON"] as const)(
+    "redacts a %s bundle assignment in a stop destroy failure",
+    async (form) => {
+      const f = await fixture();
+      const bundle = "AbC_dEf-0123456789".repeat(15).slice(0, 240);
+      const stderr =
+        form === "env"
+          ? `error: VAPI_MEMBER_BUNDLE=${bundle}`
+          : `error: "VAPI_MEMBER_BUNDLE": "${bundle}"`;
+      const railway = fakeRailway({ destroy: () => ({ code: 1, stdout: "", stderr }) });
+
+      const failure = (await createRailwayRuntime({ home: f.home, exec: railway.exec })
+        .stop(handle())
+        .catch((error: unknown) => error)) as Error;
+
+      expect(failure instanceof Error).toBe(true);
+      expect(failure.message.includes(bundle.slice(0, 32))).toBe(false);
+      expect(failure.message).toContain("VAPI_MEMBER_BUNDLE=[redacted]");
+    },
+  );
+
+  it("preserves the exact ordinary stop destroy failure", async () => {
+    const f = await fixture();
+    const railway = fakeRailway({
+      destroy: () => ({ code: 1, stdout: "", stderr: "destroy failed" }),
+    });
+
+    const failure = (await createRailwayRuntime({ home: f.home, exec: railway.exec })
+      .stop(handle())
+      .catch((error: unknown) => error)) as Error;
+
+    expect(failure.message).toBe(
+      "railway sandbox destroy sbx_7f3a9c failed (exit 1): destroy failed",
+    );
+  });
+
   it("reports a sandbox that is gone as unknown", async () => {
     const f = await fixture();
     const railway = fakeRailway({ cat: () => SANDBOX_GONE });
@@ -1962,6 +1998,44 @@ describe("railway runtime signals during start", () => {
     ]);
   });
 
+  it("SIGTERM right after secret-valued create output leaves the sandbox id unreadable", async () => {
+    const f = await fixture();
+    const before = process.listeners("SIGTERM");
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const stderr = captureStderr();
+    const railway = fakeRailway({
+      create: () => ({ ...CREATED, stdout: JSON.stringify({ id: f.alphaKey }) }),
+    });
+    let signalled = false;
+    const rmAfterCreate = vi.fn(async (path: string, options: { recursive: true; force: true }) => {
+      if (!signalled && railway.observations.length === 1) {
+        signalled = true;
+        addedListener("SIGTERM", before)("SIGTERM");
+        await vi.waitFor(() => expect(kill).toHaveBeenCalledWith(process.pid, "SIGTERM"), {
+          interval: 1,
+        });
+      }
+      await rm(path, options);
+    });
+
+    const failure = (await runtimeFor(f, railway.exec, { fs: { rm: rmAfterCreate } })
+      .start(MEMBER, RUN)
+      .catch((error: unknown) => error)) as RuntimeError;
+
+    const text = stderr.join("");
+    for (const value of [f.alphaKey, f.alphaKey.slice(2)]) {
+      expect(text.includes(value)).toBe(false);
+      expect(failure.message.includes(value)).toBe(false);
+      expect(JSON.stringify(readSidecarFile(f)).includes(value)).toBe(false);
+    }
+    expect(railway.calls.map((args) => args[1])).toEqual(["create"]);
+    expect(text).toContain("railway sandbox list");
+    expect(failure instanceof RuntimeError).toBe(true);
+    expect(failure.code).toBe("launch_ambiguous");
+    expect(readSidecarFile(f)).toEqual(sidecarOf());
+    expect(process.listeners("SIGTERM")).toEqual(before);
+  });
+
   it("SIGTERM during readiness keeps an orphaned sidecar when the destroy fails", async () => {
     const f = await fixture();
     const before = process.listeners("SIGTERM");
@@ -2211,6 +2285,29 @@ describe("railway runtime sidecar during start", () => {
     expect(readSidecarFile(f)).toEqual(sidecarOf({ state: "orphaned", sandboxId: SANDBOX_ID }));
   });
 
+  it("redacts an echoed bundle before shortening a start destroy failure", async () => {
+    const f = await fixture();
+    let bundle = "";
+    const railway = fakeRailway({
+      create: (observation) => {
+        bundle = bundleOf(observation);
+        return CREATED;
+      },
+      detach: () => ({ code: 1, stdout: "", stderr: "exec failed" }),
+      destroy: () => ({ code: 1, stdout: "", stderr: `error: VAPI_MEMBER_BUNDLE=${bundle}` }),
+    });
+
+    const failure = (await runtimeFor(f, railway.exec)
+      .start(MEMBER, RUN)
+      .catch((error: unknown) => error)) as Error;
+
+    for (const value of [bundle, bundle.slice(0, 48), f.alphaKey, f.alphaKey.slice(2)]) {
+      expect(failure.message.includes(value)).toBe(false);
+    }
+    expect(failure.message).toContain(`Could not destroy sandbox ${SANDBOX_ID}`);
+    expect(failure.message).toContain(`railway sandbox destroy ${SANDBOX_ID}`);
+  });
+
   it("keeps an orphaned sidecar when readiness fails and the destroy fails", async () => {
     const f = await fixture();
     const railway = fakeRailway({
@@ -2223,6 +2320,91 @@ describe("railway runtime sidecar during start", () => {
     ).rejects.toThrow(`railway sandbox destroy ${SANDBOX_ID}`);
     expect(readSidecarFile(f)).toEqual(sidecarOf({ state: "orphaned", sandboxId: SANDBOX_ID }));
   });
+});
+
+describe("railway runtime secret-valued sandbox ids", () => {
+  async function expectUnreadableId(f: Fixture, id: string, shortCredential = false) {
+    let bundle = "";
+    const railway = fakeRailway({
+      create: (observation) => {
+        bundle = bundleOf(observation);
+        return { ...CREATED, stdout: JSON.stringify({ id }) };
+      },
+    });
+    const failure = (await startDetachedRun({
+      home: f.home,
+      runtime: runtimeFor(f, railway.exec),
+      member: MEMBER,
+      run: RUN,
+      now: () => new Date(STARTED_AT),
+    }).catch((error: unknown) => error)) as RuntimeError;
+
+    // Boolean assertions keep secrets out of regression-failure output.
+    expect(failure instanceof RuntimeError).toBe(true);
+    expect(failure.code).toBe("launch_ambiguous");
+    const values = [...forbiddenValues(f, bundle), id];
+    for (const value of values) {
+      expect(failure.message.toLowerCase().includes(value.toLowerCase())).toBe(false);
+      expect(
+        railway.calls.some((args) =>
+          args.some((arg) => arg.toLowerCase().includes(value.toLowerCase())),
+        ),
+      ).toBe(false);
+    }
+    if (shortCredential) expect(/\babc1234\b/iu.test(failure.message)).toBe(false);
+    const files = await readdir(f.home, { recursive: true, withFileTypes: true });
+    for (const file of files) {
+      if (!file.isFile()) continue;
+      const text = (await readFile(join(file.parentPath, file.name), "utf8")).toLowerCase();
+      for (const value of values) expect(text.includes(value.toLowerCase())).toBe(false);
+    }
+    expect(railway.calls.map((args) => args[1])).toEqual(["create"]);
+    expect(failure.message).toContain("railway sandbox list");
+    expect(failure.message).toMatch(/--confirm-worker-stopped\.$/u);
+    expect(readSidecarFile(f)).toEqual(sidecarOf());
+    expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+      state: "starting",
+      handle: { ref: "" },
+    });
+    expect(
+      (await readAuditLog(f.home)).filter((entry) => entry.event === "agent.remote_key_exported"),
+    ).toEqual([
+      expect.objectContaining({
+        wallet: ALPHA,
+        detail: "runtime=railway sandbox=unknown create_unparsed",
+      }),
+    ]);
+  }
+
+  it.each(["bare", "0x", "upper case", "substring"] as const)(
+    "treats a %s private-key sandbox id as unreadable",
+    async (form) => {
+      const f = await fixture();
+      const id =
+        form === "bare"
+          ? f.alphaKey.slice(2)
+          : form === "upper case"
+            ? f.alphaKey.toUpperCase()
+            : form === "substring"
+              ? `sbx_${f.alphaKey.slice(2)}`
+              : f.alphaKey;
+      await expectUnreadableId(f, id);
+    },
+  );
+
+  it.each(["original", "upper case"] as const)(
+    "treats a short credential sandbox id as unreadable (%s)",
+    async (form) => {
+      const f = await fixture();
+      const credential = "abc1234";
+      await f.secrets.set(agentSecretAccounts(ALPHA).tokens, tokens(credential, ALPHA_REFRESH));
+      await expectUnreadableId(
+        f,
+        form === "original" ? credential : credential.toUpperCase(),
+        true,
+      );
+    },
+  );
 });
 
 // Directory permissions inject failures into the real synchronous sidecar I/O.
@@ -2367,51 +2549,6 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       expect(railway.calls.at(-1)).toEqual(["sandbox", "destroy", SANDBOX_ID]);
     });
 
-    it.each([
-      ["bare", "succeeds"],
-      ["0x", "succeeds"],
-      ["bare", "fails"],
-      ["0x", "fails"],
-    ] as const)(
-      "redacts a %s private-key sandbox id when destroy %s and the id-less marker remains",
-      async (form, destroy) => {
-        const f = await fixture();
-        const id = form === "bare" ? f.alphaKey.slice(2) : f.alphaKey;
-        let bundle = "";
-        const railway = fakeRailway({
-          create: (observation) => {
-            bundle = bundleOf(observation);
-            chmodSync(runsDirectory(f.home), 0o500);
-            return { ...CREATED, stdout: `${JSON.stringify({ id })}\n` };
-          },
-          destroy: () =>
-            destroy === "succeeds" ? OK : { code: 1, stdout: "", stderr: "destroy failed" },
-        });
-        const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec));
-
-        const failure = (await startDetachedRun({
-          home: f.home,
-          runtime,
-          member: MEMBER,
-          run: RUN,
-        }).catch((error: unknown) => error)) as RuntimeError;
-
-        expect(failure).toMatchObject({ code: "launch_ambiguous" });
-        expect(readSidecarFile(f)).toEqual(sidecarOf());
-        expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
-          state: "starting",
-          handle: { ref: "" },
-        });
-        expect(railway.calls.map((args) => args[1])).toEqual(["create", "destroy"]);
-        expect(railway.calls.at(-1)?.at(-1) === id).toBe(true);
-        // Boolean assertions keep the key out of regression-failure output.
-        for (const value of forbiddenValues(f, bundle))
-          expect(failure.message.includes(value)).toBe(false);
-        expect(failure.message).toContain("[redacted]");
-        expect(failure.message).toMatch(/--confirm-worker-stopped\.$/u);
-      },
-    );
-
     it.each(["succeeds", "fails"] as const)(
       "preserves reconciliation instructions verbatim when destroy %s and the id-less marker remains",
       async (destroy) => {
@@ -2442,44 +2579,6 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
         expect(failure.message.split("\n").at(-1)).toBe(
           `After checking railway sandbox list and destroying any worker, wait for the five-minute reconciliation window, then run vapi swarm stop team ${RUN_ID} --confirm-worker-stopped.`,
         );
-      },
-    );
-
-    it.each(["succeeds", "fails"] as const)(
-      "redacts a short credential sandbox id when destroy %s and the id-less marker remains",
-      async (destroy) => {
-        const f = await fixture();
-        const id = "abc1234";
-        await f.secrets.set(agentSecretAccounts(ALPHA).tokens, tokens(id, ALPHA_REFRESH));
-        const railway = fakeRailway({
-          create: () => {
-            chmodSync(runsDirectory(f.home), 0o500);
-            return { ...CREATED, stdout: `${JSON.stringify({ id })}\n` };
-          },
-          destroy: () =>
-            destroy === "succeeds" ? OK : { code: 1, stdout: "", stderr: "destroy failed" },
-        });
-        const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec));
-
-        const failure = (await startDetachedRun({
-          home: f.home,
-          runtime,
-          member: MEMBER,
-          run: RUN,
-        }).catch((error: unknown) => error)) as RuntimeError;
-
-        expect(failure).toMatchObject({ code: "launch_ambiguous" });
-        expect(readSidecarFile(f)).toEqual(sidecarOf());
-        expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
-          state: "starting",
-          handle: { ref: "" },
-        });
-        expect(railway.calls.map((args) => args[1])).toEqual(["create", "destroy"]);
-        expect(railway.calls.at(-1)?.at(-1) === id).toBe(true);
-        // Boolean assertions keep the credential out of regression-failure output.
-        expect(/\babc1234\b/u.test(failure.message)).toBe(false);
-        expect(failure.message).toContain("[redacted]");
-        expect(failure.message).toMatch(/--confirm-worker-stopped\.$/u);
       },
     );
 
