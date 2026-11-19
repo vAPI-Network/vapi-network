@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,6 +24,7 @@ import {
   type DeviceLinkStart,
   type LinkResult,
 } from "./agent-link.js";
+import { FileLockedError, __setAtomicFileTestHooks } from "./atomic-file.js";
 import { readAuditLog } from "./audit.js";
 import { DEFAULT_SPEND_CAPS } from "./config.js";
 import type { SecretStore } from "./secret-store.js";
@@ -40,6 +41,7 @@ const ROUTER_KEY = "router-key-that-must-stay-secret";
 const directories: string[] = [];
 
 afterEach(async () => {
+  __setAtomicFileTestHooks(undefined);
   await Promise.all(
     directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
   );
@@ -1283,4 +1285,111 @@ describe("forgetAgentLink", () => {
       forgetAgentLink({ secrets, wallets, wallet: "main", fetchImpl, home }),
     ).resolves.toBeUndefined();
   });
+});
+
+describe("agent link purchase serialization", () => {
+  it.each(["login", "logout"] as const)(
+    "%s reports a busy purchase without changing credentials",
+    async (action) => {
+      const home = await temporaryHome();
+      const wallets = await walletStore(home);
+      await wallets.setLink("main", agentLink());
+      const secrets = memorySecretStore();
+      const fetchImpl = vi.fn<typeof fetch>();
+      const lock = vi
+        .spyOn(wallets, "withRouterPurchaseLock")
+        .mockRejectedValue(new FileLockedError());
+      const operation =
+        action === "login"
+          ? saveAgentLink({
+              secrets,
+              wallets,
+              wallet: "main",
+              start: deviceStart(),
+              result: linkResult(),
+              apiBase: API_BASE,
+              label: "new",
+            })
+          : forgetAgentLink({ secrets, wallets, wallet: "main", fetchImpl });
+      await expect(operation).rejects.toThrow(
+        "A Router purchase is in progress. Retry login or logout after it completes.",
+      );
+      expect(secrets.setCalls).toHaveLength(0);
+      expect(secrets.removeCalls).toHaveLength(0);
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(wallets.entry("main")?.link).toEqual(agentLink());
+      lock.mockRestore();
+    },
+  );
+
+  it.each(["login", "logout"] as const)(
+    "%s waits outside credential locks without changing state",
+    async (action) => {
+      const home = await temporaryHome();
+      const wallets = await walletStore(home);
+      const originalLink = agentLink();
+      await wallets.setLink("main", originalLink);
+      const accounts = agentSecretAccounts("main");
+      const secrets = memorySecretStore({
+        [accounts.tokens]: JSON.stringify({
+          ...linkResult().tokens,
+          expiresAt: Number.MAX_SAFE_INTEGER,
+        }),
+        [accounts.routerStake]: ROUTER_KEY,
+      });
+      const before = { ...secrets.entries };
+      const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+      let release!: () => void;
+      let locked!: () => void;
+      const acquired = new Promise<void>((resolve) => {
+        locked = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const holder = wallets.withRouterPurchaseLock("main", async () => {
+        locked();
+        await gate;
+      });
+      await acquired;
+      let attempting!: () => void;
+      const attempt = new Promise<void>((resolve) => {
+        attempting = resolve;
+      });
+      let registryAttempts = 0;
+      __setAtomicFileTestHooks({
+        beforeLockAttempt: (path) => {
+          if (path.endsWith(".purchase.lock")) attempting();
+          else registryAttempts++;
+        },
+      });
+      const operation =
+        action === "login"
+          ? saveAgentLink({
+              secrets,
+              wallets,
+              wallet: "main",
+              start: deviceStart({ clientId: "new-client" }),
+              result: linkResult(),
+              apiBase: API_BASE,
+              label: "new",
+            })
+          : forgetAgentLink({ secrets, wallets, wallet: "main", fetchImpl });
+      try {
+        await attempt;
+        expect(secrets.entries).toEqual(before);
+        expect(wallets.entry("main")?.link).toEqual(originalLink);
+        expect(fetchImpl).not.toHaveBeenCalled();
+        expect(registryAttempts).toBe(0);
+        expect((await readdir(home)).some((path) => path.endsWith(".agent-link.lock"))).toBe(false);
+      } finally {
+        __setAtomicFileTestHooks(undefined);
+        release();
+        await holder;
+      }
+      await operation;
+      if (action === "login") expect(wallets.entry("main")?.link?.clientId).toBe("new-client");
+      else expect(wallets.entry("main")?.link).toBeUndefined();
+    },
+  );
 });

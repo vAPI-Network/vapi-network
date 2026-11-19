@@ -100,6 +100,7 @@ const routerPendingPurchaseSchema = z
     createdAt: z.iso.datetime(),
     tierUsd: z.union([z.literal(1), z.literal(5), z.literal(20), z.literal(50)]),
     link: agentLinkSchema,
+    baselinePurchasedUsd: z.number().finite().nonnegative().optional(),
     network: z.string().min(1).optional(),
     amountAtomic: z.string().regex(/^\d+$/u).optional(),
     transaction: z.string().optional(),

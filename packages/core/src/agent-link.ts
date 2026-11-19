@@ -5,6 +5,7 @@ import { dirname } from "node:path";
 
 import { createSiweMessage } from "viem/siwe";
 
+import { FileLockedError } from "./atomic-file.js";
 import { appendAudit } from "./audit.js";
 import { DEVICE_NAME_PATTERN } from "./device.js";
 import { createPublicFetch } from "./net-guard.js";
@@ -305,6 +306,19 @@ export async function renameAgentLinkWallet(args: {
   });
 }
 
+async function withLinkPurchaseLock<T>(
+  wallets: WalletStore,
+  wallet: WalletName,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await wallets.withRouterPurchaseLock(wallet, operation);
+  } catch (error) {
+    if (!(error instanceof FileLockedError)) throw error;
+    throw httpError("A Router purchase is in progress. Retry login or logout after it completes.");
+  }
+}
+
 export async function saveAgentLink(args: {
   secrets: SecretStore;
   wallets: WalletStore;
@@ -315,57 +329,63 @@ export async function saveAgentLink(args: {
   label: string;
   home?: string;
 }): Promise<AgentLink> {
-  if (!args.secrets.available) {
-    throw new Error(
-      "No OS secret store is available on this machine, so the agent link cannot be stored safely. Nothing was saved.",
-    );
-  }
-
-  const link: AgentLink = {
-    apiBase: args.apiBase,
-    clientId: args.start.clientId,
-    owner: args.result.owner,
-    label: args.label,
-    scopes: [...args.result.tokens.scopes],
-    linkedAt: new Date().toISOString(),
-    ...(args.result.routerKey === undefined || args.result.routerBaseUrl === undefined
-      ? {}
-      : { routerBaseUrl: args.result.routerBaseUrl }),
-  };
-
-  await withAgentCredentialLock(args.wallets, `wallet:${args.wallet}`, async () => {
-    await args.wallets.reload();
-    const previousLink = args.wallets.entry(args.wallet)?.link;
-    const accounts = agentSecretAccounts(args.wallet);
-    const previousSecrets = await readSecretSnapshot(args.secrets, accounts);
-
-    try {
-      await safeSetSecret(args.secrets, accounts.tokens, JSON.stringify(args.result.tokens));
-      await writeOptionalSecret(args.secrets, accounts.routerStake, args.result.routerKey);
-      // Balance keys belong to the prior owner/link generation and are never returned here.
-      await writeOptionalSecret(args.secrets, accounts.routerBalance, undefined);
-      await args.wallets.setLink(args.wallet, link);
-    } catch (error) {
-      const secretsRestored = await restoreSecretSnapshot(args.secrets, accounts, previousSecrets);
-      const metadataRestored = await restoreLinkMetadata(args.wallets, args.wallet, previousLink);
-      if (!secretsRestored || !metadataRestored) {
-        // A missing link is safer than metadata that can select the wrong owner's credentials.
-        await args.wallets.clearLink(args.wallet).catch(() => undefined);
-        throw httpError(
-          "The agent link could not be stored consistently. Local link metadata was cleared; run vapi login again.",
-        );
-      }
-      throw error;
+  return await withLinkPurchaseLock(args.wallets, args.wallet, async () => {
+    if (!args.secrets.available) {
+      throw new Error(
+        "No OS secret store is available on this machine, so the agent link cannot be stored safely. Nothing was saved.",
+      );
     }
-  });
 
-  await appendAudit(args.home ?? args.wallets.home, {
-    event: "agent.linked",
-    wallet: args.wallet,
-    owner: args.result.owner,
-    tty: Boolean(process.stderr.isTTY),
+    const link: AgentLink = {
+      apiBase: args.apiBase,
+      clientId: args.start.clientId,
+      owner: args.result.owner,
+      label: args.label,
+      scopes: [...args.result.tokens.scopes],
+      linkedAt: new Date().toISOString(),
+      ...(args.result.routerKey === undefined || args.result.routerBaseUrl === undefined
+        ? {}
+        : { routerBaseUrl: args.result.routerBaseUrl }),
+    };
+
+    await withAgentCredentialLock(args.wallets, `wallet:${args.wallet}`, async () => {
+      await args.wallets.reload();
+      const previousLink = args.wallets.entry(args.wallet)?.link;
+      const accounts = agentSecretAccounts(args.wallet);
+      const previousSecrets = await readSecretSnapshot(args.secrets, accounts);
+
+      try {
+        await safeSetSecret(args.secrets, accounts.tokens, JSON.stringify(args.result.tokens));
+        await writeOptionalSecret(args.secrets, accounts.routerStake, args.result.routerKey);
+        // Balance keys belong to the prior owner/link generation and are never returned here.
+        await writeOptionalSecret(args.secrets, accounts.routerBalance, undefined);
+        await args.wallets.setLink(args.wallet, link);
+      } catch (error) {
+        const secretsRestored = await restoreSecretSnapshot(
+          args.secrets,
+          accounts,
+          previousSecrets,
+        );
+        const metadataRestored = await restoreLinkMetadata(args.wallets, args.wallet, previousLink);
+        if (!secretsRestored || !metadataRestored) {
+          // A missing link is safer than metadata that can select the wrong owner's credentials.
+          await args.wallets.clearLink(args.wallet).catch(() => undefined);
+          throw httpError(
+            "The agent link could not be stored consistently. Local link metadata was cleared; run vapi login again.",
+          );
+        }
+        throw error;
+      }
+    });
+
+    await appendAudit(args.home ?? args.wallets.home, {
+      event: "agent.linked",
+      wallet: args.wallet,
+      owner: args.result.owner,
+      tty: Boolean(process.stderr.isTTY),
+    });
+    return link;
   });
-  return link;
 }
 
 export async function agentAccessToken(args: {
@@ -409,40 +429,45 @@ export async function forgetAgentLink(args: {
   fetchImpl?: typeof fetch;
   home?: string;
 }): Promise<void> {
-  const link = args.wallets.entry(args.wallet)?.link;
-  let revokedError: AgentLinkError | undefined;
-  if (link !== undefined) {
-    try {
-      await agentFetch(args, apiEndpoint(link.apiBase, "/api/agents/self"), {
-        method: "DELETE",
-      });
-    } catch (error) {
-      if (
-        error instanceof AgentLinkError &&
-        error.code === "not_linked" &&
-        error.message === AGENT_LINK_REVOKED_MESSAGE
-      ) {
-        revokedError = error;
-      }
-      // Remote revocation is best effort. Local secrets must still be removed.
-    }
-  }
-
-  if (args.secrets.available) {
+  return await withLinkPurchaseLock(args.wallets, args.wallet, async () => {
+    await args.wallets.reload();
+    const link = args.wallets.entry(args.wallet)?.link;
+    let revokedError: AgentLinkError | undefined;
     if (link !== undefined) {
-      await removeSecretAccounts(args.secrets, agentSecretAccounts(args.wallet));
+      try {
+        await agentFetch(args, apiEndpoint(link.apiBase, "/api/agents/self"), {
+          method: "DELETE",
+        });
+      } catch (error) {
+        if (
+          error instanceof AgentLinkError &&
+          error.code === "not_linked" &&
+          error.message === AGENT_LINK_REVOKED_MESSAGE
+        ) {
+          revokedError = error;
+        }
+        // Remote revocation is best effort. Local secrets must still be removed.
+      }
     }
-  }
-  if (args.wallets.entry(args.wallet) !== undefined) await args.wallets.clearLink(args.wallet);
-  if (link !== undefined) {
-    await appendAudit(args.home ?? args.wallets.home, {
-      event: "agent.unlinked",
-      wallet: args.wallet,
-      owner: link.owner,
-      tty: Boolean(process.stderr.isTTY),
+
+    await withAgentCredentialLock(args.wallets, `wallet:${args.wallet}`, async () => {
+      if (args.secrets.available) {
+        if (link !== undefined) {
+          await removeSecretAccounts(args.secrets, agentSecretAccounts(args.wallet));
+        }
+      }
+      if (args.wallets.entry(args.wallet) !== undefined) await args.wallets.clearLink(args.wallet);
     });
-  }
-  if (revokedError !== undefined) throw revokedError;
+    if (link !== undefined) {
+      await appendAudit(args.home ?? args.wallets.home, {
+        event: "agent.unlinked",
+        wallet: args.wallet,
+        owner: link.owner,
+        tty: Boolean(process.stderr.isTTY),
+      });
+    }
+    if (revokedError !== undefined) throw revokedError;
+  });
 }
 
 async function resolveAgentAccessToken(

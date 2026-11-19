@@ -352,6 +352,7 @@ describe("vapi router buy", () => {
                   ? "router_key_unavailable"
                   : "balance_unavailable",
           },
+          ...(failure === "key" || failure === "balance" ? [{ code: "credit_pending" }] : []),
         ],
       });
       expect(allOutput(captured)).not.toContain("private-follow-up-error-must-not-leak");

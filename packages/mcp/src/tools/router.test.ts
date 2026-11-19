@@ -95,6 +95,7 @@ describe("vAPI Router MCP tools", () => {
                     ? "router_key_unavailable"
                     : "balance_unavailable",
             },
+            ...(failure === "key" || failure === "balance" ? [{ code: "credit_pending" }] : []),
           ],
         });
         expectPublicValue(result);
