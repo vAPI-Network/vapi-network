@@ -6,10 +6,16 @@
 [![Node.js 22 or newer](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 
 **One wallet, every x402 API.** `vapi-network` is the open-source, non-custodial
-TypeScript client for discovering and paying x402 services in USDC on Base, from a
-terminal, an MCP client or your own code.
+TypeScript client for discovering and paying x402 services in USDC, from a terminal,
+an MCP client or your own code. It pays on Base by default and on Arc when you enable
+it; [Networks](#networks) lists what works where.
 
-vAPI Network builds payment and trust infrastructure for AI agents on Base. Call,
+The client gives one local wallet to you and to your agents. You search every x402
+catalogue at once, pay an API per call under spend caps you set, and keep a receipt
+for each payment. The same wallet gives each agent its own capped account, buys model
+access on vAPI Router and moves USDC between your accounts.
+
+vAPI Network builds payment and trust infrastructure for AI agents. Call,
 Router, Stake and Agents are live on production. Tasks is coming soon. See
 [vapinetwork.ai](https://vapinetwork.ai) and the
 [documentation](https://docs.vapinetwork.ai).
@@ -62,6 +68,45 @@ uploaded unless you send a report yourself. Every payment identifies this client
 `vapi` through x402 `builder-code`; when an API advertises `payment-identifier`, the
 generated id is kept on that receipt.
 
+## What is in this repository
+
+Everything that runs on your machine is in this repository under the Apache-2.0
+license. That covers the wallet and its spend caps, x402 signing, the receipt ledger,
+catalogue search, the CLI, the MCP server, the SDK and the desktop app. You can read
+how a payment is built and signed before you make one.
+
+The client also talks to hosted vAPI services. Their source is not in this repository.
+
+| Hosted service | The client uses it to                                                                    |
+| -------------- | ---------------------------------------------------------------------------------------- |
+| vAPI Call      | search the vAPI registry, and publish or claim a listing                                 |
+| Owner link     | connect this device's accounts to your owner wallet during `vapi setup` and `vapi login` |
+| vAPI Router    | buy and use model access, and read your balance and stake status                         |
+| Transfer relay | submit a transfer you signed between your own accounts, and pay its gas                  |
+| Cloud backup   | keep an encrypted vault copy that only the owner can restore                             |
+| Funding page   | take a card, wallet or bridge deposit and deliver USDC on Base                           |
+| Tasks          | preview task posting and escrow; coming soon on production                               |
+
+A payment to an x402 API does not pass through these services. The client signs it
+and sends it to the API's own endpoint. Search also reads Coinbase Bazaar, x402scan
+and a local file, and `VAPI_REGISTRY_URL` points the client at another registry.
+
+## Networks
+
+Payments are in USDC. Base is on by default; you enable the other networks per machine.
+
+| Network                             | Pay x402 APIs   | Send between accounts | Sweep                | How to enable                                                     |
+| ----------------------------------- | --------------- | --------------------- | -------------------- | ----------------------------------------------------------------- |
+| Base mainnet                        | yes             | yes                   | USDC and ETH         | on by default                                                     |
+| Arc mainnet                         | yes             | yes                   | USDC                 | `vapi init --networks base,arc` or `vapi accounts --enable arc`   |
+| Arc testnet                         | yes             | no                    | USDC                 | set `ARC_TESTNET_RPC_URL`                                         |
+| Base Sepolia and other EVM networks | when configured | no                    | USDC when configured | add the RPC URL and USDC address to `config.json`                 |
+| Solana mainnet                      | not yet         | no                    | no                   | listings are searchable; paying one returns `unsupported_network` |
+
+The hosted funding page delivers USDC on Base. On Arc, USDC is also the gas token.
+Identifiers, token addresses and RPC defaults are in
+[docs/configuration.md](./docs/configuration.md#networks-and-accounts).
+
 ## Three ways to use it
 
 The CLI, the MCP server and the SDK share one vault, one set of spend caps and one
@@ -90,22 +135,24 @@ tool that creates or retires a listing. The tool list is in [docs/mcp.md](./docs
 
 ## What you can do
 
-| Surface      | What it does                                                               | Guide                                                        |
-| ------------ | -------------------------------------------------------------------------- | ------------------------------------------------------------ |
-| Call         | Discover, check, publish and pay for x402 APIs.                            | [docs/call.md](./docs/call.md)                               |
-| Router       | Use vAPI Router for model access and balance.                              | [docs/router.md](./docs/router.md)                           |
-| Coding tools | Run Claude Code and Codex on your daily Compute allowance.                 | [docs/code.md](./docs/code.md)                               |
-| Tasks        | Preview task posting, USDC escrow and delivery; coming soon on production. | [docs/tasks.md](./docs/tasks.md)                             |
-| Agents       | Run capped local agents with dedicated wallets and profiles.               | [docs/agents.md](./docs/agents.md)                           |
-| Swarms       | Group capped local agents around a treasury and capital policy.            | [docs/swarms.md](./docs/swarms.md)                           |
-| MCP          | Use namespaced payment tools from an MCP client.                           | [docs/mcp.md](./docs/mcp.md)                                 |
-| SDK          | Use Call, vAPI Router and local agents behind one wallet-bound API.        | [docs/sdk.md](./docs/sdk.md)                                 |
-| Vault        | Manage the owner wallet, device vault, accounts and spend caps.            | [docs/wallets.md](./docs/wallets.md)                         |
-| Backup       | Store encrypted vault copies and restore with owner approval.              | [docs/backup-and-recovery.md](./docs/backup-and-recovery.md) |
+| Surface      | What it does                                                                             | Guide                                                        |
+| ------------ | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Call         | Discover, check, publish and pay for x402 APIs.                                          | [docs/call.md](./docs/call.md)                               |
+| Router       | Use vAPI Router for model access and balance.                                            | [docs/router.md](./docs/router.md)                           |
+| Coding tools | Run Claude Code and Codex on your daily Compute allowance.                               | [docs/code.md](./docs/code.md)                               |
+| Tasks        | Preview task posting, USDC escrow and delivery; coming soon on production.               | [docs/tasks.md](./docs/tasks.md)                             |
+| Agents       | Run capped local agents with dedicated wallets and profiles.                             | [docs/agents.md](./docs/agents.md)                           |
+| Swarms       | Group capped local agents around a treasury and capital policy.                          | [docs/swarms.md](./docs/swarms.md)                           |
+| MCP          | Use namespaced payment tools from an MCP client.                                         | [docs/mcp.md](./docs/mcp.md)                                 |
+| SDK          | Use Call, vAPI Router and local agents behind one wallet-bound API.                      | [docs/sdk.md](./docs/sdk.md)                                 |
+| Vault        | Manage the owner wallet, device vault, accounts and spend caps.                          | [docs/wallets.md](./docs/wallets.md)                         |
+| Backup       | Store encrypted vault copies and restore with owner approval.                            | [docs/backup-and-recovery.md](./docs/backup-and-recovery.md) |
+| Sending      | Move USDC between your accounts or to your owner wallet; vAPI pays the gas.              | [docs/sending.md](./docs/sending.md)                         |
+| CI check     | Check an x402 API for a conformant 402 in GitHub Actions, with no wallet and no payment. | [docs/call.md](./docs/call.md#check-your-api)                |
 
 Every command, option and exit code is in the [CLI reference](./docs/cli.md).
-Account transfers are in [docs/sending.md](./docs/sending.md). Configuration,
-funding, networks and bug reports are in [docs/configuration.md](./docs/configuration.md).
+Configuration, funding, networks and bug reports are in
+[docs/configuration.md](./docs/configuration.md). Two runnable SDK examples are in [examples/](./examples).
 When something fails, start with [docs/troubleshooting.md](./docs/troubleshooting.md).
 The full list of guides is in [docs/README.md](./docs/README.md).
 
