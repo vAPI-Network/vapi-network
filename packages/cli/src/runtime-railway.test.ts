@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -342,14 +342,14 @@ async function directoryText(path: string): Promise<string> {
   return texts.join("\n");
 }
 
-function ownerCommands(f: Fixture, exec: RailwayExec) {
+function ownerCommands(f: Fixture, exec: RailwayExec, now = () => new Date(STARTED_AT)) {
   vi.stubEnv("VAPI_HOME", f.home);
   const balanceReader = vi.fn(async () => 0n);
   const transfer = vi.fn<MovementTransfer>();
   const dependencies: CliDependencies = {
     secretStore: f.secrets,
     env: {},
-    now: () => new Date(STARTED_AT),
+    now,
     railwayExec: exec,
     fetchImpl: vi.fn<typeof fetch>(async () => {
       throw new Error("Unexpected network request");
@@ -2224,6 +2224,270 @@ describe("railway runtime sidecar during start", () => {
     expect(readSidecarFile(f)).toEqual(sidecarOf({ state: "orphaned", sandboxId: SANDBOX_ID }));
   });
 });
+
+// Directory permissions inject failures into the real synchronous sidecar I/O.
+// Root and Windows do not enforce these POSIX permission bits.
+describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "railway launch sidecar persistence failures",
+  () => {
+    function restorePermissionsAfterStart(f: Fixture, adapter: ReturnType<typeof runtimeFor>) {
+      return {
+        ...adapter,
+        async start(...args: Parameters<typeof adapter.start>) {
+          try {
+            return await adapter.start(...args);
+          } finally {
+            // Restore before the registry handles rejection, so its reservation
+            // removal is governed by the error code, not directory permissions.
+            chmodSync(runsDirectory(f.home), 0o700);
+          }
+        },
+      };
+    }
+
+    it("retains an id-less failed launch until stale-start confirmation clears it and permits dissolve", async () => {
+      const f = await fixture();
+      let bundle = "";
+      const railway = fakeRailway({
+        create: (observation) => {
+          bundle = bundleOf(observation);
+          chmodSync(runsDirectory(f.home), 0o500);
+          return CREATED;
+        },
+        destroy: () => ({
+          code: 1,
+          stdout: "",
+          stderr: `destroy failed: ${ALPHA_ACCESS} ${f.alphaKey}`,
+        }),
+      });
+      let time = Date.parse(STARTED_AT);
+      const now = () => new Date(time);
+      const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec, { now }));
+
+      const failure = (await startDetachedRun({
+        home: f.home,
+        runtime,
+        member: MEMBER,
+        run: RUN,
+        now,
+      }).catch((error: unknown) => error)) as RuntimeError;
+
+      expect(failure).toMatchObject({ code: "launch_ambiguous" });
+      expect(failure.message).toContain("EACCES");
+      expect(failure.message).toContain(`railway sandbox destroy ${SANDBOX_ID}`);
+      expect(failure.message).toContain(`vapi swarm stop team ${RUN_ID} --confirm-worker-stopped`);
+      for (const value of forbiddenValues(f, bundle)) expect(failure.message).not.toContain(value);
+      expect(readSidecarFile(f)).toEqual(sidecarOf());
+      expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+        state: "starting",
+        handle: { ref: "" },
+      });
+      // Both id writes fail; the mandatory second write aborts before remote exec.
+      expect(railway.calls).toEqual([
+        expect.arrayContaining(["sandbox", "create"]),
+        ["sandbox", "destroy", SANDBOX_ID],
+      ]);
+
+      const owner = ownerCommands(f, railway.exec, now);
+      await owner.blocked();
+      await owner.command(["stop", "team", RUN_ID, "--confirm-worker-stopped"], 1);
+      expect(readSidecarFile(f)).toEqual(sidecarOf());
+      time += 5 * 60 * 1_000 + 1;
+      expect(
+        await owner.command(["stop", "team", RUN_ID, "--confirm-worker-stopped"], 0),
+      ).toMatchObject({ stopped: [{ runId: RUN_ID, state: "stopped" }] });
+      expect(await exists(railwaySidecarPath(f.home, RUN_ID))).toBe(false);
+      expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({ state: "stopped" });
+      expect(await owner.command(["dissolve", "team"], 0)).toMatchObject({ status: "dissolved" });
+      expect(railway.calls.filter((args) => args[1] === "destroy")).toHaveLength(1);
+    });
+
+    it("drops the reservation and names stop before forget when the identified orphan write fails", async () => {
+      const f = await fixture();
+      const railway = fakeRailway({
+        detach: () => {
+          chmodSync(runsDirectory(f.home), 0o500);
+          return { code: 1, stdout: "", stderr: `exec failed: ${ALPHA_ACCESS}` };
+        },
+        destroy: () => ({ code: 1, stdout: "", stderr: `destroy failed: ${ALPHA_ROUTER}` }),
+      });
+      const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec));
+
+      const failure = (await startDetachedRun({
+        home: f.home,
+        runtime,
+        member: MEMBER,
+        run: RUN,
+      }).catch((error: unknown) => error)) as Error;
+
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toMatchObject({ code: "launch_ambiguous" });
+      expect(failure.message).toContain(`railway sandbox exec ${SANDBOX_ID} failed`);
+      const stop = `vapi swarm stop team ${RUN_ID}`;
+      const forget = `vapi swarm forget-run team ${RUN_ID} --confirm-destroyed`;
+      expect(failure.message).toContain(stop);
+      expect(failure.message.indexOf(stop)).toBeLessThan(failure.message.indexOf(forget));
+      for (const value of forbiddenValues(f)) expect(failure.message).not.toContain(value);
+      expect(readSidecarFile(f)).toEqual(sidecarOf({ sandboxId: SANDBOX_ID }));
+      expect(await readRunRecord(f.home, RUN_ID)).toBeUndefined();
+      const owner = ownerCommands(f, railway.exec);
+      await owner.blocked();
+      await owner.command(["stop", "team", RUN_ID], 1);
+      expect(readSidecarFile(f)).toEqual(sidecarOf({ state: "orphaned", sandboxId: SANDBOX_ID }));
+      await owner.forgetAndDissolve();
+    });
+
+    it("retains ambiguity when destroy succeeds but the id-less launch marker cannot be removed", async () => {
+      const f = await fixture();
+      const railway = fakeRailway({
+        create: () => {
+          chmodSync(runsDirectory(f.home), 0o500);
+          return CREATED;
+        },
+      });
+      const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec));
+
+      const failure = (await startDetachedRun({
+        home: f.home,
+        runtime,
+        member: MEMBER,
+        run: RUN,
+      }).catch((error: unknown) => error)) as RuntimeError;
+
+      expect(failure).toMatchObject({ code: "launch_ambiguous" });
+      expect(failure.message).toContain("EACCES");
+      expect(failure.message).toContain(`Sandbox ${SANDBOX_ID} was destroyed`);
+      expect(failure.message).toContain("only the local launch marker could not be removed");
+      expect(failure.message).toMatch(/--confirm-worker-stopped\.$/u);
+      expect(readSidecarFile(f)).toEqual(sidecarOf());
+      expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+        state: "starting",
+        handle: { ref: "" },
+      });
+      expect(railway.calls.at(-1)).toEqual(["sandbox", "destroy", SANDBOX_ID]);
+    });
+
+    it.each(["before-create", "ENOENT"] as const)(
+      "retains ambiguity when %s cleanup cannot remove the local launch marker",
+      async (stage) => {
+        const f = await fixture();
+        const railway = fakeRailway({
+          create: () => {
+            chmodSync(runsDirectory(f.home), 0o500);
+            throw Object.assign(new Error(`spawn railway ENOENT ${ALPHA_ACCESS}`), {
+              code: "ENOENT",
+            });
+          },
+        });
+        const adapter = runtimeFor(f, railway.exec, {
+          fs: {
+            stat: async (path) => {
+              if (stage === "before-create" && path.endsWith("member.env")) {
+                chmodSync(runsDirectory(f.home), 0o500);
+                throw new Error(`env file refused ${ALPHA_ACCESS}`);
+              }
+              return await stat(path);
+            },
+          },
+        });
+        const runtime = restorePermissionsAfterStart(f, adapter);
+
+        const failure = (await startDetachedRun({
+          home: f.home,
+          runtime,
+          member: MEMBER,
+          run: RUN,
+        }).catch((error: unknown) => error)) as RuntimeError;
+
+        expect(failure).toMatchObject({ code: "launch_ambiguous" });
+        expect(failure.message).toContain(
+          stage === "before-create" ? "env file refused" : "spawn railway ENOENT",
+        );
+        expect(failure.message).toContain(
+          "No sandbox was created; only the local launch marker could not be removed",
+        );
+        expect(failure.message).toContain("EACCES");
+        expect(failure.message).toMatch(/--confirm-worker-stopped\.$/u);
+        for (const value of forbiddenValues(f)) expect(failure.message).not.toContain(value);
+        expect(readSidecarFile(f)).toEqual(sidecarOf());
+        expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+          state: "starting",
+          handle: { ref: "" },
+        });
+        if (stage === "before-create") expect(railway.exec).not.toHaveBeenCalled();
+        else expect(railway.calls).toHaveLength(1);
+      },
+    );
+
+    it.each(["after-create", "during-destroy"] as const)(
+      "keeps the starting reservation when %s signal cleanup cannot record the known id or destroy it",
+      async (stage) => {
+        const f = await fixture();
+        const before = process.listeners("SIGTERM");
+        captureStderr();
+        let finishSignal!: () => void;
+        const signalled = new Promise<void>((resolve) => {
+          finishSignal = resolve;
+        });
+        let recordAtExit: boolean | undefined;
+        vi.spyOn(process, "kill").mockImplementation(() => {
+          recordAtExit = existsSync(runRecordPath(f.home, RUN_ID));
+          finishSignal();
+          return true;
+        });
+        let destroys = 0;
+        const railway = fakeRailway({
+          create: () => {
+            chmodSync(runsDirectory(f.home), 0o500);
+            return CREATED;
+          },
+          destroy: async () => {
+            destroys += 1;
+            if (stage === "during-destroy" && destroys === 1) {
+              addedListener("SIGTERM", before)("SIGTERM");
+              await signalled;
+              return OK;
+            }
+            return { code: 1, stdout: "", stderr: "destroy failed" };
+          },
+        });
+        const adapter = runtimeFor(f, railway.exec, {
+          fs: {
+            rm: async (path, options) => {
+              if (stage === "after-create") {
+                addedListener("SIGTERM", before)("SIGTERM");
+                await signalled;
+              }
+              await rm(path, options);
+            },
+          },
+        });
+        const runtime = restorePermissionsAfterStart(f, adapter);
+
+        const failure = (await startDetachedRun({
+          home: f.home,
+          runtime,
+          member: MEMBER,
+          run: RUN,
+        }).catch((error: unknown) => error)) as RuntimeError;
+
+        expect(failure).toMatchObject({ code: "launch_ambiguous" });
+        expect(failure.message).toContain("interrupted by SIGTERM");
+        expect(failure.message).toContain("--confirm-worker-stopped");
+        expect(recordAtExit).toBe(true);
+        expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+          state: "starting",
+          handle: { ref: "" },
+        });
+        expect(readSidecarFile(f)).toEqual(sidecarOf());
+        expect(railway.calls.filter((args) => args[1] === "destroy")).toHaveLength(
+          stage === "after-create" ? 1 : 2,
+        );
+        expect(process.listeners("SIGTERM")).toEqual(before);
+      },
+    );
+  },
+);
 
 describe("railway runtime create failures", () => {
   it.each(["nonzero", "no-id"] as const)(

@@ -759,6 +759,8 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
       };
       let directory: string | undefined;
       let sandboxId: string | undefined;
+      // Updated only after an atomic id-carrying write succeeds.
+      let recordedSandboxId: string | undefined;
       // Set just before `sandbox create` runs: from then on the key may have left.
       let attempted = false;
       let interrupted: NodeJS.Signals | undefined;
@@ -767,6 +769,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
         if (interrupted !== undefined) return;
         sidecar = next;
         writeSidecarSync(sidecarPath, next);
+        if (next.sandboxId !== undefined) recordedSandboxId = next.sandboxId;
       };
       const dropSidecar = (): void => {
         if (interrupted === undefined) rmSync(sidecarPath, { force: true });
@@ -776,7 +779,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
       const assertNotInterrupted = (): void => {
         if (interrupted !== undefined) {
           const message = `Starting ${account} on Railway was interrupted by ${interrupted}.`;
-          if (attempted && (sandboxId === undefined || sidecar.sandboxId === undefined))
+          if (attempted && recordedSandboxId === undefined)
             throw new RuntimeError(
               "launch_ambiguous",
               `${message} A sandbox may exist; check railway sandbox list. ${ambiguousInstruction}`,
@@ -805,6 +808,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
               ? { ...sidecar, state: "creating" }
               : { ...sidecar, state: "orphaned", sandboxId: id },
           );
+          if (id !== undefined) recordedSandboxId = id;
           sidecarRecorded = true;
         } catch {
           // The stderr line below still tells the owner what to destroy.
@@ -927,7 +931,17 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
         if (createError !== undefined || created === undefined || created.code !== 0) {
           if (!attempted) {
             // Nothing reached railway, so nothing can exist remotely and nothing was exported.
-            dropSidecar();
+            try {
+              dropSidecar();
+            } catch (error) {
+              throw new RuntimeError(
+                "launch_ambiguous",
+                `${withLeftover([
+                  `railway sandbox create failed: ${scrub(errorMessage(createError), secretValues)}`,
+                  `No sandbox was created; only the local launch marker could not be removed: ${scrub(errorMessage(error), secretValues)}`,
+                ])}\n${ambiguousInstruction}`,
+              );
+            }
             throw new Error(
               withLeftover([
                 `railway sandbox create failed: ${scrub(errorMessage(createError), secretValues)}`,
@@ -936,7 +950,17 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
           }
           if (createError !== undefined && hasCode(createError, "ENOENT")) {
             // The binary never started: no sandbox was created and nothing was exported.
-            dropSidecar();
+            try {
+              dropSidecar();
+            } catch (error) {
+              throw new RuntimeError(
+                "launch_ambiguous",
+                `${withLeftover([
+                  `railway sandbox create failed: ${scrub(errorMessage(createError), secretValues)}`,
+                  `No sandbox was created; only the local launch marker could not be removed: ${scrub(errorMessage(error), secretValues)}`,
+                ])}\n${ambiguousInstruction}`,
+              );
+            }
             throw new RuntimeError(
               "runtime_unavailable",
               withLeftover([
@@ -1035,31 +1059,57 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
         } catch (error) {
           const cause = scrub(errorMessage(error), secretValues);
           // After a signal the handler destroys the sandbox and owns the sidecar.
-          if (interrupted !== undefined)
+          if (interrupted !== undefined) {
+            if (recordedSandboxId === undefined) assertNotInterrupted();
             throw new Error(
               `${cause}\nDestroy it yourself with: railway sandbox destroy ${id}\n${destroyedInstruction}`,
             );
+          }
           try {
             await destroySandbox(exec, id);
           } catch (destroyError) {
+            let orphanRecorded = false;
             try {
               saveSidecar({ ...sidecar, state: "orphaned", sandboxId: id });
+              orphanRecorded = true;
             } catch {
               // The error below still names the sandbox and the command.
             }
+            const lines = [
+              cause,
+              `Could not destroy sandbox ${id}, which holds ${account}'s private key: ${scrub(errorMessage(destroyError), secretValues)}`,
+              `Destroy it yourself with: railway sandbox destroy ${id}`,
+            ];
+            if (recordedSandboxId === undefined)
+              throw new RuntimeError(
+                "launch_ambiguous",
+                [...lines, ambiguousInstruction].join("\n"),
+              );
             throw new Error(
               [
-                cause,
-                `Could not destroy sandbox ${id}, which holds ${account}'s private key: ${scrub(errorMessage(destroyError), secretValues)}`,
-                `Destroy it yourself with: railway sandbox destroy ${id}`,
+                ...lines,
+                ...(orphanRecorded
+                  ? []
+                  : [
+                      `Retry cleanup with: vapi swarm stop ${member.swarm ?? policy.swarm.name} ${run.runId}`,
+                    ]),
                 destroyedInstruction,
               ].join("\n"),
             );
           }
+          assertNotInterrupted();
           try {
             dropSidecar();
-          } catch {
-            // The sandbox is gone; a stale sidecar only costs a retry later.
+          } catch (removalError) {
+            if (recordedSandboxId === undefined)
+              throw new RuntimeError(
+                "launch_ambiguous",
+                [
+                  cause,
+                  `Sandbox ${id} was destroyed; only the local launch marker could not be removed: ${scrub(errorMessage(removalError), secretValues)}`,
+                  ambiguousInstruction,
+                ].join("\n"),
+              );
           }
           throw new Error(cause);
         }

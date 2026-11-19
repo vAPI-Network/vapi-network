@@ -222,6 +222,8 @@ The run registry writes a `starting` reservation before it launches a worker. Th
 
 A create that reached Railway but failed, timed out, threw or returned no readable sandbox id raises `RuntimeError("launch_ambiguous")`, names the confirmation command and retains its `starting` reservation and id-less `creating` sidecar. Each-mode rollback preserves that error code. A missing Railway binary or failure before create removes both files.
 
+If a failed launch cannot save its sandbox id locally or remove an id-less launch marker, it also returns `launch_ambiguous` and keeps the `starting` reservation for the same five-minute confirmation, even when no sandbox was created or a known sandbox was destroyed. If the id was saved but the `orphaned` write fails, use `vapi swarm stop <name> <runId>` to retry cleanup, then `vapi swarm forget-run <name> <runId> --confirm-destroyed` after verifying destruction.
+
 An unreconciled `starting` record remains fail-closed. After five minutes, `vapi swarm runs` exits with code 1 and names the terminal-only confirmation command. First use `railway sandbox list` to find and destroy any sandbox that may hold the member key. Then run `vapi swarm stop <name> <runId> --confirm-worker-stopped` to retire the matching id-less `creating` sidecar and clear the reservation under the member lock. The command keeps a mismatched sidecar, and sidecars with ids follow the normal destroy path. MCP does not expose this override. Never confirm while the worker may still run.
 
 | Sidecar state | When                                                                              |
