@@ -1,24 +1,32 @@
-import { spawn } from "node:child_process";
-import { stat } from "node:fs/promises";
 import { join } from "node:path";
+import { fileExists, openInBrowser } from "./platform.js";
 
-import { formatEther } from "viem";
 import { RouterClientError } from "@vapi-network/core/router-client";
+import { formatEther } from "viem";
 
 import {
   BASE_MAINNET_CAIP2,
   DEFAULT_WALLET_NAME,
   DocsError,
+  KeystoreError,
+  MARKETPLACE_EXECUTION_METHODS,
   ONRAMP_FALLBACK_INSTRUCTIONS,
   ONRAMP_NETWORK,
+  SpendCapExceededError,
+  SwarmError,
+  SweepGasError,
+  TransferError,
+  VAULT_KEY_ACCOUNT,
+  WalletStore,
   aggregateStats,
   assertWalletName,
-  checkReceiptSettlement,
   changeKeystorePassphrase,
+  checkReceiptSettlement,
   createPublicFetch,
   createSupportReport,
   drainCeilingSweeps,
   enableDefaultNetwork,
+  explorerTransactionUrl,
   filterReceiptsByRange,
   formatLegacyRegistryRewrites,
   formatListingFee,
@@ -27,53 +35,43 @@ import {
   getArcGasHeadroomAtomic,
   getNetworkDefinition,
   getVapiPaths,
-  explorerTransactionUrl,
-  isMissingFile,
   isMirroredHit,
   isNetworkConfigured,
   isSolanaNetwork,
-  KeystoreError,
-  loadOrCreateDeviceKey,
-  loadConfig,
-  MARKETPLACE_EXECUTION_METHODS,
   listAccounts,
   listUnfinishedMovements,
+  loadConfig,
+  loadOrCreateDeviceKey,
   lockVault,
   migrateLegacyRegistryConfig,
   migrateLegacyVapiHome,
   readKeystoreVersion,
-  readVaultFileUnlocked,
   readReceipts,
   readSearchEvents,
+  readVaultFileUnlocked,
   receiptWallet,
   receiptsToCsv,
   resolveRegistryUrl,
-  SpendCapExceededError,
   spendCapsForWallet,
+  supportsNativeEthSweep,
   swarmParentResolver,
   sweepAboveCeiling,
-  SweepGasError,
-  SwarmError,
-  TransferError,
   sweepBack,
   sweepNativeEth,
-  supportsNativeEthSweep,
   unlockProtectedVault,
   usesUsdcGas,
   validatePrivateKey,
   validateRecoveryPhrase,
-  VAULT_KEY_ACCOUNT,
-  WalletStore,
+  withAccountMovementLock,
   writeDefaultConfig,
   writeJsonAtomic,
-  withAccountMovementLock,
+  type AccountInfo,
   type ListingConformance,
   type ListingHealth,
   type ListingLiveness,
   type ListingVerification,
   type MarketplaceDiscoveryPage,
   type SpendCaps,
-  type AccountInfo,
   type VapiConfig,
   type WalletBalanceReader,
   type WalletInfo,
@@ -96,6 +94,8 @@ import {
 } from "@vapi-network/core/api-key";
 
 import {
+  RuntimeError,
+  VapiCallError,
   callInspect,
   callPay,
   callSearch,
@@ -104,8 +104,6 @@ import {
   redactRunText,
   redactRunValue,
   runAction,
-  RuntimeError,
-  VapiCallError,
   startStdioServer,
   type ActionContext,
   type CallPort,
@@ -113,30 +111,29 @@ import {
   type InspectToolInput,
   type MarketplaceSearchInput,
 } from "@vapi-network/mcp";
-import { detectColorLevel, renderBanner } from "./brand.js";
 import { accountsAddCommand, accountsCapsCommand, accountsCommand } from "./accounts.js";
-import { autoUploadBackup, cloudBackupCommand } from "./cloud-backup.js";
-import { checkX402, formatCheckReport } from "./check.js";
-import { docsCommand } from "./docs.js";
-import { dashboardCommand, offerDashboardLink } from "./dashboard.js";
 import { agentCommand } from "./agent.js";
+import { detectColorLevel, renderBanner } from "./brand.js";
+import { checkX402, formatCheckReport } from "./check.js";
+import { autoUploadBackup, cloudBackupCommand } from "./cloud-backup.js";
+import { claudeCommand, codexCommand } from "./code-launch.js";
+import { codeCommand } from "./code.js";
+import { dashboardCommand, offerDashboardLink } from "./dashboard.js";
+import { docsCommand } from "./docs.js";
 import { formatIdentityLines } from "./identity.js";
 import { loginCommand, logoutCommand, whoamiCommand } from "./login.js";
 import { mcpInstallCommand } from "./mcp-install.js";
-import { codeCommand } from "./code.js";
-import { claudeCommand, codexCommand } from "./code-launch.js";
 import { routerCommand } from "./router.js";
+import { resolveRuntime } from "./runtime-local.js";
+import { RemoteKeyRefusedError } from "./runtime-railway.js";
 import { sendCommand } from "./send.js";
 import { setupCommand } from "./setup.js";
 import { stakeCommand } from "./stake.js";
-import { TaskCommandError, taskCommand } from "./task.js";
 import { statusCommand } from "./status.js";
 import { swarmCommand } from "./swarm.js";
-import { resolveRuntime } from "./runtime-local.js";
-import { RemoteKeyRefusedError } from "./runtime-railway.js";
+import { TaskCommandError, taskCommand } from "./task.js";
 import { restoreCommand, vaultCommand } from "./vault.js";
 
-import { CLI_VERSION } from "./version.js";
 import {
   ACCOUNT_OPTION,
   RESUME_OPTION,
@@ -157,16 +154,17 @@ import {
   requiredPositional,
 } from "./args.js";
 import {
-  type CliDependencies,
-  type CliIo,
   getEnvironment,
   getPrompts,
   isInteractive,
   output,
   readConfig,
+  type CliDependencies,
+  type CliIo,
 } from "./cli-context.js";
+import { claimCommand, noApiKeyMessage, publishCommand, registryBaseUrl } from "./publish-cli.js";
+import { CLI_VERSION } from "./version.js";
 import {
-  type WalletTarget,
   confirmWalletName,
   getSecretStore,
   openWalletStore,
@@ -180,14 +178,14 @@ import {
   walletHeader,
   walletPassphrase,
   withResolvedPassphrase,
+  type WalletTarget,
 } from "./wallet-session.js";
-import { claimCommand, noApiKeyMessage, publishCommand, registryBaseUrl } from "./publish-cli.js";
 
 // Re-exported for task.ts until the Tasks v2 branch lands; import from the module directly elsewhere.
 export { UsageError, parseArguments } from "./args.js";
 export { getEnvironment, getLinePrompt, type CliDependencies, type CliIo } from "./cli-context.js";
-export { getSecretStore, targetWallet, unlockTarget, type WalletTarget } from "./wallet-session.js";
 export { registryBaseUrl } from "./publish-cli.js";
+export { getSecretStore, targetWallet, unlockTarget, type WalletTarget } from "./wallet-session.js";
 
 // Re-exported so `@vapi-network/cli/cli` (bin.ts forwards every export of this file) keeps the names it had
 // before these helpers moved out. Import from the module directly inside this package.
@@ -207,6 +205,8 @@ export {
   recordAudit,
   requireSecretsAllowed,
 } from "./wallet-session.js";
+
+export { fileExists, openInBrowser } from "./platform.js";
 
 const HELP_HEADING = "vAPI Network";
 
@@ -2693,27 +2693,6 @@ function formatFund(address: string, url: string, opened: boolean): string {
   ].join("\n");
 }
 
-/**
- * Open a funding URL without ever failing the command: a headless or locked-down
- * machine simply keeps the printed link.
- */
-export function openInBrowser(url: string): boolean {
-  const opener =
-    process.platform === "darwin"
-      ? { command: "open", args: [url] }
-      : process.platform === "win32"
-        ? { command: "cmd", args: ["/c", "start", "", url] }
-        : { command: "xdg-open", args: [url] };
-  try {
-    const child = spawn(opener.command, opener.args, { stdio: "ignore", detached: true });
-    child.on("error", () => undefined);
-    child.unref();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export const CUSTODY_NOTICE = [
   "This wallet is yours. vAPI has no copy of the key and cannot recover it.",
   "If you lose this machine and your recovery phrase, the funds are gone.",
@@ -2925,14 +2904,4 @@ function formatSweepResults(
       return `${name}: swept ${formatUsdc(BigInt(result.amountAtomic))} USDC${destination} in ${transaction}${retained}`;
     })
     .join("\n");
-}
-
-export async function fileExists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch (error) {
-    if (isMissingFile(error)) return false;
-    throw error;
-  }
 }

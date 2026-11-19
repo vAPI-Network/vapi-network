@@ -1,8 +1,8 @@
 import { join } from "node:path";
 
 import {
-  getVapiPaths,
   MAX_RESTORE_ACCOUNTS,
+  getVapiPaths,
   lockVault,
   protectVault,
   readVaultFileUnlocked,
@@ -11,8 +11,7 @@ import {
   writeDefaultConfig,
 } from "@vapi-network/core";
 
-import { fileExists } from "./cli.js";
-import { getSecretStore, recordAudit } from "./wallet-session.js";
+import { UsageError, parseArguments } from "./args.js";
 import {
   getEnvironment,
   getPrompts,
@@ -22,10 +21,11 @@ import {
   type CliDependencies,
   type CliIo,
 } from "./cli-context.js";
-import { UsageError, parseArguments } from "./args.js";
 import { restoreFromOwnerCommand } from "./cloud-backup.js";
+import { fileExists } from "./platform.js";
 import { restoreVaultFromPhrase } from "./setup.js";
 import { collectStatus } from "./status.js";
+import { getSecretStore, recordAudit } from "./wallet-session.js";
 
 const VAULT_USAGE = "Usage: vapi vault protect|unprotect|lock|unlock|status [--json]";
 const RESTORE_USAGE =

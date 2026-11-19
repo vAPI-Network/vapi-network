@@ -8,8 +8,8 @@ import {
   loadConfig,
 } from "@vapi-network/core";
 import {
-  DEFAULT_AGENT_SCOPES,
   AgentLinkError,
+  DEFAULT_AGENT_SCOPES,
   agentFetch,
   agentSecretAccounts,
   forgetAgentLink,
@@ -20,12 +20,12 @@ import {
   withAgentCredentialLock,
 } from "@vapi-network/core/agent-link";
 
-import { openInBrowser } from "./cli.js";
+import { parseArguments } from "./args.js";
+import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
+import { fetchWalletIdentity, formatIdentityLines } from "./identity.js";
+import { openInBrowser } from "./platform.js";
 import { registryBaseUrl } from "./publish-cli.js";
 import { getSecretStore, targetWallet, unlockTarget } from "./wallet-session.js";
-import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
-import { parseArguments } from "./args.js";
-import { fetchWalletIdentity, formatIdentityLines } from "./identity.js";
 
 const WALLET_OPTION = "--wallet";
 
