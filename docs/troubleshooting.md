@@ -43,3 +43,11 @@ vapi sweep <your-address> --asset eth
 `vapi report "<what happened>"` writes a report file and prints a prefilled GitHub issue link. The report holds the message, the client version, OS and Node information and the newest five receipt ids. Addresses are included only with `--include-addresses`, and nothing is uploaded unless you add `--send`.
 
 Never paste a recovery phrase, a private key, a vault password or a Router key into an issue. Questions about an account, points or a quest are answered on [Discord](https://discord.gg/vapinetwork) and [Telegram](https://t.me/vapinetwork), because maintainers cannot look up an account from a public issue.
+
+## Router purchases awaiting recovery
+
+Keep the receipt id and transaction when Router reports an unconfirmed authorization or credit awaiting confirmation.
+Retry chat without repeating the purchase; a settled journal keeps guarding against another payment until credit and receipt persistence are established.
+After relinking, recovery accepts the same owner and API base, and a successful balance-key chat proves usable credit.
+A missing or different link permits stake-key chat with a pending-purchase warning and keeps the payment journal.
+See [Router recovery](router.md#purchase-recovery) for inspection and explicit settled retirement; keep the printed evidence and contact support if credit does not appear.

@@ -280,6 +280,9 @@ export function routerPurchaseView(result: RouterPurchaseResult) {
     receipt: {
       id: result.receipt.id,
       ...routerPurchaseSummary(result.receipt),
+      ...(result.receipt.settlement === undefined
+        ? {}
+        : { settlement: result.receipt.settlement.outcome }),
       ...(result.receipt.settlement?.transaction === undefined
         ? {}
         : { transaction: result.receipt.settlement.transaction }),

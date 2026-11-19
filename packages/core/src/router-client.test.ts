@@ -16,7 +16,7 @@ import { readAuditLog } from "./audit.js";
 import { drainCeilingSweeps } from "./ceiling.js";
 import { DEFAULT_SPEND_CAPS, getDefaultConfig } from "./config.js";
 import { NETWORKS } from "./networks.js";
-import { appendReceipt, readReceipts } from "./receipts.js";
+import { appendReceipt, readReceipts, type Receipt } from "./receipts.js";
 import { createRunBudget, type RunBudget } from "./run-budget.js";
 import {
   DEFAULT_ROUTER_BASE_URL,
@@ -30,6 +30,7 @@ import {
   routerChat,
   routerCredentials,
   routerUsage,
+  routerPurchaseView,
   type RouterClientDeps,
 } from "./router-client.js";
 import type { SecretStore } from "./secret-store.js";
@@ -2640,4 +2641,36 @@ describe("Router purchase credit and receipt guards", () => {
     });
     expect(await readReceipts(receiptsPath)).toHaveLength(2);
   });
+});
+
+describe("routerPurchaseView settlement", () => {
+  it.each([undefined, "succeeded", "rejected", "unknown"] as const)(
+    "projects settlement %s without provider evidence",
+    async (outcome) => {
+      const receipt: Receipt = {
+        id: "public-purchase",
+        timestamp: NOW.toISOString(),
+        resourceUrl: `${API_BASE}/api/router/top-up/5`,
+        quote: { network: BASE_MAINNET_CAIP2, amountAtomic: "4750000" },
+        ...(outcome === undefined
+          ? {}
+          : {
+              settlement: {
+                outcome,
+                transaction: "0xtransaction",
+                evidence: { privateProviderField: "hidden" },
+              },
+            }),
+      };
+      expect(routerPurchaseView({ receipt, balance: null })).toEqual({
+        receipt: {
+          id: receipt.id,
+          amountUsd: 4.75,
+          network: BASE_MAINNET_CAIP2,
+          ...(outcome === undefined ? {} : { settlement: outcome, transaction: "0xtransaction" }),
+        },
+        balance: null,
+      });
+    },
+  );
 });

@@ -10,12 +10,14 @@ import {
   ROUTER_TOPUP_TIERS,
   RouterClientError,
   buyRouterBalance,
+  ensureRouterPurchaseReceipt,
   listRouterModels,
   rotateRouterKey,
   routerChat,
   routerCredentials,
   routerUsage,
   routerPurchaseView,
+  routerPurchaseSummary,
   routerPendingEvidence,
   resolveRouterPendingPurchase,
   type RouterClientDeps,
@@ -82,14 +84,62 @@ async function clearPendingCommand(
 ): Promise<void> {
   const parsed = parseArguments(argv, {
     valueOptions: new Set([WALLET_OPTION]),
-    booleanOptions: new Set(["--confirm-unpaid"]),
+    booleanOptions: new Set(["--confirm-unpaid", "--confirm-settled"]),
     maximumPositionals: 0,
   });
+  if (parsed.has("--confirm-unpaid") && parsed.has("--confirm-settled")) {
+    throw new UsageError("--confirm-unpaid and --confirm-settled cannot be used together.");
+  }
   const target = await targetWallet(parsed, dependencies);
   await target.store.withRouterPurchaseLock(target.name, async () => {
     await target.store.refreshRegistry();
     const pending = target.store.entry(target.name)?.routerPendingPurchase;
     const evidence = pending === undefined ? null : routerPendingEvidence(pending);
+    if (parsed.has("--confirm-settled") && pending !== undefined) {
+      if (pending.status !== "settled") {
+        throw new Error(
+          "Only a settled Router purchase can be retired with --confirm-settled. Retry vapi router chat so recovery can check the chain, or use --confirm-unpaid after verifying the payment cannot settle.",
+        );
+      }
+      const { receipt, appended } = await ensureRouterPurchaseReceipt(
+        routerDeps(target, dependencies),
+        pending,
+      );
+      const payment = {
+        id: receipt.id,
+        ...routerPurchaseSummary(receipt),
+        ...(receipt.settlement?.transaction === undefined
+          ? {}
+          : { transaction: receipt.settlement.transaction }),
+      };
+      const notice =
+        "Keep this payment evidence and contact support if the Router balance does not appear.";
+      if (!json) {
+        io.stdout(`Receipt: ${payment.id}`);
+        io.stdout(`Transaction: ${payment.transaction ?? "none recorded"}`);
+        io.stdout(
+          payment.amountUsd === null
+            ? "Amount: unknown"
+            : `Amount: $${money(payment.amountUsd)} USDC`,
+        );
+        io.stdout(`Network: ${networkDisplayName(payment.network)}`);
+        io.stdout(notice);
+      }
+      await target.store.setRouterPendingPurchase(target.name, null, pending.receiptId);
+      io.stdout(
+        json
+          ? JSON.stringify({
+              wallet: target.name,
+              pending: evidence,
+              cleared: true,
+              receipt: payment,
+              receiptAppended: appended,
+              notice,
+            })
+          : "Cleared the settled Router purchase.",
+      );
+      return;
+    }
     const confirmed = parsed.has("--confirm-unpaid");
     let confirmation: string | undefined;
     if (confirmed && pending !== undefined) {
@@ -226,14 +276,16 @@ async function chatCommand(
   };
   const chat = dependencies.router?.routerChat ?? routerChat;
   const refill = await configuredRefill(target, io, dependencies);
-  const result = await withRouterError(() =>
-    chat(
-      {
-        ...routerDeps(target, dependencies),
-        ...(refill === undefined ? {} : { refill }),
-      },
-      request,
-    ),
+  const result = await withRouterError(
+    () =>
+      chat(
+        {
+          ...routerDeps(target, dependencies),
+          ...(refill === undefined ? {} : { refill }),
+        },
+        request,
+      ),
+    { json, io },
   );
   if (json) {
     io.stdout(
@@ -304,18 +356,20 @@ async function buyCommand(
   const buy = dependencies.router?.buyRouterBalance ?? buyRouterBalance;
   let result: Awaited<ReturnType<typeof buyRouterBalance>>;
   try {
-    result = await withRouterError(() =>
-      buy(
-        {
-          ...routerDeps(target, dependencies),
-          account,
-          config,
-          caps,
-          paths: { ledgerPath: paths.ledger, receiptsPath: paths.receipts },
-          ...(dependencies.now === undefined ? {} : { now: dependencies.now() }),
-        },
-        tierUsd,
-      ),
+    result = await withRouterError(
+      () =>
+        buy(
+          {
+            ...routerDeps(target, dependencies),
+            account,
+            config,
+            caps,
+            paths: { ledgerPath: paths.ledger, receiptsPath: paths.receipts },
+            ...(dependencies.now === undefined ? {} : { now: dependencies.now() }),
+          },
+          tierUsd,
+        ),
+      { json, io },
     );
   } catch (error) {
     // The shared error already carries the cap, amounts, wallet, and exact remedy
@@ -337,9 +391,13 @@ async function buyCommand(
   }
   const networkName = networkDisplayName(network);
   const payment =
-    amountUsd === null
-      ? `Payment succeeded on ${networkName}; charged amount unknown.`
-      : `Paid $${amountUsd.toFixed(2)} USDC on ${networkName}.`;
+    summary.receipt.settlement === "unknown"
+      ? "The payment authorization was sent, but settlement is not confirmed yet. Do not repeat the purchase."
+      : summary.receipt.settlement === "rejected"
+        ? "The payment authorization was sent, but settlement was rejected. Keep the receipt and verify the outcome; do not repeat the purchase."
+        : amountUsd === null
+          ? `Payment succeeded on ${networkName}; charged amount unknown.`
+          : `Paid $${amountUsd.toFixed(2)} USDC on ${networkName}.`;
   io.stdout(
     result.balance === null
       ? `${payment} Router balance is not visible yet.`
@@ -422,16 +480,27 @@ async function configuredRefill(
   }
 }
 
-async function withRouterError<T>(operation: () => Promise<T>): Promise<T> {
+async function withRouterError<T>(
+  operation: () => Promise<T>,
+  output?: { json: boolean; io: CliIo },
+): Promise<T> {
   try {
     return await operation();
   } catch (error) {
-    if (error instanceof RouterClientError && error.code === "not_linked") {
-      throw new Error(
-        error.message === AGENT_LINK_REVOKED_MESSAGE
-          ? AGENT_LINK_REVOKED_MESSAGE
-          : "Not linked. Run vapi login.",
-      );
+    if (error instanceof RouterClientError) {
+      if (output !== undefined && !output.json) {
+        for (const warning of error.refill?.warnings ?? []) output.io.stderr(warning.message);
+      }
+      if (error.code === "not_linked") {
+        const message =
+          error.message === AGENT_LINK_REVOKED_MESSAGE
+            ? AGENT_LINK_REVOKED_MESSAGE
+            : "Not linked. Run vapi login.";
+        if (error.refill !== undefined) {
+          throw new RouterClientError(error.code, message, error.status, error.refill);
+        }
+        throw new Error(message);
+      }
     }
     throw error;
   }

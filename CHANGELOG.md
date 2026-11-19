@@ -16,6 +16,8 @@ Router purchases recover after an interruption without a second charge, swarm di
 
 ### Added
 
+- CLI `vapi router clear-pending --confirm-settled` saves any missing succeeded receipt, prints payment evidence and support guidance, then retires a settled journal under the purchase lock. JSON adds `receipt`, `receiptAppended` and `notice`; prepared, signed and unknown entries are refused. The flag is exclusive with `--confirm-unpaid` and has no MCP equivalent.
+- CLI purchase/refill JSON and MCP purchase/refill output add optional `receipt.settlement` (`succeeded`, `rejected` or `unknown`). MCP output schemas accept `settlement_unconfirmed`, `credit_pending` and `pending_purchase_unlinked` warnings.
 - The Router subentry exports `ensureRouterPurchaseReceipt` to durably record settled purchase evidence before retirement. Pending purchase journals optionally record `baselinePurchasedUsd`; older entries remain recoverable through a successful balance-key chat.
 - Payment warnings add `settlement_unconfirmed`, `credit_pending` and `pending_purchase_unlinked` to distinguish unconfirmed authorizations, credit awaiting confirmation, and settled purchases whose link changed.
 - `vapi router clear-pending [--confirm-unpaid]` prints public payment evidence and explorer instructions. Before clearing, the CLI uses the same receipt/authorization-state resolution as automatic recovery: paid attempts and live authorizations are refused, and unused expired authorizations can clear. Only when chain evidence is unavailable may explicit human confirmation override the guard; output identifies that confirmation as lacking chain evidence. There is no MCP equivalent.
@@ -40,6 +42,8 @@ Router purchases recover after an interruption without a second charge, swarm di
 
 ### Fixed
 
+- CLI Router purchases with unknown settlement now say that the authorization was sent, settlement is not confirmed and the purchase must not be repeated. Rejected settlements are also identified without a successful payment claim.
+- CLI Router chat and buy errors preserve `refill` evidence when a missing link message is normalized. Human errors print purchase warnings, including the settled-retirement command; JSON retains the warning codes and messages.
 - Settled Router purchases keep blocking another payment until their receipt is in the ledger and purchased credit is established by usage under the original link or a successful balance-key chat. Repeated failed chats and manual buys recover the earlier purchase without paying again.
 - Router recovery appends missing settled receipts with sender, authorization nonce, token, amount and known transaction before retiring the journal. Receipt write failures retain the journal and allow balance-key chat; repeated recovery never appends another succeeded row for the same purchase.
 - Router purchases with an unconfirmed settlement return an explicit warning and keep their signed journal for chain recovery, while allowing chat on usable balance credit.
