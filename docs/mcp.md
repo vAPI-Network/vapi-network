@@ -180,7 +180,7 @@ independently on its own account and budget. MCP has no interactive owner, so
 every approval prompt is declined regardless of mode. `swarm.allocate` and
 `swarm.delegate` are exposed for schema alignment with agent runs but are
 refused when called directly over MCP. Set `detach` to `true` to start the run
-through the configured runtime and return before its model loop starts.
+through the configured runtime and return before its model loop starts. Detached swarm starts reserve under swarm-then-member locks and release the swarm lock before launch. A locked or missing swarm, or removed member, returns `swarm_unavailable` and starts no worker. Standalone agent starts keep their member-only lock.
 `swarm.runs` takes `{ "name": "<swarm>" }` and returns stored runs with refreshed
 status when their runtime is available. Run summaries omit task text and runtime
 results.
@@ -188,12 +188,12 @@ results.
 `swarm.stop` takes `{ "name": "<swarm>", "runId": "<run>" }` or
 `{ "name": "<swarm>", "all": true }`. It stops tracked starting, running and
 unknown workers and returns `stopped`, `unchanged` and `failed` summaries. A stop
-failure returns `isError: true` and leaves the record unresolved. The standard
+failure returns `isError: true` and leaves the record unresolved. Unknown Railway runs and starting Railway runs with a saved id require destroy exit zero; not-found text cannot clear them, and a refused starting run becomes unknown. The standard
 CLI-hosted MCP server resolves local and Railway adapters for stopping only;
 remote startup and the terminal-only stale-start confirmation remain unchanged.
 An SDK host without the matching runtime gets `runtime_unavailable` and can use
 `vapi swarm stop <name> --all`. Dissolution refusal uses the shared
-`swarm_workers_active` code; it can be retried after a successful stop.
+`swarm_workers_active` code; it can be retried after a successful stop. Railway startup errors exposed by the runtime SDK may use `launch_ambiguous`; the starting reservation survives and the CLI owner must check for workers, then use `vapi swarm stop <name> <runId> --confirm-worker-stopped` after five minutes. MCP exposes no confirmation override.
 
 Attached runs reload a member's local caps before each Call payment. Lowering
 caps through `accounts.caps` applies to the next payment in the active run.

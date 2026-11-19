@@ -7,6 +7,8 @@ import {
   isRunId,
   readSwarm,
   RUN_ID_PATTERN,
+  SwarmError,
+  withSwarmLock,
   validateRecoveryPhrase,
   WALLET_NAME_PATTERN,
   withFileLock,
@@ -86,7 +88,13 @@ export class RuntimeError extends Error {
   readonly name = "RuntimeError";
 
   constructor(
-    readonly code: "member_busy" | "runtime_unavailable" | "run_not_found" | "invalid_run_id",
+    readonly code:
+      | "member_busy"
+      | "runtime_unavailable"
+      | "run_not_found"
+      | "invalid_run_id"
+      | "swarm_unavailable"
+      | "launch_ambiguous",
     message: string,
   ) {
     super(message);
@@ -317,14 +325,17 @@ async function refreshRunRecordLocked(
   } catch {
     return current;
   }
-  const state: RunState =
-    current.state === "starting" && status.state === "unknown" ? "starting" : status.state;
+  // Railway also reports running when a poll fails or no result exists. That
+  // cannot confirm launch completion or relax a starting run's strict stop.
+  const unresolvedStart =
+    current.state === "starting" &&
+    (status.state === "unknown" || (current.kind === "railway" && status.state === "running"));
+  const state: RunState = unresolvedStart ? "starting" : status.state;
   const statusDetail =
     status.detail === undefined ? undefined : redactRunText(status.detail, process.env);
-  const detail =
-    current.state === "starting" && status.state === "unknown"
-      ? `${statusDetail ?? "Worker status is unknown"}. ${startingStopInstruction(current)}`
-      : statusDetail;
+  const detail = unresolvedStart
+    ? `${statusDetail ?? (status.state === "running" ? "Worker launch is still unconfirmed" : "Worker status is unknown")}. ${startingStopInstruction(current)}`
+    : statusDetail;
   if (state === current.state && detail === current.detail) return current;
 
   const updated: RunRecord = {
@@ -385,92 +396,161 @@ export async function startDetachedRun(args: {
   await mkdir(runsDirectory(args.home), { recursive: true, mode: 0o700 });
   const lockPath = memberRunLockPath(args.home, args.member.account);
   const busyMessage = `Member ${args.member.account} is already starting a run.`;
+  const reserve = async (): Promise<RunRecord> => {
+    const records = await listRunRecords(args.home, { account: args.member.account });
+    for (const record of records) {
+      const refreshed = await refreshRunRecordLocked(args.home, record, args.runtime, args.now);
+      if (refreshed.state === "starting" || refreshed.state === "running") {
+        throw new RuntimeError(
+          "member_busy",
+          `Member ${args.member.account} already has ${refreshed.state} run ${refreshed.runId}.${refreshed.detail === undefined ? "" : ` ${refreshed.detail}`}`,
+        );
+      }
+    }
+
+    const adapterBusy = await args.runtime.busy?.(args.member);
+    if (adapterBusy !== undefined) {
+      throw new RuntimeError(
+        "member_busy",
+        `Member ${args.member.account} is busy with unresolved run ${adapterBusy.runId}: ${adapterBusy.detail}`,
+      );
+    }
+
+    // The runtime receives the task exactly as given, so a detached run does what an attached
+    // run would; only the stored copy is scrubbed.
+    const startedAt = (args.now?.() ?? new Date()).toISOString();
+    const reservation: RunRecord = {
+      v: 1,
+      runId: args.run.runId,
+      kind: args.runtime.kind,
+      member: args.member,
+      run: { ...args.run, task: redactRunText(args.run.task, args.env ?? process.env) },
+      handle: {
+        runId: args.run.runId,
+        kind: args.runtime.kind,
+        member: args.member,
+        startedAt,
+        ref: "",
+      },
+      startedAt,
+      state: "starting",
+    };
+    await writeRunRecord(args.home, reservation);
+    return reservation;
+  };
+  const launch = async (reserved: RunRecord): Promise<RunRecord> => {
+    let reservation = reserved;
+    const current = await readRunRecord(args.home, reserved.runId);
+    if (
+      current === undefined ||
+      JSON.stringify(current) !== JSON.stringify(runRecordSchema.parse(reserved)) ||
+      current.state !== "starting" ||
+      current.handle.ref !== ""
+    ) {
+      throw new RuntimeError(
+        "runtime_unavailable",
+        `Reservation for ${reserved.runId} changed before launch. No worker was started. ${unreconciledStartInstruction(reserved)}`,
+      );
+    }
+    let handle: RuntimeHandle;
+    try {
+      handle = await args.runtime.start(args.member, args.run, async (launched) => {
+        assertRecoveredHandle(reservation, launched);
+        reservation = {
+          ...reservation,
+          handle: launched,
+          startedAt: launched.startedAt,
+        };
+        await writeRunRecord(args.home, reservation);
+      });
+    } catch (error) {
+      if (!(error instanceof RuntimeError && error.code === "launch_ambiguous")) {
+        await rm(runRecordPath(args.home, args.run.runId), { force: true }).catch(() => undefined);
+      }
+      throw error;
+    }
+    const record: RunRecord = {
+      ...reservation,
+      handle,
+      startedAt: handle.startedAt,
+      state: "running",
+    };
+    try {
+      await writeRunRecord(args.home, record);
+    } catch (error) {
+      const stopped = await args.runtime.stop(handle).then(
+        () => true,
+        () => false,
+      );
+      if (stopped) {
+        await rm(runRecordPath(args.home, args.run.runId), { force: true }).catch(() => undefined);
+      }
+      throw error;
+    }
+    return record;
+  };
+  let reservation: RunRecord | undefined;
+  let launchLockAcquired = false;
   try {
+    if (args.member.swarm === undefined) {
+      return await withFileLock(lockPath, async () => await launch(await reserve()), {
+        timeoutMs: 5_000,
+        lockedMessage: busyMessage,
+      });
+    }
+    const name = args.member.swarm;
+    // Match dissolution's lock order. Only the reservation holds the swarm lock;
+    // the durable starting record blocks dissolution throughout the remote launch.
+    reservation = await withSwarmLock(
+      args.home,
+      name,
+      async () =>
+        await withFileLock(
+          lockPath,
+          async () => {
+            const swarm = await readSwarm(args.home, name);
+            if (!swarm.members.some((member) => member.account === args.member.account)) {
+              throw new RuntimeError(
+                "swarm_unavailable",
+                `Account ${args.member.account} is no longer a member of swarm ${name}. No worker was started.`,
+              );
+            }
+            return await reserve();
+          },
+          { timeoutMs: 5_000, lockedMessage: busyMessage },
+        ),
+    );
+    const reserved = reservation;
     return await withFileLock(
       lockPath,
       async () => {
-        const records = await listRunRecords(args.home, { account: args.member.account });
-        for (const record of records) {
-          const refreshed = await refreshRunRecordLocked(args.home, record, args.runtime, args.now);
-          if (refreshed.state === "starting" || refreshed.state === "running") {
-            throw new RuntimeError(
-              "member_busy",
-              `Member ${args.member.account} already has ${refreshed.state} run ${refreshed.runId}.${refreshed.detail === undefined ? "" : ` ${refreshed.detail}`}`,
-            );
-          }
-        }
-
-        const adapterBusy = await args.runtime.busy?.(args.member);
-        if (adapterBusy !== undefined) {
-          throw new RuntimeError(
-            "member_busy",
-            `Member ${args.member.account} is busy with unresolved run ${adapterBusy.runId}: ${adapterBusy.detail}`,
-          );
-        }
-
-        // The runtime receives the task exactly as given, so a detached run does what an attached
-        // run would; only the stored copy is scrubbed.
-        const startedAt = (args.now?.() ?? new Date()).toISOString();
-        let reservation: RunRecord = {
-          v: 1,
-          runId: args.run.runId,
-          kind: args.runtime.kind,
-          member: args.member,
-          run: { ...args.run, task: redactRunText(args.run.task, args.env ?? process.env) },
-          handle: {
-            runId: args.run.runId,
-            kind: args.runtime.kind,
-            member: args.member,
-            startedAt,
-            ref: "",
-          },
-          startedAt,
-          state: "starting",
-        };
-        await writeRunRecord(args.home, reservation);
-        let handle: RuntimeHandle;
-        try {
-          handle = await args.runtime.start(args.member, args.run, async (launched) => {
-            assertRecoveredHandle(reservation, launched);
-            reservation = {
-              ...reservation,
-              handle: launched,
-              startedAt: launched.startedAt,
-            };
-            await writeRunRecord(args.home, reservation);
-          });
-        } catch (error) {
-          await rm(runRecordPath(args.home, args.run.runId), { force: true }).catch(
-            () => undefined,
-          );
-          throw error;
-        }
-        const record: RunRecord = {
-          ...reservation,
-          handle,
-          startedAt: handle.startedAt,
-          state: "running",
-        };
-        try {
-          await writeRunRecord(args.home, record);
-        } catch (error) {
-          const stopped = await args.runtime.stop(handle).then(
-            () => true,
-            () => false,
-          );
-          if (stopped) {
-            await rm(runRecordPath(args.home, args.run.runId), { force: true }).catch(
-              () => undefined,
-            );
-          }
-          throw error;
-        }
-        return record;
+        launchLockAcquired = true;
+        return await launch(reserved);
       },
-      { timeoutMs: 5_000, lockedMessage: busyMessage },
+      {
+        timeoutMs: 5_000,
+        lockedMessage: busyMessage,
+      },
     );
   } catch (error) {
-    if (error instanceof FileLockedError) throw new RuntimeError("member_busy", busyMessage);
+    if (reservation !== undefined && !launchLockAcquired) {
+      throw new RuntimeError(
+        error instanceof FileLockedError ? "member_busy" : "runtime_unavailable",
+        `Could not acquire the launch lock for member ${args.member.account}. No worker was started; the reservation was retained. ${unreconciledStartInstruction(reservation)}`,
+      );
+    }
+    if (
+      error instanceof SwarmError &&
+      (error.code === "swarm_locked" || error.code === "swarm_not_found")
+    ) {
+      throw new RuntimeError(
+        "swarm_unavailable",
+        `Swarm ${args.member.swarm} ${error.code === "swarm_locked" ? "is locked (it may be dissolving)" : "no longer exists"}. No worker was started.`,
+      );
+    }
+    if (error instanceof FileLockedError) {
+      throw new RuntimeError("member_busy", busyMessage);
+    }
     throw error;
   }
 }
@@ -603,8 +683,27 @@ export async function stopRun(args: {
           }
           await args.runtime.retireUnreconciledStart?.(current);
         } else {
-          if (current.kind === "railway" && current.state === "unknown") {
-            await args.runtime.stop(current.handle, { requireSuccessfulExit: true });
+          if (
+            current.kind === "railway" &&
+            (current.state === "unknown" || current.state === "starting")
+          ) {
+            try {
+              await args.runtime.stop(current.handle, { requireSuccessfulExit: true });
+            } catch (error) {
+              const detail = redactRunText(
+                error instanceof Error ? error.message : String(error),
+                process.env,
+              );
+              if (current.state === "starting") {
+                await writeRunRecord(args.home, {
+                  ...current,
+                  state: "unknown",
+                  endedAt: (args.now?.() ?? new Date()).toISOString(),
+                  detail,
+                });
+              }
+              throw error;
+            }
           } else {
             await args.runtime.stop(current.handle);
           }

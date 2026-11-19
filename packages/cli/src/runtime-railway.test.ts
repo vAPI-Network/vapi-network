@@ -1770,7 +1770,8 @@ describe("railway runtime signals during start", () => {
       .start(MEMBER, RUN)
       .catch((error: unknown) => error)) as Error;
 
-    expect(failure).toBeInstanceOf(Error);
+    expect(failure).toBeInstanceOf(RuntimeError);
+    expect(failure).toMatchObject({ code: "launch_ambiguous" });
     expect(failure.message).toMatch(/interrupted by SIGINT/u);
     expect(atSignal).toEqual(sidecarOf());
     // The interrupted start never writes the sidecar back or goes on.
@@ -2027,6 +2028,100 @@ describe("railway runtime sidecar during start", () => {
 });
 
 describe("railway runtime create failures", () => {
+  it.each(["nonzero", "no-id"] as const)(
+    "retains launch ambiguity when its export audit cannot be written (%s)",
+    async (outcome) => {
+      const f = await fixture();
+      await mkdir(join(f.home, "audit.log"));
+      const railway = fakeRailway({
+        create: () => ({
+          code: outcome === "nonzero" ? 1 : 0,
+          stdout: "Created",
+          stderr: "timeout",
+        }),
+      });
+      const failure = await startDetachedRun({
+        home: f.home,
+        runtime: runtimeFor(f, railway.exec),
+        member: MEMBER,
+        run: RUN,
+      }).catch((error: unknown) => error);
+      expect(failure).toMatchObject({
+        code: "launch_ambiguous",
+        message: expect.stringContaining("Could not record export audit"),
+      });
+      expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+        state: "starting",
+        handle: { ref: "" },
+      });
+      expect(readSidecarFile(f)).toMatchObject({ state: "creating" });
+    },
+  );
+
+  it.each(["missing-binary", "env-file-refused"] as const)(
+    "drops the reservation when create never reached Railway (%s)",
+    async (outcome) => {
+      const f = await fixture();
+      const railway = fakeRailway({
+        create: () => {
+          throw Object.assign(new Error("spawn railway ENOENT"), { code: "ENOENT" });
+        },
+      });
+      const runtime = runtimeFor(
+        f,
+        railway.exec,
+        outcome === "env-file-refused"
+          ? {
+              fs: {
+                stat: async (path) =>
+                  path.endsWith("member.env") ? { mode: 0o100644 } : await stat(path),
+              },
+            }
+          : {},
+      );
+      const failure = await startDetachedRun({
+        home: f.home,
+        runtime,
+        member: MEMBER,
+        run: RUN,
+      }).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toMatchObject({ code: "launch_ambiguous" });
+      expect(await readRunRecord(f.home, RUN_ID)).toBeUndefined();
+      expect(await exists(railwaySidecarPath(f.home, RUN_ID))).toBe(false);
+      if (outcome === "env-file-refused") expect(railway.exec).not.toHaveBeenCalled();
+    },
+  );
+
+  it("requires exit zero to stop a starting Railway record with a saved id", async () => {
+    const f = await fixture();
+    const railway = fakeRailway({ cat: () => SANDBOX_GONE, destroy: () => SANDBOX_GONE });
+    const record = {
+      v: 1 as const,
+      runId: RUN_ID,
+      kind: "railway" as const,
+      member: MEMBER,
+      run: RUN,
+      handle: handle(),
+      startedAt: STARTED_AT,
+      state: "starting" as const,
+    };
+    await writeRunRecord(f.home, record);
+    await expect(
+      stopRun({
+        home: f.home,
+        runtime: runtimeFor(f, railway.exec),
+        record,
+        now: () => new Date(STARTED_AT),
+      }),
+    ).rejects.toThrow("sandbox destroy");
+    expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+      state: "unknown",
+      endedAt: STARTED_AT,
+      detail: expect.stringContaining("sandbox destroy"),
+    });
+  });
+
   it("keeps a creating sidecar and warns that a sandbox may exist when create exits non-zero", async () => {
     const f = await fixture();
     const railway = fakeRailway({
@@ -2037,6 +2132,8 @@ describe("railway runtime create failures", () => {
       .start(MEMBER, RUN)
       .catch((error: unknown) => error)) as Error;
 
+    expect(failure).toBeInstanceOf(RuntimeError);
+    expect(failure).toMatchObject({ code: "launch_ambiguous" });
     expect(failure.message).toContain("railway sandbox create failed");
     expect(failure.message).toContain(`A sandbox holding ${ALPHA}'s private key may still exist`);
     expect(failure.message).toContain("railway sandbox list");
@@ -2055,6 +2152,8 @@ describe("railway runtime create failures", () => {
       .start(MEMBER, RUN)
       .catch((error: unknown) => error)) as Error;
 
+    expect(failure).toBeInstanceOf(RuntimeError);
+    expect(failure).toMatchObject({ code: "launch_ambiguous" });
     expect(failure.message).toContain("socket hang up");
     expect(failure.message).toContain("railway sandbox list");
     expect(readSidecarFile(f)).toEqual(sidecarOf());
@@ -2119,9 +2218,14 @@ describe("railway runtime create failures", () => {
       create: () => ({ code: 0, stdout: "Sandbox created\n", stderr: "" }),
     });
 
-    await expect(runtimeFor(f, railway.exec).start(MEMBER, RUN)).rejects.toThrow(
-      /railway sandbox list/u,
-    );
+    const failure = await runtimeFor(f, railway.exec)
+      .start(MEMBER, RUN)
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(RuntimeError);
+    expect(failure).toMatchObject({
+      code: "launch_ambiguous",
+      message: expect.stringContaining("railway sandbox list"),
+    });
     expect(readSidecarFile(f)).toEqual(sidecarOf());
   });
 
@@ -2338,7 +2442,7 @@ describe("railway sidecar helpers", () => {
     expect(await exists(railwaySidecarPath(f.home, RUN_ID))).toBe(false);
   });
 
-  it("deletes the sidecar of a sandbox that is clearly gone", async () => {
+  it("keeps the sidecar when destroy only reports that a sandbox is gone", async () => {
     const f = await fixture();
     await mkdir(runsDirectory(f.home), { recursive: true });
     await writeFile(
@@ -2349,8 +2453,36 @@ describe("railway sidecar helpers", () => {
 
     await expect(
       destroyRailwaySidecar(f.home, RUN_ID, { exec: railway.exec }),
-    ).resolves.toMatchObject({ destroyed: true });
-    expect(await exists(railwaySidecarPath(f.home, RUN_ID))).toBe(false);
+    ).resolves.toMatchObject({ destroyed: false });
+    expect(await exists(railwaySidecarPath(f.home, RUN_ID))).toBe(true);
+  });
+
+  it.each([
+    ["creating", "null"],
+    ["kept", "timeout"],
+    ["running", "thrown"],
+    ["orphaned", "gone"],
+  ] as const)("keeps %s sidecars on %s destroy failures", async (state, outcome) => {
+    const f = await fixture();
+    await mkdir(runsDirectory(f.home), { recursive: true });
+    await writeFile(
+      railwaySidecarPath(f.home, RUN_ID),
+      JSON.stringify(sidecarOf({ state, sandboxId: SANDBOX_ID })),
+    );
+    const railway = fakeRailway({
+      destroy: () => {
+        if (outcome === "thrown") throw new Error("socket hang up");
+        return {
+          code: outcome === "null" ? null : outcome === "timeout" ? 124 : 1,
+          stdout: "",
+          stderr: SANDBOX_GONE.stderr,
+        };
+      },
+    });
+    expect(await destroyRailwaySidecar(f.home, RUN_ID, { exec: railway.exec })).toMatchObject({
+      destroyed: false,
+    });
+    expect(readSidecarFile(f)).toMatchObject({ state: "orphaned", sandboxId: SANDBOX_ID });
   });
 
   it("keeps an orphaned sidecar with the destroy command when the destroy fails", async () => {
