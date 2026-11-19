@@ -35,7 +35,7 @@ While it remains pending, chat retries use the balance key and manual buys recov
 Normal retirement requires a succeeded receipt in the local ledger and proof that the purchased credit is usable.
 Usage proves credit when purchased balance reaches the recorded baseline plus the purchased tier under a current link with the same owner (case-insensitive) and API base.
 A successful balance-key chat also proves credit. Older entries without a baseline require a successful balance-key chat.
-`ensureRouterPurchaseReceipt` records the receipt; appends sync best effort. Retirement separately requires a strict sync of the ledger file and its parent directory. The file is opened with write access without creating it; directory sync is skipped on Windows.
+`ensureRouterPurchaseReceipt` records the receipt; appends sync best effort. Retirement separately requires a strict sync of the ledger file and its parent directory. The file is opened without creating it, with write access only on Windows. Directory sync is skipped on Windows.
 Receipt write or retirement sync failures retain the journal and allow balance-key chat to continue; `credit_pending` remains until retirement succeeds.
 
 Relinking to the same owner and API base lets recovery fetch the balance key under the current link.

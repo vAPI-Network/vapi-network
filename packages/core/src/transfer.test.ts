@@ -270,7 +270,7 @@ describe("transferBetweenAccounts", () => {
     },
   );
 
-  it("preserves the pre-relay error when appending its failed row also fails", async () => {
+  it("keeps the reservation and resumes when authorization sync and the failed append both fail", async () => {
     const fixture = await linkedFixture();
     const paths = getVapiPaths(fixture.home);
     const transport = fakeTransport(fixture);
@@ -288,15 +288,41 @@ describe("transferBetweenAccounts", () => {
       },
     });
 
-    await expect(runTransfer(fixture, transport.fetchImpl)).rejects.toMatchObject({
-      name: "TransferError",
-      code: "network_error",
-      reservationReleased: true,
-      message: "Original durability failure. No money moved.",
+    const unknown = await runTransfer(fixture, transport.fetchImpl);
+    expect(unknown).toMatchObject({
+      status: "unknown",
+      nonce: NONCE,
+      txHash: null,
+      replayed: false,
     });
     expect(append).toHaveBeenCalledTimes(2);
-    expect(release).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
     expect(relayCalls(transport.calls)).toHaveLength(0);
+    const ledger = JSON.parse(await readFile(paths.ledger, "utf8"));
+    expect(ledger).toMatchObject({
+      rows: [
+        {
+          wallet: "research",
+          spentAtomic: "2000000",
+          reservations: [{ id: NONCE, amountAtomic: "2000000" }],
+        },
+      ],
+    });
+    expect(await readReceipts(paths.receipts)).toMatchObject([
+      { transfer: { status: "unknown", nonce: NONCE, request: expect.any(Object) } },
+    ]);
+
+    __setReceiptTestHooks(undefined);
+    append.mockRestore();
+    const sent = await runTransfer(fixture, transport.fetchImpl, { resume: unknown.nonce });
+    expect(sent).toMatchObject({ status: "sent", nonce: NONCE, txHash: TX_HASH });
+    expect(relayCalls(transport.calls)).toHaveLength(1);
+    expect(fixture.signTypedData).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    expect(JSON.parse(await readFile(paths.ledger, "utf8"))).toEqual(ledger);
+    const rows = await readReceipts(paths.receipts);
+    expect(rows.map((row) => row.transfer?.status)).toEqual(["unknown", "sent"]);
+    expect(rows[1]!.transfer?.request).toBeUndefined();
   });
 
   it("5. refuses a revoked sibling before signing", async () => {

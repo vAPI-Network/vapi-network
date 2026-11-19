@@ -2280,9 +2280,15 @@ describe("vapi swarm railway runs", () => {
     },
   );
 
-  it.each(["tracked", "sidecar-only"] as const)(
-    "blocks dissolution after text-only status until forget-run confirms destruction (%s)",
-    async (shape) => {
+  it.each([
+    ...(["creating", "running", "orphaned", "kept"] as const).map((state) => ({
+      shape: "tracked" as const,
+      state,
+    })),
+    { shape: "sidecar-only" as const, state: "running" as const },
+  ])(
+    "blocks dissolution after text-only status until recovery ($shape, $state)",
+    async ({ shape, state }) => {
       const home = await homeWithStoredSwarm("vapi-swarm-status-absence-");
       const record = railwayRecordForRace("running");
       record.handle.railwayScope = {
@@ -2293,9 +2299,11 @@ describe("vapi swarm railway runs", () => {
       await writeSidecarFile(home, {
         runId: ORPHAN_RUN,
         account: record.member.account,
-        state: "running",
+        state,
         sandboxId: "sbx_9",
       });
+      const path = join(home, "runs", `${ORPHAN_RUN}.railway.json`);
+      const bytes = await readFile(path, "utf8");
       const exec = vi.fn<RailwayExec>(async () => ({
         code: 1,
         stdout: "",
@@ -2314,13 +2322,7 @@ describe("vapi swarm railway runs", () => {
         });
         expect(await readRunRecord(home, ORPHAN_RUN)).toBeUndefined();
       }
-      const path = join(home, "runs", `${ORPHAN_RUN}.railway.json`);
-      expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({
-        state: "orphaned",
-        sandboxId: "sbx_9",
-        swarm: "team",
-        account: record.member.account,
-      });
+      expect(await readFile(path, "utf8")).toBe(bytes);
       const balanceReader = vi.fn(async () => 0n);
       const transfer = vi.fn<MovementTransfer>();
       const deps = { ...railwayDependencies(exec), swarm: { balanceReader, transfer } };
@@ -2329,6 +2331,25 @@ describe("vapi swarm railway runs", () => {
       expect(JSON.parse(onlyLine(blocked.stdout))).toMatchObject({ code: "swarm_workers_active" });
       expect(balanceReader).not.toHaveBeenCalled();
       expect(transfer).not.toHaveBeenCalled();
+      expect(await readFile(path, "utf8")).toBe(bytes);
+      if (shape === "sidecar-only") {
+        exec.mockClear();
+        const stopped = captureIo();
+        expect(await run(["swarm", "stop", "team", "--all", "--json"], stopped.io, deps)).toBe(1);
+        expect(exec).toHaveBeenCalledTimes(1);
+        expect(exec.mock.calls[0]?.slice(0, 2)).toEqual([
+          "railway",
+          ["sandbox", "destroy", "sbx_9"],
+        ]);
+        expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({
+          state: "orphaned",
+          sandboxId: "sbx_9",
+        });
+        expect(await readRunRecord(home, ORPHAN_RUN)).toBeUndefined();
+        expect(onlyLine(stopped.stdout)).toContain(
+          `vapi swarm forget-run team ${ORPHAN_RUN} --confirm-destroyed`,
+        );
+      }
       exec.mockClear();
       expect(
         await run(
@@ -2637,6 +2658,8 @@ describe("vapi swarm railway runs", () => {
       state: "running",
       sandboxId: handle.ref,
     });
+    const sidecarPath = join(home, "runs", `${ORPHAN_RUN}.railway.json`);
+    const sidecarBytes = await readFile(sidecarPath, "utf8");
     const destroys: string[] = [];
     const exec = vi.fn<RailwayExec>(async (_file, args) => {
       if (args[1] === "exec")
@@ -2680,9 +2703,7 @@ describe("vapi swarm railway runs", () => {
     expect(
       (await readdir(join(home, "runs"))).filter((file) => file.endsWith(".railway.json")),
     ).toEqual([`${ORPHAN_RUN}.railway.json`]);
-    expect(
-      JSON.parse(await readFile(join(home, "runs", `${ORPHAN_RUN}.railway.json`), "utf8")),
-    ).toMatchObject({ state: "orphaned", sandboxId: handle.ref });
+    expect(await readFile(sidecarPath, "utf8")).toBe(sidecarBytes);
     const blocked = captureIo();
     expect(await run(["swarm", "dissolve", "team", "--json"], blocked.io, deps)).toBe(1);
     expect(onlyLine(blocked.stdout)).toContain("vapi swarm stop team --all");

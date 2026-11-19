@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -72,7 +72,29 @@ describe("receipts ledger", () => {
     expect(attempts).toEqual([path]);
   });
 
-  it("uses a writable file handle at the strict gate without creating a missing ledger", async () => {
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "syncs an existing read-only ledger at the strict gate on POSIX",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-readonly-"));
+      temporaryDirectories.push(directory);
+      const path = join(directory, "receipts.jsonl");
+      const receipt: Receipt = {
+        id: "recorded",
+        timestamp: "2026-09-10T08:00:00.000Z",
+        resourceUrl: "https://api.example/paid",
+      };
+      await appendReceipt(receipt, path);
+      await chmod(path, 0o400);
+      try {
+        await expect(syncReceipts(path)).resolves.toBeUndefined();
+        expect(await readReceipts(path)).toEqual([receipt]);
+      } finally {
+        await chmod(path, 0o600);
+      }
+    },
+  );
+
+  it("uses a writable file handle on Windows without creating a missing ledger on either platform", async () => {
     const directory = await mkdtemp(join(tmpdir(), "vapi-receipts-writable-"));
     temporaryDirectories.push(directory);
     const path = join(directory, "receipts.jsonl");
@@ -85,12 +107,19 @@ describe("receipts ledger", () => {
         written();
       },
     });
-    await syncReceipts(path);
-    expect(written).toHaveBeenCalledTimes(1);
-    expect(await readFile(path, "utf8")).toBe("ledger");
     const missing = join(directory, "missing.jsonl");
     await expect(syncReceipts(missing)).rejects.toMatchObject({ code: "ENOENT" });
     expect(await readdir(directory)).toEqual(["receipts.jsonl"]);
+    const platform = vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+    try {
+      await syncReceipts(path);
+      await expect(syncReceipts(missing)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readdir(directory)).toEqual(["receipts.jsonl"]);
+    } finally {
+      platform.mockRestore();
+    }
+    expect(written).toHaveBeenCalledTimes(1);
+    expect(await readFile(path, "utf8")).toBe("ledger");
   });
 
   it.each(["file", "directory"] as const)(

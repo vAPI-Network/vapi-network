@@ -363,14 +363,24 @@ export async function transferBetweenAccounts(args: TransferArgs): Promise<Trans
       try {
         await syncReceipts(context.receiptsPath);
       } catch (error) {
-        await appendTransferReceipt(context, request, {
-          receiptId,
-          status: "failed",
-          txHash: null,
-          replayed: false,
-          reservedOn,
-          error: transferError("network_error"),
-        }).catch(() => undefined);
+        try {
+          await appendTransferReceipt(context, request, {
+            receiptId,
+            status: "failed",
+            txHash: null,
+            replayed: false,
+            reservedOn,
+            error: transferError("network_error"),
+          });
+        } catch {
+          authorizationPersisted = true;
+          return transferResult(context, {
+            status: "unknown",
+            txHash: null,
+            nonce: request.authorization.nonce,
+            replayed: false,
+          });
+        }
         throw error;
       }
       authorizationPersisted = true;

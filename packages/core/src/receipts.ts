@@ -330,7 +330,7 @@ async function syncReceiptHandle(handle: FileHandle, path: string): Promise<void
 
 /** Flush the ledger and its directory before retirement. Missing files and sync failures throw. */
 export async function syncReceipts(path = getVapiPaths().receipts): Promise<void> {
-  await syncReceiptPath(path, "r+");
+  await syncReceiptPath(path, process.platform === "win32" ? "r+" : "r");
   await syncReceiptDirectory(dirname(path));
 }
 
