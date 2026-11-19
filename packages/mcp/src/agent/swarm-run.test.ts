@@ -9,11 +9,13 @@ import {
   createAgentProfileSchema,
   getDefaultConfig,
   getVapiPaths,
+  PAYMENT_WARNING_CODES,
   readDelegationRecord,
   readAgentProfile,
   readMovement,
   readReceipts,
   setupSwarm,
+  swarmRunRefillSchema,
   treasuryRequestMovementId,
   WalletStore,
   withSwarmLock,
@@ -39,6 +41,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getAddress, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
+import { routerChatTool } from "../tools/router.js";
 import { createAgentRunDeps } from "./deps.js";
 import { runSwarm, type MemberRunOptions, type RunSwarmDeps } from "./swarm-run.js";
 import type { RunAgentDeps, RunAgentResult, SwarmRunContext } from "./run.js";
@@ -148,6 +151,48 @@ describe("runSwarm lead mode", () => {
         budgetUsd: 0.25,
         refills: [routerPurchaseView(refillPurchase())],
       },
+    });
+  });
+
+  it("accepts every payment warning code and the settlement outcome as refill evidence", async () => {
+    const purchase = refillPurchase();
+    const view = routerPurchaseView({
+      ...purchase,
+      receipt: { ...purchase.receipt, settlement: { outcome: "unknown" } },
+      warnings: PAYMENT_WARNING_CODES.map((code) => ({ code, message: `Warning ${code}.` })),
+    });
+    expect(view.receipt.settlement).toBe("unknown");
+    expect(view.warnings?.map(({ code }) => code)).toEqual([...PAYMENT_WARNING_CODES]);
+
+    // A member result, a delegation replay and a Router tool result all carry
+    // this view; none may reject a code the Router client can produce.
+    expect(swarmRunRefillSchema.parse(view)).toEqual(view);
+    expect(
+      routerChatTool.outputSchema.parse({ content: "ok", model: "model", refill: view }).refill,
+    ).toEqual(view);
+
+    const fixture = await swarmFixture();
+    const movementId = treasuryRequestMovementId("team", "run_1:delegate");
+    await writeDelegationRecord(fixture.home, {
+      v: 1,
+      movementId,
+      requestId: "run_1:delegate",
+      swarm: "team",
+      member: "team-helper-1",
+      budgetUsd: "0.25",
+      childRunId: "run_2",
+      startedAt: new Date(NOW).toISOString(),
+      result: {
+        runId: "run_2",
+        answer: "Done.",
+        stoppedBecause: { reason: "finished" },
+        spentUsd: 0,
+        budgetUsd: 0.25,
+        refills: [view],
+      },
+    });
+    await expect(readDelegationRecord(fixture.home, movementId)).resolves.toMatchObject({
+      result: { refills: [view] },
     });
   });
 

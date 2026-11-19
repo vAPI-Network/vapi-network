@@ -27,6 +27,7 @@ import {
   type MovementSummary,
 } from "./movement.js";
 import { configuredNetworkFor } from "./networks.js";
+import { PAYMENT_WARNING_CODES } from "./payment-warning.js";
 import { RunBudgetError, type RunBudget } from "./run-budget.js";
 import { readSpendLedger } from "./spend-policy.js";
 import {
@@ -109,24 +110,13 @@ export const swarmRunRefillSchema = z.object({
     amountUsd: z.number().nullable(),
     network: z.string(),
     transaction: z.string().optional(),
+    settlement: z.enum(["succeeded", "rejected", "unknown"]).optional(),
   }),
   balance: z
     .object({ purchasedUsd: z.number(), spentUsd: z.number(), remainingUsd: z.number() })
     .nullable(),
   warnings: z
-    .array(
-      z.object({
-        code: z.enum([
-          "audit_unavailable",
-          "router_key_unavailable",
-          "balance_unavailable",
-          "purchase_response_unavailable",
-          "receipt_unavailable",
-          "payment_followup_unavailable",
-        ]),
-        message: z.string(),
-      }),
-    )
+    .array(z.object({ code: z.enum(PAYMENT_WARNING_CODES), message: z.string() }))
     .optional(),
 });
 

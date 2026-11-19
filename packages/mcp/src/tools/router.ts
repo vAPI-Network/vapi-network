@@ -1,5 +1,5 @@
 import type { SecretStore, VapiConfig, VapiPaymentAccount, WalletStore } from "@vapi-network/core";
-import { spendCapsForWallet, walletNameSchema } from "@vapi-network/core";
+import { PAYMENT_WARNING_CODES, spendCapsForWallet, walletNameSchema } from "@vapi-network/core";
 import {
   buyRouterBalance,
   listRouterModels,
@@ -98,22 +98,7 @@ const purchaseSchema = z.object({
   }),
   balance: routerUsageSchema.balance,
   warnings: z
-    .array(
-      z.object({
-        code: z.enum([
-          "settlement_unconfirmed",
-          "credit_pending",
-          "pending_purchase_unlinked",
-          "audit_unavailable",
-          "router_key_unavailable",
-          "balance_unavailable",
-          "purchase_response_unavailable",
-          "receipt_unavailable",
-          "payment_followup_unavailable",
-        ]),
-        message: z.string(),
-      }),
-    )
+    .array(z.object({ code: z.enum(PAYMENT_WARNING_CODES), message: z.string() }))
     .optional(),
 });
 
