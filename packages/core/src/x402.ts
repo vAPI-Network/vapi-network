@@ -2,6 +2,7 @@ import { bytesToHex, getAddress, type Address, type Hex } from "viem";
 import { ExactSvmScheme } from "@x402/svm/exact/client";
 
 import { createPublicFetch } from "./net-guard.js";
+import { discardBody } from "./http-response.js";
 import { isSolanaAddress } from "./svm.js";
 import {
   areSamePaymentNetwork,
@@ -12,6 +13,7 @@ import {
 import { getCanonicalX402Usdc, type X402NetworkConfig } from "./x402-networks.js";
 
 export type { Address, Hex } from "viem";
+export { discardBody } from "./http-response.js";
 
 export {
   ARC_MAINNET_CAIP2,
@@ -127,6 +129,14 @@ export type X402Signer = {
   address: Address;
   signTypedData(typedData: X402TypedData): Promise<Hex>;
   solana?: ConstructorParameters<typeof ExactSvmScheme>[0];
+};
+
+/** Durable public evidence recorded before any signature can exist. */
+export type X402SigningEvidence = {
+  network: string;
+  token: string;
+  amountAtomic: string;
+  authorization?: Eip3009Authorization;
 };
 
 export type X402PaymentPayload = {
@@ -430,15 +440,6 @@ export function parse402Challenge(
   }
 }
 
-/**
- * Drop a response body without waiting. Awaiting cancel() on a body that has
- * been clone()d never settles until the other tee branch is cancelled too, so
- * callers that only want to discard the bytes must not block on it.
- */
-export function discardBody(response: Response | null | undefined): void {
-  void response?.body?.cancel().catch(() => undefined);
-}
-
 /** Decodes a `PAYMENT-REQUIRED` header: base64 of the JSON payment offer. Throws when it is not. */
 export function decodePaymentRequiredHeader(value: string): unknown {
   return decodeBase64Json(value);
@@ -580,6 +581,7 @@ export async function buildX402Payment(args: {
   nonce?: Hex;
   fetchImpl?: typeof fetch;
   paymentId?: string;
+  beforeSign?: (evidence: X402SigningEvidence) => Promise<void>;
 }): Promise<{
   payload: X402PaymentPayload;
   headers: X402PaymentHeaders;
@@ -605,6 +607,11 @@ export async function buildX402Payment(args: {
       args.quote.accepted.network === SOLANA_MAINNET_CAIP2
         ? { ...args.quote.accepted, network: X402_SOLANA_MAINNET_CAIP2 }
         : args.quote.accepted;
+    await args.beforeSign?.({
+      network: args.quote.accepted.network,
+      token: args.quote.accepted.asset,
+      amountAtomic: args.quote.amountAtomic.toString(),
+    });
     const created = await withGuardedSvmFetch(
       args.fetchImpl ?? createPublicFetch({ allowPrivateNetwork: false }),
       async () => {
@@ -638,6 +645,12 @@ export async function buildX402Payment(args: {
       ? {}
       : { maximumValidBeforeSeconds: args.maximumValidBeforeSeconds }),
   });
+  await args.beforeSign?.({
+    network: args.quote.accepted.network,
+    token: args.quote.accepted.asset,
+    amountAtomic: args.quote.amountAtomic.toString(),
+    authorization,
+  });
   const signature = await args.signer.signTypedData(typedData);
   const payload: X402PaymentPayload = {
     x402Version: 2,
@@ -664,6 +677,7 @@ export async function buildCompatibleX402Payment(args: {
   nonce?: Hex;
   fetchImpl?: typeof fetch;
   paymentId?: string;
+  beforeSign?: (evidence: X402SigningEvidence) => Promise<void>;
 }): Promise<{
   payload: X402PaymentPayload;
   headers: X402CompatiblePaymentHeaders;
@@ -677,6 +691,7 @@ export async function buildCompatibleX402Payment(args: {
       ? {}
       : { maximumValidBeforeSeconds: args.maximumValidBeforeSeconds }),
     ...(args.nonce === undefined ? {} : { nonce: args.nonce }),
+    ...(args.beforeSign === undefined ? {} : { beforeSign: args.beforeSign }),
     ...(args.fetchImpl === undefined ? {} : { fetchImpl: args.fetchImpl }),
     ...(args.paymentId === undefined ? {} : { paymentId: args.paymentId }),
   });
