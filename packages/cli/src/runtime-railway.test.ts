@@ -1616,20 +1616,19 @@ describe("railway runtime lifecycle", () => {
     },
   );
 
-  it("preserves the exact ordinary stop destroy failure", async () => {
-    const f = await fixture();
-    const railway = fakeRailway({
-      destroy: () => ({ code: 1, stdout: "", stderr: "destroy failed" }),
-    });
+  it.each(["destroy failed", "error: VAPI_MEMBER_BUNDLE: invalid encoding"])(
+    "preserves the exact ordinary stop destroy failure (%s)",
+    async (stderr) => {
+      const f = await fixture();
+      const railway = fakeRailway({ destroy: () => ({ code: 1, stdout: "", stderr }) });
 
-    const failure = (await createRailwayRuntime({ home: f.home, exec: railway.exec })
-      .stop(handle())
-      .catch((error: unknown) => error)) as Error;
+      const failure = (await createRailwayRuntime({ home: f.home, exec: railway.exec })
+        .stop(handle())
+        .catch((error: unknown) => error)) as Error;
 
-    expect(failure.message).toBe(
-      "railway sandbox destroy sbx_7f3a9c failed (exit 1): destroy failed",
-    );
-  });
+      expect(failure.message).toBe(`railway sandbox destroy sbx_7f3a9c failed (exit 1): ${stderr}`);
+    },
+  );
 
   it("reports a sandbox that is gone as unknown", async () => {
     const f = await fixture();
@@ -2285,28 +2284,36 @@ describe("railway runtime sidecar during start", () => {
     expect(readSidecarFile(f)).toEqual(sidecarOf({ state: "orphaned", sandboxId: SANDBOX_ID }));
   });
 
-  it("redacts an echoed bundle before shortening a start destroy failure", async () => {
-    const f = await fixture();
-    let bundle = "";
-    const railway = fakeRailway({
-      create: (observation) => {
-        bundle = bundleOf(observation);
-        return CREATED;
-      },
-      detach: () => ({ code: 1, stdout: "", stderr: "exec failed" }),
-      destroy: () => ({ code: 1, stdout: "", stderr: `error: VAPI_MEMBER_BUNDLE=${bundle}` }),
-    });
+  it.each(["labelled", "unlabelled"] as const)(
+    "redacts an echoed %s bundle before shortening a start destroy failure",
+    async (form) => {
+      const f = await fixture();
+      let bundle = "";
+      const railway = fakeRailway({
+        create: (observation) => {
+          bundle = bundleOf(observation);
+          return CREATED;
+        },
+        detach: () => ({ code: 1, stdout: "", stderr: "exec failed" }),
+        // The unlabelled form is only caught by the launch's own secrets list.
+        destroy: () => ({
+          code: 1,
+          stdout: "",
+          stderr: form === "labelled" ? `error: VAPI_MEMBER_BUNDLE=${bundle}` : `error: ${bundle}`,
+        }),
+      });
 
-    const failure = (await runtimeFor(f, railway.exec)
-      .start(MEMBER, RUN)
-      .catch((error: unknown) => error)) as Error;
+      const failure = (await runtimeFor(f, railway.exec)
+        .start(MEMBER, RUN)
+        .catch((error: unknown) => error)) as Error;
 
-    for (const value of [bundle, bundle.slice(0, 48), f.alphaKey, f.alphaKey.slice(2)]) {
-      expect(failure.message.includes(value)).toBe(false);
-    }
-    expect(failure.message).toContain(`Could not destroy sandbox ${SANDBOX_ID}`);
-    expect(failure.message).toContain(`railway sandbox destroy ${SANDBOX_ID}`);
-  });
+      for (const value of [bundle, bundle.slice(0, 48), f.alphaKey, f.alphaKey.slice(2)]) {
+        expect(failure.message.includes(value)).toBe(false);
+      }
+      expect(failure.message).toContain(`Could not destroy sandbox ${SANDBOX_ID}`);
+      expect(failure.message).toContain(`railway sandbox destroy ${SANDBOX_ID}`);
+    },
+  );
 
   it("keeps an orphaned sidecar when readiness fails and the destroy fails", async () => {
     const f = await fixture();

@@ -1830,8 +1830,9 @@ function describeFailure(outcome: RailwayExecResult, secrets: readonly string[])
     .find((part) => part.length > 0);
   const exit = outcome.code === null ? "no exit code" : `exit ${outcome.code}`;
   if (line === undefined) return ` (${exit}).`;
+  // The bundle is base64url text; a shorter word after the name is a diagnostic, not a value.
   const redacted = line.replace(
-    new RegExp(`${RAILWAY_CLI.bundleVariable}["']?\\s*[=:]\\s*["']?[^\\s"']+`, "gu"),
+    new RegExp(`${RAILWAY_CLI.bundleVariable}["']?\\s*[=:]\\s*["']?[A-Za-z0-9_-]{32,}`, "gu"),
     `${RAILWAY_CLI.bundleVariable}=[redacted]`,
   );
   return ` (${exit}): ${scrub(redacted, secrets).slice(0, 300)}`;
