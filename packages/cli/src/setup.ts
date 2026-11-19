@@ -26,10 +26,10 @@ import {
   type CliDependencies,
   type CliIo,
 } from "./cli-context.js";
-import { CUSTODY_NOTICE, showRecoveryPhrase } from "./cli.js";
 import { cloudBackupSetupChoice } from "./cloud-backup.js";
 import { runLoginFlow } from "./login.js";
 import { fileExists } from "./platform.js";
+import { CUSTODY_NOTICE, showRecoveryPhrase } from "./recovery-phrase.js";
 import { collectStatus, renderStatusScreen } from "./status.js";
 import { getSecretStore, openWalletStore, recordAudit } from "./wallet-session.js";
 
