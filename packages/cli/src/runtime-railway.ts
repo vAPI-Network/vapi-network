@@ -761,6 +761,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
       let sandboxId: string | undefined;
       // Updated only after an atomic id-carrying write succeeds.
       let recordedSandboxId: string | undefined;
+      let orphanOnDisk = false;
       // Set just before `sandbox create` runs: from then on the key may have left.
       let attempted = false;
       let interrupted: NodeJS.Signals | undefined;
@@ -770,6 +771,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
         sidecar = next;
         writeSidecarSync(sidecarPath, next);
         if (next.sandboxId !== undefined) recordedSandboxId = next.sandboxId;
+        if (next.state === "orphaned") orphanOnDisk = true;
       };
       const dropSidecar = (): void => {
         if (interrupted === undefined) rmSync(sidecarPath, { force: true });
@@ -808,7 +810,10 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
               ? { ...sidecar, state: "creating" }
               : { ...sidecar, state: "orphaned", sandboxId: id },
           );
-          if (id !== undefined) recordedSandboxId = id;
+          if (id !== undefined) {
+            recordedSandboxId = id;
+            orphanOnDisk = true;
+          }
           sidecarRecorded = true;
         } catch {
           // The stderr line below still tells the owner what to destroy.
@@ -1068,10 +1073,8 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
           try {
             await destroySandbox(exec, id);
           } catch (destroyError) {
-            let orphanRecorded = false;
             try {
               saveSidecar({ ...sidecar, state: "orphaned", sandboxId: id });
-              orphanRecorded = true;
             } catch {
               // The error below still names the sandbox and the command.
             }
@@ -1083,12 +1086,12 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
             if (recordedSandboxId === undefined)
               throw new RuntimeError(
                 "launch_ambiguous",
-                [...lines, ambiguousInstruction].join("\n"),
+                scrub([...lines, ambiguousInstruction].join("\n"), secretValues),
               );
             throw new Error(
               [
                 ...lines,
-                ...(orphanRecorded
+                ...(orphanOnDisk
                   ? []
                   : [
                       `Retry cleanup with: vapi swarm stop ${member.swarm ?? policy.swarm.name} ${run.runId}`,
@@ -1104,11 +1107,14 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
             if (recordedSandboxId === undefined)
               throw new RuntimeError(
                 "launch_ambiguous",
-                [
-                  cause,
-                  `Sandbox ${id} was destroyed; only the local launch marker could not be removed: ${scrub(errorMessage(removalError), secretValues)}`,
-                  ambiguousInstruction,
-                ].join("\n"),
+                scrub(
+                  [
+                    cause,
+                    `Sandbox ${id} was destroyed; only the local launch marker could not be removed: ${scrub(errorMessage(removalError), secretValues)}`,
+                    ambiguousInstruction,
+                  ].join("\n"),
+                  secretValues,
+                ),
               );
           }
           throw new Error(cause);

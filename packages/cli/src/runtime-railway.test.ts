@@ -2367,6 +2367,84 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
       expect(railway.calls.at(-1)).toEqual(["sandbox", "destroy", SANDBOX_ID]);
     });
 
+    it.each([
+      ["bare", "succeeds"],
+      ["0x", "succeeds"],
+      ["bare", "fails"],
+      ["0x", "fails"],
+    ] as const)(
+      "redacts a %s private-key sandbox id when destroy %s and the id-less marker remains",
+      async (form, destroy) => {
+        const f = await fixture();
+        const id = form === "bare" ? f.alphaKey.slice(2) : f.alphaKey;
+        let bundle = "";
+        const railway = fakeRailway({
+          create: (observation) => {
+            bundle = bundleOf(observation);
+            chmodSync(runsDirectory(f.home), 0o500);
+            return { ...CREATED, stdout: `${JSON.stringify({ id })}\n` };
+          },
+          destroy: () =>
+            destroy === "succeeds" ? OK : { code: 1, stdout: "", stderr: "destroy failed" },
+        });
+        const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec));
+
+        const failure = (await startDetachedRun({
+          home: f.home,
+          runtime,
+          member: MEMBER,
+          run: RUN,
+        }).catch((error: unknown) => error)) as RuntimeError;
+
+        expect(failure).toMatchObject({ code: "launch_ambiguous" });
+        expect(readSidecarFile(f)).toEqual(sidecarOf());
+        expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+          state: "starting",
+          handle: { ref: "" },
+        });
+        expect(railway.calls.map((args) => args[1])).toEqual(["create", "destroy"]);
+        expect(railway.calls.at(-1)?.at(-1) === id).toBe(true);
+        // Boolean assertions keep the key out of regression-failure output.
+        for (const value of forbiddenValues(f, bundle))
+          expect(failure.message.includes(value)).toBe(false);
+        expect(failure.message).toContain("[redacted]");
+        expect(failure.message).toMatch(/--confirm-worker-stopped\.$/u);
+      },
+    );
+
+    it.each(["succeeds", "fails"] as const)(
+      "preserves reconciliation instructions verbatim when destroy %s and the id-less marker remains",
+      async (destroy) => {
+        const f = await fixture();
+        const railway = fakeRailway({
+          create: () => {
+            chmodSync(runsDirectory(f.home), 0o500);
+            return CREATED;
+          },
+          destroy: () =>
+            destroy === "succeeds" ? OK : { code: 1, stdout: "", stderr: "destroy failed" },
+        });
+        const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec));
+
+        const failure = (await startDetachedRun({
+          home: f.home,
+          runtime,
+          member: MEMBER,
+          run: RUN,
+        }).catch((error: unknown) => error)) as RuntimeError;
+
+        expect(failure).toMatchObject({ code: "launch_ambiguous" });
+        expect(failure.message).toContain(
+          destroy === "succeeds"
+            ? `Sandbox ${SANDBOX_ID} was destroyed`
+            : `railway sandbox destroy ${SANDBOX_ID}`,
+        );
+        expect(failure.message.split("\n").at(-1)).toBe(
+          `After checking railway sandbox list and destroying any worker, wait for the five-minute reconciliation window, then run vapi swarm stop team ${RUN_ID} --confirm-worker-stopped.`,
+        );
+      },
+    );
+
     it.each(["before-create", "ENOENT"] as const)(
       "retains ambiguity when %s cleanup cannot remove the local launch marker",
       async (stage) => {
@@ -2486,6 +2564,57 @@ describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
         expect(process.listeners("SIGTERM")).toEqual(before);
       },
     );
+
+    it("names stop before forget when a during-destroy signal cannot record the identified orphan and both destroys fail", async () => {
+      const f = await fixture();
+      const before = process.listeners("SIGTERM");
+      captureStderr();
+      let finishSignal!: () => void;
+      const signalled = new Promise<void>((resolve) => {
+        finishSignal = resolve;
+      });
+      let recordAtExit: boolean | undefined;
+      vi.spyOn(process, "kill").mockImplementation(() => {
+        recordAtExit = existsSync(runRecordPath(f.home, RUN_ID));
+        finishSignal();
+        return true;
+      });
+      let destroys = 0;
+      const railway = fakeRailway({
+        detach: () => ({ code: 1, stdout: "", stderr: "exec failed" }),
+        destroy: async () => {
+          destroys += 1;
+          if (destroys === 1) {
+            expect(readSidecarFile(f)).toEqual(sidecarOf({ sandboxId: SANDBOX_ID }));
+            chmodSync(runsDirectory(f.home), 0o500);
+            addedListener("SIGTERM", before)("SIGTERM");
+            await signalled;
+          }
+          return { code: 1, stdout: "", stderr: "destroy failed" };
+        },
+      });
+      const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec));
+
+      const failure = (await startDetachedRun({
+        home: f.home,
+        runtime,
+        member: MEMBER,
+        run: RUN,
+      }).catch((error: unknown) => error)) as Error;
+
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toMatchObject({ code: "launch_ambiguous" });
+      expect(readSidecarFile(f)).toEqual(sidecarOf({ sandboxId: SANDBOX_ID }));
+      expect(recordAtExit).toBe(true);
+      expect(await readRunRecord(f.home, RUN_ID)).toBeUndefined();
+      expect(destroys).toBe(2);
+      expect(process.listeners("SIGTERM")).toEqual(before);
+      const stop = `vapi swarm stop team ${RUN_ID}`;
+      const forget = `vapi swarm forget-run team ${RUN_ID} --confirm-destroyed`;
+      expect(failure.message).toContain(stop);
+      expect(failure.message).toContain(forget);
+      expect(failure.message.indexOf(stop)).toBeLessThan(failure.message.indexOf(forget));
+    });
   },
 );
 
