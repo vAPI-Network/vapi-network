@@ -757,7 +757,7 @@ async function withCredentialLockFile<T>(
   try {
     return await operation();
   } finally {
-    await handle.close();
+    await handle.close().catch(() => undefined);
     await unlink(lockPath).catch(() => undefined);
   }
 }

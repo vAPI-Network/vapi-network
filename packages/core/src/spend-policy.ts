@@ -518,7 +518,7 @@ async function withLedgerLock<T>(path: string, operation: () => Promise<T>): Pro
   try {
     return await operation();
   } finally {
-    await handle.close();
+    await handle.close().catch(() => undefined);
     await unlink(lockPath).catch(() => undefined);
   }
 }

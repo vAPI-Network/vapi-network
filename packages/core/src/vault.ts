@@ -783,7 +783,7 @@ export async function withVaultLock<T>(path: string, operation: () => Promise<T>
   try {
     return await operation();
   } finally {
-    await handle.close();
+    await handle.close().catch(() => undefined);
     await unlink(lockPath).catch(() => undefined);
   }
 }
