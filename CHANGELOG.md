@@ -12,6 +12,10 @@ sentence under it is the summary shown on the
 
 ## Unreleased
 
+### Fixed
+
+- A Router key write that started before `vapi logout` or a new `vapi login` can no longer finish after it. `vapi router key --rotate`, the Router balance key stored after a purchase and the removal of a rejected balance key now re-check the link and write under the same lock that login, logout and the token refresh use. Before, a rotation that lost the race could publish the old link again and store a Router key for a wallet that was logged out. The `agent-link` subentry exports `withCredentialPublishLock` for this.
+
 ## 0.15.0 - 2026-11-19
 
 Router purchases recover after an interruption without a second charge, swarm dissolution refuses while a worker is active or unresolved, and `vapi login` works on more Linux keyrings.

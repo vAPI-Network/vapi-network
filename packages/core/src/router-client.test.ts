@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,7 +9,9 @@ import { privateKeyToAccount } from "viem/accounts";
 import {
   AGENT_LINK_REVOKED_MESSAGE,
   agentSecretAccounts,
+  forgetAgentLink,
   saveAgentLink,
+  withCredentialPublishLock,
   type AgentTokens,
 } from "./agent-link.js";
 import { readAuditLog } from "./audit.js";
@@ -242,6 +244,318 @@ function usageResponse() {
     balance: { purchasedUsd: 10, spentUsd: 4, remainingUsd: 6 },
   };
 }
+
+function gate() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
+function observeCredentialLockWait() {
+  const waiting = gate();
+  const schedule = setTimeout;
+  const spy = vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, delay, ...args) => {
+    if (delay === 20) waiting.release();
+    return schedule(callback, delay, ...args);
+  });
+  return { waiting: waiting.promise, spy };
+}
+
+function pausedKeyResponse(routerKey: string) {
+  const arrived = gate();
+  const parse = gate();
+  const response = Response.json({ router_key: routerKey, router_base_url: ROUTER_BASE });
+  const json = response.json.bind(response);
+  vi.spyOn(response, "json").mockImplementation(async () => {
+    arrived.release();
+    await parse.promise;
+    return await json();
+  });
+  return { response, arrived: arrived.promise, release: parse.release };
+}
+
+function pauseSecretRemoval(secrets: SecretStore, account: string) {
+  const entered = gate();
+  const finish = gate();
+  const remove = secrets.remove.bind(secrets);
+  vi.spyOn(secrets, "remove").mockImplementation(async (name) => {
+    if (name === account) {
+      entered.release();
+      await finish.promise;
+    }
+    return await remove(name);
+  });
+  return { entered: entered.promise, release: finish.release };
+}
+
+async function expectPublishLockWait(waiting: Promise<void>, operation: Promise<unknown>) {
+  await expect(
+    Promise.race([
+      waiting.then(() => "lock-wait"),
+      operation.then(
+        () => "settled",
+        () => "settled",
+      ),
+    ]),
+  ).resolves.toBe("lock-wait");
+}
+
+async function expectNoPublishLock(wallets: WalletStore) {
+  expect(
+    (await readdir(wallets.home)).filter((name) => name.endsWith(".agent-publish.lock")),
+  ).toEqual([]);
+}
+
+describe("Router credential publish exclusion", () => {
+  it("waits for logout before publishing a rotated stake key", async () => {
+    const response = pausedKeyResponse("sk-test-stale-rotation-key");
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/agents/self/router-key") return response.response;
+      if (url.pathname === "/api/agents/self" && init?.method === "DELETE")
+        return new Response(null, { status: 204 });
+      throw new Error("Unexpected credential exclusion request.");
+    });
+    const deps = await linkedDeps(fetchImpl, { balanceKey: BALANCE_KEY });
+    const competing = await WalletStore.open(deps.wallets.home);
+    const accounts = agentSecretAccounts("main");
+    const removal = pauseSecretRemoval(deps.secrets, accounts.tokens);
+    const setLink = vi.spyOn(deps.wallets, "setLink");
+    const waiter = observeCredentialLockWait();
+    const rotation = rotateRouterKey(deps);
+    const outcome = rotation.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    let logout: Promise<void> | undefined;
+    try {
+      await response.arrived;
+      logout = forgetAgentLink({ ...deps, wallets: competing });
+      await removal.entered;
+      response.release();
+      await expectPublishLockWait(waiter.waiting, outcome);
+      expect(deps.secrets.setCalls.length).toBe(0);
+      expect(setLink).not.toHaveBeenCalled();
+      removal.release();
+      await logout;
+      expect(await outcome).toMatchObject({
+        name: "RouterClientError",
+        code: "not_linked",
+        message: "Not linked. Run vapi login.",
+      });
+      await deps.wallets.reload();
+      expect(deps.wallets.entry("main")?.link).toBeUndefined();
+      expect(
+        Object.values(accounts).every((name) => deps.secrets.entries[name] === undefined),
+      ).toBe(true);
+      expect(setLink).not.toHaveBeenCalled();
+      await expectNoPublishLock(deps.wallets);
+    } finally {
+      response.release();
+      removal.release();
+      await Promise.allSettled([rotation, outcome, logout]);
+      waiter.spy.mockRestore();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("waits for login before rechecking a rotated stake key's link", async () => {
+    const response = pausedKeyResponse("sk-test-stale-rotation-key");
+    const deps = await linkedDeps(vi.fn<typeof fetch>(async () => response.response));
+    const competing = await WalletStore.open(deps.wallets.home);
+    const entered = gate();
+    const finishLogin = gate();
+    const setLink = competing.setLink.bind(competing);
+    vi.spyOn(competing, "setLink").mockImplementation(async (...args) => {
+      entered.release();
+      await finishLogin.promise;
+      return await setLink(...args);
+    });
+    const rotationSetLink = vi.spyOn(deps.wallets, "setLink");
+    const waiter = observeCredentialLockWait();
+    const rotation = rotateRouterKey(deps);
+    const outcome = rotation.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    let login: Promise<AgentLink> | undefined;
+    try {
+      await response.arrived;
+      login = saveAgentLink({
+        ...deps,
+        wallets: competing,
+        start: {
+          clientId: "test-new-login-client",
+          deviceCode: "test-device-code",
+          userCode: "TEST-CODE",
+          verificationUri: `${API_BASE}/link`,
+          verificationUriComplete: `${API_BASE}/link?code=TEST-CODE`,
+          expiresIn: 600,
+          interval: 5,
+          autoApproved: false,
+        },
+        result: {
+          owner: OWNER,
+          tokens: { ...tokens(), accessToken: "test-new-login-access-token" },
+          routerKey: "sk-test-new-login-key",
+          routerBaseUrl: "https://new-login-router.example",
+        },
+        apiBase: API_BASE,
+        label: "new login",
+      });
+      await entered.promise;
+      const writesBeforeRotation = deps.secrets.setCalls.length;
+      response.release();
+      await expectPublishLockWait(waiter.waiting, outcome);
+      expect(deps.secrets.setCalls.length).toBe(writesBeforeRotation);
+      expect(rotationSetLink).not.toHaveBeenCalled();
+      finishLogin.release();
+      const publishedLink = await login;
+      expect(await outcome).toMatchObject({
+        name: "RouterClientError",
+        code: "http",
+        message: "The agent link changed during Router key rotation.",
+      });
+      await deps.wallets.reload();
+      expect(deps.wallets.entry("main")?.link).toEqual(publishedLink);
+      const accounts = agentSecretAccounts("main");
+      expect(deps.secrets.entries[accounts.routerStake] === "sk-test-new-login-key").toBe(true);
+      expect(
+        deps.secrets.entries[accounts.tokens] ===
+          JSON.stringify({ ...tokens(), accessToken: "test-new-login-access-token" }),
+      ).toBe(true);
+      expect(deps.secrets.entries[accounts.routerBalance] === undefined).toBe(true);
+      expect(rotationSetLink).not.toHaveBeenCalled();
+      await expectNoPublishLock(deps.wallets);
+    } finally {
+      response.release();
+      finishLogin.release();
+      await Promise.allSettled([rotation, outcome, login]);
+      waiter.spy.mockRestore();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("waits for logout before storing a recovered balance key outside the purchase lock", async () => {
+    const response = pausedKeyResponse(BALANCE_KEY);
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.host === "router.example")
+        return new Response("Budget has been exceeded", { status: 429 });
+      if (url.pathname === "/api/agents/self/router") return Response.json(usageResponse());
+      if (url.pathname === "/api/agents/self/router-balance-key") return response.response;
+      if (url.pathname === "/api/agents/self" && init?.method === "DELETE")
+        return new Response(null, { status: 204 });
+      throw new Error("Unexpected balance recovery request.");
+    });
+    const deps = await linkedDeps(fetchImpl);
+    const competing = await WalletStore.open(deps.wallets.home);
+    const accounts = agentSecretAccounts("main");
+    const removal = pauseSecretRemoval(deps.secrets, accounts.tokens);
+    const waiter = observeCredentialLockWait();
+    // No pending purchase or automatic refill: routerChat's legacy recovery holds no purchase lock.
+    const chat = routerChat(deps, { model: "model", messages: [] });
+    const outcome = chat.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    let logout: Promise<void> | undefined;
+    try {
+      await response.arrived;
+      logout = forgetAgentLink({ ...deps, wallets: competing });
+      await removal.entered;
+      response.release();
+      await expectPublishLockWait(waiter.waiting, outcome);
+      expect(deps.secrets.setCalls.length).toBe(0);
+      removal.release();
+      await logout;
+      expect(await outcome).toMatchObject({ name: "RouterClientError", code: "budget_exhausted" });
+      await deps.wallets.reload();
+      expect(deps.wallets.entry("main")?.link).toBeUndefined();
+      expect(
+        Object.values(accounts).every((name) => deps.secrets.entries[name] === undefined),
+      ).toBe(true);
+      expect(deps.secrets.setCalls.length).toBe(0);
+      await expectNoPublishLock(deps.wallets);
+    } finally {
+      response.release();
+      removal.release();
+      await Promise.allSettled([chat, outcome, logout]);
+      waiter.spy.mockRestore();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("waits for publication before removing a rejected balance key and preserves a new link's key", async () => {
+    const rejected = new Response("test-rejected-balance-key", { status: 401 });
+    const arrived = gate();
+    const finishResponse = gate();
+    const text = rejected.text.bind(rejected);
+    vi.spyOn(rejected, "text").mockImplementation(async () => {
+      arrived.release();
+      await finishResponse.promise;
+      return await text();
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.host === "router.example") {
+        if (new Headers(init?.headers).get("authorization") === `Bearer ${ROUTER_KEY}`)
+          return new Response("Budget has been exceeded", { status: 429 });
+        return rejected;
+      }
+      if (url.pathname === "/api/agents/self/router") return Response.json(usageResponse());
+      throw new Error("Unexpected rejected balance request.");
+    });
+    const deps = await linkedDeps(fetchImpl, { balanceKey: BALANCE_KEY });
+    const accounts = agentSecretAccounts("main");
+    const remove = vi.spyOn(deps.secrets, "remove");
+    const locked = gate();
+    const unlock = gate();
+    const waiter = observeCredentialLockWait();
+    const chat = routerChat(deps, { model: "model", messages: [] });
+    const outcome = chat.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    let publication: Promise<void> | undefined;
+    try {
+      await arrived.promise;
+      publication = withCredentialPublishLock(deps.wallets, deps.wallet, async () => {
+        locked.release();
+        await unlock.promise;
+      });
+      await locked.promise;
+      finishResponse.release();
+      await expectPublishLockWait(waiter.waiting, outcome);
+      expect(remove).not.toHaveBeenCalled();
+      const newLink = agentLink({ clientId: "test-new-login-client" });
+      await deps.wallets.setLink("main", newLink);
+      // Reusing the fake value also pins the link re-check, rather than only key comparison.
+      await deps.secrets.set(accounts.routerBalance, BALANCE_KEY);
+      unlock.release();
+      await publication;
+      expect(await outcome).toMatchObject({
+        name: "RouterClientError",
+        code: "no_router_key",
+        status: 401,
+        message: "The Router balance key was rejected. Buy Router balance again to refresh it.",
+      });
+      expect(deps.secrets.entries[accounts.routerBalance] === BALANCE_KEY).toBe(true);
+      expect(remove).not.toHaveBeenCalled();
+      await deps.wallets.reload();
+      expect(deps.wallets.entry("main")?.link).toEqual(newLink);
+      await expectNoPublishLock(deps.wallets);
+    } finally {
+      finishResponse.release();
+      unlock.release();
+      await Promise.allSettled([chat, outcome, publication]);
+      waiter.spy.mockRestore();
+      vi.restoreAllMocks();
+    }
+  });
+});
 
 describe("routerChat", () => {
   it("keeps an interrupted purchase blocking even when an older balance key exists", async () => {
@@ -1387,6 +1701,7 @@ describe("buyRouterBalance", () => {
     expect(second.balance).toEqual({ purchasedUsd: 10, spentUsd: 0, remainingUsd: 10 });
     expect(mintCalls).toBe(1);
     expect(deps.secrets.entries[agentSecretAccounts("main").routerBalance]).toBe(BALANCE_KEY);
+    await expectNoPublishLock(deps.wallets);
     expect(calls.filter(({ url }) => url.pathname === "/api/router/top-up/5")).toHaveLength(4);
     expect(
       calls
@@ -2074,6 +2389,7 @@ describe("console Router endpoints", () => {
     expect(deps.wallets.entry("main")?.link?.routerBaseUrl).toBe(
       "https://new-router.example/base/",
     );
+    await expectNoPublishLock(deps.wallets);
   });
 
   it("refuses an invalid rotated Router base without storing the returned key", async () => {
