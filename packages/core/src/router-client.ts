@@ -10,6 +10,7 @@ import {
   agentFetch,
   agentSecretAccounts,
   withAgentCredentialLock,
+  withCredentialPublishLock,
 } from "./agent-link.js";
 import type { RunRef } from "./agent-run.js";
 import { FileLockedError } from "./atomic-file.js";
@@ -1342,26 +1343,28 @@ async function ensureBalanceRouterKey(deps: RouterClientDeps, paidLink: AgentLin
       if (!parsed.success) {
         throw new RouterClientError("http", "The Router balance key response was invalid.");
       }
-      const currentLink = await linkedWallet(deps);
-      if (!sameAgentLink(currentLink, paidLink)) {
-        throw new RouterClientError(
-          "http",
-          "The agent link changed while fetching the Router balance key.",
-        );
-      }
-      const returnedBase = validRouterBaseUrl(parsed.data.router_base_url);
-      const expectedBase = validRouterBaseUrl(link.routerBaseUrl ?? DEFAULT_ROUTER_BASE_URL);
-      if (returnedBase !== expectedBase) {
-        throw new RouterClientError(
-          "http",
-          "The Router balance key response named an unexpected Router base URL.",
-        );
-      }
-      try {
-        await deps.secrets.set(account, parsed.data.router_key);
-      } catch {
-        throw new RouterClientError("http", "The Router balance key could not be stored safely.");
-      }
+      await withCredentialPublishLock(deps.wallets, deps.wallet, async () => {
+        const currentLink = await linkedWallet(deps);
+        if (!sameAgentLink(currentLink, paidLink)) {
+          throw new RouterClientError(
+            "http",
+            "The agent link changed while fetching the Router balance key.",
+          );
+        }
+        const returnedBase = validRouterBaseUrl(parsed.data.router_base_url);
+        const expectedBase = validRouterBaseUrl(link.routerBaseUrl ?? DEFAULT_ROUTER_BASE_URL);
+        if (returnedBase !== expectedBase) {
+          throw new RouterClientError(
+            "http",
+            "The Router balance key response named an unexpected Router base URL.",
+          );
+        }
+        try {
+          await deps.secrets.set(account, parsed.data.router_key);
+        } catch {
+          throw new RouterClientError("http", "The Router balance key could not be stored safely.");
+        }
+      });
     },
   );
 }
@@ -1416,12 +1419,14 @@ async function removeRejectedBalanceKey(
 ): Promise<void> {
   if (!deps.secrets.available) return;
   await withAgentCredentialLock(deps.wallets, rejected.clientId, async () => {
-    const link = await linkedWallet(deps);
-    if (link.clientId !== rejected.clientId) return;
-    const account = agentSecretAccounts(deps.wallet).routerBalance;
-    if ((await deps.secrets.get(account)) === rejected.routerKey) {
-      await deps.secrets.remove(account);
-    }
+    await withCredentialPublishLock(deps.wallets, deps.wallet, async () => {
+      const link = await linkedWallet(deps);
+      if (link.clientId !== rejected.clientId) return;
+      const account = agentSecretAccounts(deps.wallet).routerBalance;
+      if ((await deps.secrets.get(account)) === rejected.routerKey) {
+        await deps.secrets.remove(account);
+      }
+    });
   });
 }
 
@@ -1530,32 +1535,34 @@ export async function rotateRouterKey(deps: RouterClientDeps): Promise<void> {
 
   try {
     await withAgentCredentialLock(deps.wallets, link.clientId, async () => {
-      const currentLink = await linkedWallet(deps);
-      if (!sameAgentLink(currentLink, link)) {
-        throw new RouterClientError("http", "The agent link changed during Router key rotation.");
-      }
-      const account = agentSecretAccounts(deps.wallet).routerStake;
-      let previousKey: string | undefined;
-      try {
-        previousKey = await deps.secrets.get(account);
-        await deps.secrets.set(account, parsed.data.router_key);
-      } catch {
-        throw new RouterClientError("http", "The Router key could not be stored safely.");
-      }
-      try {
-        await deps.wallets.setLink(deps.wallet, {
-          ...currentLink,
-          routerBaseUrl: parsed.data.router_base_url,
-        });
-      } catch {
-        try {
-          if (previousKey === undefined) await deps.secrets.remove(account);
-          else await deps.secrets.set(account, previousKey);
-        } catch {
-          await deps.wallets.clearLink(deps.wallet).catch(() => undefined);
+      await withCredentialPublishLock(deps.wallets, deps.wallet, async () => {
+        const currentLink = await linkedWallet(deps);
+        if (!sameAgentLink(currentLink, link)) {
+          throw new RouterClientError("http", "The agent link changed during Router key rotation.");
         }
-        throw new RouterClientError("http", "The Router key could not be stored safely.");
-      }
+        const account = agentSecretAccounts(deps.wallet).routerStake;
+        let previousKey: string | undefined;
+        try {
+          previousKey = await deps.secrets.get(account);
+          await deps.secrets.set(account, parsed.data.router_key);
+        } catch {
+          throw new RouterClientError("http", "The Router key could not be stored safely.");
+        }
+        try {
+          await deps.wallets.setLink(deps.wallet, {
+            ...currentLink,
+            routerBaseUrl: parsed.data.router_base_url,
+          });
+        } catch {
+          try {
+            if (previousKey === undefined) await deps.secrets.remove(account);
+            else await deps.secrets.set(account, previousKey);
+          } catch {
+            await deps.wallets.clearLink(deps.wallet).catch(() => undefined);
+          }
+          throw new RouterClientError("http", "The Router key could not be stored safely.");
+        }
+      });
     });
   } catch (error) {
     if (error instanceof RouterClientError) throw error;

@@ -320,10 +320,12 @@ async function withLinkPurchaseLock<T>(
   }
 }
 
-// Lock order: wallet → client-id → publish.
-// The publish lock is a leaf; acquire no other credential locks while holding it.
-// Hold it only across local reads and writes, never a network request.
-async function withCredentialPublishLock<T>(
+/**
+ * Lock order: wallet → client-id → publish.
+ * The publish lock is a leaf; acquire no other credential locks while holding it.
+ * Hold it only across local reads and writes, never a network request.
+ */
+export async function withCredentialPublishLock<T>(
   wallets: WalletStore,
   wallet: WalletName,
   operation: () => Promise<T>,
