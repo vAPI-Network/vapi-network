@@ -15,6 +15,7 @@ sentence under it is the summary shown on the
 ### Fixed
 
 - A Router key write that started before `vapi logout` or a new `vapi login` can no longer finish after it. `vapi router key --rotate`, the Router balance key stored after a purchase and the removal of a rejected balance key now re-check the link and write under the same lock that login, logout and the token refresh use. Before, a rotation that lost the race could publish the old link again and store a Router key for a wallet that was logged out. The `agent-link` subentry exports `withCredentialPublishLock` for this.
+- `vapi send` and MCP `accounts.send` keep the spend reservation when saving the signed authorization reports an error although the row reached the receipts ledger. The transfer then returns `unknown` with its nonce and is continued by running the same `vapi send` command again with `--resume <nonce>`. Before, the reservation was released while the row stayed resumable, so a resumed transfer could move money outside the spend cap. When the ledger shows no row for the nonce, the reservation is released as before.
 
 ## 0.15.0 - 2026-11-19
 

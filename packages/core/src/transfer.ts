@@ -353,13 +353,35 @@ export async function transferBetweenAccounts(args: TransferArgs): Promise<Trans
       if (existing !== undefined && existing.transfer?.status !== "failed") {
         throw transferError("authorization_invalid");
       }
-      await appendTransferReceipt(context, request, {
-        receiptId,
-        status: "unknown",
-        txHash: null,
-        replayed: false,
-        reservedOn,
-      });
+      try {
+        await appendTransferReceipt(context, request, {
+          receiptId,
+          status: "unknown",
+          txHash: null,
+          replayed: false,
+          reservedOn,
+        });
+      } catch (error) {
+        let persisted: Receipt | undefined;
+        try {
+          persisted = await findTransferReceipt(context, nonce);
+        } catch {
+          // A failed read cannot rule out a resumable signed authorization, so the reservation
+          // stays. If nothing was written after all, --resume reports resume_not_found and the
+          // reservation counts against its day's allowance only.
+          authorizationPersisted = true;
+        }
+        if (persisted !== undefined && persisted.transfer?.status !== "failed") {
+          authorizationPersisted = true;
+        }
+        if (!authorizationPersisted) throw error;
+        return transferResult(context, {
+          status: "unknown",
+          txHash: null,
+          nonce: request.authorization.nonce,
+          replayed: false,
+        });
+      }
       try {
         await syncReceipts(context.receiptsPath);
       } catch (error) {
