@@ -193,6 +193,7 @@ function chain(input: {
         totalPrincipal: 100000000n,
         milestoneCount: milestones.length,
         milestone: ([i]: readonly unknown[]) => milestones[Number(i)],
+        MIN_WORK_TIME: 3600n,
         consentNonces: 3n,
         disputeRounds: 1,
         submissionCommitment: () => [`0x${"5e".repeat(32)}`, NOW - 10n, true],
@@ -225,7 +226,7 @@ function chain(input: {
             predictedAddress(bountyPoolFactoryV1Abi, "predictPool", args),
         },
       },
-      [IMPLEMENTATION]: { abi: escrowV2Abi, values: {} },
+      [IMPLEMENTATION]: { abi: escrowV2Abi, values: { FACTORY, USDC, MIN_WORK_TIME: 3600n } },
       [escrow]: {
         abi: pool ? bountyPoolV1Abi : bounty ? bountyEscrowV2Abi : escrowV2Abi,
         values: cloneValues,
@@ -238,7 +239,16 @@ function chain(input: {
   const options = {
     client: {} as TasksClient,
     account,
-    pending: {} as TasksChainOptions["pending"],
+    pending: {
+      v2Target: async () =>
+        input.registered
+          ? {
+              chainId: 84532,
+              escrow,
+              termsHash: acceptedV2TermsHash(input.view, PIN, pool ? 0n : 604800n),
+            }
+          : undefined,
+    } as unknown as TasksChainOptions["pending"],
     rpcFor: () => rpc as unknown as PublicClient,
     env: {},
     trustedV2Deployments: { 84532: PIN },
@@ -703,6 +713,40 @@ describe("V2 creation defaults in one deployment tuple", () => {
     const action = { action: "fund" } as const;
     const target = await verifyV2Target(options, op, view, action);
     await expect(verifyV2Plan(target, op.operation, action, 0n)).resolves.toBeUndefined();
-    expect(c.rpc.reads.some((read) => read.functionName === "implementation")).toBe(false);
+    expect(c.rpc.reads.some((read) => read.functionName === "MIN_WORK_TIME")).toBe(true);
+  });
+});
+
+it("rejects a different genuine clone with consistent hosted terms after local acceptance", async () => {
+  const originalView = orderView(taskTerms);
+  const original = chain({ view: originalView, registered: true, shape: "task" });
+  const binding = {
+    chainId: 84532,
+    escrow: original.escrow,
+    termsHash: acceptedV2TermsHash(originalView, PIN, 604800n),
+  };
+  const changedView = orderView({
+    ...taskTerms,
+    milestones: [{ ...taskTerms.milestones[0], acceptance: "A changed deliverable" }],
+  });
+  const changed = chain({ view: changedView, registered: true, shape: "task" });
+  expect(changed.escrow).not.toBe(original.escrow);
+  const action = { action: "bump-consent-nonce", newNonce: "7" } as const;
+  const data = encodeFunctionData({
+    abi: escrowV2Abi,
+    functionName: "bumpConsentNonce",
+    args: [7n],
+  });
+  // This independently registered clone passes every contract and prediction check
+  // with its own consistent metadata, before the prior local acceptance is supplied.
+  await expect(
+    verify(changed, changedView, action, "v2-bump-consent-nonce", changed.escrow, data),
+  ).resolves.toBeDefined();
+  changed.options.pending.v2Target = async () => binding;
+  await expect(
+    verify(changed, changedView, action, "v2-bump-consent-nonce", changed.escrow, data),
+  ).rejects.toMatchObject({
+    code: "v2_plan_mismatch",
+    message: expect.stringContaining("locally accepted target binding"),
   });
 });

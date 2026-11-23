@@ -99,7 +99,7 @@ export const taskV2ActionSchema = z.discriminatedUnion("action", [
   }),
   z.strictObject({ action: z.literal("resolve-unmatched"), i }),
   z.strictObject({ action: z.literal("split"), i, toWorker: amount }),
-  // Jury steps on one disputed C0 milestone; each targets DisputeResolverV3.
+  // Jury steps on one disputed milestone; each targets DisputeResolverV3.
   z.strictObject({ action: z.literal("open-jury"), i }),
   z.strictObject({ action: z.literal("draw-jury"), i }),
   z.strictObject({ action: z.literal("rearm-draw"), i }),

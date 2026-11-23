@@ -4,10 +4,12 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  decodeFunctionData,
   encodeFunctionData,
   getAddress,
   keccak256,
   parseAbi,
+  parseTransaction,
   zeroAddress,
   zeroHash,
   type Hex,
@@ -215,6 +217,7 @@ async function fixture(options: { worker?: string; workerBondBp?: number } = {})
     commitment: zeroHash as Hex,
     round: ROUND,
     blockNumber: 101n,
+    rearms: 0,
     // Queued caseData states; Voting (4) once the queue is empty.
     caseStates: [] as number[],
     evidenceDeadline: NOW_SECONDS - 3600n,
@@ -310,7 +313,7 @@ async function fixture(options: { worker?: string; workerBondBp?: number } = {})
               commitDeadline: chain.commitDeadline,
               revealDeadline: chain.revealDeadline,
               drawBlock: 100n,
-              rearms: 0,
+              rearms: chain.rearms,
             };
           case "owed":
             return chain.owed;
@@ -1313,4 +1316,47 @@ describe("audit-3 draw history window", () => {
     if (allowed) await expect(check).resolves.toBeUndefined();
     else await expect(check).rejects.toMatchObject({ code: "v2_plan_mismatch" });
   });
+});
+
+it.each([
+  ["rearm-draw", 8292n, true],
+  ["rearm-draw", 8291n, false],
+  ["draw-jury", 8292n, false],
+] as const)(
+  "terminal draw after three rearms: %s at %s allowed=%s",
+  async (action, block, allowed) => {
+    const f = await fixture();
+    f.chain.caseStates.push(3);
+    f.chain.rearms = 3;
+    f.chain.blockNumber = block;
+    const check = guard(f, { action, i: 0 });
+    if (allowed) await expect(check).resolves.toBeUndefined();
+    else await expect(check).rejects.toMatchObject({ code: "v2_plan_mismatch" });
+  },
+);
+
+it("signs the terminal rearmDraw call after three expired re-arms", async () => {
+  const f = await fixture();
+  f.chain.rearms = 3;
+  f.chain.blockNumber = 8292n;
+  f.chain.caseStates.push(3);
+  const result = await executeTaskV2(f.context, {
+    ...f.base,
+    write: { action: "rearm-draw", i: 0 },
+  });
+  expect(result.ok).toBe(true);
+  expect(f.rpc.sendRawTransaction).toHaveBeenCalledOnce();
+  const transaction = parseTransaction(
+    f.rpc.sendRawTransaction.mock.calls[0]![0].serializedTransaction,
+  );
+  expect(transaction.to?.toLowerCase()).toBe(RESOLVER.toLowerCase());
+  expect(decodeFunctionData({ abi: disputeResolverV3Abi, data: transaction.data! })).toMatchObject({
+    functionName: "rearmDraw",
+    args: [ESCROW, 0],
+  });
+  expect(f.client.prepareV2).toHaveBeenCalledWith(
+    V2_WRITE_ORDER,
+    { action: "rearm-draw", i: 0 },
+    expect.any(Object),
+  );
 });

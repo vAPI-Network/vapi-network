@@ -39,7 +39,7 @@ function index(parsed: Parsed): number {
   const raw = parsed.one("--index");
   const value = raw !== undefined && /^\d+$/u.test(raw) ? Number(raw) : NaN;
   if (!taskV2IndexSchema.safeParse(value).success)
-    throw new UsageError("--index must be a zero-based C0 index from 0 to 4.");
+    throw new UsageError("--index must be a zero-based milestone index from 0 to 4.");
   return value;
 }
 

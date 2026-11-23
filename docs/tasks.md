@@ -74,7 +74,7 @@ vapi task status <id> [--account <name>]
 vapi task --help
 ```
 
-Durations accept `5s`, `10m`, `48h`, `7d`, or an ISO-8601 timestamp. Posting requires a deadline at least ten minutes ahead. Signed proposal and submission terms require a duration between ten minutes and 90 days. USD amounts have up to six decimal places. Webhooks and proof URLs require HTTPS. File proofs use the sha256 returned after upload finalization.
+Durations accept `5s`, `10m`, `48h`, `7d`, or an ISO-8601 timestamp. Task milestone deadlines require at least one hour; bounty and pool posting require at least ten minutes. Before creation and funding, task milestones must also leave the verified contract’s `MIN_WORK_TIME` from the trusted chain clock. Signed proposal and submission terms require a duration between ten minutes and 90 days. USD amounts have up to six decimal places. Webhooks and proof URLs require HTTPS. File proofs use the sha256 returned after upload finalization.
 
 Hosted `tasks.confirm` completes signing intents and advances chain operations. It is separate from the local CLI verbs documented above.
 
@@ -183,7 +183,7 @@ vapi task pending --json
 vapi task submit <id> --withdraw
 ```
 
-`--shape` defaults to `task`. Legacy `--intake submissions` remains supported when no v2 shape is supplied. A task accepts one to five `--milestone` values; each deadline accepts a duration or ISO timestamp and must be at least ten minutes away. If `--amount` is omitted, milestone amounts determine the task budget. Bounties default to one winner and a seven-day choice window. Pools default to `--gate proven --verifier poster`; an open pool also requires `--open-check allowlist|invite`. Membership is configured separately on the hosted service.
+`--shape` defaults to `task`. Legacy `--intake submissions` remains supported when no v2 shape is supplied. A task accepts one to five `--milestone` values; each deadline accepts a duration or ISO timestamp and must leave at least one hour for work. Before creation and funding, every milestone is checked against the trusted chain clock plus the verified contract’s `MIN_WORK_TIME`, which may exceed one hour; allow extra time to award the task. If `--amount` is omitted, milestone amounts determine the task budget. Bounties default to one winner and a seven-day choice window. Pools default to `--gate proven --verifier poster`; an open pool also requires `--open-check allowlist|invite`. Membership is configured separately on the hosted service.
 
 Proof presets are `link`, `file`, `x-post`, `onchain-tx`, `pr`, `text` and `media`, with up to six requirements. The optional `:mustContain` suffix applies to `link`, `x-post` and `pr`; additional colons stay in the required text. `media` shorthand accepts both photo and video. SDK and MCP callers can use the full `proofSpec` envelope and native `milestones`, `bounty` and `pool` base-unit fields.
 
@@ -284,7 +284,7 @@ vapi task status <id> --operation <uuid> --step v2-fund --recover
 vapi task status <id> --operation <uuid> --step v2-fund --abandon
 ```
 
-Action indices are **zero-based C0 indices (0–4)**. Posted milestone declarations
+Action indices are **zero-based milestone indices (0–4)**. Posted milestone declarations
 remain one-based. `--to-worker` takes exact USDC base units (six decimals), not
 USD. Milestone submission accepts repeated HTTPS `--proof` and local `--file`
 arguments as submission does; `--proof-json <file>` accepts the hosted preset
@@ -363,7 +363,10 @@ registered-target action must match the order's accepted terms hash and the
 pinned factory's prediction with that order's salt. The acting wallet must hold
 the on-chain role required by the action; award consent comes from the prospective
 worker before assignment. The money confirmation preview includes the verified
-escrow address.
+escrow address. Before signing, the client durably saves the accepted chain,
+escrow and terms hash locally. Every later V2 write and consent must match that
+binding; hosted metadata cannot replace it, including after a restart or failed
+signature confirmation.
 
 Fresh funding follows the hosted sequence: `createEscrow` (or `createPool`) on the
 pinned factory, a USDC approval of the new clone, then `fund()` on the clone; with
@@ -443,7 +446,7 @@ the case's `evidenceDeadline` has passed.
 
 Every step follows the V2 participant write pattern: the hosted API prepares the plan through
 `POST /v1/work-orders/{id}/writes`, the client verifies it locally, signs with the local vault and
-confirms. Indices are zero-based C0 indices. `jury --step open` repeats while the case is
+confirms. Indices are zero-based milestone indices. `jury --step open` repeats while the case is
 `Snapshotting`, because a registry larger than one snapshot batch needs several `continueJury` calls.
 Jury and vote steps move no USDC from the acting wallet; `resolve` pays out from escrow by the
 verdict.
@@ -530,6 +533,8 @@ SplitConsent includes `uint32 round` immediately after `milestone`, equal to the
 verified escrow's `disputeRounds(i) - 1`. Offers are usable only before the jury opens.
 `bump-consent-nonce` revokes the caller's outstanding award and split consents for
 that escrow; the new nonce must exceed its current nonce and be at most uint128 max.
+Revocation requires a saved local target binding and refuses when that binding is
+unavailable, so a hosted response cannot redirect revocation to another clone.
 
 The draw window is `HISTORY_WINDOW = 8,191` blocks, strictly after `drawBlock` and
 inclusive of `drawBlock + 8,191`. `rearmDraw` is available only after that boundary.

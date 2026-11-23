@@ -93,7 +93,7 @@ const authorizationTypes = {
     { name: "nonce", type: "bytes32" },
   ],
 };
-/** EscrowV2 consent typehashes (vapi-app abi/tasks-v2.ts awardConsentTypes, splitConsentTypes). */
+/** EscrowV2 consent typehashes, mirrored from vapi-app awardConsentTypes / splitConsentTypes. */
 const consentTypes = {
   AwardConsent: [
     { name: "escrow", type: "address" },
@@ -281,7 +281,7 @@ function acceptedWorkerBondBp(view: GetOrderResponse) {
 }
 
 /**
- * The exact factory prediction inputs for the accepted order (vapi-app escrow-v2-terms.server.ts
+ * The exact factory prediction inputs for the accepted order (vapi-app
  * v2TermsFromOrder / v2PoolInputFromOrder). Prediction inputs only: participant calldata always
  * comes from the API.
  */
@@ -468,6 +468,22 @@ async function creationPolicy(rpc: PublicClient, pin: TasksV2Deployment, pool: b
   );
   return { feeBp };
 }
+/** Award requires every milestone to leave the implementation's minimum work time. */
+async function verifyFundingDeadlines(
+  rpc: PublicClient,
+  contract: Address,
+  deadlines: readonly bigint[],
+  timestamp?: bigint,
+) {
+  const minimum = uint.parse(await v2Read(rpc, contract, escrowV2Abi, "MIN_WORK_TIME"));
+  if (minimum < 3600n) return v2GuardFailure("The verified MIN_WORK_TIME is below one hour.");
+  const chainTime = timestamp ?? (await rpc.getBlock()).timestamp;
+  if (deadlines.some((deadline) => deadline < chainTime + minimum))
+    return v2GuardFailure(
+      `Every milestone deadline must leave at least MIN_WORK_TIME (${minimum} seconds) from the trusted chain clock before creation or funding so the task can be awarded.`,
+    );
+}
+
 /** The API supplies candidates; only local pins and trusted RPC reads establish trust. */
 export async function verifyV2Target(
   options: TasksChainOptions,
@@ -484,6 +500,15 @@ export async function verifyV2Target(
     : intent.success
       ? intent.data.typedData.domain.chainId
       : z.object({ chainId: z.number().int().positive() }).parse(current).chainId;
+  const binding = await options.pending.v2Target?.(view.workOrder.id);
+  if (action.action === "bump-consent-nonce" && !binding)
+    return v2GuardFailure("Revocation requires a locally accepted consent target binding.");
+  if (binding && binding.chainId !== chainId)
+    return v2GuardFailure("The V2 chain differs from the locally accepted target binding.");
+  const verifyBinding = (escrow: Address, termsHash: Hex) => {
+    if (binding && (!same(binding.escrow, escrow) || binding.termsHash !== termsHash))
+      v2GuardFailure("The V2 escrow or terms differ from the locally accepted target binding.");
+  };
   const pin = getTrustedTasksV2Deployment(chainId, {
     overrides: options.trustedV2Deployments,
     env: options.env,
@@ -562,6 +587,27 @@ export async function verifyV2Target(
       return v2GuardFailure("Fresh funding inputs differ from locally accepted creation terms.");
     verifyActor(action, options.account.address, address.parse(order.clientAddress));
     const terms = pool ? undefined : escrowTermsSchema.parse(creationArgs[0]);
+    verifyBinding(candidate, terms?.termsHash ?? hash.parse(creationArgs[4]));
+    if (!pool && !bounty) {
+      const implementation = address.parse(
+        await v2Read(rpc, factory, escrowFactoryV2Abi, "implementation"),
+      );
+      if (
+        !same(await v2Read(rpc, implementation, escrowV2Abi, "FACTORY"), factory) ||
+        !same(await v2Read(rpc, implementation, escrowV2Abi, "USDC"), pin.usdc)
+      )
+        return v2GuardFailure(
+          "The pinned factory implementation has different factory or token bindings.",
+        );
+      await verifyFundingDeadlines(
+        rpc,
+        implementation,
+        z
+          .array(milestoneSchema)
+          .parse(creationArgs[1])
+          .map((m) => m.deadline),
+      );
+    }
     return {
       chainId,
       pin,
@@ -662,6 +708,13 @@ export async function verifyV2Target(
     return v2GuardFailure(
       "The V2 target differs from the pinned factory's prediction for the requested order.",
     );
+  verifyBinding(candidate, termsHash);
+  if (action.action === "fund" && !pool && !bounty)
+    await verifyFundingDeadlines(
+      rpc,
+      candidate,
+      milestones.map((m) => m.deadline),
+    );
   const worker = terms && !bounty ? terms.worker : undefined;
   verifyActor(action, options.account.address, poster, worker, verifier);
   return {
@@ -696,6 +749,15 @@ export async function verifyV2TypedData(
     return v2GuardFailure("Hosted typed data names another signer or chain.");
   const block = await target.rpc.getBlock();
   if (action.action === "fund") {
+    // Approval may have waited since target verification. An authorization is
+    // redeemable as soon as it leaves this machine, so check this signing block.
+    if (!target.pool && !target.bounty)
+      await verifyFundingDeadlines(
+        target.rpc,
+        target.escrow,
+        target.milestones.map((m) => m.deadline),
+        block.timestamp,
+      );
     const message = z
       .strictObject({
         from: address,

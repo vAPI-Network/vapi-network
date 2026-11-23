@@ -137,6 +137,10 @@ export function prepareTaskPost(input: TaskPostOptions, now: Date) {
         "An open pool requires --open-check allowlist|invite (configure participants separately).",
       );
   } else {
+    if (!input.milestones?.length && duration < 3_600_000)
+      throw new TaskInputError(
+        "Task deadlines must leave at least one hour for work before award.",
+      );
     const sum = input.milestones?.reduce((total, item) => total + BigInt(item.amountBaseUnits), 0n);
     amount =
       input.amountUsd === undefined && sum !== undefined
@@ -144,12 +148,10 @@ export function prepareTaskPost(input: TaskPostOptions, now: Date) {
         : positive(input.amountUsd, "--amount");
     if (sum !== undefined && sum !== amount)
       throw new TaskInputError("Milestone amounts must sum to --amount.");
-    if (
-      input.milestones?.some(
-        (item) => Date.parse(item.deadlineAt) - now.getTime() < TASK_LIMITS.postDeadlineMinMs,
-      )
-    )
-      throw new TaskInputError("Milestone deadlines must be at least 10 minutes from now.");
+    if (input.milestones?.some((item) => Date.parse(item.deadlineAt) - now.getTime() < 3_600_000))
+      throw new TaskInputError(
+        "Milestone deadlines must leave at least one hour for work; creation and funding also check the verified MIN_WORK_TIME against the chain clock.",
+      );
   }
   if (input.amountUsd !== undefined && positive(input.amountUsd, "--amount") !== amount)
     throw new TaskInputError("--amount conflicts with the shape budget.");

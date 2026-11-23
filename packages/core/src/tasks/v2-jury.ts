@@ -56,7 +56,7 @@ import {
 } from "./v2-public.js";
 import type { PublicClient } from "viem";
 
-/** DisputeResolverV3 case states (vapi-app tasks-v2.ts CaseState). Snapshotting was appended. */
+/** DisputeResolverV3 case states (vapi-app CaseState). Snapshotting was appended. */
 export const TASK_V2_CASE_STATES = [
   "None",
   "Raised",
@@ -77,7 +77,7 @@ export const TASK_V2_JURY_STEPS = {
 export type TaskV2JuryStep = keyof typeof TASK_V2_JURY_STEPS;
 
 // External reviewer-seat contracts, mirrored from vapi-app tasks-v1 2621284b3
-// apps/api/app/tasks/server/chain/v2-writes.server.ts reviewerStatus().
+// reviewerStatus().
 const registryAbi = reviewerRegistryV2Abi;
 const vapiIdAbi = parseAbi(["function hasId(address wallet) view returns (bool)"]);
 const gateAbi = parseAbi([

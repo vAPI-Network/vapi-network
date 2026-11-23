@@ -16,6 +16,23 @@ describe("Tasks v2 post terms", () => {
     expect(result.terms.milestones).toEqual(milestones);
     expect(milestones[0]!.deadlineAt).toBe("2026-10-11T12:00:00.000Z");
   });
+  it("refuses a post with any milestone leaving less than the one-hour minimum work time", () => {
+    expect(() =>
+      prepareTaskPost(
+        {
+          deadline: "3d",
+          milestones: [
+            parseTaskMilestone("1|First|3d", 1, now),
+            parseTaskMilestone("1|Second|20m", 2, now),
+          ],
+        },
+        now,
+      ),
+    ).toThrow("at least one hour");
+    expect(() => prepareTaskPost({ deadline: "20m", amountUsd: "1" }, now)).toThrow(
+      "at least one hour",
+    );
+  });
   it("uses per-winner market budgets and total escrow amounts", () => {
     const result = prepareTaskPost(
       {

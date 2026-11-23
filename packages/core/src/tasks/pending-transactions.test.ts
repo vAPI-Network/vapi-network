@@ -319,3 +319,20 @@ it("persists an unmatched resolution transaction and confirmation across process
     await createPendingTransactions(home).reconciled(OPERATION, "resolve-unmatched-dispute"),
   ).toEqual(response);
 });
+
+it("retains immutable V2 target acceptance after preparation cleanup and restart", async () => {
+  const { home, pending } = await store();
+  const binding = { chainId: 84532, escrow: ADDRESS, termsHash: HASH };
+  await pending.putPreparation(OPERATION, "consent", { idempotencyKey: KEY, inputs: {} });
+  await pending.bindV2Target!(OPERATION, binding);
+  await pending.completePreparation(OPERATION, "consent");
+  await pending.clearExpiredFunding!(OPERATION, KEY);
+  expect(await createPendingTransactions(home).v2Target!(OPERATION)).toEqual(binding);
+  const results = await Promise.allSettled([
+    pending.bindV2Target!(OPERATION, binding),
+    pending.bindV2Target!(OPERATION, { ...binding, chainId: 8453 }),
+    pending.bindV2Target!(OPERATION, { ...binding, termsHash: `0x${"cd".repeat(32)}` }),
+  ]);
+  expect(results.map((r) => r.status)).toEqual(["fulfilled", "rejected", "rejected"]);
+  expect(await pending.v2Target!(OPERATION)).toEqual(binding);
+});

@@ -7,6 +7,7 @@ import {
   decodeFunctionData,
   keccak256,
   parseAbi,
+  type Abi,
   type Hex,
   type PublicClient,
   getAddress,
@@ -17,7 +18,13 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { createTasksClient, TasksClientError, type TasksClient } from "./client.js";
-import { escrowFactoryV2Abi, escrowV2Abi, bountyEscrowV2Abi, bountyPoolV1Abi } from "./v2-abi.js";
+import {
+  escrowFactoryV2Abi,
+  escrowV2Abi,
+  bountyEscrowV2Abi,
+  bountyPoolV1Abi,
+  reviewerRegistryV2Abi,
+} from "./v2-abi.js";
 import { acceptedV2TermsHash } from "./v2-plan-guard.js";
 import { type TasksChainOptions } from "./chain.js";
 import { createPendingTransactions } from "./pending-transactions.js";
@@ -35,6 +42,7 @@ import {
   taskV2AbandonSchema,
   type TaskV2OperationResponse,
   type TaskV2Prepared,
+  type TaskV2Action,
 } from "./v2-write.js";
 import {
   v2WritePrepared,
@@ -278,6 +286,12 @@ async function fixture(step: TaskV2OperationResponse["operation"]["step"] = "v2-
             deliveryHash: zeroHash,
           };
         }
+        case "MIN_WORK_TIME":
+          return 3600n;
+        case "disputeRounds":
+          return 1;
+        case "registry":
+          return USDC;
         case "consentNonces":
           return 0n;
         case "disputeFee":
@@ -372,7 +386,7 @@ async function fixture(step: TaskV2OperationResponse["operation"]["step"] = "v2-
 }
 
 /**
- * The hosted fresh-funding sequence (v2-writes.server.ts prepare "fund"): createEscrow on the
+ * The hosted fresh-funding sequence (vapi-app funding preparation): createEscrow on the
  * pinned factory, then approve the clone, then fund() on the clone. The clone is unregistered
  * until the creation transaction confirms.
  */
@@ -659,60 +673,114 @@ describe("local V2 execution", () => {
   });
 });
 
-describe("hosted EIP-712 consent", () => {
-  it("signs only the returned consent and confirms it without broadcasting", async () => {
-    const f = await fixture("v2-award");
-    f.view.workOrder.clientAddress = WORKER;
-    const original = f.rpc.readContract.getMockImplementation()!;
+async function consentFixture(split = false) {
+  const f = await fixture("v2-award");
+  f.view.workOrder.clientAddress = WORKER;
+  const original = f.rpc.readContract.getMockImplementation()!;
+  f.rpc.readContract.mockImplementation(async (call) =>
+    call.functionName === "terms.poster"
+      ? WORKER
+      : call.functionName === "terms.worker"
+        ? `0x${"00".repeat(20)}`
+        : original(call),
+  );
+  const typedData = {
+    domain: {
+      name: "vAPI Tasks Escrow",
+      version: "2",
+      chainId: 84532,
+      verifyingContract: state.escrow,
+    },
+    types: {
+      AwardConsent: [
+        { name: "escrow", type: "address" },
+        { name: "worker", type: "address" },
+        { name: "termsHash", type: "bytes32" },
+        { name: "nonce", type: "uint256" },
+        { name: "expiry", type: "uint64" },
+      ],
+    },
+    primaryType: "AwardConsent",
+    message: {
+      escrow: state.escrow,
+      worker: account.address,
+      termsHash: acceptedV2TermsHash(
+        f.view as unknown as import("./types.js").GetOrderResponse,
+        PIN,
+        604800n,
+      ),
+      nonce: "0",
+      expiry: (NOW_SECONDS + 300n).toString(),
+    },
+  };
+  f.client.signV2.mockResolvedValue({
+    kind: "eip712",
+    signer: account.address,
+    operationId: `sig_${V2_WRITE_OPERATION}`,
+    typedData,
+  });
+  f.client.confirmV2Signature.mockResolvedValue({
+    kind: "consent",
+    workOrderId: V2_WRITE_ORDER,
+    consent: "award",
+    signer: account.address,
+    expiry: (NOW_SECONDS + 300n).toString(),
+  });
+
+  if (split) {
+    const read = f.rpc.readContract.getMockImplementation()!;
     f.rpc.readContract.mockImplementation(async (call) =>
-      call.functionName === "terms.poster"
-        ? WORKER
-        : call.functionName === "terms.worker"
-          ? `0x${"00".repeat(20)}`
-          : original(call),
+      call.functionName === "terms.worker" ? account.address : read(call),
     );
-    const typedData = {
-      domain: {
-        name: "vAPI Tasks Escrow",
-        version: "2",
-        chainId: 84532,
-        verifyingContract: state.escrow,
-      },
-      types: {
-        AwardConsent: [
-          { name: "escrow", type: "address" },
-          { name: "worker", type: "address" },
-          { name: "termsHash", type: "bytes32" },
-          { name: "nonce", type: "uint256" },
-          { name: "expiry", type: "uint64" },
-        ],
-      },
-      primaryType: "AwardConsent",
-      message: {
-        escrow: state.escrow,
-        worker: account.address,
-        termsHash: acceptedV2TermsHash(
-          f.view as unknown as import("./types.js").GetOrderResponse,
-          PIN,
-          604800n,
-        ),
-        nonce: "0",
-        expiry: (NOW_SECONDS + 300n).toString(),
-      },
-    };
     f.client.signV2.mockResolvedValue({
       kind: "eip712",
       signer: account.address,
       operationId: `sig_${V2_WRITE_OPERATION}`,
-      typedData,
+      typedData: {
+        ...typedData,
+        primaryType: "SplitConsent",
+        types: {
+          SplitConsent: [
+            { name: "escrow", type: "address" },
+            { name: "milestone", type: "uint8" },
+            { name: "round", type: "uint32" },
+            { name: "toWorker", type: "uint96" },
+            { name: "termsHash", type: "bytes32" },
+            { name: "signer", type: "address" },
+            { name: "nonce", type: "uint256" },
+            { name: "expiry", type: "uint64" },
+          ],
+        },
+        message: {
+          escrow: state.escrow,
+          milestone: 0,
+          round: 0,
+          toWorker: "1",
+          termsHash: typedData.message.termsHash,
+          signer: account.address,
+          nonce: "0",
+          expiry: typedData.message.expiry,
+        },
+      },
     });
     f.client.confirmV2Signature.mockResolvedValue({
       kind: "consent",
       workOrderId: V2_WRITE_ORDER,
-      consent: "award",
+      consent: "split",
       signer: account.address,
-      expiry: (NOW_SECONDS + 300n).toString(),
+      expiry: typedData.message.expiry,
     });
+  }
+  const consent = split
+    ? { action: "split-consent" as const, i: 0, toWorker: "1" }
+    : { action: "award-consent" as const };
+  return { ...f, consent, typedData };
+}
+
+describe("hosted EIP-712 consent", () => {
+  it("signs only the returned consent and confirms it without broadcasting", async () => {
+    const f = await consentFixture();
+    const { typedData } = f;
     const result = await f.execute({
       ...f.input,
       write: undefined,
@@ -783,7 +851,7 @@ describe("V2 amounts paid by the wallet", () => {
         from: account.address,
         to: state.escrow,
         value: "100000000",
-        // The hosted authorization starts at 0 (v2-writes.server.ts funding()).
+        // The hosted authorization starts at 0 (vapi-app funding).
         validAfter: "0",
         validBefore: (NOW_SECONDS + 300n).toString(),
         nonce: `0x${"12".repeat(32)}`,
@@ -1678,4 +1746,312 @@ describe("repair3: accepted bounty windows and aggregate funding", () => {
     });
     expect(f.sign).not.toHaveBeenCalled();
   });
+});
+
+describe("durable locally accepted V2 target", () => {
+  it.each([false, true])(
+    "persists %s split consent before failed confirmation and survives restart",
+    async (split) => {
+      const f = await consentFixture(split);
+      f.client.confirmV2Signature.mockRejectedValueOnce(new Error("confirmation unavailable"));
+      await expect(f.execute({ ...f.input, write: undefined, consent: f.consent })).rejects.toThrow(
+        "The prepared V2 step did not complete",
+      );
+      expect(f.typedSign).toHaveBeenCalledOnce();
+      const restarted = createPendingTransactions(f.home);
+      expect(await restarted.v2Target!(f.input.id)).toEqual({
+        chainId: 84532,
+        escrow: state.escrow.toLowerCase(),
+        termsHash: f.typedData.message.termsHash,
+      });
+      f.prepared.operation.step = f.prepared.operation.plan.step = "v2-bump-consent-nonce";
+      f.prepared.operation.plan.data = encodeFunctionData({
+        abi: escrowV2Abi,
+        functionName: "bumpConsentNonce",
+        args: [7n],
+      });
+      const result = await createTaskV2Executor({ ...f.options, pending: restarted })({
+        ...f.input,
+        write: { action: "bump-consent-nonce", newNonce: "7" },
+      });
+      expect(result.ok).toBe(true);
+      expect(f.sign).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("refuses revocation without local acceptance", async () => {
+    const f = await fixture();
+    await expect(
+      f.execute({ ...f.input, write: { action: "bump-consent-nonce", newNonce: "7" } }),
+    ).rejects.toThrow("locally accepted consent target binding");
+    expect(f.sign).not.toHaveBeenCalled();
+    expect(f.typedSign).not.toHaveBeenCalled();
+  });
+
+  it("refuses a consent on another chain after local acceptance", async () => {
+    const f = await consentFixture();
+    await f.execute({ ...f.input, write: undefined, consent: f.consent });
+    f.typedSign.mockClear();
+    f.typedData.domain.chainId = 8453;
+    await expect(
+      createTaskV2Executor({ ...f.options, pending: createPendingTransactions(f.home) })({
+        ...f.input,
+        write: undefined,
+        consent: f.consent,
+      }),
+    ).rejects.toMatchObject({
+      code: "v2_plan_mismatch",
+      message: "The V2 chain differs from the locally accepted target binding.",
+    });
+    expect(f.typedSign).not.toHaveBeenCalled();
+    expect(f.rpc.sendRawTransaction).not.toHaveBeenCalled();
+  });
+
+  it("refuses consent if its local binding cannot be saved", async () => {
+    const f = await consentFixture();
+    vi.spyOn(f.pending, "bindV2Target").mockRejectedValueOnce(new Error("disk full"));
+    await expect(f.execute({ ...f.input, write: undefined, consent: f.consent })).rejects.toThrow(
+      "The prepared V2 step did not complete",
+    );
+    expect(f.typedSign).not.toHaveBeenCalled();
+    expect(f.client.confirmV2Signature).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "bump-consent-nonce",
+    "close-rejected",
+    "prune-reviewer",
+    "prune-reviewers",
+    "split",
+    "award-consent",
+    "split-consent",
+  ] as const)(
+    "refuses consistent genuine clone and hosted terms substitution for %s after consent",
+    async (verb) => {
+      const f = await consentFixture(verb === "split" || verb === "split-consent");
+      await f.execute({ ...f.input, write: undefined, consent: f.consent });
+      f.sign.mockClear();
+      f.typedSign.mockClear();
+      const clone = `0x${"ab".repeat(20)}` as Hex;
+      f.view.workOrder.v2State.escrow = clone;
+      f.view.workOrder.terms.milestones[0]!.acceptance = "Changed accepted deliverable";
+      const original = f.rpc.readContract.getMockImplementation()!;
+      f.rpc.readContract.mockImplementation(async (call) =>
+        call.functionName === "predictEscrow"
+          ? clone
+          : call.functionName === "terms.worker"
+            ? account.address
+            : original(call),
+      );
+      // The pinned factory recognizes the substituted clone and predicts it using
+      // the changed terms. Its on-chain terms hash agrees with the hosted metadata.
+      const termsHash = acceptedV2TermsHash(
+        f.view as unknown as import("./types.js").GetOrderResponse,
+        PIN,
+        604800n,
+      );
+      expect(await f.rpc.readContract({ functionName: "isEscrow", args: [clone] })).toBe(true);
+      expect(await f.rpc.readContract({ functionName: "terms.termsHash", address: clone })).toBe(
+        termsHash,
+      );
+      const consent =
+        verb === "award-consent"
+          ? { action: verb }
+          : verb === "split-consent"
+            ? { action: verb, i: 0, toWorker: "1" }
+            : undefined;
+      if (consent) {
+        const fresh = await consentFixture(verb === "split-consent");
+        const intent = await fresh.client.signV2();
+        intent.typedData.domain.verifyingContract = clone;
+        intent.typedData.message.escrow = clone;
+        intent.typedData.message.termsHash = termsHash;
+        f.client.signV2.mockResolvedValue(intent);
+      } else if (verb !== "award-consent" && verb !== "split-consent") {
+        const write: TaskV2Action =
+          verb === "bump-consent-nonce"
+            ? { action: verb, newNonce: "7" }
+            : verb === "close-rejected"
+              ? { action: verb, i: 0 }
+              : verb === "split"
+                ? { action: verb, i: 0, toWorker: "1" }
+                : verb === "prune-reviewer"
+                  ? { action: verb, reviewer: WORKER }
+                  : { action: "prune-reviewers", reviewers: [WORKER] };
+        const functionName = {
+          "bump-consent-nonce": "bumpConsentNonce",
+          "close-rejected": "closeRejected",
+          split: "resolveWithSplit",
+          "prune-reviewer": "pruneReviewer",
+          "prune-reviewers": "pruneReviewers",
+        }[verb];
+        const args =
+          verb === "bump-consent-nonce"
+            ? [7n]
+            : verb === "close-rejected"
+              ? [0]
+              : verb === "split"
+                ? [0, 1n, "0x"]
+                : verb === "prune-reviewer"
+                  ? [WORKER]
+                  : [[WORKER]];
+        const prune = verb.startsWith("prune-");
+        f.prepared.operation.step = f.prepared.operation.plan.step = `v2-${verb}`;
+        f.prepared.operation.plan.to = prune ? USDC : clone;
+        f.prepared.operation.plan.data = encodeFunctionData({
+          abi: (prune ? reviewerRegistryV2Abi : escrowV2Abi) as Abi,
+          functionName,
+          args,
+        });
+        f.input.write = write;
+      }
+      const execute = createTaskV2Executor({
+        ...f.options,
+        pending: createPendingTransactions(f.home),
+      });
+      await expect(
+        execute({ ...f.input, ...(consent ? { write: undefined, consent } : {}) }),
+      ).rejects.toMatchObject({
+        code: "v2_plan_mismatch",
+        message: expect.stringContaining("locally accepted target binding"),
+      });
+      expect(f.sign).not.toHaveBeenCalled();
+      expect(f.typedSign).not.toHaveBeenCalled();
+      expect(f.rpc.sendRawTransaction).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("awardable funding deadlines", () => {
+  it.each(["creation", "funding"] as const)(
+    "refuses a twenty-minute milestone before %s",
+    async (stage) => {
+      const f = await fixture("v2-fund");
+      const deadline = NOW_SECONDS + 1200n;
+      f.view.workOrder.terms.milestones[0]!.deadlineAt = new Date(
+        Number(deadline) * 1000,
+      ).toISOString();
+      const args = creationArgs(f.view);
+      const updated = [args[0], [{ ...args[1][0], deadline }], args[2]] as const;
+      if (stage === "creation")
+        freshFunding(
+          f,
+          encodeFunctionData({
+            abi: escrowFactoryV2Abi,
+            functionName: "createEscrow",
+            args: updated,
+          }),
+        );
+      const read = f.rpc.readContract.getMockImplementation()!;
+      f.rpc.readContract.mockImplementation(async (call) =>
+        call.functionName === "milestone"
+          ? { ...((await read(call)) as object), deadline }
+          : read(call),
+      );
+      await expect(f.execute({ ...f.input, write: { action: "fund" } })).rejects.toThrow(
+        /MIN_WORK_TIME.*3600.*chain clock/u,
+      );
+      expect(f.sign).not.toHaveBeenCalled();
+      expect(f.typedSign).not.toHaveBeenCalled();
+      expect(f.rpc.sendRawTransaction).not.toHaveBeenCalled();
+      await expect(readFile(f.input.ledgerPath)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(f.rpc.readContract.mock.calls).toContainEqual([
+        expect.objectContaining({
+          functionName: "MIN_WORK_TIME",
+          address: stage === "creation" ? IMPLEMENTATION : state.escrow,
+        }),
+      ]);
+    },
+  );
+
+  it("uses the deployed minimum, checks every milestone and rereads the chain clock", async () => {
+    const f = await fixture("v2-fund");
+    f.view.workOrder.v2State.milestones = ["80000000", "20000000"].map((amountBaseUnits) => ({
+      amountBaseUnits,
+      status: "pending",
+      dispute: undefined,
+    }));
+    f.view.workOrder.terms.milestones = [7200n, 5400n].map((seconds, i) => ({
+      index: i + 1,
+      amountBaseUnits: i ? "20000000" : "80000000",
+      acceptance: "Work",
+      deadlineAt: new Date(Number(NOW_SECONDS + seconds) * 1000).toISOString(),
+    }));
+    const read = f.rpc.readContract.getMockImplementation()!;
+    f.rpc.readContract.mockImplementation(async (call) =>
+      call.functionName === "MIN_WORK_TIME"
+        ? 5400n
+        : call.functionName === "milestone"
+          ? {
+              ...((await read(call)) as object),
+              deadline: NOW_SECONDS + (Number(call.args![0]) ? 5400n : 7200n),
+            }
+          : read(call),
+    );
+    f.rpc.getBlock.mockResolvedValue({ timestamp: NOW_SECONDS + 1n });
+    await expect(f.execute({ ...f.input, write: { action: "fund" } })).rejects.toThrow(
+      /MIN_WORK_TIME.*5400/u,
+    );
+    expect(f.sign).not.toHaveBeenCalled();
+  });
+});
+
+it("rechecks deadline headroom after approval before signing a redeemable funding authorization", async () => {
+  const f = await fixture("v2-fund");
+  const deadline = NOW_SECONDS + 3601n;
+  f.view.workOrder.terms.milestones[0]!.deadlineAt = new Date(
+    Number(deadline) * 1000,
+  ).toISOString();
+  const read = f.rpc.readContract.getMockImplementation()!;
+  f.rpc.readContract.mockImplementation(async (call) =>
+    call.functionName === "milestone"
+      ? { ...((await read(call)) as object), deadline }
+      : read(call),
+  );
+  f.client.prepareV2.mockResolvedValue({
+    kind: "eip712",
+    signer: account.address,
+    operationId: `sig_${V2_WRITE_OPERATION}`,
+    escrow: state.escrow,
+    typedData: {
+      domain: { name: "USD Coin", version: "2", chainId: 84532, verifyingContract: USDC },
+      primaryType: "ReceiveWithAuthorization",
+      types: {
+        ReceiveWithAuthorization: [
+          { name: "from", type: "address" },
+          { name: "to", type: "address" },
+          { name: "value", type: "uint256" },
+          { name: "validAfter", type: "uint256" },
+          { name: "validBefore", type: "uint256" },
+          { name: "nonce", type: "bytes32" },
+        ],
+      },
+      message: {
+        from: account.address,
+        to: state.escrow,
+        value: "100000000",
+        validAfter: "0",
+        validBefore: (NOW_SECONDS + 300n).toString(),
+        nonce: `0x${"12".repeat(32)}`,
+      },
+    },
+  });
+  const ask = vi.fn(async () => {
+    f.rpc.getBlock.mockResolvedValue({ timestamp: NOW_SECONDS + 2n });
+    return true;
+  });
+  await expect(
+    f.execute({
+      ...f.input,
+      write: { action: "fund" },
+      policy: { ...f.input.policy, approveAboveUsd: 1 },
+      approval: { ask },
+    }),
+  ).rejects.toThrow(/MIN_WORK_TIME.*chain clock/u);
+  expect(ask).toHaveBeenCalledOnce();
+  expect(f.sign).not.toHaveBeenCalled();
+  expect(f.typedSign).not.toHaveBeenCalled();
+  expect(f.client.confirmV2Signature).not.toHaveBeenCalled();
+  expect(f.rpc.sendRawTransaction).not.toHaveBeenCalled();
+  await expect(readFile(f.input.ledgerPath)).rejects.toMatchObject({ code: "ENOENT" });
 });

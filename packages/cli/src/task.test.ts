@@ -849,7 +849,7 @@ describe("vapi task", () => {
     },
   );
 
-  it("reads a brief file and accepts the exact injected ten-minute deadline", async () => {
+  it("reads a brief file and accepts the exact injected one-hour deadline", async () => {
     const { home, client, dependencies } = await fixture();
     const path = join(home, "brief.md");
     await writeFile(path, BRIEF);
@@ -863,7 +863,7 @@ describe("vapi task", () => {
         "--amount",
         "0.000001",
         "--deadline",
-        "2026-10-08T12:10:00.000Z",
+        "2026-10-08T13:00:00.000Z",
       ],
       dependencies,
     );
@@ -3568,6 +3568,10 @@ describe("Tasks V2 prepared write arguments", () => {
       f.dependencies.tasks!.chain = { ...missingTasksChain, executeV2 };
       const result = await invoke(["milestone", ID, "approve", "--index", index], f.dependencies);
       expect(result.code).toBe(1);
+      expect(result.value).toMatchObject({
+        error: { message: expect.stringContaining("milestone index") },
+      });
+      expect(result.stdout.join("\n")).not.toContain("C0");
       expect(executeV2).not.toHaveBeenCalled();
     },
   );
@@ -3879,6 +3883,15 @@ describe("Tasks V2 jury and reviewer verbs", () => {
     expect(result.value).toMatchObject({ error: { code: "usage_error" } });
     expect(fake.executeV2).not.toHaveBeenCalled();
     expect(fake.juryV2.sealBallot).not.toHaveBeenCalled();
+  });
+
+  it("names the milestone index in jury usage errors", async () => {
+    const f = await fixture();
+    const result = await invoke(["jury", ID, "--index", "5", "--step", "open"], f.dependencies);
+    expect(result.value).toMatchObject({
+      error: { message: expect.stringContaining("milestone index") },
+    });
+    expect(result.stdout.join("\n")).not.toContain("C0");
   });
 
   it("reads reviewer status for --address from local RPC reads", async () => {

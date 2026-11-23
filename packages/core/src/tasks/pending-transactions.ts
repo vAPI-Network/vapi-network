@@ -39,7 +39,11 @@ export type PendingPreparation = {
   preparedV2?: TaskV2Prepared;
 };
 
+export type TaskV2TargetBinding = { chainId: number; escrow: Address; termsHash: Hex };
+
 export interface PendingTransactions {
+  v2Target?(orderId: string): Promise<TaskV2TargetBinding | undefined>;
+  bindV2Target?(orderId: string, binding: TaskV2TargetBinding): Promise<void>;
   get(operationId: string, step: string): Promise<PendingTransaction | undefined>;
   put(operationId: string, step: string, entry: PendingTransaction): Promise<void>;
   remove(operationId: string, step: string): Promise<void>;
@@ -146,9 +150,13 @@ const retainedReservation = z
     invalidated: z.boolean().optional(),
   })
   .strict();
+const v2TargetBinding = z
+  .object({ chainId: z.number().int().positive(), escrow: address, termsHash: hash })
+  .strict();
 const stateSchema = z
   .object({
     version: z.literal(1),
+    v2Targets: z.record(z.uuid(), v2TargetBinding).default({}),
     transactions: z.record(operationStepKey, transaction),
     reservations: z.record(z.uuid(), z.uuid()),
     retainedReservations: z.record(z.uuid(), retainedReservation),
@@ -174,6 +182,7 @@ const stateSchema = z
 type State = z.infer<typeof stateSchema>;
 const emptyState = (): State => ({
   version: 1,
+  v2Targets: {},
   transactions: {},
   reservations: {},
   retainedReservations: {},
@@ -243,6 +252,26 @@ export function createPendingTransactions(home: string): PendingTransactions {
     return `${milestoneId}:${verb}`;
   };
   return {
+    async v2Target(orderId) {
+      return (await read()).v2Targets[milestoneKey(orderId)];
+    },
+    async bindV2Target(orderId, binding) {
+      await locked(async (state) => {
+        milestoneKey(orderId);
+        const parsed = v2TargetBinding.parse({
+          ...binding,
+          escrow: binding.escrow.toLowerCase(),
+          termsHash: binding.termsHash.toLowerCase(),
+        });
+        const existing = state.v2Targets[orderId];
+        if (existing && canonicalJson(existing) !== canonicalJson(parsed))
+          throw new Error("The locally accepted V2 chain, escrow and terms binding is immutable.");
+        if (!existing) {
+          state.v2Targets[orderId] = parsed;
+          await save(state);
+        }
+      });
+    },
     async get(operationId, step) {
       const value = (await read()).transactions[transactionKey(operationId, step)];
       if (!value) return undefined;

@@ -387,6 +387,17 @@ export function createTaskV2Executor(options: TasksChainOptions) {
           // Retain on all ambiguous failures; no authorization or broadcast can roll this back.
           reserved = true;
         };
+        // Persist acceptance before any redeemable signature can leave this machine.
+        // This survives preparation cleanup, failed confirmation and process restarts.
+        const bindTarget = async () => {
+          if (!pending.bindV2Target || !pending.v2Target)
+            v2GuardFailure("Durable local V2 target binding storage is unavailable.");
+          await pending.bindV2Target!(input.id, {
+            chainId: target.chainId,
+            escrow: target.escrow,
+            termsHash: target.termsHash,
+          });
+        };
         let fundingAuthorization:
           { message: Record<string, unknown>; signature: `0x${string}` } | undefined;
         try {
@@ -394,6 +405,7 @@ export function createTaskV2Executor(options: TasksChainOptions) {
             const intent = taskV2IntentSchema.parse(current);
             const typed = intent.typedData;
             await verifyV2TypedData(target, intent, action, account.address, pays);
+            await bindTarget();
             await beforeSign();
             const signature = await account.signTypedData(typed);
             if (action.action === "fund")
@@ -519,6 +531,7 @@ export function createTaskV2Executor(options: TasksChainOptions) {
             const rpc = rpcFor(plan.chainId);
             if ((await rpc.getChainId()) !== plan.chainId) fail("Transaction chain mismatch.");
             await input.beforeSigning?.();
+            await bindTarget();
             await beforeSign();
             const saved = await pending.withStepLock(op.id, op.step, () =>
               pending.withSignerLock(plan.chainId, account.address, async () => {

@@ -146,8 +146,8 @@ export const TASK_HELP = `Usage:
   vapi task watch <id> [--until <state>] [--auto-release] [--timeout 7d] [--interval 5s] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task status <id> [--operation <uuid> --step <v2-step> --recover|--abandon] [--account <name>] [--json]
 
-Durations: 5s, 10m, 48h, 7d, or an ISO-8601 timestamp. Posting and proposal terms require at least 10 minutes.
-V1 dispute accepts a precomputed evidence hash. V2 dispute accepts --index with --evidence text. C0 action indices are zero-based; declared milestone indices remain one-based.
+Durations: 5s, 10m, 48h, 7d, or an ISO-8601 timestamp. Task milestone deadlines require at least one hour; bounty and pool posting and proposal terms require at least 10 minutes.
+V1 dispute accepts a precomputed evidence hash. V2 dispute accepts --index with --evidence text. Milestone action indices are zero-based; declared milestone indices remain one-based.
 Jury: ${TASK_V2_JURY_RULES} ${TASK_V2_REVIEWER_GUIDANCE} Jury open repeats while the case is Snapshotting.
 Vote --commit seals the salt in a local ballot under VAPI_HOME before vAPI sees the commitment; --reveal reads that ballot back by the onchain commitment, so reveal from the machine that committed. --to-worker is USDC base units and only for split.
 Watch requires an interval of at least 1s and a positive timeout. Auto-release uses the acting wallet's agent profile, or defaults, and releases only amounts strictly below the threshold.
