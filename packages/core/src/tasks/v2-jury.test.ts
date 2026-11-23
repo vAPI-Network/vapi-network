@@ -214,6 +214,7 @@ async function fixture(options: { worker?: string; workerBondBp?: number } = {})
   const chain = {
     commitment: zeroHash as Hex,
     round: ROUND,
+    blockNumber: 101n,
     // Queued caseData states; Voting (4) once the queue is empty.
     caseStates: [] as number[],
     evidenceDeadline: NOW_SECONDS - 3600n,
@@ -231,7 +232,7 @@ async function fixture(options: { worker?: string; workerBondBp?: number } = {})
       keccak256(serializedTransaction),
     ),
     waitForTransactionReceipt: vi.fn(async () => ({ status: "success" })),
-    getBlock: vi.fn(async () => ({ timestamp: NOW_SECONDS })),
+    getBlock: vi.fn(async () => ({ timestamp: NOW_SECONDS, number: chain.blockNumber })),
     readContract: vi.fn(
       async (call: {
         functionName: string;
@@ -248,8 +249,6 @@ async function fixture(options: { worker?: string; workerBondBp?: number } = {})
             return FACTORY;
           case "implementation":
             return IMPLEMENTATION;
-          case "MIN_OBJECTION_WINDOW":
-            return 86400n;
           case "feeBp":
             return 500;
           case "terms":
@@ -297,6 +296,8 @@ async function fixture(options: { worker?: string; workerBondBp?: number } = {})
               Number(call.args![1]),
               chain.round,
             );
+          case "HISTORY_WINDOW":
+            return 8191;
           case "disputeRound":
             return chain.round;
           case "commitments":
@@ -308,6 +309,8 @@ async function fixture(options: { worker?: string; workerBondBp?: number } = {})
               evidenceDeadline: chain.evidenceDeadline,
               commitDeadline: chain.commitDeadline,
               revealDeadline: chain.revealDeadline,
+              drawBlock: 100n,
+              rearms: 0,
             };
           case "owed":
             return chain.owed;
@@ -417,6 +420,10 @@ describe("V2 jury plan guard", () => {
   ];
   it.each(accepted)("accepts the hosted plan for $action", async (action) => {
     const f = await fixture();
+    if (action.action === "draw-jury" || action.action === "rearm-draw") {
+      f.chain.caseStates.push(3);
+      f.chain.blockNumber = action.action === "rearm-draw" ? 8292n : 101n;
+    }
     await expect(guard(f, action)).resolves.toBeUndefined();
   });
 
@@ -1112,6 +1119,7 @@ describe("V2 jury, bond and owed steps", () => {
 
   it("runs draw without moving USDC", async () => {
     const f = await fixture();
+    f.chain.caseStates = [3];
     const result = await runTaskV2Jury(f.context, { ...f.base, i: 0, step: "draw" });
     expect(result).toMatchObject({ ok: true, rounds: 1, money: { gross: { baseUnits: "0" } } });
     expect(f.writes).toEqual([{ action: "draw-jury", i: 0 }]);
@@ -1284,5 +1292,25 @@ describe("ballot path helper", () => {
         commitment: CASE_ID,
       }),
     ).toBe(join("/h", "tasks", "ballots", "1", RESOLVER.toLowerCase(), CASE_ID, `${CASE_ID}.json`));
+  });
+});
+
+describe("audit-3 draw history window", () => {
+  it.each([
+    ["draw-jury", 100n, false],
+    ["draw-jury", 101n, true],
+    ["draw-jury", 351n, true],
+    ["draw-jury", 8291n, true],
+    ["draw-jury", 8292n, false],
+    ["rearm-draw", 351n, false],
+    ["rearm-draw", 8291n, false],
+    ["rearm-draw", 8292n, true],
+  ] as const)("%s at block %s is allowed=%s for seed block 100", async (action, block, allowed) => {
+    const f = await fixture();
+    f.chain.caseStates.push(3);
+    f.chain.blockNumber = block;
+    const check = guard(f, { action, i: 0 });
+    if (allowed) await expect(check).resolves.toBeUndefined();
+    else await expect(check).rejects.toMatchObject({ code: "v2_plan_mismatch" });
   });
 });

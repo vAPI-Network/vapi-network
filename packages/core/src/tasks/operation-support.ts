@@ -13,6 +13,7 @@ import { SpendCapError } from "../spend-policy.js";
 import type { WalletName } from "../wallet-name.js";
 import type { WalletStore } from "../wallet-store.js";
 import { TasksChainUnavailableError, type TasksChain } from "./chain-port.js";
+import { taskV2OutcomeLines } from "./v2-events.js";
 import { TasksClientError, type TasksClient } from "./client.js";
 import type { PendingTransactions } from "./pending-transactions.js";
 import { parseFeeBp, taskMoney, type TaskMoney } from "./money.js";
@@ -572,7 +573,7 @@ export function taskEventLine(event: {
               : event.type === "task.released"
                 ? "escrow released"
                 : event.type;
-  return `${event.sequence}: ${label}`;
+  return `${event.sequence}: ${[label, ...taskV2OutcomeLines(event.payload)].join(" · ")}`;
 }
 
 export function requireTaskMethod<K extends keyof TasksClient>(

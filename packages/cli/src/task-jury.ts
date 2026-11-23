@@ -198,7 +198,10 @@ async function reviewerStatus(
           `Reviewer ${status.wallet} on chain ${status.chainId} (resolver ${status.resolver}).`,
           `Registry seat: ${status.isReviewer ? "yes" : "no"} · vAPI ID: ${status.hasId ? "yes" : "no"} · stake ${status.staked} of ${status.threshold} (${status.meetsStake ? "meets" : "below"} the gate) · gate eligible: ${status.eligible ? "yes" : "no"}.`,
           `Available: ${status.available ? "yes" : "no"} · suspended: ${status.suspended ? "yes" : "no"} · missed reveals: ${status.missedReveals} · claimable fees: ${status.claimable} base units.`,
-          status.ready ? "Ready to be drawn." : "Not ready to be drawn.",
+          status.ready
+            ? "Current seat and stake checks pass; warm-up and case membership still apply."
+            : "Current reviewer checks do not pass.",
+          status.reviewerGuidance,
         ].join("\n"),
   );
   return undefined;

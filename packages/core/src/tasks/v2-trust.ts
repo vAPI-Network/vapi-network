@@ -10,12 +10,16 @@ export type TasksV2Deployment = {
   usdcName: string;
   usdcVersion: string;
   offerTtlSeconds?: number;
+  reviewWindowSeconds?: number;
   evidenceWindowSeconds?: number;
   choiceWindowSeconds?: number;
 };
 export type TasksV2DeploymentOverrides = Partial<Record<number, TasksV2Deployment>>;
 
-/** Intentionally empty until the control room verifies the deployed V2 tuple. */
+/** Intentionally empty until mainnet deployment is verified. Add the complete chain 8453
+ * TasksV2Deployment tuple here once; all SDK, CLI and MCP trust checks use this table.
+ * See docs/tasks.md for the values and release checklist.
+ */
 export const TRUSTED_TASKS_V2_DEPLOYMENTS: Readonly<TasksV2DeploymentOverrides> = {};
 
 /** All overrides are local operator decisions, never hosted readiness fields. */
@@ -41,6 +45,7 @@ export function getTrustedTasksV2Deployment(
     values.some((v) => v !== undefined) ||
     env[`VAPI_TASKS_V2_EVIDENCE_WINDOW_SECONDS_${chainId}`] !== undefined ||
     env[`VAPI_TASKS_V2_OFFER_TTL_SECONDS_${chainId}`] !== undefined ||
+    env[`VAPI_TASKS_V2_REVIEW_WINDOW_SECONDS_${chainId}`] !== undefined ||
     env[`VAPI_TASKS_V2_CHOICE_WINDOW_SECONDS_${chainId}`] !== undefined;
   let configured = options.overrides?.[chainId];
   if (anyEnv && !configured) {
@@ -61,6 +66,9 @@ export function getTrustedTasksV2Deployment(
         : {}),
       ...(env[`VAPI_TASKS_V2_OFFER_TTL_SECONDS_${chainId}`] !== undefined
         ? { offerTtlSeconds: Number(env[`VAPI_TASKS_V2_OFFER_TTL_SECONDS_${chainId}`]) }
+        : {}),
+      ...(env[`VAPI_TASKS_V2_REVIEW_WINDOW_SECONDS_${chainId}`] !== undefined
+        ? { reviewWindowSeconds: Number(env[`VAPI_TASKS_V2_REVIEW_WINDOW_SECONDS_${chainId}`]) }
         : {}),
       ...(env[`VAPI_TASKS_V2_CHOICE_WINDOW_SECONDS_${chainId}`] !== undefined
         ? { choiceWindowSeconds: Number(env[`VAPI_TASKS_V2_CHOICE_WINDOW_SECONDS_${chainId}`]) }
@@ -95,9 +103,12 @@ export function getTrustedTasksV2Deployment(
       normalized.disputeResolverV3,
       normalized.usdc,
     ].includes(zeroAddress) ||
-    [tuple.offerTtlSeconds, tuple.choiceWindowSeconds, tuple.evidenceWindowSeconds].some(
-      (value) => value !== undefined && (!Number.isSafeInteger(value) || value <= 0),
-    ) ||
+    [
+      tuple.offerTtlSeconds,
+      tuple.reviewWindowSeconds,
+      tuple.choiceWindowSeconds,
+      tuple.evidenceWindowSeconds,
+    ].some((value) => value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) ||
     !tuple.usdcName ||
     !tuple.usdcVersion
   )

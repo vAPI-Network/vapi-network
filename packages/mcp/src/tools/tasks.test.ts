@@ -1492,6 +1492,7 @@ describe("task MCP tools", () => {
             "dispute",
             "counter-evidence",
             "resolve-unmatched",
+            "close-rejected",
             "approve-bond",
             "claim-owed",
           ].includes(verb)
@@ -2451,6 +2452,14 @@ describe("V2 jury and reviewer tools", () => {
   }
 
   it.each([
+    ["close-rejected", { i: 0 }, { action: "close-rejected", i: 0 }],
+    ["bump-consent-nonce", { newNonce: "7" }, { action: "bump-consent-nonce", newNonce: "7" }],
+    ["prune-reviewer", { reviewer: RESOLVER }, { action: "prune-reviewer", reviewer: RESOLVER }],
+    [
+      "prune-reviewers",
+      { reviewers: [RESOLVER] },
+      { action: "prune-reviewers", reviewers: [RESOLVER] },
+    ],
     ["jury", { i: 0, step: "open" }, { action: "open-jury", i: 0 }],
     ["jury", { i: 2, step: "resolve" }, { action: "resolve", i: 2 }],
     ["approve-bond", {}, { action: "approve-bond" }],
@@ -2677,6 +2686,53 @@ describe("V2 jury and reviewer tools", () => {
     } finally {
       notice.mockRestore();
       vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("audit-3 outcome presentation", () => {
+  it.each(["show", "status"] as const)(
+    "labels cause 6 in tasks.%s as disputed without a winner",
+    async (verb) => {
+      const settlement = { cause: 6, paidToWorker: "100", disputed: false, disputeWinner: 1 };
+      const client = {
+        show: async () => ({
+          workOrder: {
+            id: ID,
+            title: "Task",
+            version: "work-order-view-v1",
+            milestones: [],
+            v2State: { outcomes: [settlement] },
+          },
+        }),
+        chainState: async () => ({
+          workOrderId: ID,
+          milestones: [],
+          observedAt: NOW,
+          outcomes: [settlement],
+        }),
+        events: async () => ({ events: [], nextAfter: 0 }),
+      } as unknown as TasksClient;
+      const { server } = await watchServer({ client, now: () => new Date(NOW) });
+      const result = await server.callTool({ name: `tasks.${verb}`, arguments: { id: ID } });
+      expect(result.isError).not.toBe(true);
+      for (const output of [JSON.stringify(result.structuredContent), result.content[0]!.text]) {
+        expect(output).toContain('"disputed":true,"disputeWinner":0');
+        expect(output).toContain(
+          "status quo final after round 2 without a verdict; no dispute winner",
+        );
+      }
+    },
+  );
+
+  it("warns reviewers that membership does not guarantee a vote and stake must stay through reveal", async () => {
+    const { server } = await watchServer({ client: {} as TasksClient, now: () => new Date(NOW) });
+    const tools = (await server.listTools()).tools;
+    for (const name of ["tasks.jury", "tasks.vote"]) {
+      const description = tools.find((tool) => tool.name === name)!.description;
+      expect(description).toContain("mayVote reports jury membership only");
+      expect(description).toContain("Do not touch your stake until you have revealed");
+      expect(description).toContain("even a cancelled unstake can cost the vote");
     }
   });
 });

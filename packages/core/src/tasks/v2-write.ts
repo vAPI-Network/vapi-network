@@ -66,6 +66,10 @@ const fillItemSchema = z.discriminatedUnion("preset", [
 
 export const taskV2ProofSchema = z.array(fillItemSchema).min(1).max(20);
 
+export const taskV2ConsentNonceSchema = z
+  .string()
+  .regex(/^(0|[1-9][0-9]*)$/u)
+  .pipe(z.string().refine((v) => BigInt(v) <= 2n ** 128n - 1n, "Nonce must fit uint128"));
 const i = taskV2IndexSchema;
 export const taskV2ActionSchema = z.discriminatedUnion("action", [
   z.strictObject({ action: z.literal("fund") }),
@@ -75,6 +79,13 @@ export const taskV2ActionSchema = z.discriminatedUnion("action", [
   z.strictObject({ action: z.literal("approve"), i }),
   z.strictObject({ action: z.literal("reject"), i, reason: z.string().trim().min(1).max(8000) }),
   z.strictObject({ action: z.literal("finalize"), i }),
+  z.strictObject({ action: z.literal("close-rejected"), i }),
+  z.strictObject({ action: z.literal("bump-consent-nonce"), newNonce: taskV2ConsentNonceSchema }),
+  z.strictObject({ action: z.literal("prune-reviewer"), reviewer: address }),
+  z.strictObject({
+    action: z.literal("prune-reviewers"),
+    reviewers: z.array(address).min(1).max(250),
+  }),
   z.strictObject({ action: z.literal("cancel-offer") }),
   z.strictObject({ action: z.literal("cancel-remainder") }),
   z.strictObject({ action: z.literal("expire") }),
@@ -122,6 +133,10 @@ export const taskV2StepSchema = z.enum([
   "v2-approve",
   "v2-reject",
   "v2-finalize",
+  "v2-close-rejected",
+  "v2-bump-consent-nonce",
+  "v2-prune-reviewer",
+  "v2-prune-reviewers",
   "v2-cancel-offer",
   "v2-cancel-remainder",
   "v2-expire",

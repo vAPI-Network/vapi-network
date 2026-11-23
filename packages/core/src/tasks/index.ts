@@ -76,3 +76,5 @@ export {
   verifiedV2Resolver,
   acceptedV2WorkerBond,
 } from "./v2-plan-guard.js";
+
+export * from "./v2-events.js";

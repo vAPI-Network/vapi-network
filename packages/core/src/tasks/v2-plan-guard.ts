@@ -27,6 +27,7 @@ import {
   bountyPoolV1Abi,
   disputeResolverV3Abi,
   TASK_V2_CASE_STATE,
+  reviewerRegistryV2Abi,
 } from "./v2-abi.js";
 import { getTrustedTasksV2Deployment, type TasksV2Deployment } from "./v2-trust.js";
 import {
@@ -104,6 +105,7 @@ const consentTypes = {
   SplitConsent: [
     { name: "escrow", type: "address" },
     { name: "milestone", type: "uint8" },
+    { name: "round", type: "uint32" },
     { name: "toWorker", type: "uint96" },
     { name: "termsHash", type: "bytes32" },
     { name: "signer", type: "address" },
@@ -168,7 +170,7 @@ export type VerifiedV2Target = {
   creationArgs?: readonly unknown[];
 };
 /** Inputs a fresh clone freezes from the pinned factory, never from the hosted response. */
-type CreationPolicy = { feeBp: number; minObjectionWindow: bigint };
+type CreationPolicy = { feeBp: number };
 
 function acceptedV2Total(view: GetOrderResponse): bigint {
   const terms = view.workOrder.terms;
@@ -192,7 +194,8 @@ function acceptedV2Windows(
   return {
     offerTtl: BigInt(pin.offerTtlSeconds ?? 604800),
     reviewWindow: BigInt(
-      getTrustedTasksDurations(chainId, options.trustedDurations).reviewWindowSeconds ??
+      pin.reviewWindowSeconds ??
+        getTrustedTasksDurations(chainId, options.trustedDurations).reviewWindowSeconds ??
         DEFAULT_ACCEPTANCE_WINDOW_SECONDS,
     ),
     // EscrowFactoryV2 task terms carry no choice window; only bounties judge a choice.
@@ -331,10 +334,7 @@ function acceptedCreationArgs(
       termsHash: acceptedV2TermsHash(view, pin, windows.reviewWindow),
       ...windows,
       bountyDeadline: bounty ? seconds(bounty.deadlineAt) : 0n,
-      objectionWindow:
-        windows.reviewWindow > policy.minObjectionWindow
-          ? windows.reviewWindow
-          : policy.minObjectionWindow,
+      objectionWindow: windows.reviewWindow,
       workerBondBp: acceptedWorkerBondBp(view),
       feeBp: policy.feeBp,
       winners: bounty?.winners ?? 0,
@@ -456,7 +456,7 @@ function verifyActor(
     );
 }
 
-/** The factory's current creation fee and the task implementation's objection-window floor. */
+/** The factory's current creation fee. objectionWindow is app metadata in audit-3. */
 async function creationPolicy(rpc: PublicClient, pin: TasksV2Deployment, pool: boolean) {
   const feeBp = feeBpSchema.parse(
     await v2Read(
@@ -466,15 +466,8 @@ async function creationPolicy(rpc: PublicClient, pin: TasksV2Deployment, pool: b
       "feeBp",
     ),
   );
-  return { feeBp, minObjectionWindow: pool ? 0n : await minObjectionWindow(rpc, pin) };
+  return { feeBp };
 }
-async function minObjectionWindow(rpc: PublicClient, pin: TasksV2Deployment) {
-  const implementation = address.parse(
-    await v2Read(rpc, pin.escrowFactoryV2, escrowFactoryV2Abi, "implementation"),
-  );
-  return uint.parse(await v2Read(rpc, implementation, escrowV2Abi, "MIN_OBJECTION_WINDOW"));
-}
-
 /** The API supplies candidates; only local pins and trusted RPC reads establish trust. */
 export async function verifyV2Target(
   options: TasksChainOptions,
@@ -660,7 +653,7 @@ export async function verifyV2Target(
     creationArgs,
     pool,
     chainId,
-    { feeBp, minObjectionWindow: pool ? 0n : await minObjectionWindow(rpc, pin) },
+    { feeBp },
     action.action === "fund",
   );
   if (suppliedCreation && canon(suppliedCreation) !== canon(creationArgs))
@@ -765,11 +758,21 @@ export async function verifyV2TypedData(
         uint.parse(await v2Read(target.rpc, target.escrow, escrowV2Abi, "consentNonces", [signer]))
     )
       return v2GuardFailure("Consent signer, escrow, terms, nonce or expiry mismatch.");
-    if (
-      action.action === "split-consent" &&
-      (String(m.milestone) !== String(action.i) || String(m.toWorker) !== action.toWorker)
-    )
-      return v2GuardFailure("Split consent differs from the requested index or amount.");
+    if (action.action === "split-consent") {
+      const count = uint.parse(
+        await v2Read(target.rpc, target.escrow, escrowV2Abi, "disputeRounds", [action.i]),
+      );
+      if (
+        count < 1n ||
+        count > 2n ||
+        uint.parse(m.round) !== count - 1n ||
+        String(m.milestone) !== String(action.i) ||
+        String(m.toWorker) !== action.toWorker
+      )
+        return v2GuardFailure(
+          "Split consent differs from the current round, requested index or amount.",
+        );
+    }
   }
 }
 
@@ -894,6 +897,23 @@ export async function verifyV2Plan(
     if (!names.includes(decoded.functionName) || canon(decoded.args ?? []) !== canon(expected))
       v2GuardFailure("V2 calldata selector or arguments differ from the user's action.");
   };
+  if (action.action === "prune-reviewer" || action.action === "prune-reviewers") {
+    const resolver = await verifiedV2Resolver(target);
+    const registry = address.parse(
+      await v2Read(target.rpc, resolver, disputeResolverV3Abi, "registry"),
+    );
+    if (registry === zeroAddress || !same(plan.to, registry) || plan.step !== `v2-${action.action}`)
+      return v2GuardFailure("Pruning must target the verified resolver's reviewer registry.");
+    return bind(
+      decodeFunctionData({ abi: reviewerRegistryV2Abi, data: plan.data }),
+      [action.action === "prune-reviewer" ? "pruneReviewer" : "pruneReviewers"],
+      [
+        action.action === "prune-reviewer"
+          ? getAddress(action.reviewer)
+          : action.reviewers.map(getAddress),
+      ],
+    );
+  }
   if (isV2ResolverAction(action)) {
     const resolver = await verifiedV2Resolver(target);
     if (!same(plan.to, resolver) || plan.step !== `v2-${action.action}`)
@@ -907,9 +927,23 @@ export async function verifyV2Plan(
         // A registry larger than one snapshot batch continues the same open step.
         return bind(decoded, ["openJury", "continueJury"], at);
       case "draw-jury":
-        return bind(decoded, ["drawJury"], at);
-      case "rearm-draw":
-        return bind(decoded, ["rearmDraw"], at);
+      case "rearm-draw": {
+        const { data } = await verifiedV2Case(target, action.i);
+        const block = await target.rpc.getBlock();
+        const window = uint.parse(
+          await v2Read(target.rpc, resolver, disputeResolverV3Abi, "HISTORY_WINDOW"),
+        );
+        if (
+          data.state !== TASK_V2_CASE_STATE.JuryDrawPending ||
+          typeof block.number !== "bigint" ||
+          block.number <= data.drawBlock ||
+          (action.action === "draw-jury"
+            ? block.number > data.drawBlock + window
+            : block.number <= data.drawBlock + window)
+        )
+          return v2GuardFailure("The jury draw step is outside its on-chain history window.");
+        return bind(decoded, [action.action === "draw-jury" ? "drawJury" : "rearmDraw"], at);
+      }
       case "resolve":
         return bind(decoded, ["resolve"], at);
       case "commit-vote":
@@ -960,6 +994,22 @@ export async function verifyV2Plan(
       taskOnly();
       name = "rejectMilestone";
       expected = [action.i, digest(action.reason)];
+      break;
+    case "bump-consent-nonce": {
+      taskOnly();
+      const current = uint.parse(
+        await v2Read(target.rpc, target.escrow, escrowV2Abi, "consentNonces", [plan.from]),
+      );
+      if (BigInt(action.newNonce) <= current || BigInt(action.newNonce) > 2n ** 128n - 1n)
+        return v2GuardFailure("Consent nonce must increase and fit uint128.");
+      name = "bumpConsentNonce";
+      expected = [BigInt(action.newNonce)];
+      break;
+    }
+    case "close-rejected":
+      taskOnly();
+      name = "closeRejected";
+      expected = [action.i];
       break;
     case "finalize":
       taskOnly();
@@ -1049,6 +1099,8 @@ const caseDataSchema = z.looseObject({
   evidenceDeadline: uint,
   commitDeadline: uint,
   revealDeadline: uint,
+  drawBlock: uint,
+  rearms: small(3),
 });
 /** The current round of a milestone's dispute, read from the verified escrow's own resolver. */
 export async function verifiedV2Case(target: VerifiedV2Target, i: number) {

@@ -114,6 +114,10 @@ import {
   tasksCounterEvidenceTool,
   tasksResolveUnmatchedTool,
   tasksJuryTool,
+  tasksCloseRejectedTool,
+  tasksBumpConsentNonceTool,
+  tasksPruneReviewerTool,
+  tasksPruneReviewersTool,
   tasksVoteTool,
   tasksApproveBondTool,
   tasksClaimOwedTool,
@@ -740,6 +744,14 @@ export function createVapiServer(options: VapiServerOptions = {}) {
   server.registerTool("tasks.dispute", tasksDisputeTool, tasks.dispute);
   server.registerTool("tasks.counter-evidence", tasksCounterEvidenceTool, tasks.counterEvidence);
   server.registerTool("tasks.resolve-unmatched", tasksResolveUnmatchedTool, tasks.resolveUnmatched);
+  server.registerTool("tasks.close-rejected", tasksCloseRejectedTool, tasks.closeRejected);
+  server.registerTool(
+    "tasks.bump-consent-nonce",
+    tasksBumpConsentNonceTool,
+    tasks.bumpConsentNonce,
+  );
+  server.registerTool("tasks.prune-reviewer", tasksPruneReviewerTool, tasks.pruneReviewer);
+  server.registerTool("tasks.prune-reviewers", tasksPruneReviewersTool, tasks.pruneReviewers);
   server.registerTool("tasks.jury", tasksJuryTool, tasks.jury);
   server.registerTool("tasks.vote", tasksVoteTool, tasks.vote);
   server.registerTool("tasks.approve-bond", tasksApproveBondTool, tasks.approveBond);

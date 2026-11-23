@@ -5,6 +5,14 @@ scoped packages. The packages share one version and are released together.
 
 ## Unreleased
 
+### Changed
+
+- Tasks V2 uses the audit-3 contract ABIs, round-bound split consents, bounded nonce revocation, the 8,191-block draw history window and final status quo after round two without a verdict (disputed, no dispute winner). Funding no longer reads the removed objection-window getter. Reviewer guidance explains membership-only `mayVote` and retaining stake through reveal.
+
+### Added
+
+- SDK, CLI and MCP actions for closing rejected milestones, revoking consent nonces and pruning reviewer seats; audit-3 event decoding, including dispute fee flows and surplus sweeps. Mainnet deployment pins remain empty pending verification.
+
 ## 0.13.0 — 2026-11-10
 
 ### Added

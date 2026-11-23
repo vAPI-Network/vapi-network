@@ -4,36 +4,40 @@ Tasks is an onchain task market with USDC escrow, delivery, review and disputes.
 
 The task SDK in `@vapi-network/core/tasks` talks to the vAPI task API and builds delivery manifests. The CLI verbs below use its shared actions. The local MCP server exposes the same task verbs.
 
-| Verb                | What it does                                                                 | Moves money            |
-| ------------------- | ---------------------------------------------------------------------------- | ---------------------- |
-| `search`            | Finds tasks and workers.                                                     | No                     |
-| `show`              | Shows lifecycle, milestones, next action and receipts.                       | No                     |
-| `pending`           | Lists the acting wallet's pending actions.                                   | No                     |
-| `checkin`           | Records a worker check-in.                                                   | No                     |
-| `post`              | Posts a task, bounty or pool, optionally funding with the vault.             | Only with `--fund`     |
-| `propose`           | Proposes terms for a task.                                                   | No                     |
-| `submit`            | Submits proof for an open bounty.                                            | No                     |
-| `milestone`         | Submit, approve, reject or finalize a zero-based V2 milestone                | On approve/finalize    |
-| `cancel`            | Cancel a V2 offer, unpaid remainder or expire                                | Refunds only           |
-| `claim`             | Pay a stored pool claim as its verifier                                      | Yes                    |
-| `award`             | Awards a proposal or submission.                                             | No                     |
-| `sign`              | Signs the task scope.                                                        | No                     |
-| `fund`              | Locks USDC in escrow.                                                        | Yes                    |
-| `deliver`           | Delivers files and a note through a manifest hash.                           | No                     |
-| `release`           | Pays the worker from escrow.                                                 | Yes                    |
-| `refund`            | Returns escrowed USDC to the poster.                                         | Yes                    |
-| `dispute`           | Raises a dispute and charges the contract dispute fee.                       | Yes                    |
-| `counter-evidence`  | Submits counter-evidence and pays the verified dispute fee.                  | Yes                    |
-| `resolve-unmatched` | Resolves a dispute after an unanswered counter-evidence deadline.            | Yes                    |
-| `jury`              | Opens, draws, rearms or resolves the V2 jury on a disputed milestone.        | No                     |
-| `vote`              | Commits a sealed jury vote, or reveals it from the local ballot.             | No                     |
-| `approve-bond`      | Approves the verified escrow to collect the agreed worker bond.              | Yes                    |
-| `claim-owed`        | Pulls a payout the escrow could not send to this wallet.                     | Yes                    |
-| `reviewer-status`   | Shows a wallet's jury reviewer readiness from the chain.                     | No                     |
-| `message`           | Sends a message to the other party.                                          | No                     |
-| `thread`            | Reads the task message thread.                                               | No                     |
-| `watch`             | Watches task events and moves money only when auto-release is on.            | Only with auto-release |
-| `status`            | Shows signed-in chain state and participant events, or the public task card. | No                     |
+| Verb                 | What it does                                                                 | Moves money            |
+| -------------------- | ---------------------------------------------------------------------------- | ---------------------- |
+| `search`             | Finds tasks and workers.                                                     | No                     |
+| `show`               | Shows lifecycle, milestones, next action and receipts.                       | No                     |
+| `pending`            | Lists the acting wallet's pending actions.                                   | No                     |
+| `checkin`            | Records a worker check-in.                                                   | No                     |
+| `post`               | Posts a task, bounty or pool, optionally funding with the vault.             | Only with `--fund`     |
+| `propose`            | Proposes terms for a task.                                                   | No                     |
+| `submit`             | Submits proof for an open bounty.                                            | No                     |
+| `milestone`          | Submit, approve, reject or finalize a zero-based V2 milestone                | On approve/finalize    |
+| `cancel`             | Cancel a V2 offer, unpaid remainder or expire                                | Refunds only           |
+| `claim`              | Pay a stored pool claim as its verifier                                      | Yes                    |
+| `award`              | Awards a proposal or submission.                                             | No                     |
+| `sign`               | Signs the task scope.                                                        | No                     |
+| `fund`               | Locks USDC in escrow.                                                        | Yes                    |
+| `deliver`            | Delivers files and a note through a manifest hash.                           | No                     |
+| `release`            | Pays the worker from escrow.                                                 | Yes                    |
+| `refund`             | Returns escrowed USDC to the poster.                                         | Yes                    |
+| `dispute`            | Raises a dispute and charges the contract dispute fee.                       | Yes                    |
+| `counter-evidence`   | Submits counter-evidence and pays the verified dispute fee.                  | Yes                    |
+| `resolve-unmatched`  | Resolves a dispute after an unanswered counter-evidence deadline.            | Yes                    |
+| `close-rejected`     | Closes a rejected milestone after its late window.                           | Refunds only           |
+| `bump-consent-nonce` | Revokes outstanding consents for this escrow.                                | No                     |
+| `prune-reviewer`     | Prunes an ineligible reviewer seat.                                          | No                     |
+| `prune-reviewers`    | Prunes ineligible reviewer seats.                                            | No                     |
+| `jury`               | Opens, draws, rearms or resolves the V2 jury on a disputed milestone.        | No                     |
+| `vote`               | Commits a sealed jury vote, or reveals it from the local ballot.             | No                     |
+| `approve-bond`       | Approves the verified escrow to collect the agreed worker bond.              | Yes                    |
+| `claim-owed`         | Pulls a payout the escrow could not send to this wallet.                     | Yes                    |
+| `reviewer-status`    | Shows a wallet's jury reviewer readiness from the chain.                     | No                     |
+| `message`            | Sends a message to the other party.                                          | No                     |
+| `thread`             | Reads the task message thread.                                               | No                     |
+| `watch`              | Watches task events and moves money only when auto-release is on.            | Only with auto-release |
+| `status`             | Shows signed-in chain state and participant events, or the public task card. | No                     |
 
 The local CLI and MCP share these verbs. Hosted API availability can lag the local tools; unsupported operations report the server error without claiming success.
 
@@ -132,8 +136,8 @@ Refund returns eligible remaining funds to the poster.
 
 The poster may dispute a fresh (submitted) delivery. The worker never disputes its own fresh delivery.
 A rejected milestone becomes disputable by either side after 2 rejections, or after 1 rejection once the milestone deadline has passed.
-With 20 or fewer eligible reviewers, everyone eligible votes; above 20, 5 reviewers are drawn.
-A verdict needs at least 3 revealed votes and a strict majority. A tie or no majority restores the milestone to its state before the dispute, and a new dispute may then be raised.
+Fewer than 3 eligible reviewers ends the round immediately. With 3 to 20, all eligible reviewers join the jury; above 20, 5 are drawn.
+A verdict needs at least 3 revealed votes and a strict majority. Round 1 without a verdict restores the pre-dispute state. Round 2 without a verdict makes the status quo final: disputed, with no dispute winner (outcome cause 6).
 The dispute fee is 10% of the milestone, minimum 20 USDC, maximum 500 USDC, which can be above 20% of a small milestone.
 A worker who delivered on time keeps the bond on a voluntary refund. There is no mediation and no appeal.
 
@@ -156,7 +160,7 @@ vapi task post --title "Research shortlist" --brief brief.md --amount 100 --dead
   --milestone "70|Intros completed|7d" --fund --yes
 ```
 
-Confirm the deployed token domain before setting its name and version. In Conductor cloud environments, prefix these input names with `VAPI_NETWORK_`.
+Confirm the deployed token domain before setting its name and version. In cloud environments, prefix these input names with `VAPI_NETWORK_`.
 The one-call flow depends on the server returning a supported funding preparation; the limitations below still apply.
 
 ```sh
@@ -330,7 +334,7 @@ have plain top-level object schemas. The SDK exposes `prepareV2`, `signV2`,
 legacy transport and signing adapters can keep the original interface.
 
 V2 signing also requires a **local deployment trust anchor**. The V2 pin map is
-empty until the control room verifies the deployment ceremony. Hosted readiness,
+empty until the deployment record is verified. Hosted readiness,
 intent recipients and operation destinations cannot supply that trust. With no
 pin or explicit override the command returns `v2_trust_unavailable` before a
 signature. For staging, configure all six chain-specific variables, for example:
@@ -347,8 +351,8 @@ VAPI_TASKS_V2_USDC_VERSION_84532=2
 The guard reads the current contracts: the factory's `paymentToken()`, the clone's
 `FACTORY()`, `USDC()`, `terms()` and `totalPrincipal()`, and consent nonces from
 `consentNonces()` under the `vAPI Tasks Escrow` version `2` EIP-712 domain. Its ABI
-entries are copied from the vapi-app generated artifact by
-`node scripts/sync-tasks-v2-abi.mjs <vapi-app checkout>` (`--check` reports a stale
+entries are copied directly from the audited contract JSON files by
+`node scripts/sync-tasks-v2-abi.mjs <contracts/abi directory>` (`--check` reports a stale
 copy); never edit `packages/core/src/tasks/v2-abi.generated.ts` by hand.
 
 Cloud inputs use the `VAPI_NETWORK_` prefix. Every override is logged to stderr as
@@ -365,16 +369,17 @@ Fresh funding follows the hosted sequence: `createEscrow` (or `createPool`) on t
 pinned factory, a USDC approval of the new clone, then `fund()` on the clone; with
 an EIP-3009 authorization a task is created and funded in one
 `createAndFundWithAuthorization` call. The client predicts the clone from accepted
-order terms, local defaults, the pinned factory's `feeBp()` and its implementation's
-`MIN_OBJECTION_WINDOW()`; every creation input (the complete `IEscrowV2.Terms`
+order terms, local defaults and the pinned factory's `feeBp()`; `objectionWindow`
+is app metadata set to the accepted review window; every creation input (the complete `IEscrowV2.Terms`
 tuple, the milestones and the order salt) must match that prediction. An accepted bounty choice window takes precedence
 over local defaults. Unset offer TTL and choice windows default to 604800 seconds;
 staging can explicitly set
 `VAPI_TASKS_V2_OFFER_TTL_SECONDS_<chainId>` and
 `VAPI_TASKS_V2_CHOICE_WINDOW_SECONDS_<chainId>`, or the SDK pin's
-`offerTtlSeconds` and `choiceWindowSeconds`. The optional
+`offerTtlSeconds` and `choiceWindowSeconds`. `VAPI_TASKS_V2_REVIEW_WINDOW_SECONDS_<chainId>`
+(SDK `reviewWindowSeconds`) pins the review default in the same V2 tuple. The optional
 `VAPI_TASKS_V2_EVIDENCE_WINDOW_SECONDS_<chainId>` (SDK `evidenceWindowSeconds`)
-also accepts a positive safe integer; it records local evidence-window configuration. The review window uses the existing
+also accepts a positive safe integer; it records local evidence-window configuration. An unset review window uses the existing
 local trusted duration setting. These are local decisions, never hosted
 readiness values. Creation plans must match accepted terms and the pinned
 factory's prediction. A hosted
@@ -401,9 +406,9 @@ preparation without creating a conflicting hosted operation.
 
 A matched V2 dispute goes to a jury of reviewers on DisputeResolverV3. The rules:
 
-- With 20 or fewer eligible reviewers, everyone eligible votes. Above 20, 5 are drawn.
+- Fewer than 3 eligible reviewers ends the round immediately. With 3 to 20, all eligible reviewers join the jury; above 20, 5 are drawn.
 - A verdict needs at least 3 reveals and a strict majority.
-- A tie or no majority restores the pre-dispute state, and a new dispute round may be raised.
+- Round 1 without a verdict restores the pre-dispute state. Round 2 without a verdict makes the status quo final: disputed, with no dispute winner (outcome cause 6).
 - There is no mediation or appeal.
 
 ```sh
@@ -500,7 +505,8 @@ task implementation (`implementation()` then its immutable `DISPUTE_RESOLVER()`;
 resolver getter), which must match the local `disputeResolverV3` pin, then reads the registry seat (`isReviewer`), the vAPI ID
 (`hasId`), the stake (`stakedBalance` on the gate's `staking()`) against the gate `threshold()`, the
 gate's `isEligible`, and the resolver's `available`, `suspended`, `missedReveals` and `claimable`.
-`ready` is true only when all of these allow a draw.
+`ready` means these current checks pass. Warm-up, frozen case membership and historical
+stake checks still apply; it does not guarantee a draw or a vote.
 
 MCP tools: `tasks.jury {id,i,step}`, `tasks.vote {id,i,action,outcome?,toWorker?}`,
 `tasks.approve-bond {id}`, `tasks.claim-owed {id,to?}` and `tasks.reviewer-status {address?}`. The
@@ -509,3 +515,67 @@ local MCP server uses the same ballot store.
 Reviewer writes (`set-available`, `reactivate`, `claim-reviewer-fee`) are not in the CLI yet. They
 need an order-less hosted route, which vAPI does not offer yet; until then use the hosted MCP
 `tasks.reviewer` tool.
+
+## Audit-3 contract compatibility
+
+The SDK copies all functions, events and errors for the nine Tasks V2 contracts from
+`contracts/abi` at `tasks-v2-audit-3` (`fcc670908`), preserving Apache-2.0 provenance.
+Refresh with `node scripts/sync-tasks-v2-abi.mjs <contracts/abi directory>`; add `--check`
+to verify byte-for-byte reproducibility. `decodeTaskV2Event(contractKind, log)` decodes
+logs, including `DisputeFeesSettled`, `ConsentNonceBumped`, `RoundEndedWithoutJury`,
+`ReviewerPruned` and `SurplusSwept` (pool and resolver). The caller
+must verify the emitting address before choosing the contract kind.
+
+SplitConsent includes `uint32 round` immediately after `milestone`, equal to the
+verified escrow's `disputeRounds(i) - 1`. Offers are usable only before the jury opens.
+`bump-consent-nonce` revokes the caller's outstanding award and split consents for
+that escrow; the new nonce must exceed its current nonce and be at most uint128 max.
+
+The draw window is `HISTORY_WINDOW = 8,191` blocks, strictly after `drawBlock` and
+inclusive of `drawBlock + 8,191`. `rearmDraw` is available only after that boundary.
+There are at most three rearms; the next expired attempt ends the round without a jury.
+`caseData` includes `rearms`. Fewer than three eligible reviewers also ends the round.
+
+`mayVote` reports jury membership only; it does not promise that a vote will pass
+stake or deadline checks. Do not touch your stake until you have revealed; even a
+cancelled unstake can cost the vote. Seat, availability and stake have warm-up rules.
+
+The permissionless maintenance verbs use the same hosted prepare/confirm flow and
+local plan verification as other writes. Pruning targets the registry read from the
+verified escrow's pinned resolver and does not change frozen juries:
+
+```sh
+vapi task close-rejected <id> --index 0
+vapi task bump-consent-nonce <id> --new-nonce 7
+vapi task prune-reviewer <id> --reviewer 0x...
+vapi task prune-reviewers <id> --reviewers 0x...,0x...
+```
+
+`closeRejected` closes a rejected milestone after its late window when the remainder
+has closed; its principal goes to the poster. Pruning an eligible seat reverts.
+MCP equivalents are `tasks.close-rejected {id,i}`, `tasks.bump-consent-nonce {id,newNonce}`,
+`tasks.prune-reviewer {id,reviewer}` and `tasks.prune-reviewers {id,reviewers}`.
+
+## Base mainnet address release
+
+`TRUSTED_TASKS_V2_DEPLOYMENTS` in `packages/core/src/tasks/v2-trust.ts` stays empty
+until deployment verification. Add the chain **8453** tuple in that one table:
+`escrowFactoryV2`, `disputeResolverV3`, `bountyPoolFactoryV1`, `usdc`, `usdcName`,
+`usdcVersion`, and the verified `offerTtlSeconds`, `evidenceWindowSeconds` and
+`choiceWindowSeconds` and `reviewWindowSeconds` for the intended creation defaults.
+All four windows can be set in this same tuple. No addresses
+come from hosted readiness. The factories' registered clones and resolver/registry
+wiring must match the audited deployment record and runtime hashes.
+
+Before release, verify the deployment record, owners/timelock, USDC domain, windows,
+EIP-2935 history address, launch caps, paused factories and reviewer launch gate.
+Rehearse funding, dispute rounds, split revocation, draw/rearm, reveal, cause 6 and
+maintenance against the verified test deployment. Add the verified 8453 tuple and
+adapt the empty-table test. Bump every package manifest together plus
+`EXPECTED_VERSION` in `scripts/pack-check.mjs`, `CLI_VERSION` in
+`packages/cli/src/version.ts` and `VAPI_CLIENT_VERSION` in
+`packages/core/src/support-report.ts`; update both versions in `server.json`.
+Move the Unreleased changelog into that
+release. Run format, lint, typecheck, tests, build and `pnpm pack:check`, then follow
+the repository's manual staged-package release with public access and an explicit
+`latest` or `next` tag. This compatibility change does not activate or publish mainnet.

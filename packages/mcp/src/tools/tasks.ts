@@ -77,6 +77,12 @@ import {
   type TasksClient,
   type TasksClientOptions,
 } from "@vapi-network/core/tasks";
+import {
+  TASK_V2_JURY_RULES,
+  TASK_V2_REVIEWER_GUIDANCE,
+  taskV2ConsentNonceSchema,
+  normalizeTaskV2Outcomes,
+} from "@vapi-network/core/tasks";
 import { z } from "zod";
 
 import { createHostedTasksClient } from "../tasks-client.js";
@@ -301,8 +307,29 @@ export const tasksResolveUnmatchedTool = descriptor(
   "Executes the user's own resolution of an unmatched dispute with the user's vault wallet after the onchain counter-evidence deadline when no counter-evidence was submitted; nothing is custodial.",
   { ...moneyParticipant, i: taskV2IndexSchema.optional() },
 );
-const JURY_RULES =
-  "With 20 or fewer eligible reviewers everyone eligible votes; above 20, 5 are drawn. A verdict needs at least 3 reveals and a strict majority. A tie or no majority restores the pre-dispute state and a new dispute round may be raised. No mediation or appeal.";
+export const tasksCloseRejectedTool = descriptor(
+  "Executes the user's own permissionless close of a rejected V2 milestone after its late window with the local vault wallet; nothing is custodial. Returns principal to the poster.",
+  { ...participant, i: taskV2IndexSchema },
+);
+export const tasksBumpConsentNonceTool = descriptor(
+  "Does not move money. Revoke this wallet's outstanding award and split consents for the verified task escrow. newNonce must exceed the current nonce and fit uint128.",
+  { ...participant, newNonce: taskV2ConsentNonceSchema },
+);
+export const tasksPruneReviewerTool = descriptor(
+  "Does not move money. Permissionlessly prune a reviewer seat that no longer passes the stake gate from the verified resolver's registry. Frozen juries are preserved.",
+  { ...participant, reviewer: z.string().regex(/^0x[0-9a-fA-F]{40}$/u) },
+);
+export const tasksPruneReviewersTool = descriptor(
+  "Does not move money. Permissionlessly prune reviewer seats that no longer pass the stake gate from the verified resolver's registry. Frozen juries are preserved.",
+  {
+    ...participant,
+    reviewers: z
+      .array(z.string().regex(/^0x[0-9a-fA-F]{40}$/u))
+      .min(1)
+      .max(250),
+  },
+);
+const JURY_RULES = `${TASK_V2_JURY_RULES} ${TASK_V2_REVIEWER_GUIDANCE}`;
 const address = z.string().regex(/^0x[0-9a-fA-F]{40}$/u);
 export const tasksJuryTool = descriptor(
   `Does not move money from the wallet. Run one hosted-prepared DisputeResolverV3 jury step on a disputed V2 milestone with the local vault wallet: open (repeats while the case is Snapshotting), draw, rearm or resolve. C0 index i is zero-based. ${JURY_RULES}`,
@@ -1117,6 +1144,27 @@ export function createTasksTools(options: TasksToolsOptions) {
         }),
       );
     },
+    async closeRejected(input: Input<typeof tasksCloseRejectedTool>) {
+      return v2(input, { action: "close-rejected", i: input.i });
+    },
+    async bumpConsentNonce(input: Input<typeof tasksBumpConsentNonceTool>) {
+      return v2(
+        input,
+        taskV2ActionSchema.parse({ action: "bump-consent-nonce", newNonce: input.newNonce }),
+      );
+    },
+    async pruneReviewer(input: Input<typeof tasksPruneReviewerTool>) {
+      return v2(
+        input,
+        taskV2ActionSchema.parse({ action: "prune-reviewer", reviewer: input.reviewer }),
+      );
+    },
+    async pruneReviewers(input: Input<typeof tasksPruneReviewersTool>) {
+      return v2(
+        input,
+        taskV2ActionSchema.parse({ action: "prune-reviewers", reviewers: input.reviewers }),
+      );
+    },
     async jury(input: Input<typeof tasksJuryTool>) {
       const { ctx, base } = await v2Base(input);
       const result = await runTaskV2Jury(ctx, { ...base, i: input.i, step: input.step });
@@ -1287,6 +1335,7 @@ function abortableFetch(fetchImpl: typeof fetch, signal: AbortSignal): typeof fe
 }
 
 function taskResult(value: object, isError = false) {
+  value = normalizeTaskV2Outcomes(value);
   return {
     ...(isError ? { isError: true as const } : {}),
     structuredContent: { ...value },

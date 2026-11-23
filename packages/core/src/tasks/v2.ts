@@ -132,7 +132,14 @@ export const nextActionSchema = z.looseObject({
   amountBaseUnits: amount.optional(),
   dueAt: instant.optional(),
 });
+const lifecycleOutcomeFields = {
+  cause: z.number().int().min(1).max(6).optional(),
+  disputed: z.boolean().optional(),
+  disputeWinner: z.number().int().min(0).max(3).optional(),
+  summary: z.string().optional(),
+};
 const lifecycleMilestone = z.looseObject({
+  ...lifecycleOutcomeFields,
   id: z.string(),
   status: z.enum(["pending", "submitted", "released", "refunded", "disputed", "split"]),
   amountBaseUnits: amount,
@@ -141,6 +148,7 @@ const lifecycleMilestone = z.looseObject({
 export const taskLifecycleSchema = z.union([
   z.looseObject({
     shape: z.literal("task"),
+    ...lifecycleOutcomeFields,
     state: z.enum(["Draft", "Open", "Active", "Settled", "Refunded", "Cancelled"]),
     substate: z.enum(["InProgress", "Submitted", "Stalled", "Disputed"]).optional(),
     milestones: z.array(lifecycleMilestone),

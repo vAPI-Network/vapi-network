@@ -6,6 +6,7 @@
 import { toFunctionSelector } from "viem";
 import { z } from "zod";
 
+import { normalizeTaskV2Outcomes } from "./v2-events.js";
 import { TasksClientError } from "./client.js";
 import { TaskInputError, TaskOperationError } from "./operation-support.js";
 import { disputeResolverV3Abi } from "./v2-abi.js";
@@ -152,6 +153,17 @@ function pick<T>(source: Record<string, unknown>, key: string, schema: z.ZodType
   return parsed.success ? ({ [key]: parsed.data } as Record<string, T>) : {};
 }
 
+function publicOutcome(source: Record<string, unknown>) {
+  const cause = z.coerce.number().int().min(1).max(6).safeParse(source.cause);
+  return cause.success
+    ? normalizeTaskV2Outcomes({
+        cause: cause.data,
+        ...pick(source, "disputed", z.boolean()),
+        ...pick(source, "disputeWinner", z.number().int().min(0).max(3)),
+      })
+    : {};
+}
+
 /**
  * The documented lifecycle fields (shape, state, substate, amount, due date and each
  * milestone's id, status, amount and due date). Hosted lifecycle and next-action objects are
@@ -167,6 +179,7 @@ export function publicTaskLifecycle(value: unknown): TaskLifecycle | null {
         return m
           ? [
               {
+                ...publicOutcome(m),
                 ...pick(m, "id", milestoneId),
                 ...pick(m, "status", milestoneStatus),
                 ...pick(m, "amountBaseUnits", baseUnits),
@@ -177,6 +190,7 @@ export function publicTaskLifecycle(value: unknown): TaskLifecycle | null {
       })
     : undefined;
   return {
+    ...publicOutcome(source),
     ...pick(source, "shape", lifecycleShape),
     ...pick(source, "state", lifecycleState),
     ...pick(source, "substate", lifecycleSubstate),
@@ -308,7 +322,7 @@ export function redactTaskV2Ballots<T>(value: T): T {
     }
     return out;
   };
-  return walk(value, false, false) as T;
+  return normalizeTaskV2Outcomes(walk(value, false, false)) as T;
 }
 
 /** A 32-byte hex run or any ballot word in an error message. */

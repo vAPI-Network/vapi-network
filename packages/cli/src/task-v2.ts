@@ -27,7 +27,15 @@ export async function taskV2Command(
   dependencies: CliDependencies,
 ): Promise<number | undefined | null> {
   const explicit =
-    ["milestone", "cancel", "claim"].includes(verb) ||
+    [
+      "milestone",
+      "cancel",
+      "claim",
+      "close-rejected",
+      "bump-consent-nonce",
+      "prune-reviewer",
+      "prune-reviewers",
+    ].includes(verb) ||
     ["--worker", "--winners", "--action", "--index", "--operation"].some(
       (flag) => parsed.one(flag) !== undefined,
     );
@@ -114,6 +122,17 @@ export async function taskV2Command(
       });
       if (!["submit", "approve", "reject", "finalize"].includes(action!))
         throw new UsageError("Milestone action must be submit, approve, reject or finalize.");
+    } else if (verb === "close-rejected") {
+      write = taskV2ActionSchema.parse({ action: verb, i: index() });
+    } else if (verb === "bump-consent-nonce") {
+      write = taskV2ActionSchema.parse({ action: verb, newNonce: parsed.one("--new-nonce") });
+    } else if (verb === "prune-reviewer") {
+      write = taskV2ActionSchema.parse({ action: verb, reviewer: parsed.one("--reviewer") });
+    } else if (verb === "prune-reviewers") {
+      write = taskV2ActionSchema.parse({
+        action: verb,
+        reviewers: parsed.one("--reviewers")?.split(","),
+      });
     } else if (verb === "cancel") {
       const scope = parsed.positionals[1];
       if (!["offer", "remainder", "expire"].includes(scope!))

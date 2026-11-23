@@ -1,4 +1,4 @@
-import { bountyPoolV1Abi } from "./v2-abi.js";
+import { bountyPoolV1Abi, escrowV2Abi } from "./v2-abi.js";
 import {
   acceptedV2WorkerBond,
   isV2ResolverAction,
@@ -13,7 +13,6 @@ import { randomUUID } from "node:crypto";
 import {
   isAddressEqual,
   keccak256,
-  parseAbi,
   parseTransaction,
   recoverTransactionAddress,
   type TransactionSerializable,
@@ -86,7 +85,6 @@ const stateSchema = z.object({
     z.object({ amountBaseUnits: uint, status: z.string(), dispute: z.unknown().optional() }),
   ),
 });
-const feeAbi = parseAbi(["function disputeFee(uint8) view returns (uint256)"]);
 /**
  * Headroom on the node's gas estimate for every V2 write, in percent (e2e finding F4: jury and
  * snapshot steps whose cost depends on state read at execution ran out of gas at the bare
@@ -240,6 +238,11 @@ export function createTaskV2Executor(options: TasksChainOptions) {
           );
           if (gross !== BigInt(terms!.pool!.rewardPerClaimBaseUnits))
             v2GuardFailure("Hosted pool reward differs from its verified on-chain amount.");
+        } else if (action.action === "close-rejected") {
+          const milestone = target.milestones[action.i];
+          if (!milestone) v2GuardFailure("The rejected milestone is unavailable.");
+          gross = milestone!.amount;
+          feeBp = 0;
         } else if (action.action === "split" || action.action === "split-consent")
           gross = BigInt(action.toWorker);
         else if (action.action === "approve" || action.action === "finalize") {
@@ -264,7 +267,7 @@ export function createTaskV2Executor(options: TasksChainOptions) {
             fail("Hosted dispute binding is unavailable.");
           pays = gross = await target.rpc.readContract({
             address: target.escrow,
-            abi: feeAbi,
+            abi: escrowV2Abi,
             functionName: "disputeFee",
             args: [action.i],
           });

@@ -3725,6 +3725,19 @@ describe("Tasks V2 jury and reviewer verbs", () => {
   }
 
   it.each([
+    [["close-rejected", ID, "--index", "0"], { action: "close-rejected", i: 0 }],
+    [
+      ["bump-consent-nonce", ID, "--new-nonce", "7"],
+      { action: "bump-consent-nonce", newNonce: "7" },
+    ],
+    [
+      ["prune-reviewer", ID, "--reviewer", ADDRESS],
+      { action: "prune-reviewer", reviewer: ADDRESS },
+    ],
+    [
+      ["prune-reviewers", ID, "--reviewers", `${ADDRESS},${ESCROW}`],
+      { action: "prune-reviewers", reviewers: [ADDRESS, ESCROW] },
+    ],
     [["jury", ID, "--index", "0", "--step", "draw"], { action: "draw-jury", i: 0 }],
     [["jury", ID, "--index", "1", "--step", "rearm"], { action: "rearm-draw", i: 1 }],
     [["jury", ID, "--index", "0", "--step", "resolve"], { action: "resolve", i: 0 }],
@@ -3910,5 +3923,53 @@ describe("Tasks V2 jury and reviewer verbs", () => {
       ready: true,
     });
     expect(result.stderr.join("\n")).toContain("untrusted override");
+  });
+});
+
+describe("audit-3 outcome presentation", () => {
+  it.each([
+    ["show", true],
+    ["show", false],
+    ["status", true],
+    ["status", false],
+  ] as const)(
+    "shows cause 6 in %s with signedIn=%s without naming a winner",
+    async (verb, signedIn) => {
+      const settlement = { cause: 6, paidToWorker: "100", disputed: false, disputeWinner: 1 };
+      const value = order();
+      const client = fakeClient({
+        show: async () => ({
+          ...value,
+          workOrder: { ...value.workOrder, v2State: { outcomes: [settlement] } },
+        }),
+        chainState: async () => ({
+          workOrderId: ID,
+          milestones: [],
+          observedAt: NOW.toISOString(),
+          outcomes: [settlement],
+        }),
+        events: async () => ({ events: [], nextAfter: 0 }),
+        publicTask: async () => ({ ...card(), outcomes: [settlement] }),
+      });
+      const { dependencies } = await fixture(signedIn, client);
+      const json = await invoke([verb, ID], dependencies);
+      expect(json.code).toBe(0);
+      expect(JSON.stringify(json.value)).toContain('"disputed":true,"disputeWinner":0');
+      expect(JSON.stringify(json.value)).toContain(
+        "status quo final after round 2 without a verdict; no dispute winner",
+      );
+      const human = await invoke([verb, ID], dependencies, false);
+      expect(human.code).toBe(0);
+      expect(human.stdout.join("\n")).toContain(
+        "Disputed: status quo final after round 2 without a verdict; no dispute winner.",
+      );
+    },
+  );
+
+  it("includes membership and stake-retention guidance in task help", async () => {
+    const { dependencies } = await fixture();
+    const result = await invoke(["--help"], dependencies, false);
+    expect(result.stdout.join("\n")).toContain("mayVote reports jury membership only");
+    expect(result.stdout.join("\n")).toContain("even a cancelled unstake can cost the vote");
   });
 });

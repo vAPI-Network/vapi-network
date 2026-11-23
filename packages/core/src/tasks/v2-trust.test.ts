@@ -14,6 +14,9 @@ const env = {
 describe("local V2 trust anchors", () => {
   it("has no deployment pins until the ceremony and refuses an unconfigured chain", () => {
     expect(TRUSTED_TASKS_V2_DEPLOYMENTS).toEqual({});
+    expect(() => getTrustedTasksV2Deployment(8453, { env: {} })).toThrow(
+      "No locally pinned V2 deployment",
+    );
     expect(() => getTrustedTasksV2Deployment(84532, { env: {} })).toThrow(
       "No locally pinned V2 deployment",
     );
@@ -55,12 +58,14 @@ describe("local V2 trust anchors", () => {
           ...env,
           VAPI_TASKS_V2_EVIDENCE_WINDOW_SECONDS_84532: "3600",
           VAPI_TASKS_V2_OFFER_TTL_SECONDS_84532: "86400",
+          VAPI_TASKS_V2_REVIEW_WINDOW_SECONDS_84532: "172800",
           VAPI_TASKS_V2_CHOICE_WINDOW_SECONDS_84532: "172800",
         },
         notice: vi.fn(),
       }),
     ).toMatchObject({
       offerTtlSeconds: 86400,
+      reviewWindowSeconds: 172800,
       choiceWindowSeconds: 172800,
       evidenceWindowSeconds: 3600,
     });
@@ -113,6 +118,17 @@ describe("local V2 trust anchors", () => {
       }),
     ).toThrow(expect.objectContaining({ code: "v2_trust_unavailable" }));
   });
+  it.each(["0", "-1", "1.5", "invalid", "9007199254740992"])(
+    "refuses invalid review window %s",
+    (value) => {
+      expect(() =>
+        getTrustedTasksV2Deployment(84532, {
+          env: { ...env, VAPI_TASKS_V2_REVIEW_WINDOW_SECONDS_84532: value },
+          notice: vi.fn(),
+        }),
+      ).toThrow(expect.objectContaining({ code: "v2_trust_unavailable" }));
+    },
+  );
   it("treats an evidence window alone as an incomplete override", () => {
     expect(() =>
       getTrustedTasksV2Deployment(84532, {

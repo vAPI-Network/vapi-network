@@ -70,6 +70,10 @@ export const TOOL_PRESENTATION: Readonly<Record<string, ToolPresentation>> = {
   "tasks.counter-evidence": { title: "Add counter-evidence", annotations: write },
   "tasks.resolve-unmatched": { title: "Resolve an unmatched escrow", annotations: destructive },
   // step "resolve" settles the disputed principal and pays out the dispute fees.
+  "tasks.close-rejected": { title: "Close a rejected milestone", annotations: destructive },
+  "tasks.bump-consent-nonce": { title: "Revoke outstanding consents", annotations: destructive },
+  "tasks.prune-reviewer": { title: "Prune a reviewer seat", annotations: destructive },
+  "tasks.prune-reviewers": { title: "Prune reviewer seats", annotations: destructive },
   "tasks.jury": { title: "Run a jury step", annotations: destructive },
   "tasks.vote": { title: "Commit or reveal a jury vote", annotations: write },
   "tasks.approve-bond": { title: "Approve a worker bond", annotations: destructive },

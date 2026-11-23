@@ -225,8 +225,6 @@ async function fixture(step: TaskV2OperationResponse["operation"]["step"] = "v2-
           return pool ? POOL_FACTORY : FACTORY;
         case "implementation":
           return IMPLEMENTATION;
-        case "MIN_OBJECTION_WINDOW":
-          return 86400n;
         case "name":
           return "USD Coin";
         case "version":
@@ -293,6 +291,8 @@ async function fixture(step: TaskV2OperationResponse["operation"]["step"] = "v2-
             evidenceDeadline: NOW_SECONDS - 1n,
             commitDeadline: 0n,
             revealDeadline: 0n,
+            drawBlock: 100n,
+            rearms: 0,
           };
         case "submissionCommitment":
           return [`0x${"5e".repeat(32)}`, NOW_SECONDS - 10n, true];

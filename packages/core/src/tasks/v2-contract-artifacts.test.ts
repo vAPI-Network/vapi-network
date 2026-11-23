@@ -28,6 +28,7 @@ import {
   disputeResolverV3Abi,
   escrowFactoryV2Abi,
   escrowV2Abi,
+  reviewerRegistryV2Abi,
 } from "./v2-abi.generated.js";
 import {
   acceptedV2TermsHash,
@@ -48,6 +49,7 @@ const USDC = getAddress(`0x${"44".repeat(20)}`);
 const FACTORY = getAddress(`0x${"55".repeat(20)}`);
 const POOL_FACTORY = getAddress(`0x${"66".repeat(20)}`);
 const IMPLEMENTATION = getAddress(`0x${"67".repeat(20)}`);
+const REGISTRY = getAddress(`0x${"a9".repeat(20)}`);
 const RESOLVER = getAddress(`0x${"99".repeat(20)}`);
 const NOW = BigInt(Date.parse("2026-10-26T12:00:00Z") / 1000);
 const DEADLINE = "2026-10-28T12:00:00.000Z";
@@ -192,6 +194,7 @@ function chain(input: {
         milestoneCount: milestones.length,
         milestone: ([i]: readonly unknown[]) => milestones[Number(i)],
         consentNonces: 3n,
+        disputeRounds: 1,
         submissionCommitment: () => [`0x${"5e".repeat(32)}`, NOW - 10n, true],
       };
   const rpc = createArtifactRpc({
@@ -222,13 +225,14 @@ function chain(input: {
             predictedAddress(bountyPoolFactoryV1Abi, "predictPool", args),
         },
       },
-      [IMPLEMENTATION]: { abi: escrowV2Abi, values: { MIN_OBJECTION_WINDOW: 86400n } },
+      [IMPLEMENTATION]: { abi: escrowV2Abi, values: {} },
       [escrow]: {
         abi: pool ? bountyPoolV1Abi : bounty ? bountyEscrowV2Abi : escrowV2Abi,
         values: cloneValues,
       },
       [USDC]: { abi: usdcTokenAbi, values: { name: "USD Coin", version: "2" } },
-      [RESOLVER]: { abi: disputeResolverV3Abi, values: {} },
+      [RESOLVER]: { abi: disputeResolverV3Abi, values: { registry: REGISTRY } },
+      [REGISTRY]: { abi: reviewerRegistryV2Abi, values: {} },
     },
   });
   const options = {
@@ -503,5 +507,202 @@ describe("Tasks V2 guard against the current contract artifact", () => {
         0n,
       ),
     ).rejects.toMatchObject({ code: "v2_plan_mismatch" });
+  });
+});
+
+describe("audit-3 guarded writes", () => {
+  it.each([
+    { action: "close-rejected", i: 0 },
+    { action: "bump-consent-nonce", newNonce: "4" },
+    { action: "bump-consent-nonce", newNonce: (2n ** 128n - 1n).toString() },
+    { action: "prune-reviewer", reviewer: WORKER },
+    { action: "prune-reviewers", reviewers: [WORKER, account.address] },
+  ] as const)("binds $action to the verified contract and exact arguments", async (action) => {
+    const view = orderView(taskTerms);
+    const c = chain({ view, registered: true, shape: "task" });
+    const pruning = action.action === "prune-reviewer" || action.action === "prune-reviewers";
+    const abi: Abi = pruning ? reviewerRegistryV2Abi : escrowV2Abi;
+    const functionName = {
+      "close-rejected": "closeRejected",
+      "bump-consent-nonce": "bumpConsentNonce",
+      "prune-reviewer": "pruneReviewer",
+      "prune-reviewers": "pruneReviewers",
+    }[action.action];
+    const args =
+      "i" in action
+        ? [action.i]
+        : "newNonce" in action
+          ? [BigInt(action.newNonce!)]
+          : "reviewer" in action
+            ? [action.reviewer]
+            : [action.reviewers];
+    const data = encodeFunctionData({ abi, functionName, args });
+    const to = pruning ? REGISTRY : c.escrow;
+    const write = action as unknown as TaskV2Action;
+    await verify(c, view, write, `v2-${action.action}`, to, data);
+    await expect(verify(c, view, write, `v2-${action.action}`, USDC, data)).rejects.toMatchObject({
+      code: "v2_plan_mismatch",
+    });
+    const badArgs =
+      action.action === "close-rejected"
+        ? [1]
+        : action.action === "bump-consent-nonce"
+          ? [5n]
+          : action.action === "prune-reviewer"
+            ? [USDC]
+            : [[USDC]];
+    await expect(
+      verify(
+        c,
+        view,
+        write,
+        `v2-${action.action}`,
+        to,
+        encodeFunctionData({ abi, functionName, args: badArgs }),
+      ),
+    ).rejects.toMatchObject({ code: "v2_plan_mismatch" });
+  });
+
+  it.each(["0", "2", "3", (2n ** 128n).toString()])(
+    "refuses nonce %s at current nonce 3",
+    async (newNonce) => {
+      const view = orderView(taskTerms);
+      const c = chain({ view, registered: true, shape: "task" });
+      await expect(
+        verify(
+          c,
+          view,
+          { action: "bump-consent-nonce", newNonce },
+          "v2-bump-consent-nonce",
+          c.escrow,
+          encodeFunctionData({
+            abi: escrowV2Abi,
+            functionName: "bumpConsentNonce",
+            args: [BigInt(newNonce)],
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "v2_plan_mismatch" });
+    },
+  );
+
+  it("binds SplitConsent to disputeRounds(i) minus one, refusing old schemas and replayed rounds", async () => {
+    const view = orderView(taskTerms);
+    const c = chain({ view, registered: true, shape: "task" });
+    const action = { action: "split-consent", i: 0, toWorker: "40000000" } as const;
+    const target = await verifyV2Target(c.options, { chainId: 84532 }, view, action, c.escrow);
+    const fields = [
+      { name: "escrow", type: "address" },
+      { name: "milestone", type: "uint8" },
+      { name: "round", type: "uint32" },
+      { name: "toWorker", type: "uint96" },
+      { name: "termsHash", type: "bytes32" },
+      { name: "signer", type: "address" },
+      { name: "nonce", type: "uint256" },
+      { name: "expiry", type: "uint64" },
+    ];
+    const intent = taskV2IntentSchema.parse({
+      kind: "eip712",
+      operationId: "sig_split",
+      signer: account.address,
+      typedData: {
+        domain: {
+          name: "vAPI Tasks Escrow",
+          version: "2",
+          chainId: 84532,
+          verifyingContract: c.escrow,
+        },
+        primaryType: "SplitConsent",
+        types: { SplitConsent: fields },
+        message: {
+          escrow: c.escrow,
+          milestone: 0,
+          round: 0,
+          toWorker: "40000000",
+          termsHash: c.creation[0].termsHash,
+          signer: account.address,
+          nonce: "3",
+          expiry: (NOW + 600n).toString(),
+        },
+      },
+    });
+    await expect(
+      verifyV2TypedData(target, intent, action, account.address, 0n),
+    ).resolves.toBeUndefined();
+    for (const round of [1, -1, 2 ** 32])
+      await expect(
+        verifyV2TypedData(
+          target,
+          {
+            ...intent,
+            typedData: { ...intent.typedData, message: { ...intent.typedData.message, round } },
+          },
+          action,
+          account.address,
+          0n,
+        ),
+      ).rejects.toThrow();
+    await expect(
+      verifyV2TypedData(
+        target,
+        {
+          ...intent,
+          typedData: {
+            ...intent.typedData,
+            types: { SplitConsent: fields.filter((field) => field.name !== "round") },
+          },
+        },
+        action,
+        account.address,
+        0n,
+      ),
+    ).rejects.toMatchObject({ code: "v2_plan_mismatch" });
+    // A new round starts: the same signed offer must fail; a round-1 offer must pass.
+    const original = target.rpc.readContract.bind(target.rpc);
+    target.rpc.readContract = (async (call: { functionName: string }) =>
+      call.functionName === "disputeRounds" ? 2 : original(call as never)) as typeof original;
+    await expect(verifyV2TypedData(target, intent, action, account.address, 0n)).rejects.toThrow(
+      "round",
+    );
+    await expect(
+      verifyV2TypedData(
+        target,
+        {
+          ...intent,
+          typedData: { ...intent.typedData, message: { ...intent.typedData.message, round: 1 } },
+        },
+        action,
+        account.address,
+        0n,
+      ),
+    ).resolves.toBeUndefined();
+  });
+});
+
+describe("V2 creation defaults in one deployment tuple", () => {
+  it("uses the V2 review window from the same tuple as the address pins", async () => {
+    const view = orderView(taskTerms);
+    const c = chain({ view, registered: false, shape: "task" });
+    const pin = { ...PIN, reviewWindowSeconds: 172800 };
+    const options = { ...c.options, trustedV2Deployments: { 84532: pin } };
+    const creation = c.creation;
+    const args = [
+      {
+        ...creation[0],
+        reviewWindow: 172800n,
+        objectionWindow: 172800n,
+        termsHash: acceptedV2TermsHash(view, pin, 172800n),
+      },
+      creation[1],
+      creation[2],
+    ] as const;
+    const op = operation(
+      "v2-create-escrow",
+      FACTORY,
+      encodeFunctionData({ abi: escrowFactoryV2Abi, functionName: "createEscrow", args }),
+    );
+    const action = { action: "fund" } as const;
+    const target = await verifyV2Target(options, op, view, action);
+    await expect(verifyV2Plan(target, op.operation, action, 0n)).resolves.toBeUndefined();
+    expect(c.rpc.reads.some((read) => read.functionName === "implementation")).toBe(false);
   });
 });

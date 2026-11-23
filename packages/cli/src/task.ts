@@ -79,6 +79,12 @@ import {
   type SignedScopeTerms,
   validTaskBrief,
 } from "@vapi-network/core/tasks";
+import {
+  TASK_V2_JURY_RULES,
+  TASK_V2_REVIEWER_GUIDANCE,
+  taskV2OutcomeLines,
+  normalizeTaskV2Outcomes,
+} from "@vapi-network/core/tasks";
 import { createHostedTasksClient, registeredAgentProfileSchema } from "@vapi-network/mcp";
 import {
   getEnvironment,
@@ -126,6 +132,10 @@ export const TASK_HELP = `Usage:
   vapi task dispute <id> [--evidence-hash <0x + 64 hex>|--index N --evidence <text>] [--action raise|resolve-unmatched|split --to-worker <base-units>] [--yes] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task counter-evidence <id> [--evidence-hash <0x + 64 hex>|--index N --evidence <text>] [--yes] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task resolve-unmatched <id> [--index N] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task close-rejected <id> --index N [--account <name>] [--json]
+  vapi task bump-consent-nonce <id> --new-nonce N [--account <name>] [--json]
+  vapi task prune-reviewer <id> --reviewer <address> [--account <name>] [--json]
+  vapi task prune-reviewers <id> --reviewers a,b,c [--account <name>] [--json]
   vapi task jury <id> --index N --step open|draw|rearm|resolve [--account <name>] [--json]
   vapi task vote <id> --index N (--commit worker|poster|split [--to-worker <base-units>] | --reveal) [--account <name>] [--json]
   vapi task approve-bond <id> [--yes] [--account <name>] [--json]
@@ -138,7 +148,7 @@ export const TASK_HELP = `Usage:
 
 Durations: 5s, 10m, 48h, 7d, or an ISO-8601 timestamp. Posting and proposal terms require at least 10 minutes.
 V1 dispute accepts a precomputed evidence hash. V2 dispute accepts --index with --evidence text. C0 action indices are zero-based; declared milestone indices remain one-based.
-Jury: with 20 or fewer eligible reviewers everyone eligible votes; above 20, 5 are drawn. A verdict needs at least 3 reveals and a strict majority. A tie or no majority restores the pre-dispute state and a new dispute round may be raised. No mediation or appeal. Jury open repeats while the case is Snapshotting.
+Jury: ${TASK_V2_JURY_RULES} ${TASK_V2_REVIEWER_GUIDANCE} Jury open repeats while the case is Snapshotting.
 Vote --commit seals the salt in a local ballot under VAPI_HOME before vAPI sees the commitment; --reveal reads that ballot back by the onchain commitment, so reveal from the machine that committed. --to-worker is USDC base units and only for split.
 Watch requires an interval of at least 1s and a positive timeout. Auto-release uses the acting wallet's agent profile, or defaults, and releases only amounts strictly below the threshold.
 Posting without --fund moves no money. --fund applies task and daily caps before signing. Task reads require tasks:read and writes require tasks:write; write access includes reads.
@@ -436,6 +446,8 @@ export function taskOutput(
   value: object,
   lines: string[],
 ): void {
+  value = normalizeTaskV2Outcomes(value);
+  lines = [...lines, ...taskV2OutcomeLines(value)];
   if (json) {
     io.stdout(
       JSON.stringify({
@@ -490,12 +502,22 @@ async function taskCommandInner(
   const parsed = parseArguments(commandArguments, {
     valueOptions: new Set([
       "--wallet",
-      ...(["milestone", "dispute", "counter-evidence", "resolve-unmatched", "sign"].includes(verb!)
+      ...([
+        "milestone",
+        "dispute",
+        "counter-evidence",
+        "resolve-unmatched",
+        "close-rejected",
+        "sign",
+      ].includes(verb!)
         ? ["--index"]
         : []),
       ...(verb === "jury" ? ["--index", "--step"] : []),
       ...(verb === "vote" ? ["--index", "--commit", "--to-worker"] : []),
       ...(verb === "claim-owed" ? ["--to"] : []),
+      ...(verb === "bump-consent-nonce" ? ["--new-nonce"] : []),
+      ...(verb === "prune-reviewer" ? ["--reviewer"] : []),
+      ...(verb === "prune-reviewers" ? ["--reviewers"] : []),
       ...(verb === "reviewer-status" ? ["--address"] : []),
       ...(verb === "milestone"
         ? ["--reason", "--proof", "--file", "--files", "--note", "--proof-json"]

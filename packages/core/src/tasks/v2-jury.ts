@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Jury, vote and reviewer steps for Tasks V2 (DisputeResolverV3). Plans come from
 // the hosted writes route; this module only reads the chain, seals ballots and
-// hands the raw write to executeTaskV2. Rules: with 20 or fewer eligible reviewers
-// everyone eligible votes; above 20, 5 are drawn. A verdict needs at least 3 reveals
-// and a strict majority. A tie or no majority restores the pre-dispute state and a
-// new dispute round may be raised. There is no mediation or appeal.
+// hands the raw write to executeTaskV2. Rules: fewer than 3 eligible reviewers ends the round;
+// with 3 to 20 all eligible reviewers join the jury; above 20, 5 are drawn. A verdict needs at least 3 reveals
+// and a strict majority. Round one without a verdict restores the pre-dispute state;
+// round two makes that status quo final, disputed with no dispute winner.
 import { randomBytes as nodeRandomBytes } from "node:crypto";
 
 import {
@@ -40,7 +40,9 @@ import {
   escrowFactoryV2Abi,
   escrowV2Abi,
   TASK_V2_CASE_STATE,
+  reviewerRegistryV2Abi,
 } from "./v2-abi.js";
+import { TASK_V2_REVIEWER_GUIDANCE } from "./v2-events.js";
 import { executeTaskV2, type TaskV2ExecutionInput } from "./v2-execution.js";
 import { v2Read, verifiedV2Case, verifiedV2Resolver, verifyV2Target } from "./v2-plan-guard.js";
 import { getTrustedTasksV2Deployment, type TasksV2DeploymentOverrides } from "./v2-trust.js";
@@ -76,7 +78,7 @@ export type TaskV2JuryStep = keyof typeof TASK_V2_JURY_STEPS;
 
 // External reviewer-seat contracts, mirrored from vapi-app tasks-v1 2621284b3
 // apps/api/app/tasks/server/chain/v2-writes.server.ts reviewerStatus().
-const registryAbi = parseAbi(["function isReviewer(address) view returns (bool)"]);
+const registryAbi = reviewerRegistryV2Abi;
 const vapiIdAbi = parseAbi(["function hasId(address wallet) view returns (bool)"]);
 const gateAbi = parseAbi([
   "function staking() view returns (address)",
@@ -84,10 +86,6 @@ const gateAbi = parseAbi([
   "function isEligible(address) view returns (bool)",
 ]);
 const stakingAbi = parseAbi(["function stakedBalance(address) view returns (uint256)"]);
-// DisputeResolverV3's public `disputeRound` mapping getter; not in the synced ABI.
-const disputeRoundAbi = parseAbi([
-  "function disputeRound(address escrow, uint8 milestone) view returns (uint32)",
-]);
 const caseIdParameters = parseAbiParameters("address, uint8, uint32");
 const commitmentParameters = parseAbiParameters(
   "address, uint8, uint32, address, uint8, uint96, bytes32",
@@ -175,7 +173,7 @@ export function createTaskV2Jury(options: TasksChainOptions) {
       .int()
       .min(0)
       .max(2 ** 32 - 1)
-      .parse(await v2Read(target.rpc, resolver, disputeRoundAbi, "disputeRound", at));
+      .parse(await v2Read(target.rpc, resolver, disputeResolverV3Abi, "disputeRound", at));
     if (taskV2CaseId(target.escrow, i, round) !== caseId)
       throw new TaskOperationError(
         "invalid_response",
@@ -643,8 +641,9 @@ export async function readTaskV2ReviewerStatus(input: {
   const meetsStake = BigInt(status.staked) >= BigInt(status.threshold);
   return {
     ...status,
+    reviewerGuidance: TASK_V2_REVIEWER_GUIDANCE,
     meetsStake,
-    // A seat, a vAPI ID, the stake gate and availability decide whether this wallet can be drawn.
+    // Current checks only: warm-up, frozen membership and historical stake still apply.
     ready:
       status.isReviewer &&
       status.hasId &&
