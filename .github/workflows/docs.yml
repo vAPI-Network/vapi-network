@@ -1,0 +1,36 @@
+name: docs
+
+# Checks the docs on a pull request and on main: the build, and every link, anchor and search result in it.
+# With a Cloudflare account it also publishes them: main to the live site, a pull request to its own preview address.
+# The account is the repository variable CLOUDFLARE_ACCOUNT_ID and the repository secret CLOUDFLARE_API_TOKEN.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      # Installs the package at the version that wrote this file. npm runs outside the repository, where it reads no package.json: inside, it installs the repository's own dependencies too, and stops when the package.json allows only pnpm or names a workspace package. No dependency runs an install script: none needs one.
+      - run: npm install --no-save --ignore-scripts vertical-docs@0.1.0
+        working-directory: ${{ runner.temp }}
+      # Links the package to node_modules/, where docs-site/wrangler.jsonc finds the Worker. A repository that has vertical-docs in its own devDependencies runs its own install in place of these two steps.
+      - run: ln -s "$RUNNER_TEMP/node_modules" node_modules
+      - run: node_modules/.bin/vertical-docs check docs-site
+      - if: vars.CLOUDFLARE_ACCOUNT_ID != ''
+        run: npx wrangler@4.161.0 ${{ github.event_name == 'push' && 'deploy' || format('versions upload --preview-alias pr-{0}', github.event.number) }} --config "$GITHUB_WORKSPACE/docs-site/wrangler.jsonc" --message ${{ github.sha }}
+        working-directory: ${{ runner.temp }}
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

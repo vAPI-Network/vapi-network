@@ -1,0 +1,13 @@
+{
+  "name": "vapi-docs",
+  "main": "../node_modules/vertical-docs/src/worker.ts",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    "directory": "dist",
+    "binding": "ASSETS",
+    // An address with no page answers 404 with dist/404.html.
+    "not_found_handling": "404-page",
+    // The Worker answers pages and /mcp. Hashed files are served without it.
+    "run_worker_first": ["/*", "!/_astro/*"],
+  },
+}

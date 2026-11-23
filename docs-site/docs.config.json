@@ -1,0 +1,8 @@
+{
+  "name": "vAPI",
+  "description": "vAPI Network builds payment and trust infrastructure for AI agents on Base, with x402 API payments in USDC.",
+  "url": "https://docs.vapinetwork.ai",
+  "repo": "https://github.com/vAPI-Network/vapi-network",
+  "accent": "#ff7300",
+  "tabs": ["call", "agents", "router", "stake", "tasks", "reference"]
+}

@@ -1,0 +1,20 @@
+name: docs-sync
+
+# Optional: a coding agent in your own session keeps the docs in step with the code through AGENTS.md, and needs no key.
+# This workflow does the same on GitHub. After a code change on main, an agent edits the docs to match the change, and the result arrives as one pull request on docs/sync.
+# The agent needs a model key: the repository secret ANTHROPIC_API_KEY. Without it a run does nothing.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["docs-site/**"]
+
+jobs:
+  sync:
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: VerticalStudio-ai/vertical-docs/.github/workflows/docs-sync.yml@6bd9f3ddae4b6bd23bb8d118b4026cef9c85e8a2
+    with:
+      site: docs-site
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
