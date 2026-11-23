@@ -75,34 +75,48 @@ export async function searchDocs(
     throw new DocsError("invalid_input", "Search limit must be a positive integer.");
   }
   const origin = resolveDocsOrigin(options.env);
-  const { text: body } = await requestText(
-    new URL("/~gitbook/mcp", origin),
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "tools/call",
-        params: { name: "searchDocumentation", arguments: { query: normalized } },
-      }),
+  const requestOptions = {
+    operation: "search" as const,
+    origin,
+    timeoutMs: options.timeoutMs ?? SEARCH_TIMEOUT_MS,
+    fetchImpl: options.fetchImpl,
+  };
+  const searchRequest = (name: string, args: { query: string; limit?: number }): RequestInit => ({
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
     },
-    {
-      operation: "search",
-      origin,
-      timeoutMs: options.timeoutMs ?? SEARCH_TIMEOUT_MS,
-      fetchImpl: options.fetchImpl,
-    },
-  );
-  const payload = parseSearchEnvelope(body);
-  const blocks = searchTextBlocks(payload);
-  const results = blocks.flatMap((block) => {
-    const parsed = parseSearchBlock(block);
-    return parsed === undefined ? [] : [parsed];
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name, arguments: args },
+    }),
   });
+  let results: DocsSearchResult[];
+  try {
+    const { text: body } = await requestText(
+      new URL("/mcp", origin),
+      searchRequest("search_docs", {
+        query: normalized,
+        ...(options.limit === undefined ? {} : { limit: Math.min(options.limit, 10) }),
+      }),
+      { ...requestOptions, notFoundOn404: true, notFoundOn405: true },
+    );
+    results = parseSiteSearch(searchTextBlocks(parseSearchEnvelope(body)), origin);
+  } catch (error) {
+    if (!(error instanceof DocsError && error.code === "not_found")) throw error;
+    const { text: body } = await requestText(
+      new URL("/~gitbook/mcp", origin),
+      searchRequest("searchDocumentation", { query: normalized }),
+      requestOptions,
+    );
+    results = searchTextBlocks(parseSearchEnvelope(body)).flatMap((block) => {
+      const parsed = parseSearchBlock(block);
+      return parsed === undefined ? [] : [parsed];
+    });
+  }
   return { results: options.limit === undefined ? results : results.slice(0, options.limit) };
 }
 
@@ -134,13 +148,13 @@ export async function readDocs(
   throw new DocsError("not_found", `Documentation page not found: ${page.href}`);
 }
 
-/** GitBook serves a page at `<path>.md` and a section or group root at `<path>/readme.md`. */
+/** Try the site's Markdown path before GitBook's section and home readme pages. */
 async function readFirstMarkdown(
   page: URL,
   options: RequestOptions,
 ): Promise<DocsReadResponse | undefined> {
   const path = page.pathname.replace(/\/+$/u, "");
-  const candidates = path ? [`${path}.md`, `${path}/readme.md`] : ["/readme.md"];
+  const candidates = path ? [`${path}.md`, `${path}/readme.md`] : ["/index.md", "/readme.md"];
   for (const pathname of candidates) {
     const candidate = new URL(page);
     candidate.pathname = pathname;
@@ -169,17 +183,32 @@ export async function askDocs(
   // The ask interface answers on markdown URLs; the bare site root serves HTML without the header.
   const url = new URL("/readme.md", origin);
   url.searchParams.set("ask", normalized);
-  const { text: markdown } = await requestText(
-    url,
-    { method: "GET", headers: { accept: "text/markdown" } },
-    {
-      operation: "ask",
-      origin,
-      timeoutMs: options.timeoutMs ?? ASK_TIMEOUT_MS,
-      fetchImpl: options.fetchImpl,
-    },
-  );
-  return parseAnswer(markdown);
+  try {
+    const { text: markdown } = await requestText(
+      url,
+      { method: "GET", headers: { accept: "text/markdown" } },
+      {
+        operation: "ask",
+        origin,
+        timeoutMs: options.timeoutMs ?? ASK_TIMEOUT_MS,
+        fetchImpl: options.fetchImpl,
+        notFoundOn404: true,
+      },
+    );
+    return parseAnswer(markdown);
+  } catch (error) {
+    if (!(error instanceof DocsError && error.code === "not_found")) throw error;
+  }
+  const { results } = await searchDocs(normalized, { ...options, limit: 3 });
+  if (results.length === 0) return { answer: "No matching documentation found.", sources: [] };
+  return {
+    answer: [
+      "These are the closest sections of the docs; the new docs site has no assistant.",
+      "",
+      ...results.map(({ title, url, excerpt }) => `- [${title}](${url}): ${excerpt}`),
+    ].join("\n"),
+    sources: results.map(({ title, url }) => ({ title, url })),
+  };
 }
 
 function nonEmpty(value: string, label: string): string {
@@ -215,6 +244,8 @@ type RequestOptions = {
   timeoutMs: number;
   fetchImpl?: typeof fetch;
   notFoundOn404?: boolean;
+  /** GitBook answers a POST to the new site's `/mcp` with 405, which means the endpoint is not there. */
+  notFoundOn405?: boolean;
 };
 
 async function requestText(
@@ -271,7 +302,10 @@ async function requestText(
       assertAllowedUrl(next, options.origin);
       url = next;
     }
-    if (options.notFoundOn404 && response.status === 404) {
+    if (
+      (options.notFoundOn404 && response.status === 404) ||
+      (options.notFoundOn405 && response.status === 405)
+    ) {
       throw new DocsError("not_found", `Documentation page not found: ${url.href}`);
     }
     if (!response.ok) {
@@ -384,10 +418,44 @@ function searchTextBlocks(payload: unknown): string[] {
     throw new DocsError("bad_response", `The documentation search returned an error${message}`);
   }
   const result = asRecord(envelope?.result);
+  if (result?.isError === true) {
+    throw new DocsError("bad_response", "The documentation search tool returned an error.");
+  }
   if (!Array.isArray(result?.content)) throw invalidSearchResponse();
   return result.content.flatMap((item) => {
     const block = asRecord(item);
     return block?.type === "text" && typeof block.text === "string" ? [block.text] : [];
+  });
+}
+
+function parseSiteSearch(blocks: string[], origin: string): DocsSearchResult[] {
+  if (blocks.length === 0) throw invalidSearchResponse();
+  return blocks.flatMap((block) => {
+    const items = parseJson(block);
+    if (!Array.isArray(items)) throw invalidSearchResponse();
+    return items.map((item: unknown) => {
+      const entry = asRecord(item);
+      if (
+        typeof entry?.title !== "string" ||
+        typeof entry.url !== "string" ||
+        typeof entry.heading !== "string" ||
+        typeof entry.snippet !== "string"
+      ) {
+        throw invalidSearchResponse();
+      }
+      let url: URL;
+      try {
+        url = new URL(entry.url, origin);
+      } catch {
+        throw invalidSearchResponse();
+      }
+      assertAllowedUrl(url, origin);
+      return {
+        title: entry.heading ? `${entry.title} › ${entry.heading}` : entry.title,
+        url: url.href,
+        excerpt: entry.snippet,
+      };
+    });
   });
 }
 

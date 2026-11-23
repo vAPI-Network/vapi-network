@@ -59,19 +59,75 @@ describe("vapi docs", () => {
     "prints $name in human and JSON modes before init",
     async ({ args, response, human, json }) => {
       const humanIo = capturedIo();
-      const humanFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response(response));
+      const humanFetch = vi.fn<typeof fetch>(async (url) =>
+        new URL(String(url)).pathname === "/mcp"
+          ? new Response("Not Found", { status: 404 })
+          : new Response(response),
+      );
       expect(await runCli(args, humanIo.io, { fetchImpl: humanFetch, env: {} })).toBe(0);
       expect(humanIo.stdout).toEqual([human]);
       expect(humanIo.stderr).toEqual([]);
 
       const jsonIo = capturedIo();
-      const jsonFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response(response));
+      const jsonFetch = vi.fn<typeof fetch>(async (url) =>
+        new URL(String(url)).pathname === "/mcp"
+          ? new Response("Not Found", { status: 404 })
+          : new Response(response),
+      );
       expect(await runCli([...args, "--json"], jsonIo.io, { fetchImpl: jsonFetch, env: {} })).toBe(
         0,
       );
       expect(jsonIo.stdout).toHaveLength(1);
       expect(JSON.parse(jsonIo.stdout[0]!)).toEqual(json);
       expect(jsonIo.stderr).toEqual([]);
+    },
+  );
+
+  it.each([false, true])(
+    "prints search sections for ask on the new site (JSON: %s)",
+    async (json) => {
+      const io = capturedIo();
+      const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+        if (new URL(String(input)).pathname === "/readme.md") {
+          return new Response("Not Found", { status: 404 });
+        }
+        return Response.json({
+          result: {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify([
+                  { title: "Call", url: "/call/", heading: "", snippet: "Call APIs." },
+                ]),
+              },
+            ],
+            isError: false,
+          },
+          jsonrpc: "2.0",
+          id: 1,
+        });
+      });
+      const args = ["docs", "How do I call APIs?", ...(json ? ["--json"] : [])];
+
+      expect(await runCli(args, io.io, { fetchImpl, env: {} })).toBe(0);
+      const answer =
+        "These are the closest sections of the docs; the new docs site has no assistant.\n\n" +
+        "- [Call](https://docs.vapinetwork.ai/call/): Call APIs.";
+      if (json) {
+        expect(JSON.parse(io.stdout[0]!)).toEqual({
+          answer,
+          sources: [{ title: "Call", url: "https://docs.vapinetwork.ai/call/" }],
+        });
+      } else {
+        expect(io.stdout).toEqual([
+          `${answer}\n\nSources:\n- Call: https://docs.vapinetwork.ai/call/`,
+        ]);
+      }
+      expect(io.stderr).toEqual([]);
+      expect(fetchImpl.mock.calls.map(([url]) => new URL(String(url)).pathname)).toEqual([
+        "/readme.md",
+        "/mcp",
+      ]);
     },
   );
 });
