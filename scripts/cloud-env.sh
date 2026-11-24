@@ -26,6 +26,12 @@ vapi_cloud_export_environment() {
     # Assignment arguments preserve whitespace, quotes and newlines without eval.
     export "$vapi_cloud_target=${!vapi_cloud_name}"
   done
+  # Cloud commits carry the project identity, whatever the image or the
+  # account that started the workspace has configured.
+  export GIT_AUTHOR_NAME='vAPI Development'
+  export GIT_AUTHOR_EMAIL='336934719+vapi-development@users.noreply.github.com'
+  export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+  export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
   # Descendants inherit this guard so caller overrides survive nested shells.
   export VAPI_NETWORK_CLOUD_ENV_APPLIED=1
 }

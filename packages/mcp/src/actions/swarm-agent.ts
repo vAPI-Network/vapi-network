@@ -1,4 +1,4 @@
-import { SWARM_NAME_PATTERN, walletNameSchema } from "@vapi-network/core";
+import { SWARM_NAME_PATTERN, swarmRunRefillSchema, walletNameSchema } from "@vapi-network/core";
 import { z } from "zod";
 
 import type { DetachedRunSummary } from "../agent/runtime.js";
@@ -50,6 +50,7 @@ export const attachedSwarmRunOutputSchema = z.object({
       stoppedBecause: z.object({ reason: z.string(), detail: z.string().optional() }).nullable(),
       spentUsd: z.number().nullable(),
       budgetUsd: z.number(),
+      refills: z.array(swarmRunRefillSchema).optional(),
       status: z.enum(["finished", "stopped", "error", "skipped"]),
       reason: z.string().optional(),
     }),
@@ -75,7 +76,18 @@ export const detachedRunSummarySchema: z.ZodType<DetachedRunSummary> = z.object(
   runId: z.string(),
   kind: z.enum(["local", "railway"]),
   mode: z.enum(["agent", "lead"]),
-  state: z.enum(["starting", "running", "finished", "failed", "stopped", "unknown"]),
+  state: z.enum([
+    "starting",
+    "running",
+    "finished",
+    "failed",
+    "stopped",
+    "unknown",
+    "orphaned",
+    "forgotten",
+  ]),
+  forgottenAt: z.iso.datetime().optional(),
+  confirmedBy: z.literal("cli").optional(),
   startedAt: z.string(),
   endedAt: z.string().optional(),
   exitCode: z.number().int().optional(),
@@ -160,6 +172,7 @@ export const swarmDelegateOutputSchema = z.object({
     .nullable(),
   spentUsd: z.number().nullable(),
   budgetUsd: z.number(),
+  refills: z.array(swarmRunRefillSchema).optional(),
 });
 
 export type SwarmAllocateResult = z.infer<typeof swarmAllocateOutputSchema>;

@@ -1,4 +1,5 @@
-import { createWalletClient, getAddress, type Hash } from "viem";
+import { createWalletClient, formatEther, getAddress, type Hash } from "viem";
+import { estimateL1Fee } from "viem/op-stack";
 
 import type { AgentCashConfig } from "./config.js";
 import type { VapiPaymentAccount } from "./keystore.js";
@@ -214,6 +215,114 @@ export async function sweepBack(args: {
     amountAtomic: amountAtomic.toString(),
     transaction,
   };
+}
+
+// Reserve 0.00001 ETH when the OP-stack gas price oracle is unavailable.
+export const NATIVE_ETH_L1_FEE_FALLBACK_WEI = 10_000_000_000_000n;
+export const NATIVE_ETH_FEE_MARGIN_PERCENT = 20n;
+
+export function supportsNativeEthSweep(network: string): boolean {
+  return network === BASE_MAINNET_CAIP2 || network === "eip155:84532";
+}
+
+export async function sweepNativeEth(args: {
+  account: VapiPaymentAccount;
+  config: AgentCashConfig;
+  network: string;
+  destination: string;
+  fetchImpl?: typeof fetch;
+  lookup?: LookupFn;
+}): Promise<SweepResult> {
+  const configured = configuredNetworkFor(args.config.networks, args.network);
+  if (!configured) throw new Error(`Network ${args.network} is not configured.`);
+  if (isSolanaNetwork(args.network)) {
+    throw new Error("Solana has no native ETH; use vapi sweep --asset usdc.");
+  }
+  if (usesUsdcGas(args.network)) {
+    throw new Error("Arc has no native ETH; use vapi sweep --asset usdc.");
+  }
+  if (!supportsNativeEthSweep(args.network)) {
+    throw new Error("Native ETH sweeps are supported only on Base mainnet and Base Sepolia.");
+  }
+  const rpcUrl = requireRpcUrl(args.network, configured);
+  const chain = createChain(args.network, rpcUrl);
+  const options = {
+    allowPrivateNetwork: args.config.allowPrivateNetwork,
+    ...(args.fetchImpl ? { fetch: args.fetchImpl } : {}),
+    ...(args.lookup ? { lookup: args.lookup } : {}),
+  };
+  const publicClient = createNetworkPublicClient(args.network, configured, options);
+  const to = getAddress(args.destination);
+  const balance = await publicClient.getBalance({ address: args.account.address });
+  const estimateTransferGas = async (value: bigint): Promise<bigint> => {
+    try {
+      return await publicClient.estimateGas({ account: args.account.address, to, value });
+    } catch (error) {
+      const code = await publicClient.getCode({ address: to });
+      if (code && code !== "0x") throw error;
+      return 21_000n;
+    }
+  };
+  let gas = await estimateTransferGas(1n);
+  const { maxFeePerGas, maxPriorityFeePerGas } = await publicClient.estimateFeesPerGas();
+  let l1Fee: bigint;
+  try {
+    l1Fee = await estimateL1Fee(publicClient, {
+      chain,
+      account: args.account.address,
+      to,
+      value: balance,
+      gas,
+      maxFeePerGas,
+      maxPriorityFeePerGas,
+      gasPriceOracleAddress: "0x420000000000000000000000000000000000000F",
+    });
+  } catch {
+    l1Fee = NATIVE_ETH_L1_FEE_FALLBACK_WEI;
+  }
+  let amount = 0n;
+  let validated = false;
+  // A contract's gas use can depend on value. Recompute the withdrawal after
+  // increasing the reserve, then validate that exact value before signing.
+  // Keep gas monotonic and bound retries so unstable estimates fail closed.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const fee = ((maxFeePerGas * gas + l1Fee) * (100n + NATIVE_ETH_FEE_MARGIN_PERCENT)) / 100n;
+    amount = balance - fee;
+    if (amount <= 0n) {
+      const name = getNetworkDefinition(args.network).name;
+      throw new Error(
+        `The ETH balance on ${name} (${formatEther(balance)} ETH) is too small to cover the ${name} network fee.`,
+      );
+    }
+    const requiredGas = await estimateTransferGas(amount);
+    if (requiredGas <= gas) {
+      validated = true;
+      break;
+    }
+    gas = requiredGas;
+  }
+  if (!validated) {
+    throw new Error(
+      "Could not safely estimate gas for the ETH withdrawal; no transaction was sent.",
+    );
+  }
+  const walletClient = createWalletClient({
+    account: args.account,
+    chain,
+    transport: createNetworkHttpTransport(rpcUrl, options),
+  });
+  const transaction = await walletClient.sendTransaction({
+    to,
+    value: amount,
+    gas,
+    maxFeePerGas,
+    maxPriorityFeePerGas,
+  });
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: transaction });
+  if (receipt.status !== "success") {
+    throw new Error(`Sweep transaction ${transaction} reverted on ${args.network}.`);
+  }
+  return { network: args.network, amountAtomic: amount.toString(), transaction };
 }
 
 function isInsufficientGasError(error: unknown): boolean {

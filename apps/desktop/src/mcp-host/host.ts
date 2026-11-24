@@ -16,6 +16,8 @@ export type McpHostDeps = {
   wallet?: string;
   signer: SignerRequester;
   env?: NodeJS.ProcessEnv;
+  /** Replaces the fetch the MCP server uses for every request; tests pass one that stays local. */
+  fetchImpl?: typeof fetch;
 };
 
 async function walletFacts(deps: McpHostDeps, name: string | undefined): Promise<WalletSummary> {
@@ -70,6 +72,7 @@ async function serveConnection(
     config,
     wallet: wallet.name,
     env: deps.env ?? process.env,
+    ...(deps.fetchImpl === undefined ? {} : { fetchImpl: deps.fetchImpl }),
     ledgerPath: join(deps.home, "spend-ledger.json"),
     receiptsPath: join(deps.home, "receipts.jsonl"),
     searchesPath: join(deps.home, "searches.jsonl"),

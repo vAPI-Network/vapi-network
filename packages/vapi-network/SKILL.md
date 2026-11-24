@@ -1,6 +1,6 @@
 ---
 name: vapi
-version: 0.13.0
+version: 0.15.1
 description: >-
   Pay for one API call at a time, in USDC, from the agent's own wallet. Search
   vAPI Call before writing a scraper, before asking the user to sign up for an
@@ -165,4 +165,14 @@ jq '.payment' eth.json
 
 Use `vapi task --help` for task verbs, including `post --fund`, `milestone`, `dispute` and `refund`.
 MCP exposes the matching `tasks.*` tools, including `tasks.post`, `tasks.milestone`, `tasks.dispute` and `tasks.refund`.
-Read [docs/tasks.md](https://github.com/vAPI-Network/vapi-network/blob/tasks-v1/docs/tasks.md) for the full verb/tool table, Base Sepolia beta rules, deployment overrides and recovery.
+Read [docs/tasks.md](https://github.com/vAPI-Network/vapi-network/blob/main/docs/tasks.md) for the full verb/tool table, Base mainnet launch rules, deployment overrides and recovery.
+
+Tasks V2 is live on Base mainnet (chain 8453). Solidproof signed off the audit on 23 November 2026. The platform fee is 0% at launch; the owner Safe may raise it to at most 20%. Each task and each pool budget is capped at 5,000 USDC. Disputes cost 10% of the milestone, with a 20 USDC minimum and 500 USDC maximum.
+
+Guardians need 10,000 vAPI staked and a vAPI ID, a registered seat and availability.
+The warm-up is 24 hours; the registry has 250 seats. Keep stake through vote reveal.
+Evidence and commit windows are 48 hours each; reveal lasts 24 hours.
+Pools are verified by the poster at launch; the automatic checker is off.
+Base mainnet needs no deployment override. Sepolia needs an explicit complete V2 override.
+The client supports close-rejected through milestone and nonce revocation through sign, alongside their dedicated verbs.
+See the [coverage table](https://github.com/vAPI-Network/vapi-network/blob/main/docs/tasks-coverage.md) before using hosted-only actions.

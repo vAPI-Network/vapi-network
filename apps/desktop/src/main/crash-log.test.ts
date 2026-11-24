@@ -6,11 +6,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { createCrashLog, scrub } from "./crash-log.js";
 
-const home = "/Users/zep";
+const home = "/Users/me";
 
 describe("crash report scrubbing", () => {
   it("shortens the home path and removes other absolute paths", () => {
-    expect(scrub("at /Users/zep/project/file.ts:12:3", home)).toBe("at ~/project/file.ts:12:3");
+    expect(scrub("at /Users/me/project/file.ts:12:3", home)).toBe("at ~/project/file.ts:12:3");
     expect(scrub("open /private/var/folders/report and /Applications/app/main.js", home)).toBe(
       "open <path> and <path>",
     );

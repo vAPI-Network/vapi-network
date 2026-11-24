@@ -5,8 +5,8 @@ import {
   assertWalletName,
   cancelMovement,
   ceilingCapsJson,
-  createPublicFetch,
   createAccount,
+  createPublicFetch,
   distributeBetweenAccounts,
   DistributeError,
   enableDefaultNetwork,
@@ -33,26 +33,21 @@ import {
 import { renameAgentLinkWallet } from "@vapi-network/core/agent-link";
 import { exportKeystoreKeys } from "@vapi-network/core/secrets";
 
-import {
-  UsageError,
-  baseUsdcBalanceReader,
-  confirmWalletName,
-  getSecretStore,
-  getEnvironment,
-  isInteractive,
-  openWalletStore,
-  parseArguments,
-  recordAudit,
-  registryBaseUrl,
-  requiredPositional,
-  targetWallet,
-  unlockTarget,
-  type CliDependencies,
-  type CliIo,
-} from "./cli.js";
+import { parseArguments, requiredPositional, UsageError } from "./args.js";
+import { baseUsdcBalanceReader } from "./balance-reader.js";
+import { getEnvironment, isInteractive, type CliDependencies, type CliIo } from "./cli-context.js";
 import { offerDashboardLink } from "./dashboard.js";
 import { runLoginFlow } from "./login.js";
+import { registryBaseUrl } from "./publish-cli.js";
 import { accountNameWidth, collectStatus, formatAccountLine } from "./status.js";
+import {
+  confirmWalletName,
+  getSecretStore,
+  openWalletStore,
+  recordAudit,
+  targetWallet,
+  unlockTarget,
+} from "./wallet-session.js";
 
 const ACCOUNT_OPTION = "--account";
 const WALLET_OPTION = "--wallet";

@@ -118,6 +118,9 @@ jobs:
       - name: Test against Windows PowerShell and DPAPI
         run: pnpm --filter @vapi-network/core exec vitest run src/secret-store.windows.test.ts
 
+      - name: Test atomic file writes and the receipts ledger on NTFS
+        run: pnpm --filter @vapi-network/core exec vitest run src/atomic-file.test.ts src/receipts.test.ts
+
   desktop:
     name: vAPI Desktop (macOS)
     runs-on: macos-15

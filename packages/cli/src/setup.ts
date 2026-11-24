@@ -2,40 +2,36 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
-  chooseSecretBackend,
   DEFAULT_WALLET_NAME,
   MAX_RESTORE_ACCOUNTS,
+  WalletStore,
+  chooseSecretBackend,
   getVapiPaths,
   loadOrCreateDeviceKey,
   osSecretStore,
   promptForSecret,
   restoreVault,
   validateRecoveryPhrase,
-  WalletStore,
   writeDefaultConfig,
   type VapiConfig,
 } from "@vapi-network/core";
 
+import { UsageError, parseArguments } from "./args.js";
+import { baseUsdcBalanceReader } from "./balance-reader.js";
 import {
-  CUSTODY_NOTICE,
-  UsageError,
-  baseUsdcBalanceReader,
-  fileExists,
   getEnvironment,
-  getSecretStore,
   isInteractive,
-  openWalletStore,
-  parseArguments,
   promptForLine,
   readConfig,
-  recordAudit,
-  showRecoveryPhrase,
   type CliDependencies,
   type CliIo,
-} from "./cli.js";
+} from "./cli-context.js";
 import { cloudBackupSetupChoice } from "./cloud-backup.js";
 import { runLoginFlow } from "./login.js";
+import { fileExists } from "./platform.js";
+import { CUSTODY_NOTICE, showRecoveryPhrase } from "./recovery-phrase.js";
 import { collectStatus, renderStatusScreen } from "./status.js";
+import { getSecretStore, openWalletStore, recordAudit } from "./wallet-session.js";
 
 const SETUP_ARGUMENT_ERROR = `vapi setup accepts only --no-cloud-backup and --accounts <n> (1-${MAX_RESTORE_ACCOUNTS}); a recovery phrase is typed at the prompt, never passed on the command line.`;
 const VAULT_CHOICE = "Create a new vault, or restore one from a recovery phrase? [new/restore] ";

@@ -12,17 +12,16 @@ import {
   routerUsage,
 } from "@vapi-network/core/router-client";
 
+import { targetWallet } from "./wallet-session.js";
 import {
-  UsageError,
   getEnvironment,
   getLinePrompt,
   isInteractive,
   isStdinInteractive,
-  parseArguments,
-  targetWallet,
   type CliDependencies,
   type CliIo,
-} from "./cli.js";
+} from "./cli-context.js";
+import { UsageError, parseArguments } from "./args.js";
 import { runLoginFlow } from "./login.js";
 import { routerDeps } from "./router.js";
 import { escapeToml, removeTomlTables, tomlKeyPath, tomlLines } from "./toml-config.js";

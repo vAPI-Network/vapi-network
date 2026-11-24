@@ -213,7 +213,7 @@ export const tasksMilestoneTool = descriptor(
   "Execute a hosted-prepared V2 milestone action. C0 index i is zero-based (0–4). Returns hosted operation state and gross · fee · net; local spend policy applies.",
   {
     ...participant,
-    action: z.enum(["submit", "approve", "reject", "finalize"]),
+    action: z.enum(["submit", "approve", "reject", "finalize", "close-rejected"]),
     i: taskV2IndexSchema,
     proof: taskV2ProofSchema.optional(),
     reason: z.string().min(1).max(8000).optional(),
@@ -248,7 +248,8 @@ export const tasksSignTool = descriptor(
   {
     ...moneyParticipant,
     wait: waitForIndexer,
-    action: z.enum(["award-consent", "split-consent"]).optional(),
+    action: z.enum(["award-consent", "split-consent", "bump-consent-nonce"]).optional(),
+    newNonce: z.string().optional(),
     i: taskV2IndexSchema.optional(),
     toWorker: z.string().regex(/^\d+$/u).optional(),
   },
@@ -936,6 +937,11 @@ export function createTasksTools(options: TasksToolsOptions) {
       );
     },
     async sign(input: Input<typeof tasksSignTool>) {
+      if (input.action === "bump-consent-nonce")
+        return v2(
+          input,
+          taskV2ActionSchema.parse({ action: input.action, newNonce: input.newNonce }),
+        );
       if (input.action)
         return v2(
           input,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { Receipt } from "./receipts.js";
+import { appendReceipt, readReceipts, type Receipt } from "./receipts.js";
 import type { SearchEvent } from "./searches.js";
 import { aggregateStats, receiptsToCsv } from "./stats.js";
 
@@ -49,6 +49,37 @@ const searches: SearchEvent[] = [
 ];
 
 describe("local metrics aggregation", () => {
+  it("counts a recovered Router purchase as one paid call in stats and CSV", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-stats-router-"));
+    try {
+      const path = join(home, "receipts.jsonl");
+      const original = receipt(
+        "router",
+        "2026-09-10T11:00:00.000Z",
+        "https://api.example/top-up/5",
+        {
+          source: "router.topup",
+          quote: quote("5000000"),
+          outcome: "settlement_unknown",
+          settlement: { outcome: "unknown" },
+        },
+      );
+      await appendReceipt(original, path);
+      await appendReceipt(
+        { ...original, outcome: "paid", settlement: { outcome: "succeeded" } },
+        path,
+      );
+      const rows = await readReceipts(path);
+      const stats = aggregateStats({ receipts: rows, searches: [], range: "24h", now });
+      expect(stats.totals).toMatchObject({ calls: 1, spendUsd: "5" });
+      expect(stats.outcomes.paid).toEqual({ count: 1, rate: 1 });
+      expect(stats.outcomes.settlement_unknown.count).toBe(0);
+      expect(receiptsToCsv(rows).trim().split("\n")).toHaveLength(2);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   it("aggregates spend, outcomes, latency, services, and search health", () => {
     const stats = aggregateStats({ receipts, searches, range: "24h", now });
 
@@ -142,3 +173,6 @@ function quote(amountAtomic: string): NonNullable<Receipt["quote"]> {
     payTo: "0xpayee",
   };
 }
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";

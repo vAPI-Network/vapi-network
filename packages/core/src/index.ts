@@ -25,6 +25,8 @@ export type {
   ChatRequest,
   ChatResult,
   RouterModel,
+  RouterPurchaseResult,
+  RouterPurchaseWarning,
 } from "./router-client.js";
 export { buyRouterBalance } from "./router-client.js";
 export { TASKS_CLIENT_VERBS, prepareDeliveryManifest, sha256Hex } from "./tasks/index.js";
@@ -136,6 +138,8 @@ export * from "./wallet-store.js";
 export * from "./x402.js";
 export * from "./remote-account.js";
 export * from "./x402-pay.js";
+export { PAYMENT_WARNING_CODES } from "./payment-warning.js";
+export type { PaymentWarning } from "./payment-warning.js";
 export {
   ARC_MAINNET_CAIP2,
   BROWSER_ENABLED_X402_NETWORK_CONFIG,

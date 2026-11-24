@@ -17,7 +17,7 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 
 import { AccountMovementLockedError, withAccountMovementLocks } from "./account-movement-lock.js";
-import { withFileLock } from "./atomic-file.js";
+import { withFileLock, writeJsonAtomic } from "./atomic-file.js";
 import { appendAudit, type AuditRecord } from "./audit.js";
 import {
   DEFAULT_CEILING_ATOMIC,
@@ -91,6 +91,50 @@ const routerRefillSchema: z.ZodType<RouterRefill> = z.object({
   tierUsd: z.union([z.literal(1), z.literal(5), z.literal(20), z.literal(50)]),
 });
 
+// Public payment evidence only. Signed is journaled BEFORE invoking the signer.
+// Unknown preserves legacy or non-EIP-3009 attempts that cannot be proved unpaid.
+const routerPendingPurchaseSchema = z
+  .strictObject({
+    receiptId: z.string().min(1),
+    status: z.enum(["prepared", "signed", "settled", "unknown"]),
+    createdAt: z.iso.datetime(),
+    tierUsd: z.union([z.literal(1), z.literal(5), z.literal(20), z.literal(50)]),
+    link: agentLinkSchema,
+    baselinePurchasedUsd: z.number().finite().nonnegative().optional(),
+    network: z.string().min(1).optional(),
+    amountAtomic: z.string().regex(/^\d+$/u).optional(),
+    transaction: z.string().optional(),
+    authorization: z
+      .strictObject({
+        token: z.string().regex(/^0x[0-9a-fA-F]{40}$/u),
+        from: z.string().regex(/^0x[0-9a-fA-F]{40}$/u),
+        nonce: z.string().regex(/^0x[0-9a-fA-F]{64}$/u),
+        validBefore: z.string().regex(/^\d+$/u),
+      })
+      .optional(),
+  })
+  .superRefine((pending, context) => {
+    if (
+      pending.status === "signed" &&
+      (pending.authorization === undefined || pending.network === undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Signed purchases require public authorization evidence.",
+      });
+    }
+  });
+
+const routerPurchaseStateSchema = z.strictObject({
+  version: z.literal(1),
+  pending: routerPendingPurchaseSchema.optional(),
+  completedReceiptId: z.string().optional(),
+});
+
+type RouterPurchaseState = z.infer<typeof routerPurchaseStateSchema>;
+
+export type RouterPendingPurchase = z.infer<typeof routerPendingPurchaseSchema>;
+
 const ceilingSweepPendingSchema = z.strictObject({
   owner: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
   target: z
@@ -116,6 +160,7 @@ export const walletEntrySchema = z.object({
   ceilingSweepAttemptedAt: z.iso.datetime().optional(),
   ceilingSweepPending: ceilingSweepPendingSchema.optional(),
   routerRefill: routerRefillSchema.optional(),
+  routerPendingPurchase: routerPendingPurchaseSchema.optional(),
   link: agentLinkSchema.optional(),
 });
 
@@ -325,7 +370,9 @@ export class WalletStore {
   }
 
   entry(name: string): WalletEntry | undefined {
-    return isWalletName(name) ? this.registry.wallets[name] : undefined;
+    return isWalletName(name) && Object.hasOwn(this.registry.wallets, name)
+      ? this.registry.wallets[name]
+      : undefined;
   }
 
   has(name: string): boolean {
@@ -380,7 +427,7 @@ export class WalletStore {
       throw new KeystoreError("No wallet yet. Run vapi init.");
     }
     assertWalletName(name);
-    const entry = this.registry.wallets[name];
+    const entry = this.entry(name);
     if (!entry) {
       throw new KeystoreError(unknownWalletMessage(name, this.names()));
     }
@@ -623,7 +670,7 @@ export class WalletStore {
     const walletName = assertWalletName(name);
     return await withRegistryLock(this.registryPath, async () => {
       const registry = await this.readRegistry();
-      const entry = registry.wallets[walletName];
+      const entry = ownWalletEntry(registry.wallets, walletName);
       if (!entry) {
         throw new KeystoreError(unknownWalletMessage(walletName, Object.keys(registry.wallets)));
       }
@@ -669,7 +716,7 @@ export class WalletStore {
     }
     return await withRegistryLock(this.registryPath, async () => {
       const registry = await this.readRegistry();
-      const entry = registry.wallets[walletName];
+      const entry = ownWalletEntry(registry.wallets, walletName);
       if (!entry) {
         throw new KeystoreError(unknownWalletMessage(walletName, Object.keys(registry.wallets)));
       }
@@ -699,7 +746,7 @@ export class WalletStore {
     const walletName = assertWalletName(name);
     return await withRegistryLock(this.registryPath, async () => {
       const registry = await this.readRegistry();
-      const entry = registry.wallets[walletName];
+      const entry = ownWalletEntry(registry.wallets, walletName);
       if (!entry) {
         throw new KeystoreError(unknownWalletMessage(walletName, Object.keys(registry.wallets)));
       }
@@ -724,7 +771,7 @@ export class WalletStore {
     const walletName = assertWalletName(name);
     return await withRegistryLock(this.registryPath, async () => {
       const registry = await this.readRegistry();
-      const entry = registry.wallets[walletName];
+      const entry = ownWalletEntry(registry.wallets, walletName);
       if (!entry) {
         throw new KeystoreError(unknownWalletMessage(walletName, Object.keys(registry.wallets)));
       }
@@ -755,7 +802,7 @@ export class WalletStore {
     }
     return await withRegistryLock(this.registryPath, async () => {
       const registry = await this.readRegistry();
-      const entry = registry.wallets[walletName];
+      const entry = ownWalletEntry(registry.wallets, walletName);
       if (!entry) {
         throw new KeystoreError(unknownWalletMessage(walletName, Object.keys(registry.wallets)));
       }
@@ -784,13 +831,79 @@ export class WalletStore {
     const parsed = refill === null ? undefined : routerRefillSchema.parse(refill);
     const wallet = this.resolve({ name });
     const registry = await this.update((registry) => {
-      const entry = registry.wallets[wallet.name];
+      const entry = ownWalletEntry(registry.wallets, wallet.name);
       if (!entry)
         throw new KeystoreError(unknownWalletMessage(wallet.name, Object.keys(registry.wallets)));
       if (parsed === undefined) delete entry.routerRefill;
       else entry.routerRefill = parsed;
     });
     return structuredClone(registry.wallets[wallet.name]!);
+  }
+
+  /** Atomically reserve a purchase, or update/clear the matching reservation.
+   * A competing reservation is returned unchanged. No payment may precede this write.
+   */
+  async setRouterPendingPurchase(
+    name: string,
+    pending: RouterPendingPurchase | null,
+    expectedReceiptId?: string,
+  ): Promise<WalletEntry> {
+    const parsed = pending === null ? undefined : routerPendingPurchaseSchema.parse(pending);
+    const wallet = this.resolve({ name });
+    const path = this.routerPurchasePath(wallet.name);
+    return await withFileLock(`${path}.lock`, async () => {
+      const state = await this.readRouterPurchaseState(
+        wallet.name,
+        wallet.entry.routerPendingPurchase,
+      );
+      if (state.pending?.receiptId === expectedReceiptId) {
+        if (parsed === undefined) {
+          if (state.pending?.status === "settled")
+            state.completedReceiptId = state.pending.receiptId;
+          delete state.pending;
+        } else state.pending = parsed;
+        // Keep an empty tombstone so a legacy registry field cannot resurrect.
+        await writeJsonAtomic(path, state);
+      }
+      const entry = this.registry.wallets[wallet.name]!;
+      if (state.pending === undefined) delete entry.routerPendingPurchase;
+      else entry.routerPendingPurchase = state.pending;
+      return structuredClone(entry);
+    });
+  }
+
+  /** Separate from registry locks: held throughout recovery, reservation and payment. */
+  async withRouterPurchaseLock<T>(name: string, operation: () => Promise<T>): Promise<T> {
+    return await withFileLock(`${this.routerPurchasePath(name)}.purchase.lock`, operation);
+  }
+
+  private assertNoPendingRouterPurchase(name: WalletName): void {
+    if (this.entry(name)?.routerPendingPurchase !== undefined) {
+      throw new KeystoreError(
+        `Account ${name} has a pending Router purchase. Resolve it with vapi router clear-pending --account ${name} before renaming or removing the account.`,
+      );
+    }
+  }
+
+  async routerCompletedPurchase(name: string): Promise<string | undefined> {
+    return (await this.readRouterPurchaseState(name)).completedReceiptId;
+  }
+
+  private routerPurchasePath(name: string): string {
+    return join(this.home, "router-pending", `${assertWalletName(name)}.json`);
+  }
+
+  private async readRouterPurchaseState(
+    name: string,
+    legacy?: RouterPendingPurchase,
+  ): Promise<RouterPurchaseState> {
+    const path = this.routerPurchasePath(name);
+    try {
+      return routerPurchaseStateSchema.parse(JSON.parse(await readFile(path, "utf8")));
+    } catch (error) {
+      if (!isMissingFile(error)) throw error; // Corrupt evidence must fail closed.
+    }
+    return { version: 1, ...(legacy === undefined ? {} : { pending: legacy }) };
   }
 
   /** Sets or, with `undefined`, clears the human label of a wallet. */
@@ -801,7 +914,7 @@ export class WalletStore {
         : walletEntrySchema.shape.label.parse(label);
     const wallet = this.resolve({ name });
     await this.update((registry) => {
-      const entry = registry.wallets[wallet.name];
+      const entry = ownWalletEntry(registry.wallets, wallet.name);
       if (!entry) return;
       if (parsed === undefined) delete entry.label;
       else entry.label = parsed;
@@ -816,7 +929,7 @@ export class WalletStore {
     const parsed = agentLinkSchema.parse(link);
     const wallet = this.resolve({ name });
     const registry = await this.update((registry) => {
-      const entry = registry.wallets[wallet.name];
+      const entry = ownWalletEntry(registry.wallets, wallet.name);
       if (!entry)
         throw new KeystoreError(unknownWalletMessage(wallet.name, Object.keys(registry.wallets)));
       entry.link = parsed;
@@ -827,7 +940,7 @@ export class WalletStore {
   async clearLink(name: WalletName): Promise<WalletEntry> {
     const wallet = this.resolve({ name });
     const registry = await this.update((registry) => {
-      const entry = registry.wallets[wallet.name];
+      const entry = ownWalletEntry(registry.wallets, wallet.name);
       if (!entry)
         throw new KeystoreError(unknownWalletMessage(wallet.name, Object.keys(registry.wallets)));
       delete entry.link;
@@ -847,16 +960,19 @@ export class WalletStore {
     const source = assertWalletName(oldName.trim());
     const target = assertWalletName(newName);
     try {
-      return await withAccountMovementLocks(this.home, [source, target], undefined, async () => {
-        return await withAccountMutationLocks(
-          this.home,
-          [source, target],
-          `vapi accounts rename ${source} ${target}`,
-          async () => {
-            await this.reload();
-            return await this.renameWithMovementLocksHeld(source, target, options);
-          },
-        );
+      return await this.withRouterPurchaseLock(source, async () => {
+        return await withAccountMovementLocks(this.home, [source, target], undefined, async () => {
+          return await withAccountMutationLocks(
+            this.home,
+            [source, target],
+            `vapi accounts rename ${source} ${target}`,
+            async () => {
+              await this.reload();
+              this.assertNoPendingRouterPurchase(source);
+              return await this.renameWithMovementLocksHeld(source, target, options);
+            },
+          );
+        });
       });
     } catch (error) {
       if (error instanceof AccountMovementLockedError) {
@@ -962,9 +1078,12 @@ export class WalletStore {
   async remove(name: string, options: WalletRemoveOptions = {}): Promise<TrashedWallet> {
     const account = assertWalletName(name.trim());
     try {
-      return await withAccountMovementLocks(this.home, [account], undefined, async () => {
-        await this.reload();
-        return await this.removeWithMovementLockHeld(account, options);
+      return await this.withRouterPurchaseLock(account, async () => {
+        return await withAccountMovementLocks(this.home, [account], undefined, async () => {
+          await this.reload();
+          this.assertNoPendingRouterPurchase(account);
+          return await this.removeWithMovementLockHeld(account, options);
+        });
       });
     } catch (error) {
       if (error instanceof AccountMovementLockedError) {
@@ -1231,11 +1350,13 @@ export class WalletStore {
       await this.update((registry) => {
         for (const account of missing) {
           const name = assertWalletName(account.name);
-          registry.wallets[name] ??= {
-            createdAt: account.createdAt,
-            spendCaps: { ...DEFAULT_SPEND_CAPS },
-            ceilingAtomic: DEFAULT_CEILING_ATOMIC.toString(),
-          };
+          if (!Object.hasOwn(registry.wallets, name)) {
+            registry.wallets[name] = {
+              createdAt: account.createdAt,
+              spendCaps: { ...DEFAULT_SPEND_CAPS },
+              ceilingAtomic: DEFAULT_CEILING_ATOMIC.toString(),
+            };
+          }
         }
         registry.default ??= Object.keys(registry.wallets)[0] as WalletName | undefined;
       });
@@ -1337,7 +1458,25 @@ export class WalletStore {
       throw error;
     }
     try {
-      return walletRegistrySchema.parse(JSON.parse(raw));
+      const registry = walletRegistrySchema.parse(JSON.parse(raw));
+      for (const [name, entry] of Object.entries(registry.wallets)) {
+        const legacy = entry.routerPendingPurchase;
+        // Older prepared records may already have signed; they have no signing journal.
+        const migrated =
+          legacy?.status === "prepared" ? { ...legacy, status: "unknown" as const } : legacy;
+        const path = this.routerPurchasePath(name);
+        let state = await this.readRouterPurchaseState(name);
+        if (legacy !== undefined) {
+          state = await withFileLock(`${path}.lock`, async () => {
+            const current = await this.readRouterPurchaseState(name, migrated);
+            await writeJsonAtomic(path, current);
+            return current;
+          });
+        }
+        if (state.pending === undefined) delete entry.routerPendingPurchase;
+        else entry.routerPendingPurchase = state.pending;
+      }
+      return registry;
     } catch (error) {
       throw new KeystoreError(
         `The wallet registry at ${this.registryPath} could not be read. Fix or move the file, then run vapi wallet list again.`,
@@ -1348,7 +1487,9 @@ export class WalletStore {
 
   private async writeRegistry(registry: WalletRegistry): Promise<void> {
     const parsed = walletRegistrySchema.parse(registry);
-    await writeJsonFile(this.registryPath, parsed);
+    const disk = structuredClone(parsed);
+    for (const entry of Object.values(disk.wallets)) delete entry.routerPendingPurchase;
+    await writeJsonFile(this.registryPath, disk);
     this.registry = parsed;
   }
 }
@@ -1601,6 +1742,17 @@ function unknownWalletMessage(name: string, names: readonly string[]): string {
   return `No wallet named ${name}. This machine has: ${[...names].sort().join(", ")}.`;
 }
 
+/**
+ * Reads a registry entry by own key only. `registry.wallets` is a plain object, so a bare
+ * index returns inherited `Object.prototype` members such as `constructor`.
+ */
+function ownWalletEntry(
+  wallets: Readonly<Record<string, WalletEntry>>,
+  name: string,
+): WalletEntry | undefined {
+  return Object.hasOwn(wallets, name) ? wallets[name] : undefined;
+}
+
 function emptyRegistry(): WalletRegistry {
   return { version: 1, wallets: {} };
 }
@@ -1830,7 +1982,7 @@ async function withRegistryLock<T>(path: string, operation: () => Promise<T>): P
   try {
     return await operation();
   } finally {
-    await handle.close();
+    await handle.close().catch(() => undefined);
     await unlink(lockPath).catch(() => undefined);
   }
 }

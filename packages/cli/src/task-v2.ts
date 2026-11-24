@@ -120,8 +120,10 @@ export async function taskV2Command(
         ...(action === "submit" ? { proof: await proof() } : {}),
         ...(action === "reject" ? { reason: parsed.one("--reason") } : {}),
       });
-      if (!["submit", "approve", "reject", "finalize"].includes(action!))
-        throw new UsageError("Milestone action must be submit, approve, reject or finalize.");
+      if (!["submit", "approve", "reject", "finalize", "close-rejected"].includes(action!))
+        throw new UsageError(
+          "Milestone action must be submit, approve, reject, finalize or close-rejected.",
+        );
     } else if (verb === "close-rejected") {
       write = taskV2ActionSchema.parse({ action: verb, i: index() });
     } else if (verb === "bump-consent-nonce") {
@@ -155,10 +157,15 @@ export async function taskV2Command(
       );
     } else if (verb === "sign") {
       const action = parsed.one("--action");
-      consent = taskV2ConsentSchema.parse({
-        action,
-        ...(action === "split-consent" ? { i: index(), toWorker: parsed.one("--to-worker") } : {}),
-      });
+      if (action === "bump-consent-nonce")
+        write = taskV2ActionSchema.parse({ action, newNonce: parsed.one("--new-nonce") });
+      else
+        consent = taskV2ConsentSchema.parse({
+          action,
+          ...(action === "split-consent"
+            ? { i: index(), toWorker: parsed.one("--to-worker") }
+            : {}),
+        });
     } else if (verb === "claim")
       write = taskV2ActionSchema.parse({ action: "pay-claim", claimant: parsed.one("--claimant") });
     else if (["dispute", "counter-evidence", "resolve-unmatched"].includes(verb)) {

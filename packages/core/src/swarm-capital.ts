@@ -27,6 +27,7 @@ import {
   type MovementSummary,
 } from "./movement.js";
 import { configuredNetworkFor } from "./networks.js";
+import { PAYMENT_WARNING_CODES } from "./payment-warning.js";
 import { RunBudgetError, type RunBudget } from "./run-budget.js";
 import { readSpendLedger } from "./spend-policy.js";
 import {
@@ -42,6 +43,7 @@ import {
   type SwarmMember,
 } from "./swarm.js";
 import { readUsdcBalance } from "./sweep.js";
+import { assertSwarmWorkersStopped } from "./swarm-workers.js";
 import {
   transferBetweenAccounts,
   TransferError,
@@ -56,6 +58,8 @@ export type SwarmCapitalDeps = MovementDependencies & {
   balanceReader?: SwarmBalanceReader;
   config?: VapiConfig;
   reconcileCeilingSweep?: (account: WalletName) => Promise<CeilingSweepResult>;
+  /** Refresh tracked workers before the shared, fail-closed dissolution check. */
+  reconcileRuns?: (swarm: { home: string; name: string }) => Promise<void>;
 };
 
 export type SwarmLegResult = {
@@ -99,6 +103,23 @@ const treasuryRequestRecordSchema = z.strictObject({
   blocked: z.array(blockedLegSchema),
 });
 type TreasuryRequestRecord = z.infer<typeof treasuryRequestRecordSchema>;
+/** Public Router refill evidence retained in member results and delegation replays. */
+export const swarmRunRefillSchema = z.object({
+  receipt: z.object({
+    id: z.string(),
+    amountUsd: z.number().nullable(),
+    network: z.string(),
+    transaction: z.string().optional(),
+    settlement: z.enum(["succeeded", "rejected", "unknown"]).optional(),
+  }),
+  balance: z
+    .object({ purchasedUsd: z.number(), spentUsd: z.number(), remainingUsd: z.number() })
+    .nullable(),
+  warnings: z
+    .array(z.object({ code: z.enum(PAYMENT_WARNING_CODES), message: z.string() }))
+    .optional(),
+});
+
 const delegationRecordSchema = z.strictObject({
   v: z.literal(1),
   movementId: movementIdSchema,
@@ -120,6 +141,7 @@ const delegationRecordSchema = z.strictObject({
         .nullable(),
       spentUsd: z.number(),
       budgetUsd: z.number(),
+      refills: z.array(swarmRunRefillSchema).optional(),
     })
     .optional(),
 });
@@ -1075,6 +1097,8 @@ async function dissolveSwarmLocked(
   home: string,
 ): Promise<SwarmDissolveResult> {
   const swarm = await readSwarm(home, opts.name);
+  await deps.reconcileRuns?.({ home, name: swarm.name });
+  await assertSwarmWorkersStopped(home, swarm);
   await assertSwarmAccountAddresses(swarm, deps);
   await reconcilePendingCeilingSweeps(swarm, swarmAccountNames(swarm), deps, home);
   const resumed = await resumeOrBlock(swarm, deps, home);

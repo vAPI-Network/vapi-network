@@ -18,9 +18,14 @@ export interface FileLockOptions {
 }
 
 interface AtomicFileTestHooks {
+  beforeDirectorySync?: (directory: string) => void | Promise<void>;
+  beforeLockRelease?: (path: string) => void | Promise<void>;
+  afterLockHandleClose?: (path: string) => void | Promise<void>;
+  beforeTombUnlink?: (tombPath: string) => void | Promise<void>;
   beforeLockAttempt?: (path: string) => void | Promise<void>;
   afterLockCreate?: (path: string) => void | Promise<void>;
   beforeStaleLockBreak?: (path: string) => void | Promise<void>;
+  afterLockRename?: (tombPath: string) => void | Promise<void>;
   afterMismatchedLockRename?: (path: string) => void | Promise<void>;
   afterMismatchedLockRestore?: (path: string) => void | Promise<void>;
   isProcessAlive?: (pid: number) => boolean;
@@ -59,11 +64,15 @@ export async function writeJsonAtomic(
     handle = undefined;
     await rename(temporaryPath, path);
 
-    const directoryHandle = await open(directory, "r");
-    try {
-      await directoryHandle.sync();
-    } finally {
-      await directoryHandle.close();
+    // Windows cannot flush a directory handle; NTFS journals the entry itself.
+    if (process.platform !== "win32") {
+      const directoryHandle = await open(directory, "r");
+      try {
+        await atomicFileTestHooks?.beforeDirectorySync?.(directory);
+        await directoryHandle.sync();
+      } finally {
+        await directoryHandle.close();
+      }
     }
   } catch (error) {
     await handle?.close().catch(() => undefined);
@@ -87,38 +96,45 @@ export async function withFileLock<T>(
   const releasedOwner = JSON.stringify({ ...ownerRecord, released: true });
   let handle: FileHandle | undefined;
 
-  while (handle === undefined) {
-    await atomicFileTestHooks?.beforeLockAttempt?.(lockPath);
-    try {
-      const candidate = await open(lockPath, "wx", 0o600);
+  try {
+    while (handle === undefined) {
+      await atomicFileTestHooks?.beforeLockAttempt?.(lockPath);
       try {
-        await candidate.writeFile(owner, "utf8");
-        await candidate.sync();
-        await atomicFileTestHooks?.afterLockCreate?.(lockPath);
-        if (await lockTakeoverInProgress(lockPath)) {
-          await candidate.close();
-          await removeOwnedLock(lockPath, [owner]);
-          await removeAbandonedLockTombs(lockPath);
-          if (Date.now() >= deadline) {
-            throw new FileLockedError(options.lockedMessage);
+        const candidate = await open(lockPath, "wx", 0o600);
+        try {
+          await candidate.writeFile(owner, "utf8");
+          await candidate.sync();
+          await atomicFileTestHooks?.afterLockCreate?.(lockPath);
+          if (await lockTakeoverInProgress(lockPath)) {
+            await candidate.close();
+            await removeOwnedLock(lockPath, [owner]);
+            await removeAbandonedLockTombs(lockPath);
+            if (Date.now() >= deadline) {
+              throw new FileLockedError(options.lockedMessage);
+            }
+            await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+            continue;
           }
-          await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
-          continue;
+          handle = candidate;
+        } catch (error) {
+          await candidate.close().catch(() => undefined);
+          await removeOwnedLock(lockPath, [owner]).catch(() => undefined);
+          throw error;
         }
-        handle = candidate;
       } catch (error) {
-        await candidate.close().catch(() => undefined);
-        await removeOwnedLock(lockPath, [owner]).catch(() => undefined);
-        throw error;
+        if (!hasCode(error, "EEXIST")) throw error;
+        await removeStaleLock(lockPath);
+        if (Date.now() >= deadline) {
+          throw new FileLockedError(options.lockedMessage);
+        }
+        await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
       }
-    } catch (error) {
-      if (!hasCode(error, "EEXIST")) throw error;
-      await removeStaleLock(lockPath);
-      if (Date.now() >= deadline) {
-        throw new FileLockedError(options.lockedMessage);
-      }
-      await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
     }
+  } catch (error) {
+    // A failed attempt leaves no tomb with its own record: a live process's
+    // unreleased tomb blocks every later caller.
+    await removeOwnedTombs(lockPath, [owner]).catch(() => undefined);
+    throw error;
   }
 
   const ownedHandle = handle;
@@ -133,13 +149,20 @@ export async function withFileLock<T>(
   } finally {
     clearInterval(heartbeat);
     try {
-      await markLockReleased(ownedHandle, releasedOwner);
-    } finally {
       try {
-        await ownedHandle.close();
+        await atomicFileTestHooks?.beforeLockRelease?.(lockPath);
+        await markLockReleased(ownedHandle, releasedOwner);
       } finally {
-        await removeOwnedLock(lockPath, [owner, releasedOwner]);
+        try {
+          await ownedHandle.close();
+          await atomicFileTestHooks?.afterLockHandleClose?.(lockPath);
+        } finally {
+          await removeOwnedLock(lockPath, [owner, releasedOwner]);
+        }
       }
+    } catch {
+      // Release failures cannot undo the finished operation; an unremoved lock
+      // is reported as busy by the next caller.
     }
   }
 }
@@ -156,13 +179,17 @@ async function removeStaleLock(path: string): Promise<void> {
     const pid = lockOwnerPid(owner);
     if (pid !== undefined && processIsAlive(pid)) return;
     await atomicFileTestHooks?.beforeStaleLockBreak?.(path);
-    await removeOwnedLock(path, [owner]);
+    await removeOwnedLock(path, [owner], true);
   } catch (error) {
     if (!hasCode(error, "ENOENT")) throw error;
   }
 }
 
-async function removeOwnedLock(path: string, owners: readonly string[]): Promise<void> {
+async function removeOwnedLock(
+  path: string,
+  owners: readonly string[],
+  staleDeadOwner = false,
+): Promise<void> {
   const tombPath = `${path}.stale.${randomBytes(16).toString("hex")}`;
   try {
     await rename(path, tombPath);
@@ -171,7 +198,7 @@ async function removeOwnedLock(path: string, owners: readonly string[]): Promise
       await removeOwnedTombs(path, owners);
       const currentOwner = await readFile(path, "utf8").catch(() => undefined);
       if (currentOwner !== undefined && owners.includes(currentOwner)) {
-        await removeOwnedLock(path, owners);
+        await removeOwnedLock(path, owners, staleDeadOwner);
       }
       return;
     }
@@ -179,8 +206,10 @@ async function removeOwnedLock(path: string, owners: readonly string[]): Promise
   }
 
   let pendingError: unknown;
+  let renamedOwner: string | undefined;
   try {
-    const renamedOwner = await readFile(tombPath, "utf8");
+    await atomicFileTestHooks?.afterLockRename?.(tombPath);
+    renamedOwner = await readFile(tombPath, "utf8");
     if (!owners.includes(renamedOwner) && !lockOwnerReleased(renamedOwner)) {
       await atomicFileTestHooks?.afterMismatchedLockRename?.(path);
       const currentOwner = await readFile(tombPath, "utf8");
@@ -188,13 +217,23 @@ async function removeOwnedLock(path: string, owners: readonly string[]): Promise
       await atomicFileTestHooks?.afterMismatchedLockRestore?.(path);
     }
   } catch (error) {
+    if (hasCode(error, "ENOENT")) return;
     pendingError = error;
   }
 
   try {
+    await atomicFileTestHooks?.beforeTombUnlink?.(tombPath);
     await unlink(tombPath);
   } catch (error) {
-    if (!hasCode(error, "ENOENT") && pendingError === undefined) {
+    if (
+      !tombUnlinkTolerated(
+        error,
+        renamedOwner !== undefined &&
+          (lockOwnerReleased(renamedOwner) || staleDeadOwner) &&
+          owners.includes(renamedOwner),
+      ) &&
+      pendingError === undefined
+    ) {
       pendingError = error;
     }
   }
@@ -224,7 +263,7 @@ async function removeAbandonedLockTombs(path: string): Promise<void> {
         (pid === undefined || !processIsAlive(pid)));
     if (!abandoned) continue;
     await unlink(tombPath).catch((error: unknown) => {
-      if (!hasCode(error, "ENOENT")) throw error;
+      if (!tombUnlinkTolerated(error, true)) throw error;
     });
   }
 }
@@ -237,9 +276,12 @@ async function removeOwnedTombs(path: string, owners: readonly string[]): Promis
     const tombPath = join(directory, entry);
     const owner = await readFile(tombPath, "utf8").catch(() => undefined);
     if (owner === undefined || !owners.includes(owner)) continue;
-    await unlink(tombPath).catch((error: unknown) => {
-      if (!hasCode(error, "ENOENT")) throw error;
-    });
+    try {
+      await atomicFileTestHooks?.beforeTombUnlink?.(tombPath);
+      await unlink(tombPath);
+    } catch (error) {
+      if (!tombUnlinkTolerated(error, lockOwnerReleased(owner))) throw error;
+    }
   }
 }
 
@@ -293,6 +335,20 @@ function processIsAlive(pid: number): boolean {
   } catch (error) {
     return hasCode(error, "EPERM");
   }
+}
+
+/**
+ * Windows permission or busy errors are tolerated only for reapable tombs.
+ * A released or abandoned tomb left behind is reaped by any later pass; an
+ * unreleased tomb belonging to a live process never is.
+ */
+function tombUnlinkTolerated(error: unknown, reapable: boolean): boolean {
+  return (
+    hasCode(error, "ENOENT") ||
+    (reapable &&
+      process.platform === "win32" &&
+      (hasCode(error, "EPERM") || hasCode(error, "EBUSY")))
+  );
 }
 
 function hasCode(error: unknown, code: string): boolean {

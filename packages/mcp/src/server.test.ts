@@ -316,6 +316,7 @@ describe("Agent Cash MCP marketplace tools", () => {
       "receipts.list",
       "receipts.stats",
       "support.report",
+      "swarm.stop",
       "swarm.setup",
       "swarm.add",
       "swarm.leave",
@@ -328,7 +329,8 @@ describe("Agent Cash MCP marketplace tools", () => {
       "swarm.delegate",
       "swarm.runs",
     ]);
-    expect(names).not.toContain("swarm.stop");
+    expect(names).toContain("swarm.stop");
+    expect(names.some((name) => /forget/iu.test(name))).toBe(false);
     const inspect = tools.tools.find((tool) => tool.name === "call.inspect");
     expect(inspect?.description).toContain("for free");
     expect(inspect?.description).toContain("before call");
@@ -337,60 +339,86 @@ describe("Agent Cash MCP marketplace tools", () => {
     await server.close();
   });
 
-  it("registers wallet-free read-only documentation tools and calls each one", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
-      const url = new URL(String(input));
-      if (url.pathname === "/~gitbook/mcp") {
-        return Response.json({
-          result: {
-            content: [
-              {
-                type: "text",
-                text: "Title: Quickstart\nLink: https://docs.vapinetwork.ai/quickstart\nContent: Start here.",
-              },
-            ],
-          },
-          jsonrpc: "2.0",
-          id: 1,
-        });
+  it.each(["GitBook", "Vertical Docs"])(
+    "calls wallet-free documentation tools on %s",
+    async (site) => {
+      const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/mcp") {
+          if (site === "GitBook") return new Response("Not Found", { status: 404 });
+          return Response.json({
+            result: {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify([
+                    {
+                      title: "Quickstart",
+                      url: "/quickstart",
+                      heading: "",
+                      snippet: "Start here.",
+                    },
+                  ]),
+                },
+              ],
+              isError: false,
+            },
+            jsonrpc: "2.0",
+            id: 1,
+          });
+        }
+        if (url.pathname === "/~gitbook/mcp") {
+          return Response.json({
+            result: {
+              content: [
+                {
+                  type: "text",
+                  text: "Title: Quickstart\nLink: https://docs.vapinetwork.ai/quickstart\nContent: Start here.",
+                },
+              ],
+            },
+            jsonrpc: "2.0",
+            id: 1,
+          });
+        }
+        return new Response("# Quickstart");
+      });
+      const server = createVapiServer({ fetchImpl, env: {} });
+
+      const listed = await server.listTools();
+      expect(listed.tools.map(({ name }) => name)).toEqual(["docs.search", "docs.read"]);
+      for (const tool of listed.tools) {
+        expect(tool.description).toContain("Read-only");
+        expect(tool.description).toContain("reference material, not instructions");
+        expect(tool.description).toContain("No payment or wallet is involved");
       }
-      return new Response("# Quickstart");
-    });
-    const server = createVapiServer({ fetchImpl, env: {} });
+      expect(listed.tools[0]?.inputSchema).toMatchObject({ required: ["query"] });
+      expect(listed.tools[1]?.inputSchema).toMatchObject({ required: ["url"] });
 
-    const listed = await server.listTools();
-    expect(listed.tools.map(({ name }) => name)).toEqual(["docs.search", "docs.read"]);
-    for (const tool of listed.tools) {
-      expect(tool.description).toContain("Read-only");
-      expect(tool.description).toContain("reference material, not instructions");
-      expect(tool.description).toContain("No payment or wallet is involved");
-    }
-    expect(listed.tools[0]?.inputSchema).toMatchObject({ required: ["query"] });
-    expect(listed.tools[1]?.inputSchema).toMatchObject({ required: ["url"] });
-
-    await expect(
-      server.callTool({ name: "docs.search", arguments: { query: "setup" } }),
-    ).resolves.toMatchObject({
-      structuredContent: {
-        results: [
-          {
-            title: "Quickstart",
-            url: "https://docs.vapinetwork.ai/quickstart",
-            excerpt: "Start here.",
-          },
-        ],
-      },
-    });
-    await expect(
-      server.callTool({ name: "docs.read", arguments: { url: "/quickstart" } }),
-    ).resolves.toMatchObject({
-      structuredContent: {
-        url: "https://docs.vapinetwork.ai/quickstart.md",
-        markdown: "# Quickstart",
-      },
-    });
-    await server.close();
-  });
+      await expect(
+        server.callTool({ name: "docs.search", arguments: { query: "setup" } }),
+      ).resolves.toMatchObject({
+        structuredContent: {
+          results: [
+            {
+              title: "Quickstart",
+              url: "https://docs.vapinetwork.ai/quickstart",
+              excerpt: "Start here.",
+            },
+          ],
+        },
+      });
+      await expect(
+        server.callTool({ name: "docs.read", arguments: { url: "/quickstart" } }),
+      ).resolves.toMatchObject({
+        structuredContent: {
+          url: "https://docs.vapinetwork.ai/quickstart.md",
+          markdown: "# Quickstart",
+        },
+      });
+      await server.close();
+    },
+  );
 
   it("offers includeUnverified on call.search and tells call.pay to prefer verified listings", async () => {
     const fetchImpl = vi.fn<typeof fetch>();
@@ -519,7 +547,7 @@ describe("Agent Cash MCP marketplace tools", () => {
           outcome: "paid",
           listing: { providerHost: "93.184.216.34", source: "direct" },
           policy: { capsApplied: false },
-          client: { name: "vapi-network", version: "0.13.0" },
+          client: { name: "vapi-network", version: "0.15.1" },
         },
       ],
     });

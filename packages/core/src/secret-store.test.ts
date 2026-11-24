@@ -440,6 +440,41 @@ describe("the libsecret store", () => {
     });
   });
 
+  it("treats a silent non-zero clear of an absent entry as nothing to remove", async () => {
+    // Some libsecret builds exit 1 with empty stderr when `clear` matches nothing.
+    const { run, runs } = recordingRunner([{ code: 1 }, { code: 1 }]);
+
+    await expect(secretStore({ platform: "linux", run }).remove("main")).resolves.toBe(false);
+    expect(runs.map((entry) => entry.args[0])).toEqual(["lookup", "clear"]);
+  });
+
+  it("still fails when clearing an absent entry reports a reason", async () => {
+    const { run } = recordingRunner([
+      { code: 1 },
+      { code: 1, stderr: "secret-tool: Cannot autolaunch D-Bus\n" },
+    ]);
+
+    await expect(secretStore({ platform: "linux", run }).remove("main")).rejects.toThrow(
+      "Could not remove the passphrase of main from the secret service (exit 1). Cannot autolaunch D-Bus",
+    );
+  });
+
+  it("still fails when clearing an absent entry exits with another code", async () => {
+    const { run } = recordingRunner([{ code: 1 }, { code: 2 }]);
+
+    await expect(secretStore({ platform: "linux", run }).remove("main")).rejects.toThrow(
+      "Could not remove the passphrase of main from the secret service (exit 2).",
+    );
+  });
+
+  it("still fails when an entry that was there is not cleared", async () => {
+    const { run } = recordingRunner([{ code: 0, stdout: "test-only-passphrase\n" }, { code: 1 }]);
+
+    await expect(secretStore({ platform: "linux", run }).remove("main")).rejects.toThrow(
+      "Could not remove the passphrase of main from the secret service (exit 1).",
+    );
+  });
+
   it("names the package to install when secret-tool is missing", async () => {
     const { run } = recordingRunner([{ code: null, notFound: true }]);
 

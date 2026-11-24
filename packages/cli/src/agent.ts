@@ -6,6 +6,7 @@ import {
   BASE_MAINNET_CAIP2,
   DEFAULT_AUTO_RELEASE_BELOW_USD,
   DEFAULT_MAX_PER_TASK_USD,
+  SWARM_NAME_PATTERN,
   assertWalletName,
   createRunBudget,
   createRunId,
@@ -17,12 +18,11 @@ import {
   listAgentProfiles,
   loadConfig,
   readAgentProfile,
-  readSwarm,
   readSpendLedgerRows,
+  readSwarm,
   removeAgentProfile,
   resolveRegistryUrl,
   spendCapsForWallet,
-  SWARM_NAME_PATTERN,
   swarmParentResolver,
   sweepAboveCeiling,
   usdToAtomic,
@@ -39,30 +39,22 @@ import {
   createAgentRunDeps,
   getWallet,
   registeredAgentProfileSchema,
-  runLogPath,
   runAgent,
+  runLogPath,
   startDetachedRun,
   type AgentEvent,
   type RunAgentDeps,
+  type RunAgentResult,
 } from "@vapi-network/mcp";
 
-import {
-  UsageError,
-  getEnvironment,
-  getSecretStore,
-  openWalletStore,
-  parseArguments,
-  redactDetachedRunValue,
-  targetWallet,
-  unlockTarget,
-  walletCapsCommand,
-  walletCreateCommand,
-  type CliDependencies,
-  type CliIo,
-} from "./cli.js";
+import { UsageError, parseArguments } from "./args.js";
+import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
+import { walletCapsCommand, walletCreateCommand } from "./cli.js";
 import { runHeadlessAgent } from "./headless.js";
 import { runLoginFlow } from "./login.js";
+import { redactDetachedRunText, redactDetachedRunValue } from "./run-redaction.js";
 import { parseRuntimeKind, resolveRuntime } from "./runtime-local.js";
+import { getSecretStore, openWalletStore, targetWallet, unlockTarget } from "./wallet-session.js";
 
 export type AgentCommandDependencies = {
   readAgentProfile?: typeof readAgentProfile;
@@ -330,6 +322,13 @@ async function runCommand(
     throw new UsageError(`--detach and --result-file cannot be used together.\n${RUN_USAGE}`);
   }
   const environment = getEnvironment(dependencies);
+  const runIo =
+    resultFile === undefined
+      ? io
+      : {
+          stdout: (message: string) => io.stdout(redactDetachedRunText(message, environment)),
+          stderr: (message: string) => io.stderr(redactDetachedRunText(message, environment)),
+        };
   const configuredRunId = environmentRunId(environment, "VAPI_RUN_ID");
   const parentRunId = environmentRunId(environment, "VAPI_PARENT_RUN_ID");
   const paths = getVapiPaths();
@@ -341,8 +340,8 @@ async function runCommand(
     if (resultFile !== undefined) {
       await writeJsonAtomic(resultFile, { v: 1, exitCode: 1, result }, { mode: 0o600 });
     }
-    if (json) io.stdout(JSON.stringify(result));
-    else io.stderr(message);
+    if (json) runIo.stdout(JSON.stringify(result));
+    else runIo.stderr(message);
     return 1;
   }
 
@@ -418,13 +417,15 @@ async function runCommand(
     ...(runMeta === undefined ? {} : { runMeta }),
     approvals: "tty",
     json,
-    io,
+    io: runIo,
     dependencies,
   });
   const execute = dependencies.agent?.runAgent ?? runAgent;
   const executed = await execute(task, runDependencies);
-  const result =
-    resultFile === undefined ? executed : redactDetachedRunValue(executed, environment);
+  const result = resultFile === undefined ? executed : redactAgentRunResult(executed, environment);
+  // The result is already redacted. Human-readable lines keep the redacting output, which also
+  // reads a JSON-shaped line; only a restored settlement hash, which it would erase, goes around it.
+  if (!json) printAgentRefills(result, runIo, io);
   const exitCode = result.stoppedBecause.reason === "finished" ? 0 : 1;
 
   if (resultFile !== undefined) {
@@ -432,13 +433,55 @@ async function runCommand(
   }
 
   if (json) {
-    io.stdout(JSON.stringify(result));
+    // With a result file this line gets the same second pass as every other line of the run;
+    // the settlement hashes that pass erases are restored after it.
+    io.stdout(
+      JSON.stringify(resultFile === undefined ? result : redactAgentRunResult(result, environment)),
+    );
   } else if (result.stoppedBecause.reason === "finished") {
-    io.stdout(result.answer ?? "");
+    runIo.stdout(result.answer ?? "");
   } else {
-    io.stderr(result.stoppedBecause.detail ?? result.stoppedBecause.reason);
+    runIo.stderr(result.stoppedBecause.detail ?? result.stoppedBecause.reason);
   }
   return exitCode;
+}
+
+const SETTLEMENT_HASH = /^0x[0-9a-fA-F]{64}$/u;
+
+/** Redact all strings, then restore only public EVM settlement references. */
+export function redactAgentRunResult(
+  executed: RunAgentResult,
+  environment: NodeJS.ProcessEnv,
+): RunAgentResult {
+  const result = redactDetachedRunValue(executed, environment);
+  for (const [index, refill] of (executed.refills ?? []).entries()) {
+    const transaction = refill.receipt.transaction;
+    const redacted = result.refills?.[index];
+    if (redacted !== undefined && transaction !== undefined && SETTLEMENT_HASH.test(transaction)) {
+      redacted.receipt.transaction = transaction;
+    }
+  }
+  return result;
+}
+
+/**
+ * Prints each refill's receipt, transaction and warnings. When `io` redacts its lines, pass the
+ * plain output as `settlementHashIo`: a transaction that is a settlement hash is printed there.
+ */
+export function printAgentRefills(
+  result: RunAgentResult,
+  io: CliIo,
+  settlementHashIo: CliIo = io,
+): void {
+  for (const refill of result.refills ?? []) {
+    io.stderr(`Receipt: ${refill.receipt.id}`);
+    const transaction = refill.receipt.transaction;
+    if (transaction !== undefined) {
+      const output = SETTLEMENT_HASH.test(transaction) ? settlementHashIo : io;
+      output.stderr(`Transaction: ${transaction}`);
+    }
+    for (const warning of refill.warnings ?? []) io.stderr(warning.message);
+  }
 }
 
 function environmentSwarm(environment: NodeJS.ProcessEnv): string | undefined {

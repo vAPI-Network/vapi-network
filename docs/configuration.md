@@ -48,8 +48,8 @@ reports/              what vapi report writes
 | `spendCaps`                    | Legacy fallback caps; current account caps live in `wallets.json`                     |
 | `device`                       | Device name for account linking                                                       |
 | `allowPrivateNetwork`          | Allow private destinations for a development registry; defaults to false              |
-| `tasksEscrowFactoryOverrides`  | Trusted escrow factory by chain ID for Tasks preview                                  |
-| `tasksEscrowDurationOverrides` | Trusted work and review durations by chain ID for Tasks preview                       |
+| `tasksEscrowFactoryOverrides`  | Trusted escrow factory by chain ID for legacy Tasks V1                                |
+| `tasksEscrowDurationOverrides` | Trusted work and review durations by chain ID for legacy Tasks V1                     |
 
 The raw file may also contain an `apiKey` fallback on platforms without an OS secret store. Parsed configuration drops that secret; config rewrites preserve it. MCP cannot import the API-key entry point.
 

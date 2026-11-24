@@ -2,17 +2,20 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { verifyMessage } from "viem";
+import { getAddress, verifyMessage } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { WalletStore, type SecretStore } from "@vapi-network/core";
 import { agentSecretAccounts } from "@vapi-network/core/agent-link";
-import { createTasksClient, TasksClientError } from "@vapi-network/core/tasks";
 import {
   canonicalJson,
   checkinResponseSchema,
   pendingActionsResponseSchema,
+  taskTermsSchema,
+  taskLifecycleSchema,
+  createTasksClient,
+  TasksClientError,
   createPendingTransactions,
   freezeScopeTerms,
   missingTasksChain,
@@ -20,12 +23,13 @@ import {
   safeTasksChainError,
   TasksChainError,
   TasksChainUnavailableError,
+  type GetOrderResponse,
+  type TaskMilestone,
   type TasksClient,
   type TasksChain,
   type TasksChainResult,
   type TasksClientOptions,
-} from "../../core/src/tasks/index.js";
-import { tasksResponseSchemas } from "../../core/src/tasks/types.js";
+} from "@vapi-network/core/tasks";
 import { runCli, parseArguments, type CliDependencies } from "./cli.js";
 import { parseTaskDuration, taskContext, TASK_HELP } from "./task.js";
 
@@ -51,6 +55,22 @@ afterEach(async () => {
   vi.unstubAllEnvs();
   await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true })));
 });
+
+type PrivateOrderResponse = {
+  workOrder: Extract<GetOrderResponse["workOrder"], { version: "work-order-view-v1" }>;
+};
+type TaskScope = Awaited<ReturnType<TasksClient["getScopes"]>>["scopes"][number];
+
+function privateOrderResponse(response: PrivateOrderResponse): PrivateOrderResponse {
+  return response;
+}
+
+// Fixtures implement the public client's response types; transport/schema coverage lives in core.
+function taskResponse<Method extends keyof TasksClient>(
+  response: Awaited<ReturnType<NonNullable<TasksClient[Method]>>>,
+): Awaited<ReturnType<NonNullable<TasksClient[Method]>>> {
+  return response;
+}
 
 function card(state: "open" | "paid" = "open") {
   return {
@@ -90,7 +110,7 @@ function card(state: "open" | "paid" = "open") {
 }
 
 function order() {
-  return tasksResponseSchemas.getOrder.parse({
+  return privateOrderResponse({
     workOrder: {
       version: "work-order-view-v1",
       id: ID,
@@ -268,7 +288,7 @@ function milestoneOrder(
   } = {},
 ) {
   const base = order().workOrder;
-  return tasksResponseSchemas.getOrder.parse({
+  return privateOrderResponse({
     workOrder: {
       ...base,
       role: options.role ?? "client",
@@ -325,6 +345,7 @@ function milestoneOrder(
 
 function signingOrder(role: "client" | "provider", self: string) {
   const current = milestoneOrder({ role, escrowState: null });
+  const selfAddress = getAddress(self).toLowerCase() as `0x${string}`;
   const terms = scopeFixture().structuredTerms;
   const proposalTerms = {
     version: terms.version,
@@ -338,10 +359,10 @@ function signingOrder(role: "client" | "provider", self: string) {
     evidenceRules: terms.evidenceRules,
   };
   const proposedMilestones = [proposalTerms];
-  return tasksResponseSchemas.getOrder.parse({
+  return privateOrderResponse({
     workOrder: {
       ...current.workOrder,
-      clientAddress: role === "client" ? self : ADDRESS,
+      clientAddress: role === "client" ? selfAddress : ADDRESS,
       acceptedProposalId: role === "provider" ? PROPOSAL_ID : null,
       proposals:
         role === "provider"
@@ -349,12 +370,12 @@ function signingOrder(role: "client" | "provider", self: string) {
               {
                 id: PROPOSAL_ID,
                 workOrderId: ID,
-                providerAddress: self,
+                providerAddress: selfAddress,
                 state: "accepted",
                 signedPayload: {
                   version: "work-proposal-v1",
                   workOrderId: ID,
-                  providerAddress: self,
+                  providerAddress: selfAddress,
                   pricingModel: "fixed",
                   milestones: proposedMilestones,
                 },
@@ -374,7 +395,7 @@ function signingOrder(role: "client" | "provider", self: string) {
 function chainResult(
   state: "funded" | "delivered" | "released" | "refunded" | "disputed" = "funded",
 ): TasksChainResult {
-  const operation = tasksResponseSchemas.fundEscrow.parse({
+  const operation = taskResponse<"fundEscrow">({
     operation: {
       id: FILE_ID,
       kind: "escrow-funding",
@@ -452,10 +473,8 @@ async function writeProfile(
   );
 }
 
-function scopeFixture(
-  proposedByRole: "client" | "provider" = "client",
-): Awaited<ReturnType<TasksClient["getScopes"]>>["scopes"][number] {
-  const structuredTerms = {
+function scopeFixture(proposedByRole: "client" | "provider" = "client"): TaskScope {
+  const structuredTerms: TaskScope["structuredTerms"] = {
     version: "work-milestone-terms-v1" as const,
     title: "Build a page",
     description: BRIEF,
@@ -474,7 +493,7 @@ function scopeFixture(
     deadline: NOW.toISOString(),
   };
   const frozen = freezeScopeTerms(structuredTerms, BRIEF);
-  return tasksResponseSchemas.getScopes.parse({
+  return taskResponse<"getScopes">({
     scopes: [
       {
         id: FILE_ID,
@@ -1365,7 +1384,7 @@ describe("vapi task", () => {
 
   it("derives every terminal private receipt from its escrow address", async () => {
     const workOrder = order().workOrder;
-    const terms = {
+    const terms: TaskMilestone["terms"] = {
       version: "work-milestone-terms-v1",
       title: "Build a page",
       description: BRIEF,
@@ -1380,7 +1399,7 @@ describe("vapi task", () => {
       escrow: { protocol: "escrow-v1", contract: ESCROW },
       evidenceRules: { acceptedInputs: ["text"], exactCommitRequired: false },
     };
-    const milestone = {
+    const milestone: TaskMilestone = {
       id: PROPOSAL_ID,
       workOrderId: ID,
       ordinal: 1,
@@ -1409,7 +1428,7 @@ describe("vapi task", () => {
       createdAt: NOW.toISOString(),
       updatedAt: NOW.toISOString(),
     };
-    const settled = tasksResponseSchemas.getOrder.parse({
+    const settled = privateOrderResponse({
       workOrder: {
         ...workOrder,
         state: "completed",
@@ -2096,7 +2115,7 @@ describe("vapi task", () => {
     it("requires approval before signing a scope in non-interactive mode", async () => {
       const scope = scopeFixture("provider");
       const client = fakeClient({
-        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+        getScopes: vi.fn(async () => taskResponse<"getScopes">({ scopes: [scope] })),
       });
       const { dependencies, store } = await fixture(true, client);
       const self = (await store.list()).find((wallet) => wallet.name === "worker")!.address!;
@@ -2119,7 +2138,7 @@ describe("vapi task", () => {
     it("declines an interactive scope confirmation before signing or posting", async () => {
       const scope = scopeFixture("provider");
       const client = fakeClient({
-        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+        getScopes: vi.fn(async () => taskResponse<"getScopes">({ scopes: [scope] })),
       });
       const { dependencies, store } = await fixture(true, client);
       const self = (await store.list()).find((wallet) => wallet.name === "worker")!.address!;
@@ -2146,7 +2165,7 @@ describe("vapi task", () => {
     it("prints the poster direction, terms, and local signer before --yes signs", async () => {
       const scope = scopeFixture("provider");
       const stdout: string[] = [];
-      const accepted = tasksResponseSchemas.signScope.parse({
+      const accepted = taskResponse<"signScope">({
         scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
         milestone: {
           id: PROPOSAL_ID,
@@ -2157,7 +2176,7 @@ describe("vapi task", () => {
         },
       });
       const client = fakeClient({
-        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+        getScopes: vi.fn(async () => taskResponse<"getScopes">({ scopes: [scope] })),
         signScope: vi.fn(async () => {
           expect(stdout).toContain(
             `You are the poster: you will fund $100.00 USDC into escrow for worker ${scopeProposer.address}`,
@@ -2209,7 +2228,7 @@ describe("vapi task", () => {
       "accepts interactive %s and prints the worker direction before signing",
       async (answer) => {
         const scope = scopeFixture();
-        const accepted = tasksResponseSchemas.signScope.parse({
+        const accepted = taskResponse<"signScope">({
           scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
           milestone: {
             id: PROPOSAL_ID,
@@ -2220,7 +2239,7 @@ describe("vapi task", () => {
           },
         });
         const client = fakeClient({
-          getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+          getScopes: vi.fn(async () => taskResponse<"getScopes">({ scopes: [scope] })),
           signScope: vi.fn(async () => accepted),
         });
         const { dependencies, store } = await fixture(true, client);
@@ -2247,7 +2266,7 @@ describe("vapi task", () => {
     it("returns approval_needed JSON without signing when --yes is absent", async () => {
       const scope = scopeFixture("provider");
       const client = fakeClient({
-        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+        getScopes: vi.fn(async () => taskResponse<"getScopes">({ scopes: [scope] })),
       });
       const { dependencies, store } = await fixture(true, client);
       const self = (await store.list()).find((wallet) => wallet.name === "worker")!.address!;
@@ -2285,7 +2304,7 @@ describe("vapi task", () => {
       const localSignature = await signer.signMessage({
         message: canonicalJson(proposed.signingPayload),
       });
-      const acceptedScope = tasksResponseSchemas.getScopes.parse({
+      const acceptedScope = taskResponse<"getScopes">({
         scopes: [
           {
             ...proposed,
@@ -2298,9 +2317,7 @@ describe("vapi task", () => {
         ],
       }).scopes[0]!;
       client.getOrder = vi.fn(async () => signingOrder("provider", self));
-      client.getScopes = vi.fn(async () =>
-        tasksResponseSchemas.getScopes.parse({ scopes: [acceptedScope] }),
-      );
+      client.getScopes = vi.fn(async () => taskResponse<"getScopes">({ scopes: [acceptedScope] }));
       client.signScope = vi.fn();
       const signerCall = vi.spyOn(signer, "signMessage");
       const unlock = vi.spyOn(WalletStore.prototype, "unlock").mockResolvedValue(signer);
@@ -2325,7 +2342,7 @@ describe("vapi task", () => {
 
     it("signs the canonical scope then accepts it, maps roles, and reports a partial create failure", async () => {
       const scope = scopeFixture();
-      const accepted = tasksResponseSchemas.signScope.parse({
+      const accepted = taskResponse<"signScope">({
         scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
         milestone: {
           id: PROPOSAL_ID,
@@ -2338,7 +2355,7 @@ describe("vapi task", () => {
       const calls: string[] = [];
       const client = fakeClient({
         getOrder: vi.fn(async () => milestoneOrder({ role: "provider", escrowState: null })),
-        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+        getScopes: vi.fn(async () => taskResponse<"getScopes">({ scopes: [scope] })),
         signScope: vi.fn(async () => {
           calls.push("client.signScope");
           return accepted;
@@ -2403,7 +2420,7 @@ describe("vapi task", () => {
 
     it("prints verified scope terms before the signed confirmation", async () => {
       const scope = scopeFixture("provider");
-      const accepted = tasksResponseSchemas.signScope.parse({
+      const accepted = taskResponse<"signScope">({
         scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
         milestone: {
           id: PROPOSAL_ID,
@@ -2415,7 +2432,7 @@ describe("vapi task", () => {
       });
       const client = fakeClient({
         getOrder: vi.fn(async () => milestoneOrder({ role: "client", escrowState: null })),
-        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+        getScopes: vi.fn(async () => taskResponse<"getScopes">({ scopes: [scope] })),
         signScope: vi.fn(async () => accepted),
       });
       const { dependencies, store } = await fixture(true, client);
@@ -2454,7 +2471,7 @@ describe("vapi task", () => {
           message: canonicalJson({ ...original.signingPayload, termsHash: frozen.termsHash }),
         }),
       };
-      const accepted = tasksResponseSchemas.signScope.parse({
+      const accepted = taskResponse<"signScope">({
         scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
         milestone: {
           id: PROPOSAL_ID,
@@ -2482,7 +2499,7 @@ describe("vapi task", () => {
 
     it("lets the poster accept a scope with a local vault signature without C2", async () => {
       const scope = scopeFixture("provider");
-      const accepted = tasksResponseSchemas.signScope.parse({
+      const accepted = taskResponse<"signScope">({
         scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
         milestone: {
           id: PROPOSAL_ID,
@@ -2494,7 +2511,7 @@ describe("vapi task", () => {
       });
       const client = fakeClient({
         getOrder: vi.fn(async () => milestoneOrder({ role: "client", escrowState: null })),
-        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+        getScopes: vi.fn(async () => taskResponse<"getScopes">({ scopes: [scope] })),
         signScope: vi.fn(async () => accepted),
       });
       const { dependencies, store } = await fixture(true, client);
@@ -2510,9 +2527,9 @@ describe("vapi task", () => {
       const scope = scopeFixture();
       const client = fakeClient({
         getOrder: vi.fn(async () => milestoneOrder({ role: "provider", escrowState: null })),
-        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+        getScopes: vi.fn(async () => taskResponse<"getScopes">({ scopes: [scope] })),
       });
-      const accepted = tasksResponseSchemas.signScope.parse({
+      const accepted = taskResponse<"signScope">({
         scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
         milestone: {
           id: PROPOSAL_ID,
@@ -2868,7 +2885,7 @@ describe("vapi task", () => {
 
     it("waits for a worker escrow creation and reports its confirmed block", async () => {
       const scope = scopeFixture();
-      const accepted = tasksResponseSchemas.signScope.parse({
+      const accepted = taskResponse<"signScope">({
         scope: { ...scope, state: "accepted", milestoneId: PROPOSAL_ID },
         milestone: {
           id: PROPOSAL_ID,
@@ -2881,7 +2898,7 @@ describe("vapi task", () => {
       let created = false;
       let polls = 0;
       const client = fakeClient({
-        getScopes: vi.fn(async () => tasksResponseSchemas.getScopes.parse({ scopes: [scope] })),
+        getScopes: vi.fn(async () => taskResponse<"getScopes">({ scopes: [scope] })),
         signScope: vi.fn(async () => accepted),
       });
       const { dependencies, store } = await fixture(true, client);
@@ -3229,10 +3246,10 @@ describe("Tasks v2 terminal verbs", () => {
   it("keeps canonical lifecycle and nextAction in the show JSON snapshot", async () => {
     const { v2Terms, v2Lifecycle, v2NextAction } =
       await import("../../core/src/tasks/fixtures/tasks-v2.js");
-    const value = tasksResponseSchemas.getOrder.parse({
+    const value = taskResponse<"getOrder">({
       ...order(),
-      workOrder: { ...order().workOrder, terms: v2Terms },
-      lifecycle: v2Lifecycle,
+      workOrder: { ...order().workOrder, terms: taskTermsSchema.parse(v2Terms) },
+      lifecycle: taskLifecycleSchema.parse(v2Lifecycle),
       nextAction: v2NextAction,
     });
     const { dependencies } = await fixture(true, fakeClient({ show: vi.fn(async () => value) }));
@@ -3327,7 +3344,7 @@ describe("Tasks v2 terminal verbs", () => {
     const created = milestoneOrder();
     const client = fakeClient({
       post: vi.fn(async () => ({
-        task: tasksResponseSchemas.createOrder.parse(created),
+        task: taskResponse<"createOrder">(created),
         funding: { kind: "eip712" as const },
       })),
       getOrder: vi.fn(async () => created),
@@ -3354,7 +3371,7 @@ describe("Tasks v2 terminal verbs", () => {
     const { v2FundingUnavailable } = await import("../../core/src/tasks/fixtures/tasks-v2.js");
     const client = fakeClient({
       post: vi.fn(async () => ({
-        task: tasksResponseSchemas.createOrder.parse(order()),
+        task: taskResponse<"createOrder">(order()),
         funding: v2FundingUnavailable,
       })),
     });
@@ -3402,7 +3419,7 @@ describe("Tasks v2 terminal verbs", () => {
 describe("post-and-fund confirmation", () => {
   it("reserves the escrow amount before signing the returned intent and announces only hosted confirmation", async () => {
     const { readSpendLedger } = await import("@vapi-network/core");
-    const created = tasksResponseSchemas.createOrder.parse(milestoneOrder());
+    const created = taskResponse<"createOrder">(milestoneOrder());
     const intent = {
       kind: "eip712" as const,
       operationId: "sig_recorded",
@@ -3450,7 +3467,7 @@ describe("post-and-fund confirmation", () => {
     expect(result.stdout).toContain("escrow funded");
   });
   it("preserves the created task when local funding fails", async () => {
-    const created = tasksResponseSchemas.createOrder.parse(milestoneOrder());
+    const created = taskResponse<"createOrder">(milestoneOrder());
     const client = fakeClient({
       post: vi.fn(async () => ({ task: created, funding: { kind: "eip712" as const } })),
       getOrder: vi.fn(async () => milestoneOrder()),
@@ -3624,7 +3641,7 @@ function v2TestOperation(): import("@vapi-network/core/tasks").TaskV2Operation {
 }
 
 it("passes the original post funding key and prepared operation through an approval refusal", async () => {
-  const created = tasksResponseSchemas.createOrder.parse(order());
+  const created = taskResponse<"createOrder">(order());
   created.workOrder.terms = {
     shape: "task",
     milestones: [
@@ -3729,6 +3746,11 @@ describe("Tasks V2 jury and reviewer verbs", () => {
   }
 
   it.each([
+    [["milestone", ID, "close-rejected", "--index", "0"], { action: "close-rejected", i: 0 }],
+    [
+      ["sign", ID, "--action", "bump-consent-nonce", "--new-nonce", "7"],
+      { action: "bump-consent-nonce", newNonce: "7" },
+    ],
     [["close-rejected", ID, "--index", "0"], { action: "close-rejected", i: 0 }],
     [
       ["bump-consent-nonce", ID, "--new-nonce", "7"],

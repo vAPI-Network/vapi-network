@@ -20,11 +20,11 @@ import {
   createPendingTransactions,
   createTasksClient,
   missingTasksChain,
+  safeTasksChainError,
   type TasksChain,
   type TasksClient,
   type TasksClientOptions,
 } from "@vapi-network/core/tasks";
-import { safeTasksChainError } from "../../../core/src/tasks/index.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
@@ -1469,7 +1469,7 @@ describe("task MCP tools", () => {
       env: {},
       tasks: { client, chain, now: () => new Date("2026-10-08T12:00:00Z") },
     });
-    const readme = await readFile(new URL("../../../../README.md", import.meta.url), "utf8");
+    const guide = await readFile(new URL("../../../../docs/mcp.md", import.meta.url), "utf8");
 
     try {
       const allTools = (await server.listTools()).tools;
@@ -1483,7 +1483,7 @@ describe("task MCP tools", () => {
 
       for (const tool of tools) {
         const verb = tool.name.slice("tasks.".length);
-        expect(readme).toContain(`\`${tool.name}\``);
+        expect(guide).toContain(`\`${tool.name}\``);
         if (
           [
             "fund",
@@ -2452,6 +2452,12 @@ describe("V2 jury and reviewer tools", () => {
   }
 
   it.each([
+    ["milestone", { action: "close-rejected", i: 0 }, { action: "close-rejected", i: 0 }],
+    [
+      "sign",
+      { action: "bump-consent-nonce", newNonce: "7" },
+      { action: "bump-consent-nonce", newNonce: "7" },
+    ],
     ["close-rejected", { i: 0 }, { action: "close-rejected", i: 0 }],
     ["bump-consent-nonce", { newNonce: "7" }, { action: "bump-consent-nonce", newNonce: "7" }],
     ["prune-reviewer", { reviewer: RESOLVER }, { action: "prune-reviewer", reviewer: RESOLVER }],

@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -50,6 +50,13 @@ afterEach(async () => {
 });
 
 describe("createVapiClient", () => {
+  it("documents wallet removal at the next major release", async () => {
+    const source = await readFile(new URL("./client.ts", import.meta.url), "utf8");
+    expect(source).toMatch(
+      /\/\*\* @deprecated Use `account`; removed in the next major release\. \*\/\s+wallet\?: string;/u,
+    );
+  });
+
   it.each(["lock", "expiry", "protect"] as const)(
     "refuses a cached vault signer after %s and allows a new session",
     async (invalidation) => {
@@ -380,6 +387,70 @@ describe("createVapiClient", () => {
     expect(unlock).toHaveBeenCalledOnce();
     await expect(stat(getVapiPaths(home).ledger)).resolves.toBeDefined();
     await expect(stat(getVapiPaths(home).receipts)).resolves.toBeDefined();
+  });
+
+  it("returns typed purchase warnings when receipt persistence fails", async () => {
+    const home = await temporaryHome();
+    const secrets = memorySecretStore({
+      [agentSecretAccounts("main").tokens]: JSON.stringify({
+        accessToken: ACCESS_TOKEN,
+        refreshToken: "test-agent-refresh-token",
+        expiresAt: Number.MAX_SAFE_INTEGER,
+        scopes: ["mcp:call", "router.use"],
+      }),
+    });
+    const store = await WalletStore.open(home, { secrets, env: {} });
+    await store.importKey("main", PASSPHRASE, PRIVATE_KEY, {
+      spendCaps: { perCallAtomic: "10000000", perDayAtomic: "10000000" },
+    });
+    await store.setLink("main", agentLink());
+    const config = getDefaultConfig();
+    config.allowPrivateNetwork = true;
+    await writeFile(getVapiPaths(home).config, `${JSON.stringify(config)}\n`, { mode: 0o600 });
+    const balance = { purchasedUsd: 5, spentUsd: 0, remainingUsd: 5 };
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname === "/api/router/top-up/5") {
+        return request.headers.has("payment-signature")
+          ? routerTopupAccepted()
+          : routerTopupRequired();
+      }
+      if (url.pathname === "/api/agents/self/router-balance-key") {
+        return Response.json({
+          router_key: BALANCE_KEY,
+          router_base_url: "https://router.example/gateway",
+        });
+      }
+      if (url.pathname === "/api/agents/self/router") {
+        return Response.json({
+          compute: {
+            allowanceUsd: 10,
+            spentTodayUsd: 1,
+            remainingTodayUsd: 9,
+            resetsAt: "2026-09-24T00:00:00.000Z",
+            ownerLimitUsd: 20,
+            ownerSpentUsd: 1,
+          },
+          balance,
+        });
+      }
+      throw new Error(`Unexpected request to ${url.href}`);
+    });
+    const unlock = vi.spyOn(WalletStore.prototype, "unlock");
+    const client = await createVapiClient({
+      home,
+      passphrase: PASSPHRASE,
+      secretStore: secrets,
+      fetch: fetchImpl,
+      env: {},
+    });
+
+    await mkdir(getVapiPaths(home).receipts);
+    const purchase = await client.router.buy(5);
+    expect(purchase.warnings?.[0]?.code).toBe("receipt_unavailable");
+    expect(purchase.receipt).toMatchObject({ outcome: "paid", source: "router.topup" });
+    expect(unlock).toHaveBeenCalledOnce();
   });
 
   it("auto-refills configured Router balance for SDK chats and agent runs", async () => {

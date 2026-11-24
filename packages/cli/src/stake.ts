@@ -1,23 +1,16 @@
 import { activeAgentMarker } from "@vapi-network/core";
+import { AGENT_LINK_REVOKED_MESSAGE } from "@vapi-network/core/agent-link";
 import {
   RouterClientError,
   ownerStake,
   type RouterClientDeps,
 } from "@vapi-network/core/router-client";
-import { AGENT_LINK_REVOKED_MESSAGE } from "@vapi-network/core/agent-link";
 import { formatUnits } from "viem";
 
-import {
-  UsageError,
-  getEnvironment,
-  getSecretStore,
-  openInBrowser,
-  parseArguments,
-  targetWallet,
-  type CliDependencies,
-  type CliIo,
-  type WalletTarget,
-} from "./cli.js";
+import { UsageError, parseArguments } from "./args.js";
+import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
+import { openInBrowser } from "./platform.js";
+import { getSecretStore, targetWallet, type WalletTarget } from "./wallet-session.js";
 
 const WALLET_OPTION = "--wallet";
 export const STAKE_URL = "https://api.vapinetwork.ai/stake";

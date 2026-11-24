@@ -3,6 +3,13 @@
 All notable changes to the published `vapi-network` distribution and its four
 scoped packages. The packages share one version and are released together.
 
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
+versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Before
+1.0.0 a breaking change raises the minor version and is listed under a Breaking
+heading. Each heading carries the date the version was published to npm, and the
+sentence under it is the summary shown on the
+[GitHub release](https://github.com/vAPI-Network/vapi-network/releases).
+
 ## Unreleased
 
 ### Changed
@@ -11,9 +18,122 @@ scoped packages. The packages share one version and are released together.
 
 ### Added
 
-- SDK, CLI and MCP actions for closing rejected milestones, revoking consent nonces and pruning reviewer seats; audit-3 event decoding, including dispute fee flows and surplus sweeps. Mainnet deployment pins remain empty pending verification.
+- SDK, CLI and MCP actions for closing rejected milestones, revoking consent nonces and pruning reviewer seats; audit-3 event decoding, including dispute fee flows and surplus sweeps. Verified Base mainnet deployment pins are included.
+- Hosted action aliases for milestone closing and consent nonce revocation in CLI and local MCP. The bundled SDK exports the Tasks API through its `tasks` namespace.
 
-## 0.13.0 — 2026-11-10
+### Fixed
+
+- A caller of a file lock that loses a race over a removed lock file keeps waiting for the lock instead of failing. Before, a tomb another caller had already deleted could make the operation reject with `ENOENT`, and on Windows a waiter breaking a crashed process's lock could reject with `EPERM` or `EBUSY` naming a `.stale.` file.
+- `vapi login` says why the link request never reached vAPI: a failed DNS lookup, a timeout, or the system error code of the connection, such as `ECONNREFUSED`. When `HTTPS_PROXY` is set without `NODE_USE_ENV_PROXY=1`, it says that Node.js uses the proxy only with that variable. Before, every such failure printed `The vAPI agent link request failed.` with no reason.
+- CLI `vapi agent run <name> "<task>" --result-file <path>` prints a Router refill's transaction hash again. The printed result went through redaction a second time, so the `Transaction:` line and the `refills[].receipt.transaction` field of `--json` output showed `[redacted private key]` while the result file kept the hash. Both show the hash now. Everything else such a run prints is redacted as before.
+
+### Internal
+
+- The vAPI Desktop MCP host tests no longer fetch views from the live API, so a slow hosted service cannot time them out. The host takes an optional `fetchImpl`, which the tests give a local stub.
+
+## 0.15.1 - 2026-11-24
+
+`vapi docs` and the MCP docs tools read the new docs site at docs.vapinetwork.ai, and Router key writes, resumed transfers and lock files are safe against races.
+
+### Fixed
+
+- The docs client supports the new docs site's search and Markdown pages while retaining GitBook fallbacks. CLI questions return the closest three documentation sections when the site has no assistant.
+- A Router key write that started before `vapi logout` or a new `vapi login` can no longer finish after it. `vapi router key --rotate`, the Router balance key stored after a purchase and the removal of a rejected balance key now re-check the link and write under the same lock that login, logout and the token refresh use. Before, a rotation that lost the race could publish the old link again and store a Router key for a wallet that was logged out. The `agent-link` subentry exports `withCredentialPublishLock` for this.
+- `vapi send` and MCP `accounts.send` keep the spend reservation when saving the signed authorization reports an error although the row reached the receipts ledger. The transfer then returns `unknown` with its nonce and is continued by running the same `vapi send` command again with `--resume <nonce>`. Before, the reservation was released while the row stayed resumable, so a resumed transfer could move money outside the spend cap. When the ledger shows no row for the nonce, the reservation is released as before.
+- A failure while closing a lock file no longer replaces the result of the operation that held the lock. This applies to the spend ledger lock, the wallet registry lock, the agent credential locks and the vault lock: a reservation, registry change, credential write or vault write that was committed is reported as it finished, and the removal of the lock file is still attempted, where before the file stayed until the stale rule removed it.
+
+## 0.15.0 - 2026-11-19
+
+Router purchases recover after an interruption without a second charge, swarm dissolution refuses while a worker is active or unresolved, and `vapi login` works on more Linux keyrings.
+
+### Added
+
+- CLI `vapi router clear-pending --confirm-settled` saves any missing succeeded receipt, prints payment evidence and support guidance, then retires a settled journal under the purchase lock. JSON adds `receipt`, `receiptAppended` and `notice`; prepared, signed and unknown entries are refused. The flag is exclusive with `--confirm-unpaid` and has no MCP equivalent.
+- CLI purchase/refill JSON and MCP purchase/refill output add optional `receipt.settlement` (`succeeded`, `rejected` or `unknown`). MCP output schemas accept `settlement_unconfirmed`, `credit_pending` and `pending_purchase_unlinked` warnings.
+- The Router subentry exports `ensureRouterPurchaseReceipt` to record settled purchase evidence; a separate strict sync gates retirement. Pending purchase journals optionally record `baselinePurchasedUsd`; older entries remain recoverable through a successful balance-key chat.
+- Payment warnings add `settlement_unconfirmed`, `credit_pending` and `pending_purchase_unlinked` to distinguish unconfirmed authorizations, credit awaiting confirmation, and settled purchases whose link changed.
+- `vapi router clear-pending [--confirm-unpaid]` prints public payment evidence and explorer instructions. Before clearing, the CLI uses the same receipt/authorization-state resolution as automatic recovery: paid attempts and live authorizations are refused, and unused expired authorizations can clear. Only when chain evidence is unavailable may explicit human confirmation override the guard; output identifies that confirmation as lacking chain evidence. There is no MCP equivalent.
+- CLI `vapi swarm forget-run <swarm> <runId> --confirm-destroyed` lets an owner confirm a verified unknown/orphaned sandbox is destroyed. It prints the original recorded scope and check command, retains a timestamped `forgotten` run record and retires the matching sidecar. Missing scope is reported rather than guessed.
+- MCP adds `swarm.stop` with `name` and exactly one of `runId` or `all: true`. `VapiServerOptions.runtimeForStop` optionally resolves stop-only adapters by runtime kind. The CLI-hosted server supplies local/Railway stop adapters without enabling remote startup or stale-start confirmation over MCP.
+- `PayRequestArgs` adds optional `beforeSign` (also on x402 payment builders) for durable public authorization journaling before signing, and optional `receiptId` to correlate a durable purchase reservation with its receipt ledger entry. The Router subentry exports `routerPurchaseView`, the shared public receipt/warning projection.
+- Core exports the `PaymentWarning` type. The Router subentry exports `RouterPurchaseResult`, `RouterPurchaseWarning` and `routerPurchaseSummary`.
+- Core exports `PAYMENT_WARNING_CODES`, the list every payment warning schema is derived from, and `swarmRunRefillSchema`. Swarm member results, delegation records and the MCP Router tools accept the same warning codes and the receipt's `settlement` outcome, so a refill with an unconfirmed settlement or pending credit no longer fails output validation in a swarm run.
+- Core exports `RouterPendingPurchase`. Wallet entries expose its public recovery metadata in memory, while `WalletStore.setRouterPendingPurchase` atomically reserves, updates or clears the matching record in `router-pending/<wallet>.json`, separate from the v1 wallet registry. Older registry writers cannot erase it. Existing registry records migrate on read; legacy `prepared` records remain `unknown` because older clients did not journal signing. Empty tombstones prevent stale registry snapshots from resurrecting cleared purchases.
+
+### Breaking
+
+- MCP runtime `RuntimeError.code` adds `swarm_unavailable` and `launch_ambiguous`. `startDetachedRun` reserves swarm members under the swarm lock before taking their member lock, revalidates membership and can reject with `swarm_unavailable`; this applies to local and Railway swarm workers. Standalone agents retain the member-only lock.
+- Exported MCP `stopRun` now attempts to stop `unknown` workers and requires successful adapter completion before persisting `stopped`. `Runtime.stop` adds an optional `{ requireSuccessfulExit: true }` argument, passed by `stopRun` for running, unknown and starting Railway records with a saved sandbox id and by launch-persistence rollback; adapters must honor it without text-based absence inference. The Railway adapter always requires destroy exit 0, with or without the option, across launch-failure, signal, terminal-status and direct-stop cleanup; `destroyRailwaySidecar` requires exit 0 for every sidecar it retires. Stderr warnings are harmless on success; non-zero, interrupted and timeout outcomes reject even when text says not found. Local stops retain their behavior.
+- `AgentEvent` adds the `refill` member with public Router purchase evidence and warnings.
+- CLI Router purchase/refill JSON now matches MCP: `receipt.id`, `receipt.amountUsd`, `receipt.network` and optional `receipt.transaction` replace the flat `receiptId`, `amountUsd`, `network` and `transaction` fields. Human output includes the public receipt and transaction references.
+- `buyRouterBalance` returns `RouterPurchaseResult` with optional `PaymentWarning` entries. `routerPurchaseSummary`, CLI purchase JSON and MCP purchase output allow `amountUsd: null` and `network: "unknown"` when charged metadata is absent.
+- `payRequest` returns a confirmed in-memory receipt with warnings when receipt persistence or post-settlement processing fails, instead of rejecting. Callers must retain the receipt and must not repeat the payment for these warnings.
+- `RouterClientError` adds `refill_pending`, an optional prior `refill` purchase (fourth constructor argument, including interrupted purchases awaiting confirmation), and a public `toJSON()` summary. `ChatResult` adds optional `refill: RouterPurchaseResult`; CLI/MCP chat results and errors preserve public payment evidence and warnings.
+- `refreshRunRecord` now acquires the member lock, re-reads the stored record and returns its fresh state. Unknown and terminal records are never polled from stale snapshots. Missing records reject with `RuntimeError("run_not_found")`, changed member identity with `runtime_unavailable`, and lock contention with `member_busy`. MCP exports `withMemberRunLock(home, account, operation)` for the same lifecycle lock; no run-record schema or function argument changes in this round.
+- `destroyRailwaySidecar` serializes cleanup on the recorded member and re-reads ownership/state before acting. Concurrent completed confirmation with no sidecar returns `destroyed: true` without another Railway call; conflicting/current metadata or contention returns a failed cleanup result. Unattributed legacy cleanup is serialized by run id and does not rewrite failed metadata without a member lock.
+- MCP runtime `RunState` adds `orphaned` and `forgotten`; `RunRecord` and `DetachedRunSummary` add optional `forgottenAt` and `confirmedBy: "cli"`. A forgotten record requires both confirmation fields. `RuntimeHandle` adds optional `railwayScope: { projectId?, environmentId? }` for original creation metadata when available. MCP read-only run summaries include these states/confirmation fields; no forget tool is exposed.
+- `SwarmErrorCode` adds `swarm_workers_active` for active/unresolved-worker dissolution refusals. CLI JSON and MCP return that shared domain code instead of an untyped error.
+
+### Fixed
+
+- Failed Railway destroys retain evidence that blocks dissolution before any balance read or transfer, including when stderr says not found. A text-only not-found status returns `unknown` and leaves the sidecar unchanged. Without a run record, use `swarm stop --all` first; a failed destroy marks the sidecar `orphaned` for `forget-run --confirm-destroyed`. Failed starting/running stops become `unknown` with sanitized detail; when sidecar persistence succeeds, launch-failure and signal cleanup retain an identified `orphaned` sidecar that CLI `forget-run` can clear without a reservation, and failed persistence rollback retains its sidecar. Terminal-result cleanup stays `running` and retries on refresh; a failed explicit stop then becomes `unknown`. Nonterminal status polls keep Railway starts unresolved, including when status requests fail. CLI and MCP stop errors and identified failed-launch diagnostics name `vapi swarm forget-run <swarm> <runId> --confirm-destroyed` after verification in the original project/environment. CLI `swarm stop --all` and MCP `swarm.stop` retry unknown workers instead of permanently stranding a disappeared sandbox; only successful destruction or explicit CLI confirmation unblocks dissolution. CLI confirmation also accepts finished, failed or stopped Railway records with an identified orphaned sidecar; id-less sidecars remain refused.
+- Detached swarm reservations serialize with dissolution in swarm-then-member lock order. Launch releases the swarm lock and verifies its reservation before creating a worker, so a dissolve cannot miss a concurrent start.
+- Ambiguous Railway creates retain their starting reservation and return `launch_ambiguous` with the stale-start confirmation command. After five minutes and owner verification, `stop --confirm-worker-stopped` clears the id-less sidecar; failures before Railway receives a request still clear the reservation.
+- Swarm member results and delegation replays retain public Router refill receipts and warnings.
+- Bundled agent runs print refill evidence to stderr and preserve public transaction hashes in JSON and result files while redacting secrets.
+- Agent runs retain Router refill evidence in `RunAgentResult.refills`, CLI stderr, JSON and result files, including purchases carried by failed chats. Stops preserve `refill_pending` recovery guidance.
+- SDK `client.router.buy()` returns `RouterPurchaseResult` so callers can read warnings. The main core entry exports `RouterPurchaseResult` and `RouterPurchaseWarning` types.
+- Receipt appends sync payment evidence best effort; settled Router journals retire only after a separate strict sync of the ledger and its parent directory, including receipts saved by older clients. The file is opened without creating it, writable only on Windows; directory sync is skipped there. Fresh transfers strictly sync their signed authorization file and parent directory (except the directory on Windows) before calling the relay. If sync fails, no relay request is sent. A successful failed-row append releases the reservation and reports that no money moved. If that append also fails, the transfer returns `unknown`, keeps its reservation and can be resumed. Wallet renames require the receipt rewrite to sync before replacement and sync its directory best effort afterward.
+- Recovered Router purchases appear once in receipt listings, JSON/CSV exports and stats, preserving original metadata through append-only settlement revisions.
+- Logout bounds remote revocation and its token refresh requests and response bodies to ten seconds. Local cleanup uses the wallet credential lock even after that deadline. Refresh re-checks the link and stored token pair before publishing a rotation, accepting login metadata changes when the tokens still match.
+- CLI Router purchases with unknown settlement now say that the authorization was sent, settlement is not confirmed and the purchase must not be repeated. Rejected settlements are also identified without a successful payment claim.
+- CLI Router chat and buy errors preserve `refill` evidence when a missing link message is normalized. Human errors print purchase warnings, including the settled-retirement command; JSON retains the warning codes and messages.
+- Settled Router purchases keep blocking another payment until their receipt is in the ledger and purchased credit is established by usage under a current link with the same owner (case-insensitive) and API base or a successful balance-key chat. Repeated failed chats and manual buys recover the earlier purchase without paying again.
+- Router recovery appends missing settled receipts with sender, authorization nonce, token, amount and known transaction before retiring the journal. Receipt write or retirement sync failures retain the journal and `credit_pending` warning and allow balance-key chat; repeated recovery never appends another succeeded row for the same purchase.
+- Router purchases with an unconfirmed settlement return an explicit warning and keep their signed journal for chain recovery, while allowing chat on usable balance credit.
+- Settled Router purchases recover after relinking to the same owner and API base. A missing link or another owner or API base keeps the payment evidence and skips refills. Stake-key chat continues under a valid current link with usable credentials; without a link, chat returns `not_linked` with `pending_purchase_unlinked`. Login and logout serialize link changes with purchases using the purchase lock before credential locks.
+- Linux: `vapi login` no longer fails with "The agent link could not be stored consistently" on keyrings where `secret-tool clear` exits 1 without a message when it matches nothing. An exit 1 without a message for an entry the lookup did not find now counts as nothing to remove; any other exit code, a failure with a reason, and a failure to remove an entry the lookup found are still reported. Reported in #41, first fixed by @Rizal9 in #31.
+- A refused agent link now names the HTTP status and the server's error code, for example `The vAPI agent link request failed (HTTP 429, rate_limited).` Earlier versions printed only "The vAPI agent link request failed." for a rate limit, a refusal and a proxy error alike (#30, #42). A gateway or proxy error page without a JSON body is reported the same way and no longer as "response was invalid".
+- Pending Router purchases survive process restarts and are recovered before any refill decision, including manual purchases with automatic refill disabled. An unresolved purchase blocks another payment; credential-only chat retries do not unlock the payment account.
+- Router reservations now distinguish unsigned `prepared`, journaled `signed`, confirmed `settled`, and legacy/unsupported `unknown` attempts. Recovery under a per-wallet purchase lock clears unsigned reservations. Signed EIP-3009 attempts query the token's `authorizationState(from, nonce)` on the configured network RPC: used nonces recover the original purchase; unused nonces clear only after `validBefore` plus a 30-second clock margin. Live authorizations return `refill_pending` with a retry time. RPC errors and unsupported networks fail closed with CLI recovery guidance.
+- Concurrent automatic Router refills re-read balance and the durable completion marker under the purchase reservation, so stale low-balance decisions cannot buy twice after a successful first purchase, even if the configured threshold exceeds the purchased tier.
+- Accounts with pending Router purchases cannot be renamed or removed, even with forced removal. The check and mutation hold the purchase lock so an in-flight reservation cannot lose its guard; errors point to `vapi router clear-pending`.
+- Confirmed Router purchases retain their receipts when audit, key retrieval/storage, balance lookup, receipt persistence or later response processing fails. Explicit warnings report these failures; unavailable balance is `null`.
+- First automatic Router refills retain settled receipts through console, credential and chat failures. Payment-aware guidance explains pending key recovery; the next chat request fetches the missing balance key without a second purchase.
+- CLI and MCP report the charged quote amount and network from available receipt evidence. Missing network metadata no longer throws after payment or silently guesses a network.
+- x402 settlement evidence is captured before post-response timing reads; throwing timing clocks cannot discard settlement or interrupt response consumption.
+- Confirmed x402 payments retain their receipt and report a warning when an injected timing clock throws during final receipt construction.
+- x402 receipt metadata is snapshotted and validated before payment. Failures after confirmed settlement return the receipt and warnings instead of rejecting.
+- Swarm dissolution performs one shared core check before any balance lookup, pending movement resumption or transfer. CLI and MCP refresh tracked runs before that check and refuse active or unresolved Railway runs and sidecars with the same stop guidance. The core check also fails closed without a runtime adapter.
+- `SwarmCapitalDeps` adds an optional `reconcileRuns` port; local run records remain the authority for the final eligibility check. Existing capital locks and movement-journal formats are unchanged.
+- Concurrent Railway refreshes cannot turn a stored unknown run into finished through stale ordinary cleanup, or overwrite stopped/forgotten records and their confirmation metadata. Start and stop refresh through an internal helper while already holding the member lock.
+- Orphan-sidecar cleanup and CLI confirmation share the member lock. Failed cleanup cannot recreate a stale orphan after `forget-run` has retired it and retained the confirmation.
+- A rejected transfer releases its spend reservation only after its failed receipt row is written. If that write fails, it returns `unknown`, keeps the reservation and can be resumed. A relayed transfer whose receipt row cannot be written still returns `sent` (with the transaction when the relay reported one) or `unknown` with the nonce instead of a filesystem error. `--resume` with that nonce records the result once the receipt can be written.
+- Token refresh checks and stores rotated tokens under a credential lock shared with login and logout, so a refresh that finishes after logout stores nothing and cannot overwrite a newer login. The new lock adds no wait for a refresh's network request.
+- A wallet named `constructor` can now be created on a machine that has none. Earlier versions reported it as an existing wallet, so creating it failed with "already exists" while `vapi wallet list` showed nothing. Reported and fixed by @goranai in #48 and #49.
+- Setting spend caps, a ceiling or provisioning limits for a wallet named `constructor` that does not exist now says "No wallet named constructor" instead of failing with a JavaScript error, and the ceiling sweep no longer claims a window for it. Reported by @goranai in #48.
+- Atomic JSON writes no longer fail on Windows: the parent directory flush that Windows rejects is skipped there. Other platforms still flush it.
+- On Windows, a caller waiting for a file lock keeps waiting when the released lock it is removing is deleted by another caller at the same moment, instead of failing with a permission error.
+- A failure while releasing a file lock no longer replaces the result of the operation that ran under it, so a saved receipt or a completed wallet rename is not reported as failed.
+- A failed Railway launch that leaves a launch marker without a sandbox id, because the id could not be saved or the marker could not be removed, now keeps its starting reservation and returns `launch_ambiguous`, so `vapi swarm stop <swarm> <runId> --confirm-worker-stopped` can clear the marker after the five-minute window. Identified sidecars still use `vapi swarm stop <swarm> <runId>` and `vapi swarm forget-run <swarm> <runId> --confirm-destroyed` after verified destruction.
+- Railway launches treat a sandbox id in the `railway sandbox create` output that matches the member key, the bundle or a credential exported with the member as unreadable. The launch returns `launch_ambiguous` and the value is not written to the sidecar, the run record or a `railway` command line. Failure text from `railway` is scrubbed before it is shortened, and an echoed `VAPI_MEMBER_BUNDLE` value is always removed.
+
+### Internal
+
+- Core uses current path helpers and declared Tasks entry points, shares provenance deduplication in core, breaks the HD/keystore and Solana/x402 runtime import cycles, and refreshes the deprecated wallet option's removal notice without changing behavior.
+- The CLI all-networks gas-error test injects deterministic balance RPC responses during Arc setup instead of contacting live RPCs.
+
+## 0.14.0 - 2026-11-17
+
+Send ETH that landed on an agent account back to its owner with `vapi sweep --asset eth`.
+
+### Added
+
+- `vapi sweep --asset eth` sends an account's ETH on Base back to an address, or to the linked owner when no address is given. It keeps the Base network fee (gas plus the L1 data fee, with a 20% margin) and checks gas for the exact amount before signing. It works on Base and Base Sepolia only; Arc and Solana are refused. Without `--asset`, `vapi sweep` moves USDC exactly as before.
+
+## 0.13.0 - 2026-11-10
+
+`vapi setup` works on Linux machines without a keyring, such as servers, containers and GitHub Codespaces.
 
 ### Added
 
@@ -23,7 +143,9 @@ scoped packages. The packages share one version and are released together.
 
 - The Linux device-key failure hint now names `VAPI_VAULT_PASSWORD`.
 
-## 0.12.1 — 2026-11-09
+## 0.12.1 - 2026-11-10
+
+Setup says why the device key could not be stored, and secret-store errors no longer repeat raw keyring output.
 
 ### Fixed
 
@@ -31,7 +153,9 @@ scoped packages. The packages share one version and are released together.
 - When `vapi setup` cannot store the device vault key, it now says why, for example that `secret-tool` is not installed. On Linux it adds that a server, container or GitHub Codespace usually has no keyring. Run vapi on your own computer or connect Claude from https://api.vapinetwork.ai/connect.
 - OS secret-store errors no longer repeat the keyring tool's raw output, which could contain a secret. They name a known reason (such as no keyring daemon, a locked collection, or no D-Bus) or only the exit code.
 
-## 0.12.0 — 2026-10-30
+## 0.12.0 - 2026-11-05
+
+Run Claude Code and Codex on vAPI Compute with `vapi code install`, `vapi claude` and `vapi codex`. Fixes the Windows secret store.
 
 ### Added
 
@@ -47,12 +171,13 @@ scoped packages. The packages share one version and are released together.
 
 - Claude Code on vAPI Compute needs the Router's `/v1/messages` fix and prompt-cache pricing, live on vAPI production since v3.26.0.
 
-## 0.11.0 — 2026-10-29
+## 0.11.0 - 2026-10-29
+
+vAPI Call takes no fee. The package ships an agent skill, and search shows health, alternatives and next-step hints.
 
 ### Added
 
 - The public `vapi-network` package ships `SKILL.md` with setup, discovery, payment and recovery guidance for agents.
-
 - API search results can include registry health and cheaper or healthier alternatives, and inspected endpoints can include response schemas and example requests.
 - CLI JSON and MCP results for search, inspect and pay include up to four hints naming next actions.
 - `vapi search --include-outage` and MCP `call.search`'s `includeOutage` input request listings hidden by the hosted registry's default outage filter.
@@ -69,7 +194,9 @@ scoped packages. The packages share one version and are released together.
 - Discovery pages accept any `rankingVersion` label, so a registry that re-ranks no longer breaks installed clients. Required before the registry ships `marketplace-ranking-v2`.
 - The hidden-outage hint appears only when the registry reports `totals.hiddenOutage` above zero.
 
-## 0.10.0 — 2026-10-28
+## 0.10.0 - 2026-10-28
+
+MCP tools carry titles and annotations, the server identifies itself, and Call results can render interactively in Claude Desktop.
 
 ### Added
 
@@ -77,7 +204,7 @@ scoped packages. The packages share one version and are released together.
 - The MCP server identifies itself as vAPI Network with a title, website URL and light/dark icons. `server.json` lists the same icons for the MCP Registry.
 - `call.search` and `call.inspect` support interactive MCP Apps results in Claude Desktop. Views load from the hosted asset route and fall back to text when offline.
 
-## 0.9.7 (2026-10-26)
+## 0.9.7 - 2026-10-26
 
 ### Fixed
 
@@ -85,7 +212,7 @@ scoped packages. The packages share one version and are released together.
 - `vapi publish` sends each endpoint's `metadataEvidence` from the probe back with the listing, so an endpoint with a request schema is no longer refused with HTTP 422.
 - `--mode` is a hint: the registry accepts it and detects the kind of URL itself. Registries before 2026-10-26 refused it with HTTP 400 "Unrecognized key: mode".
 
-## 0.9.6 (2026-10-23)
+## 0.9.6 - 2026-10-24
 
 ### Fixed
 
@@ -93,7 +220,7 @@ scoped packages. The packages share one version and are released together.
 - `wallet.list` reports the current default from `wallets.json`, matching the `isDefault` marker on its rows.
 - Re-reading the account list never wipes the vault key an in-flight payment is still signing with.
 
-## 0.9.5 (2026-10-22)
+## 0.9.5 - 2026-10-23
 
 ### Added
 
@@ -104,7 +231,7 @@ scoped packages. The packages share one version and are released together.
 - `vapi init`, `vapi wallet create` and `vapi mcp install` offer to link the new or default wallet to your vAPI dashboard in an interactive terminal. Press Enter to accept, or use `--no-link` to skip the prompt.
 - Non-interactive runs print a login hint; JSON results include `linked: false` and a `next` link step when the wallet is unlinked. A failed link never fails wallet creation or MCP installation.
 
-## 0.9.4 (2026-10-15)
+## 0.9.4 - 2026-10-16
 
 ### Added
 
@@ -118,7 +245,9 @@ scoped packages. The packages share one version and are released together.
 
 - Interactive CLI runs report when a newer release is available. The check is skipped for JSON, MCP server, CI and non-TTY runs, uses a daily cache, and adds at most 1.5 seconds. Update with `npm i -g vapi-network@latest`.
 
-## 0.9.3 (2026-10-15)
+## 0.9.3 - not published
+
+Never published to npm on its own. These changes shipped in 0.9.4.
 
 ### Fixed
 
@@ -130,7 +259,7 @@ scoped packages. The packages share one version and are released together.
 - Phrase recovery scans through gaps until five consecutive addresses have no Base USDC. `--accounts <n>` restores a fixed count, and recovery reports how many addresses it scanned.
 - Inspect documentation describes the registry's last observed quote; a fresh quote is fetched when paying.
 
-## 0.9.2 (2026-10-15)
+## 0.9.2 - 2026-10-15
 
 0.9.1 was never published to npm; 0.9.2 is the first npm release carrying its changes.
 
@@ -153,7 +282,9 @@ scoped packages. The packages share one version and are released together.
 
 - Clients ≤ 0.9.0 fail every search whose results include a Solana row. Update to 0.9.2 with `npm i -g vapi-network@latest`.
 
-## 0.9.1 (2026-10-13)
+## 0.9.1 - not published
+
+Never published to npm on its own. These changes shipped in 0.9.2.
 
 ### Fixed
 
@@ -176,7 +307,7 @@ scoped packages. The packages share one version and are released together.
 - A polling error still fails the command or tool after a confirmed transaction; it never repeats the chain mutation.
 - Authentication errors may include sign-in or scope guidance, and chain errors include the HTTP status beside the code.
 
-## 0.9.0 (2026-10-12)
+## 0.9.0 - 2026-10-12
 
 ### Added
 
@@ -191,7 +322,7 @@ scoped packages. The packages share one version and are released together.
 - Dispute and counter-evidence pay the verified contract fee under the local spend policy.
 - The pinned Base Sepolia factory predates escrow V2, so V2 dispute actions refuse until a V2 deployment is pinned in a later release.
 
-## 0.8.0 (2026-10-01)
+## 0.8.0 - 2026-10-01
 
 ### Added
 
@@ -278,7 +409,7 @@ scoped packages. The packages share one version and are released together.
 - Backup size fallback now checks both the encrypted envelope and the owner restore relay payload against the 64 KB limit.
 - Backup export now applies the normal agent profile defaults. Invalid profiles are reported as skipped, and the CLI warns for each one.
 
-## 0.7.0 (2026-09-30)
+## 0.7.0 - 2026-09-30
 
 ### Added
 
@@ -323,7 +454,9 @@ scoped packages. The packages share one version and are released together.
 - Backup export now applies the normal agent profile defaults. Invalid profiles are reported as skipped, and the CLI warns for each one.
 - `vapi` installed with `npm i -g` (a symlink in the global bin directory) now runs; before, it exited 0 without output because the entry check compared the symlink path with the resolved module path.
 
-## 0.6.0 (2026-09-29)
+## 0.6.0 - not published
+
+Never published to npm on its own. These changes shipped in 0.7.0.
 
 ### Added
 
@@ -353,7 +486,9 @@ scoped packages. The packages share one version and are released together.
 - Top-level `vapi unlock` and `vapi lock` are deprecated; use `vapi vault unlock` and `vapi vault lock`. The old names work for one release.
 - `createVapiClient({ wallet })` is deprecated; use `createVapiClient({ account })`. The option remains accepted until 0.7.
 
-## 0.5.1 (2026-09-28)
+## 0.5.1 - not published
+
+Never published to npm on its own. These changes shipped in 0.7.0.
 
 ### Fixed
 
@@ -363,7 +498,7 @@ scoped packages. The packages share one version and are released together.
   whatever was typed there instead of the value the client sent. Every keychain write now goes over
   the pipe, in a terminal or not.
 
-## 0.5.0 (2026-09-25)
+## 0.5.0 - 2026-09-25
 
 ### Added
 
@@ -451,7 +586,9 @@ open` opens the console's stake page. Staking itself stays in the console.
   in one sentence and exit code 1 instead of a stack trace. A sweep without ETH
   for gas names the address to fund.
 
-## 0.4.0
+## 0.4.0 - not published
+
+Never published to npm on its own. These changes shipped in 0.5.0.
 
 Listing on vAPI became permissionless, so "is this listed?" stopped being a
 useful question and "how far did vAPI review it?" took its place. The registry
@@ -561,7 +698,7 @@ nonce)`, whether the signed authorization was used — `settled` (do not pay
 - Every package, `scripts/pack-check.mjs`, `CLI_VERSION` and
   `VAPI_CLIENT_VERSION` move to 0.4.0.
 
-## 0.3.0
+## 0.3.0 - 2026-09-19
 
 Several wallets on one machine, a passphrase that no longer has to sit in an
 editor's configuration file, and a hard line between what a person may see and
@@ -701,7 +838,9 @@ live on the wallet rather than in `config.json`; set them with `vapi wallet caps
 honoured, and is still checked first — `vapi unlock` is the new option, not a
 replacement.
 
-## 0.2.5
+## 0.2.5 - not published
+
+Never published to npm on its own. These changes shipped in 0.3.0.
 
 ### Added
 
@@ -749,7 +888,7 @@ replacement.
 - `createOnrampSession` stays exported for backwards compatibility but is no
   longer used by the CLI or the MCP server. Use the new `fundingPageUrl`.
 
-## 0.2.3
+## 0.2.3 - 2026-09-18
 
 ### Added
 
@@ -770,7 +909,7 @@ replacement.
 - The `bin` entries no longer use a `./` prefix, which npm stripped from the
   published manifest with a `"bin[vapi]" script name … was invalid` warning.
 
-## 0.2.1
+## 0.2.1 - 2026-09-18
 
 ### Changed
 
@@ -780,7 +919,7 @@ replacement.
   version beside it. `vapi init` and bare `vapi` show it; `--json`, `NO_COLOR`,
   `CI` and non-TTY output get the plain frame.
 
-## 0.2.0
+## 0.2.0 - 2026-09-18
 
 First release published to the npm `latest` tag. `0.2.0-dev.x` preview builds
 remain on `next`.

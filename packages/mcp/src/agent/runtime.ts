@@ -7,6 +7,8 @@ import {
   isRunId,
   readSwarm,
   RUN_ID_PATTERN,
+  SwarmError,
+  withSwarmLock,
   validateRecoveryPhrase,
   WALLET_NAME_PATTERN,
   withFileLock,
@@ -50,6 +52,8 @@ export type RuntimeHandle = {
   startedAt: string;
   /** Adapter-specific process or sandbox reference. It must never contain a secret. */
   ref: string;
+  /** Original creation scope, when returned by Railway; never today's linked scope. */
+  railwayScope?: { projectId?: string; environmentId?: string };
 };
 
 export type RuntimeStatus = {
@@ -74,17 +78,24 @@ export interface Runtime {
   recover?(record: RunRecord): Promise<RuntimeHandle | undefined>;
   /** Retire this exact adapter-owned start after the owner confirms its worker is gone. */
   retireUnreconciledStart?(record: RunRecord): Promise<void>;
-  stop(handle: RuntimeHandle): Promise<void>;
+  /** The Railway adapter always requires exit 0; the option remains for compatibility. */
+  stop(handle: RuntimeHandle, options?: { requireSuccessfulExit: true }): Promise<void>;
   status(handle: RuntimeHandle): Promise<RuntimeStatus>;
 }
 
-export type RunState = RuntimeStatus["state"] | "starting";
+export type RunState = RuntimeStatus["state"] | "starting" | "orphaned" | "forgotten";
 
 export class RuntimeError extends Error {
   readonly name = "RuntimeError";
 
   constructor(
-    readonly code: "member_busy" | "runtime_unavailable" | "run_not_found" | "invalid_run_id",
+    readonly code:
+      | "member_busy"
+      | "runtime_unavailable"
+      | "run_not_found"
+      | "invalid_run_id"
+      | "swarm_unavailable"
+      | "launch_ambiguous",
     message: string,
   ) {
     super(message);
@@ -104,6 +115,8 @@ export type RunRecord = {
   exitCode?: number;
   resultPath?: string;
   detail?: string;
+  forgottenAt?: string;
+  confirmedBy?: "cli";
 };
 
 /** A normal adapter launch should have produced a durable reference well before this bound. */
@@ -131,22 +144,48 @@ const runtimeHandleSchema: z.ZodType<RuntimeHandle> = z.strictObject({
   member: runtimeMemberSchema,
   startedAt: z.iso.datetime(),
   ref: z.string(),
+  railwayScope: z
+    .strictObject({
+      projectId: z.string().min(1).optional(),
+      environmentId: z.string().min(1).optional(),
+    })
+    .optional(),
 });
 
-export const runRecordSchema: z.ZodType<RunRecord> = z.strictObject({
-  v: z.literal(1),
-  runId: runIdSchema,
-  kind: runtimeKindSchema,
-  member: runtimeMemberSchema,
-  run: runtimeRunSchema,
-  handle: runtimeHandleSchema,
-  startedAt: z.iso.datetime(),
-  endedAt: z.iso.datetime().optional(),
-  state: z.enum(["starting", "running", "finished", "failed", "stopped", "unknown"]),
-  exitCode: z.number().int().optional(),
-  resultPath: z.string().optional(),
-  detail: z.string().optional(),
-});
+export const runRecordSchema: z.ZodType<RunRecord> = z
+  .strictObject({
+    v: z.literal(1),
+    runId: runIdSchema,
+    kind: runtimeKindSchema,
+    member: runtimeMemberSchema,
+    run: runtimeRunSchema,
+    handle: runtimeHandleSchema,
+    startedAt: z.iso.datetime(),
+    endedAt: z.iso.datetime().optional(),
+    state: z.enum([
+      "starting",
+      "running",
+      "finished",
+      "failed",
+      "stopped",
+      "unknown",
+      "orphaned",
+      "forgotten",
+    ]),
+    exitCode: z.number().int().optional(),
+    resultPath: z.string().optional(),
+    detail: z.string().optional(),
+    forgottenAt: z.iso.datetime().optional(),
+    confirmedBy: z.literal("cli").optional(),
+  })
+  .refine(
+    (record) =>
+      record.state !== "forgotten" ||
+      (record.forgottenAt !== undefined && record.confirmedBy === "cli"),
+    {
+      message: "A forgotten run requires a timestamp and explicit CLI confirmation.",
+    },
+  );
 
 export function runsDirectory(home: string): string {
   return join(home, "runs");
@@ -225,6 +264,28 @@ export async function refreshRunRecord(
   runtime?: Runtime,
   now: () => Date = () => new Date(),
 ): Promise<RunRecord> {
+  const candidate = await requireRunRecord(home, record.runId);
+  return await withMemberRunLock(
+    home,
+    candidate.member.account,
+    async () => await refreshRunRecordLocked(home, candidate, runtime, now),
+  );
+}
+
+/** The caller already holds this record's member lock (start, stop or refresh). */
+async function refreshRunRecordLocked(
+  home: string,
+  observed: RunRecord,
+  runtime?: Runtime,
+  now: () => Date = () => new Date(),
+): Promise<RunRecord> {
+  const record = await requireRunRecord(home, observed.runId);
+  if (record.member.account !== observed.member.account) {
+    throw new RuntimeError(
+      "runtime_unavailable",
+      `Run ${record.runId} changed members while waiting for its lock.`,
+    );
+  }
   if (
     (record.state !== "starting" && record.state !== "running") ||
     runtime?.kind !== record.kind
@@ -265,14 +326,17 @@ export async function refreshRunRecord(
   } catch {
     return current;
   }
-  const state: RunState =
-    current.state === "starting" && status.state === "unknown" ? "starting" : status.state;
+  // Railway also reports running when a poll fails or no result exists. That
+  // cannot confirm launch completion or relax a starting run's strict stop.
+  const unresolvedStart =
+    current.state === "starting" &&
+    (status.state === "unknown" || (current.kind === "railway" && status.state === "running"));
+  const state: RunState = unresolvedStart ? "starting" : status.state;
   const statusDetail =
     status.detail === undefined ? undefined : redactRunText(status.detail, process.env);
-  const detail =
-    current.state === "starting" && status.state === "unknown"
-      ? `${statusDetail ?? "Worker status is unknown"}. ${startingStopInstruction(current)}`
-      : statusDetail;
+  const detail = unresolvedStart
+    ? `${statusDetail ?? (status.state === "running" ? "Worker launch is still unconfirmed" : "Worker status is unknown")}. ${startingStopInstruction(current)}`
+    : statusDetail;
   if (state === current.state && detail === current.detail) return current;
 
   const updated: RunRecord = {
@@ -333,92 +397,163 @@ export async function startDetachedRun(args: {
   await mkdir(runsDirectory(args.home), { recursive: true, mode: 0o700 });
   const lockPath = memberRunLockPath(args.home, args.member.account);
   const busyMessage = `Member ${args.member.account} is already starting a run.`;
+  const reserve = async (): Promise<RunRecord> => {
+    const records = await listRunRecords(args.home, { account: args.member.account });
+    for (const record of records) {
+      const refreshed = await refreshRunRecordLocked(args.home, record, args.runtime, args.now);
+      if (refreshed.state === "starting" || refreshed.state === "running") {
+        throw new RuntimeError(
+          "member_busy",
+          `Member ${args.member.account} already has ${refreshed.state} run ${refreshed.runId}.${refreshed.detail === undefined ? "" : ` ${refreshed.detail}`}`,
+        );
+      }
+    }
+
+    const adapterBusy = await args.runtime.busy?.(args.member);
+    if (adapterBusy !== undefined) {
+      throw new RuntimeError(
+        "member_busy",
+        `Member ${args.member.account} is busy with unresolved run ${adapterBusy.runId}: ${adapterBusy.detail}`,
+      );
+    }
+
+    // The runtime receives the task exactly as given, so a detached run does what an attached
+    // run would; only the stored copy is scrubbed.
+    const startedAt = (args.now?.() ?? new Date()).toISOString();
+    const reservation: RunRecord = {
+      v: 1,
+      runId: args.run.runId,
+      kind: args.runtime.kind,
+      member: args.member,
+      run: { ...args.run, task: redactRunText(args.run.task, args.env ?? process.env) },
+      handle: {
+        runId: args.run.runId,
+        kind: args.runtime.kind,
+        member: args.member,
+        startedAt,
+        ref: "",
+      },
+      startedAt,
+      state: "starting",
+    };
+    await writeRunRecord(args.home, reservation);
+    return reservation;
+  };
+  const launch = async (reserved: RunRecord): Promise<RunRecord> => {
+    let reservation = reserved;
+    const current = await readRunRecord(args.home, reserved.runId);
+    if (
+      current === undefined ||
+      JSON.stringify(current) !== JSON.stringify(runRecordSchema.parse(reserved)) ||
+      current.state !== "starting" ||
+      current.handle.ref !== ""
+    ) {
+      throw new RuntimeError(
+        "runtime_unavailable",
+        `Reservation for ${reserved.runId} changed before launch. No worker was started. ${unreconciledStartInstruction(reserved)}`,
+      );
+    }
+    let handle: RuntimeHandle;
+    try {
+      handle = await args.runtime.start(args.member, args.run, async (launched) => {
+        assertRecoveredHandle(reservation, launched);
+        reservation = {
+          ...reservation,
+          handle: launched,
+          startedAt: launched.startedAt,
+        };
+        await writeRunRecord(args.home, reservation);
+      });
+    } catch (error) {
+      if (!(error instanceof RuntimeError && error.code === "launch_ambiguous")) {
+        // Known-id Railway cleanup failures retain an orphaned sidecar. Removing
+        // this reservation lets the owner clear that blocker with forget-run.
+        await rm(runRecordPath(args.home, args.run.runId), { force: true }).catch(() => undefined);
+      }
+      throw error;
+    }
+    const record: RunRecord = {
+      ...reservation,
+      handle,
+      startedAt: handle.startedAt,
+      state: "running",
+    };
+    try {
+      await writeRunRecord(args.home, record);
+    } catch (error) {
+      const stopped = await args.runtime.stop(handle, { requireSuccessfulExit: true }).then(
+        () => true,
+        () => false,
+      );
+      if (stopped) {
+        await rm(runRecordPath(args.home, args.run.runId), { force: true }).catch(() => undefined);
+      }
+      throw error;
+    }
+    return record;
+  };
+  let reservation: RunRecord | undefined;
+  let launchLockAcquired = false;
   try {
+    if (args.member.swarm === undefined) {
+      return await withFileLock(lockPath, async () => await launch(await reserve()), {
+        timeoutMs: 5_000,
+        lockedMessage: busyMessage,
+      });
+    }
+    const name = args.member.swarm;
+    // Match dissolution's lock order. Only the reservation holds the swarm lock;
+    // the durable starting record blocks dissolution throughout the remote launch.
+    reservation = await withSwarmLock(
+      args.home,
+      name,
+      async () =>
+        await withFileLock(
+          lockPath,
+          async () => {
+            const swarm = await readSwarm(args.home, name);
+            if (!swarm.members.some((member) => member.account === args.member.account)) {
+              throw new RuntimeError(
+                "swarm_unavailable",
+                `Account ${args.member.account} is no longer a member of swarm ${name}. No worker was started.`,
+              );
+            }
+            return await reserve();
+          },
+          { timeoutMs: 5_000, lockedMessage: busyMessage },
+        ),
+    );
+    const reserved = reservation;
     return await withFileLock(
       lockPath,
       async () => {
-        const records = await listRunRecords(args.home, { account: args.member.account });
-        for (const record of records) {
-          const refreshed = await refreshRunRecord(args.home, record, args.runtime, args.now);
-          if (refreshed.state === "starting" || refreshed.state === "running") {
-            throw new RuntimeError(
-              "member_busy",
-              `Member ${args.member.account} already has ${refreshed.state} run ${refreshed.runId}.${refreshed.detail === undefined ? "" : ` ${refreshed.detail}`}`,
-            );
-          }
-        }
-
-        const adapterBusy = await args.runtime.busy?.(args.member);
-        if (adapterBusy !== undefined) {
-          throw new RuntimeError(
-            "member_busy",
-            `Member ${args.member.account} is busy with unresolved run ${adapterBusy.runId}: ${adapterBusy.detail}`,
-          );
-        }
-
-        // The runtime receives the task exactly as given, so a detached run does what an attached
-        // run would; only the stored copy is scrubbed.
-        const startedAt = (args.now?.() ?? new Date()).toISOString();
-        let reservation: RunRecord = {
-          v: 1,
-          runId: args.run.runId,
-          kind: args.runtime.kind,
-          member: args.member,
-          run: { ...args.run, task: redactRunText(args.run.task, args.env ?? process.env) },
-          handle: {
-            runId: args.run.runId,
-            kind: args.runtime.kind,
-            member: args.member,
-            startedAt,
-            ref: "",
-          },
-          startedAt,
-          state: "starting",
-        };
-        await writeRunRecord(args.home, reservation);
-        let handle: RuntimeHandle;
-        try {
-          handle = await args.runtime.start(args.member, args.run, async (launched) => {
-            assertRecoveredHandle(reservation, launched);
-            reservation = {
-              ...reservation,
-              handle: launched,
-              startedAt: launched.startedAt,
-            };
-            await writeRunRecord(args.home, reservation);
-          });
-        } catch (error) {
-          await rm(runRecordPath(args.home, args.run.runId), { force: true }).catch(
-            () => undefined,
-          );
-          throw error;
-        }
-        const record: RunRecord = {
-          ...reservation,
-          handle,
-          startedAt: handle.startedAt,
-          state: "running",
-        };
-        try {
-          await writeRunRecord(args.home, record);
-        } catch (error) {
-          const stopped = await args.runtime.stop(handle).then(
-            () => true,
-            () => false,
-          );
-          if (stopped) {
-            await rm(runRecordPath(args.home, args.run.runId), { force: true }).catch(
-              () => undefined,
-            );
-          }
-          throw error;
-        }
-        return record;
+        launchLockAcquired = true;
+        return await launch(reserved);
       },
-      { timeoutMs: 5_000, lockedMessage: busyMessage },
+      {
+        timeoutMs: 5_000,
+        lockedMessage: busyMessage,
+      },
     );
   } catch (error) {
-    if (error instanceof FileLockedError) throw new RuntimeError("member_busy", busyMessage);
+    if (reservation !== undefined && !launchLockAcquired) {
+      throw new RuntimeError(
+        error instanceof FileLockedError ? "member_busy" : "runtime_unavailable",
+        `Could not acquire the launch lock for member ${args.member.account}. No worker was started; the reservation was retained. ${unreconciledStartInstruction(reservation)}`,
+      );
+    }
+    if (
+      error instanceof SwarmError &&
+      (error.code === "swarm_locked" || error.code === "swarm_not_found")
+    ) {
+      throw new RuntimeError(
+        "swarm_unavailable",
+        `Swarm ${args.member.swarm} ${error.code === "swarm_locked" ? "is locked (it may be dissolving)" : "no longer exists"}. No worker was started.`,
+      );
+    }
+    if (error instanceof FileLockedError) {
+      throw new RuntimeError("member_busy", busyMessage);
+    }
     throw error;
   }
 }
@@ -524,8 +659,13 @@ export async function stopRun(args: {
             `Run ${stored.runId} changed members while waiting for its lock.`,
           );
         }
-        const current = await refreshRunRecord(args.home, stored, args.runtime, args.now);
-        if (current.state !== "starting" && current.state !== "running") return current;
+        const current = await refreshRunRecordLocked(args.home, stored, args.runtime, args.now);
+        if (
+          current.state !== "starting" &&
+          current.state !== "running" &&
+          current.state !== "unknown"
+        )
+          return current;
         if (args.runtime.kind !== current.kind) {
           throw new RuntimeError(
             "runtime_unavailable",
@@ -546,7 +686,38 @@ export async function stopRun(args: {
           }
           await args.runtime.retireUnreconciledStart?.(current);
         } else {
-          await args.runtime.stop(current.handle);
+          if (current.kind === "railway") {
+            try {
+              await args.runtime.stop(current.handle, { requireSuccessfulExit: true });
+            } catch (error) {
+              const detail = redactRunText(
+                error instanceof Error ? error.message : String(error),
+                process.env,
+              );
+              if (current.state === "starting" || current.state === "running") {
+                await writeRunRecord(args.home, {
+                  ...current,
+                  state: "unknown",
+                  endedAt: (args.now?.() ?? new Date()).toISOString(),
+                  detail,
+                });
+              }
+              const message = [
+                detail,
+                ...(current.member.swarm === undefined
+                  ? []
+                  : [
+                      `Destroy it yourself with: railway sandbox destroy ${current.handle.ref}`,
+                      `Verify destruction in the original Railway project/environment, then run vapi swarm forget-run ${current.member.swarm} ${current.runId} --confirm-destroyed.`,
+                    ]),
+              ].join("\n");
+              throw error instanceof RuntimeError
+                ? new RuntimeError(error.code, message)
+                : new Error(message);
+            }
+          } else {
+            await args.runtime.stop(current.handle);
+          }
         }
         const stopped: RunRecord = {
           ...current,
@@ -568,6 +739,32 @@ function memberRunLockPath(home: string, account: string): string {
   return join(runsDirectory(home), `.member-${account}.lock`);
 }
 
+/** Serialize lifecycle observations and mutations for one member, across CLI and MCP. */
+export async function withMemberRunLock<T>(
+  home: string,
+  account: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (!WALLET_NAME_PATTERN.test(account))
+    throw new RuntimeError("runtime_unavailable", `Invalid runtime member account: ${account}.`);
+  const busyMessage = `Member ${account} is changing run state.`;
+  try {
+    return await withFileLock(memberRunLockPath(home, account), operation, {
+      timeoutMs: 5_000,
+      lockedMessage: busyMessage,
+    });
+  } catch (error) {
+    if (error instanceof FileLockedError) throw new RuntimeError("member_busy", busyMessage);
+    throw error;
+  }
+}
+
+async function requireRunRecord(home: string, runId: string): Promise<RunRecord> {
+  const record = await readRunRecord(home, runId);
+  if (record === undefined) throw new RuntimeError("run_not_found", `Run ${runId} was not found.`);
+  return record;
+}
+
 export type DetachedRunSummary = {
   member: string;
   role?: string;
@@ -581,6 +778,8 @@ export type DetachedRunSummary = {
   exitCode?: number;
   parentRunId?: string;
   detail?: string;
+  forgottenAt?: string;
+  confirmedBy?: "cli";
 };
 
 export type DetachedSwarmRunResult = {
@@ -606,6 +805,8 @@ export function summarizeRunRecord(record: RunRecord): DetachedRunSummary {
     ...(record.exitCode === undefined ? {} : { exitCode: record.exitCode }),
     ...(record.run.parentRunId === undefined ? {} : { parentRunId: record.run.parentRunId }),
     ...(record.detail === undefined ? {} : { detail: record.detail }),
+    ...(record.forgottenAt === undefined ? {} : { forgottenAt: record.forgottenAt }),
+    ...(record.confirmedBy === undefined ? {} : { confirmedBy: record.confirmedBy }),
   };
 }
 

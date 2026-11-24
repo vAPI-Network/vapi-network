@@ -9,11 +9,13 @@ import {
   createAgentProfileSchema,
   getDefaultConfig,
   getVapiPaths,
+  PAYMENT_WARNING_CODES,
   readDelegationRecord,
   readAgentProfile,
   readMovement,
   readReceipts,
   setupSwarm,
+  swarmRunRefillSchema,
   treasuryRequestMovementId,
   WalletStore,
   withSwarmLock,
@@ -33,10 +35,13 @@ import {
   type TransferNetwork,
   type TransferResult,
 } from "@vapi-network/core";
+import { RouterClientError, routerPurchaseView } from "@vapi-network/core/router-client";
+import { attachedSwarmRunOutputSchema, swarmDelegateOutputSchema } from "../actions/swarm-agent.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getAddress, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
+import { routerChatTool } from "../tools/router.js";
 import { createAgentRunDeps } from "./deps.js";
 import { runSwarm, type MemberRunOptions, type RunSwarmDeps } from "./swarm-run.js";
 import type { RunAgentDeps, RunAgentResult, SwarmRunContext } from "./run.js";
@@ -63,6 +68,134 @@ afterEach(async () => {
 });
 
 describe("runSwarm lead mode", () => {
+  it.each([false, true])(
+    "keeps public member refill evidence through swarm output (failed chat: %s)",
+    async (failed) => {
+      const fixture = await swarmFixture();
+      const purchase = refillPurchase();
+      const deps = orchestrationDeps(fixture, async (_member, runOpts) =>
+        agentDeps(fixture, runOpts, async () => {
+          if (failed)
+            throw new RouterClientError(
+              "refill_pending",
+              "Retry chat; do not repeat the purchase.",
+              undefined,
+              purchase,
+            );
+          return { ...textReply("Done."), refill: purchase };
+        }),
+      );
+      const result = attachedSwarmRunOutputSchema.parse(
+        await runSwarm({ name: "team", task: "Work", mode: "each" }, deps),
+      );
+      for (const member of result.members.filter((item) => item.status !== "skipped")) {
+        expect(member.refills).toEqual([routerPurchaseView(purchase)]);
+        expect(member.stoppedBecause?.reason).toBe(failed ? "error" : "finished");
+      }
+      expect(result.members.some((member) => member.refills !== undefined)).toBe(true);
+      expect(JSON.stringify(result)).not.toContain("non-public-sentinel");
+    },
+  );
+
+  it("retains refill evidence through delegation schemas and persisted replay", async () => {
+    const fixture = await swarmFixture();
+    const delegated: Array<Awaited<ReturnType<SwarmRunContext["delegate"]>>> = [];
+    let childRuns = 0;
+    const deps = orchestrationDeps(fixture, async (_member, runOpts) =>
+      agentDeps(fixture, runOpts, async () => textReply("unused")),
+    );
+    deps.runAgent = async (_task, memberDeps) => {
+      if (memberDeps.runMeta?.parentRunId !== undefined) {
+        childRuns += 1;
+        return {
+          ...finished(memberDeps, "Child completed once."),
+          refills: [routerPurchaseView(refillPurchase())],
+        };
+      }
+      const input = {
+        member: "team-helper-1",
+        task: "Complete once",
+        budgetUsd: "0.25",
+        parentRunId: memberDeps.runId!,
+        requestId: "run_1:delegate",
+      };
+      delegated.push(await memberDeps.swarm!.delegate(input));
+      delegated.push(await memberDeps.swarm!.delegate(input));
+      return finished(memberDeps, "Delegation retried safely.");
+    };
+
+    const result = await runSwarm(
+      { name: "team", task: "Delegate twice", mode: "lead", drawUsd: "0.25" },
+      deps,
+    );
+
+    expect(fixture.capital.transfer).toHaveBeenCalledTimes(1);
+    expect(childRuns).toBe(1);
+    expect(delegated).toHaveLength(2);
+    expect(swarmDelegateOutputSchema.parse(delegated[0]).refills).toEqual([
+      routerPurchaseView(refillPurchase()),
+    ]);
+    expect(
+      attachedSwarmRunOutputSchema
+        .parse(result)
+        .members.find((member) => member.member === "team-helper-1")?.refills,
+    ).toEqual([routerPurchaseView(refillPurchase())]);
+    expect(delegated[1]).toEqual(delegated[0]);
+    expect(result.members.filter((member) => member.member === "team-helper-1")).toHaveLength(1);
+    await expect(
+      readDelegationRecord(fixture.home, treasuryRequestMovementId("team", "run_1:delegate")),
+    ).resolves.toMatchObject({
+      childRunId: "run_2",
+      result: {
+        answer: "Child completed once.",
+        budgetUsd: 0.25,
+        refills: [routerPurchaseView(refillPurchase())],
+      },
+    });
+  });
+
+  it("accepts every payment warning code and the settlement outcome as refill evidence", async () => {
+    const purchase = refillPurchase();
+    const view = routerPurchaseView({
+      ...purchase,
+      receipt: { ...purchase.receipt, settlement: { outcome: "unknown" } },
+      warnings: PAYMENT_WARNING_CODES.map((code) => ({ code, message: `Warning ${code}.` })),
+    });
+    expect(view.receipt.settlement).toBe("unknown");
+    expect(view.warnings?.map(({ code }) => code)).toEqual([...PAYMENT_WARNING_CODES]);
+
+    // A member result, a delegation replay and a Router tool result all carry
+    // this view; none may reject a code the Router client can produce.
+    expect(swarmRunRefillSchema.parse(view)).toEqual(view);
+    expect(
+      routerChatTool.outputSchema.parse({ content: "ok", model: "model", refill: view }).refill,
+    ).toEqual(view);
+
+    const fixture = await swarmFixture();
+    const movementId = treasuryRequestMovementId("team", "run_1:delegate");
+    await writeDelegationRecord(fixture.home, {
+      v: 1,
+      movementId,
+      requestId: "run_1:delegate",
+      swarm: "team",
+      member: "team-helper-1",
+      budgetUsd: "0.25",
+      childRunId: "run_2",
+      startedAt: new Date(NOW).toISOString(),
+      result: {
+        runId: "run_2",
+        answer: "Done.",
+        stoppedBecause: { reason: "finished" },
+        spentUsd: 0,
+        budgetUsd: 0.25,
+        refills: [view],
+      },
+    });
+    await expect(readDelegationRecord(fixture.home, movementId)).resolves.toMatchObject({
+      result: { refills: [view] },
+    });
+  });
+
   it("passes tty approvals to the lead and delegated children", async () => {
     const fixture = await swarmFixture();
     const approvals: Array<{ member: string; approvals: MemberRunOptions["approvals"] }> = [];
@@ -1310,4 +1443,20 @@ function toolReply(id: string, name: string, args: Record<string, unknown>): Cha
 
 function textReply(content: string): ChatResult {
   return { content, toolCalls: [], model: "router/test", keyUsed: "stake" };
+}
+
+function refillPurchase(): NonNullable<ChatResult["refill"]> {
+  return {
+    receipt: {
+      id: "refill-evidence",
+      timestamp: new Date(NOW).toISOString(),
+      resourceUrl: "https://example.com/non-public-sentinel",
+      quote: { network: BASE_MAINNET_CAIP2, amountAtomic: "5000000" },
+      settlement: { outcome: "succeeded", transaction: `0x${"ab".repeat(32)}` },
+    },
+    balance: null,
+    warnings: [
+      { code: "receipt_unavailable", message: "Keep this receipt; do not repeat the purchase." },
+    ],
+  };
 }

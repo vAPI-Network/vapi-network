@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +23,7 @@ import {
   writeAgentProfile,
   writeSwarm,
   type SecretStore,
+  type MovementTransfer,
   type SwarmBalanceReader,
   type SwarmFile,
   type VapiConfig,
@@ -31,7 +32,9 @@ import { agentSecretAccounts } from "@vapi-network/core/agent-link";
 import { exportMemberKey, openMemberBundle } from "@vapi-network/core/secrets";
 import {
   runResultPath,
+  runRecordPath,
   readRunRecord,
+  refreshRunRecord,
   runsDirectory,
   RuntimeError,
   startDetachedRun,
@@ -43,7 +46,7 @@ import {
 } from "@vapi-network/mcp";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { CliDependencies } from "./cli.js";
+import { runCli, type CliDependencies } from "./cli.js";
 import { resolveRuntime } from "./runtime-local.js";
 import {
   assertRemoteSafeMember,
@@ -337,6 +340,54 @@ async function directoryText(path: string): Promise<string> {
   const files = await readdir(path);
   const texts = await Promise.all(files.map((file) => readFile(join(path, file), "utf8")));
   return texts.join("\n");
+}
+
+function ownerCommands(f: Fixture, exec: RailwayExec, now = () => new Date(STARTED_AT)) {
+  vi.stubEnv("VAPI_HOME", f.home);
+  const balanceReader = vi.fn(async () => 0n);
+  const transfer = vi.fn<MovementTransfer>();
+  const dependencies: CliDependencies = {
+    secretStore: f.secrets,
+    env: {},
+    now,
+    railwayExec: exec,
+    fetchImpl: vi.fn<typeof fetch>(async () => {
+      throw new Error("Unexpected network request");
+    }),
+    swarm: { balanceReader, transfer },
+  };
+  const command = async (args: string[], exit: number) => {
+    const output: string[] = [];
+    const code = await runCli(
+      ["swarm", ...args, "--json"],
+      { stdout: (text) => output.push(text), stderr: () => undefined },
+      dependencies,
+    );
+    expect(code, output.join("\n")).toBe(exit);
+    return JSON.parse(output.join("\n"));
+  };
+  return {
+    command,
+    async blocked() {
+      expect(await command(["dissolve", "team"], 1)).toMatchObject({
+        code: "swarm_workers_active",
+      });
+      expect(balanceReader).not.toHaveBeenCalled();
+      expect(transfer).not.toHaveBeenCalled();
+    },
+    async forgetAndDissolve() {
+      expect(await command(["forget-run", "team", RUN_ID, "--confirm-destroyed"], 0)).toMatchObject(
+        {
+          state: "forgotten",
+          confirmedBy: "cli",
+        },
+      );
+      expect(await exists(railwaySidecarPath(f.home, RUN_ID))).toBe(false);
+      expect(await command(["dissolve", "team"], 0)).toMatchObject({ status: "dissolved" });
+      expect(balanceReader).toHaveBeenCalled();
+      expect(transfer).not.toHaveBeenCalled();
+    },
+  };
 }
 
 describe("railway runtime policy refusals", () => {
@@ -1478,7 +1529,59 @@ describe("railway runtime lifecycle", () => {
     expect(railway.calls.filter((call) => call[1] === "destroy")).toEqual([]);
   });
 
-  it("stops by destroying the sandbox and treats a missing sandbox as stopped", async () => {
+  it.each([true, false])(
+    "persists only original scope supplied in creation JSON (scope present=%s)",
+    async (present) => {
+      const f = await fixture();
+      const scope = { projectId: "original-project", environmentId: "original-environment" };
+      const railway = fakeRailway({
+        create: () => ({
+          code: 0,
+          stdout: JSON.stringify({ id: SANDBOX_ID, ...(present ? scope : {}) }),
+          stderr: "",
+        }),
+      });
+      const record = await startDetachedRun({
+        home: f.home,
+        runtime: runtimeFor(f, railway.exec),
+        member: MEMBER,
+        run: RUN,
+        env: {},
+      });
+      expect(record.handle.railwayScope).toEqual(present ? scope : undefined);
+      expect((await readRunRecord(f.home, RUN_ID))?.handle.railwayScope).toEqual(
+        present ? scope : undefined,
+      );
+    },
+  );
+
+  it("keeps an unknown run blocked when the stop adapter was configured with another home", async () => {
+    const f = await fixture();
+    const other = await mkdtemp(join(tmpdir(), "vapi-railway-other-home-"));
+    homes.push(other);
+    const record = {
+      v: 1 as const,
+      runId: RUN_ID,
+      kind: "railway" as const,
+      member: MEMBER,
+      handle: handle(),
+      run: RUN,
+      startedAt: STARTED_AT,
+      state: "unknown" as const,
+    };
+    await writeRunRecord(f.home, record);
+    const railway = fakeRailway({ destroy: () => SANDBOX_GONE });
+    await expect(
+      stopRun({
+        home: f.home,
+        record,
+        runtime: createRailwayRuntime({ home: other, exec: railway.exec }),
+      }),
+    ).rejects.toThrow(`railway sandbox destroy ${SANDBOX_ID} failed`);
+    expect((await readRunRecord(f.home, RUN_ID))?.state).toBe("unknown");
+  });
+
+  it("stops only after destroy exits zero, rejecting a missing-sandbox message", async () => {
     const f = await fixture();
     const railway = fakeRailway();
     const runtime = createRailwayRuntime({ home: f.home, exec: railway.exec });
@@ -1489,8 +1592,43 @@ describe("railway runtime lifecycle", () => {
     const gone = fakeRailway({ destroy: () => SANDBOX_GONE });
     await expect(
       createRailwayRuntime({ home: f.home, exec: gone.exec }).stop(handle()),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow(`railway sandbox destroy ${SANDBOX_ID} failed`);
   });
+
+  it.each(["env", "JSON"] as const)(
+    "redacts a %s bundle assignment in a stop destroy failure",
+    async (form) => {
+      const f = await fixture();
+      const bundle = "AbC_dEf-0123456789".repeat(15).slice(0, 240);
+      const stderr =
+        form === "env"
+          ? `error: VAPI_MEMBER_BUNDLE=${bundle}`
+          : `error: "VAPI_MEMBER_BUNDLE": "${bundle}"`;
+      const railway = fakeRailway({ destroy: () => ({ code: 1, stdout: "", stderr }) });
+
+      const failure = (await createRailwayRuntime({ home: f.home, exec: railway.exec })
+        .stop(handle())
+        .catch((error: unknown) => error)) as Error;
+
+      expect(failure instanceof Error).toBe(true);
+      expect(failure.message.includes(bundle.slice(0, 32))).toBe(false);
+      expect(failure.message).toContain("VAPI_MEMBER_BUNDLE=[redacted]");
+    },
+  );
+
+  it.each(["destroy failed", "error: VAPI_MEMBER_BUNDLE: invalid encoding"])(
+    "preserves the exact ordinary stop destroy failure (%s)",
+    async (stderr) => {
+      const f = await fixture();
+      const railway = fakeRailway({ destroy: () => ({ code: 1, stdout: "", stderr }) });
+
+      const failure = (await createRailwayRuntime({ home: f.home, exec: railway.exec })
+        .stop(handle())
+        .catch((error: unknown) => error)) as Error;
+
+      expect(failure.message).toBe(`railway sandbox destroy sbx_7f3a9c failed (exit 1): ${stderr}`);
+    },
+  );
 
   it("reports a sandbox that is gone as unknown", async () => {
     const f = await fixture();
@@ -1501,6 +1639,33 @@ describe("railway runtime lifecycle", () => {
     ).resolves.toEqual({ state: "unknown", detail: "sandbox gone" });
     expect(railway.calls.filter((call) => call[1] === "destroy")).toEqual([]);
   });
+
+  it.each(["identified", "id-less", "legacy"] as const)(
+    "keeps sidecar bytes unchanged on text-only absence (%s)",
+    async (shape) => {
+      const f = await fixture();
+      const railway = fakeRailway({ cat: () => SANDBOX_GONE });
+      const sidecar =
+        shape === "legacy"
+          ? { v: 1, checkpoint: CHECKPOINT, keepSandbox: false, sandboxId: SANDBOX_ID }
+          : sidecarOf({
+              state: "running",
+              ...(shape === "identified" ? { sandboxId: SANDBOX_ID } : {}),
+            });
+      await mkdir(runsDirectory(f.home), { recursive: true });
+      const bytes = `${JSON.stringify(sidecar, null, 2)}\n`;
+      await writeFile(railwaySidecarPath(f.home, RUN_ID), bytes);
+      const scope = { projectId: "original-project", environmentId: "original-environment" };
+      const scopedHandle = handle({ railwayScope: scope });
+
+      await expect(
+        createRailwayRuntime({ home: f.home, exec: railway.exec }).status(scopedHandle),
+      ).resolves.toEqual({ state: "unknown", detail: "sandbox gone" });
+      expect(await readFile(railwaySidecarPath(f.home, RUN_ID), "utf8")).toBe(bytes);
+      expect(scopedHandle.railwayScope).toEqual(scope);
+      expect(railway.calls.filter((call) => call[1] === "destroy")).toEqual([]);
+    },
+  );
 
   it("rejects a handle whose ref could read as a railway option", async () => {
     const f = await fixture();
@@ -1718,7 +1883,8 @@ describe("railway runtime signals during start", () => {
       .start(MEMBER, RUN)
       .catch((error: unknown) => error)) as Error;
 
-    expect(failure).toBeInstanceOf(Error);
+    expect(failure).toBeInstanceOf(RuntimeError);
+    expect(failure).toMatchObject({ code: "launch_ambiguous" });
     expect(failure.message).toMatch(/interrupted by SIGINT/u);
     expect(atSignal).toEqual(sidecarOf());
     // The interrupted start never writes the sidecar back or goes on.
@@ -1831,6 +1997,44 @@ describe("railway runtime signals during start", () => {
     ]);
   });
 
+  it("SIGTERM right after secret-valued create output leaves the sandbox id unreadable", async () => {
+    const f = await fixture();
+    const before = process.listeners("SIGTERM");
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const stderr = captureStderr();
+    const railway = fakeRailway({
+      create: () => ({ ...CREATED, stdout: JSON.stringify({ id: f.alphaKey }) }),
+    });
+    let signalled = false;
+    const rmAfterCreate = vi.fn(async (path: string, options: { recursive: true; force: true }) => {
+      if (!signalled && railway.observations.length === 1) {
+        signalled = true;
+        addedListener("SIGTERM", before)("SIGTERM");
+        await vi.waitFor(() => expect(kill).toHaveBeenCalledWith(process.pid, "SIGTERM"), {
+          interval: 1,
+        });
+      }
+      await rm(path, options);
+    });
+
+    const failure = (await runtimeFor(f, railway.exec, { fs: { rm: rmAfterCreate } })
+      .start(MEMBER, RUN)
+      .catch((error: unknown) => error)) as RuntimeError;
+
+    const text = stderr.join("");
+    for (const value of [f.alphaKey, f.alphaKey.slice(2)]) {
+      expect(text.includes(value)).toBe(false);
+      expect(failure.message.includes(value)).toBe(false);
+      expect(JSON.stringify(readSidecarFile(f)).includes(value)).toBe(false);
+    }
+    expect(railway.calls.map((args) => args[1])).toEqual(["create"]);
+    expect(text).toContain("railway sandbox list");
+    expect(failure instanceof RuntimeError).toBe(true);
+    expect(failure.code).toBe("launch_ambiguous");
+    expect(readSidecarFile(f)).toEqual(sidecarOf());
+    expect(process.listeners("SIGTERM")).toEqual(before);
+  });
+
   it("SIGTERM during readiness keeps an orphaned sidecar when the destroy fails", async () => {
     const f = await fixture();
     const before = process.listeners("SIGTERM");
@@ -1916,6 +2120,126 @@ describe("railway runtime signals during start", () => {
 });
 
 describe("railway runtime sidecar during start", () => {
+  it.each(["readiness", "exec", "signal", "signal-persistence"] as const)(
+    "keeps a clearable orphan when %s cleanup only reports not found",
+    async (stage) => {
+      const f = await fixture();
+      const before = process.listeners("SIGTERM");
+      const stderr = captureStderr();
+      let finishSignal!: () => void;
+      const signalled = new Promise<void>((resolve) => {
+        finishSignal = resolve;
+      });
+      let finishDestroy!: () => void;
+      const destroying = new Promise<void>((resolve) => {
+        finishDestroy = resolve;
+      });
+      let finishPersistence!: () => void;
+      const persisted = new Promise<void>((resolve) => {
+        finishPersistence = resolve;
+      });
+      let recordAtExit: boolean | undefined;
+      vi.spyOn(process, "kill").mockImplementation(() => {
+        recordAtExit = existsSync(runRecordPath(f.home, RUN_ID));
+        finishSignal();
+        return true;
+      });
+      const railway = fakeRailway({
+        ready: async () => {
+          if (stage === "signal") {
+            addedListener("SIGTERM", before)("SIGTERM");
+            await signalled;
+          }
+          return stage === "readiness" ? { code: 1, stdout: "", stderr: "not ready" } : OK;
+        },
+        detach: () => ({ code: 1, stdout: "", stderr: "launch failed" }),
+        destroy: async () => {
+          finishDestroy();
+          if (stage === "signal-persistence") await persisted;
+          return SANDBOX_GONE;
+        },
+      });
+      const adapter = runtimeFor(f, railway.exec, { readyAttempts: 1 });
+      const runtime = {
+        ...adapter,
+        start: async (...args: Parameters<typeof adapter.start>) => {
+          if (stage !== "signal-persistence") return await adapter.start(...args);
+          try {
+            return await adapter.start(args[0], args[1], async (launched) => {
+              addedListener("SIGTERM", before)("SIGTERM");
+              await destroying;
+              await args[2]?.(launched);
+              finishPersistence();
+            });
+          } catch (error) {
+            // Observe metadata at the real exit point before the registry catch runs.
+            await signalled;
+            throw error;
+          }
+        },
+      };
+      const failure = await startDetachedRun({
+        home: f.home,
+        runtime,
+        member: MEMBER,
+        run: RUN,
+      }).catch((error: unknown) => error);
+      const confirmation = `vapi swarm forget-run team ${RUN_ID} --confirm-destroyed`;
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toContain(`railway sandbox destroy ${SANDBOX_ID}`);
+      expect((failure as Error).message).toContain(confirmation);
+      expect(await readRunRecord(f.home, RUN_ID)).toBeUndefined();
+      expect(readSidecarFile(f)).toEqual(sidecarOf({ state: "orphaned", sandboxId: SANDBOX_ID }));
+      if (stage === "signal" || stage === "signal-persistence") {
+        // The real signal can exit here, before the registry catch gets control.
+        expect(recordAtExit).toBe(false);
+        expect(stderr.join("")).toContain(confirmation);
+        expect(process.listeners("SIGTERM")).toEqual(before);
+      }
+      const owner = ownerCommands(f, railway.exec);
+      await owner.blocked();
+      await owner.forgetAndDissolve();
+    },
+  );
+
+  it("keeps blocking evidence when persistence rollback only reports not found", async () => {
+    const f = await fixture();
+    const railway = fakeRailway({ destroy: () => SANDBOX_GONE });
+    const adapter = runtimeFor(f, railway.exec);
+    const path = runRecordPath(f.home, RUN_ID);
+    const stop = vi.fn<typeof adapter.stop>(async (handle, options) => {
+      try {
+        await adapter.stop(handle, options);
+      } finally {
+        // Remove the injected write obstruction; the sidecar must stand alone.
+        await rm(path, { recursive: true, force: true });
+      }
+    });
+    const runtime = {
+      ...adapter,
+      start: async (...args: Parameters<typeof adapter.start>) => {
+        const launched = await adapter.start(...args);
+        await rm(path);
+        await mkdir(path); // Fail the final atomic record rename, preserving the sidecar.
+        return launched;
+      },
+      stop,
+    };
+    await expect(
+      startDetachedRun({ home: f.home, runtime, member: MEMBER, run: RUN }),
+    ).rejects.toBeInstanceOf(Error);
+    expect(stop).toHaveBeenCalledWith(expect.objectContaining({ ref: SANDBOX_ID }), {
+      requireSuccessfulExit: true,
+    });
+    expect(await readRunRecord(f.home, RUN_ID)).toBeUndefined();
+    expect(readSidecarFile(f)).toEqual(sidecarOf({ state: "running", sandboxId: SANDBOX_ID }));
+    const owner = ownerCommands(f, railway.exec);
+    await owner.blocked();
+    await owner.command(["stop", "team", RUN_ID], 1);
+    expect(readSidecarFile(f)).toEqual(sidecarOf({ state: "orphaned", sandboxId: SANDBOX_ID }));
+    await owner.forgetAndDissolve();
+  });
+
   it("writes a creating sidecar before create, adds the id, then marks it running", async () => {
     const f = await fixture();
     const seen: unknown[] = [];
@@ -1960,6 +2284,37 @@ describe("railway runtime sidecar during start", () => {
     expect(readSidecarFile(f)).toEqual(sidecarOf({ state: "orphaned", sandboxId: SANDBOX_ID }));
   });
 
+  it.each(["labelled", "unlabelled"] as const)(
+    "redacts an echoed %s bundle before shortening a start destroy failure",
+    async (form) => {
+      const f = await fixture();
+      let bundle = "";
+      const railway = fakeRailway({
+        create: (observation) => {
+          bundle = bundleOf(observation);
+          return CREATED;
+        },
+        detach: () => ({ code: 1, stdout: "", stderr: "exec failed" }),
+        // The unlabelled form is only caught by the launch's own secrets list.
+        destroy: () => ({
+          code: 1,
+          stdout: "",
+          stderr: form === "labelled" ? `error: VAPI_MEMBER_BUNDLE=${bundle}` : `error: ${bundle}`,
+        }),
+      });
+
+      const failure = (await runtimeFor(f, railway.exec)
+        .start(MEMBER, RUN)
+        .catch((error: unknown) => error)) as Error;
+
+      for (const value of [bundle, bundle.slice(0, 48), f.alphaKey, f.alphaKey.slice(2)]) {
+        expect(failure.message.includes(value)).toBe(false);
+      }
+      expect(failure.message).toContain(`Could not destroy sandbox ${SANDBOX_ID}`);
+      expect(failure.message).toContain(`railway sandbox destroy ${SANDBOX_ID}`);
+    },
+  );
+
   it("keeps an orphaned sidecar when readiness fails and the destroy fails", async () => {
     const f = await fixture();
     const railway = fakeRailway({
@@ -1974,7 +2329,632 @@ describe("railway runtime sidecar during start", () => {
   });
 });
 
+describe("railway runtime secret-valued sandbox ids", () => {
+  async function expectUnreadableId(f: Fixture, id: string, shortCredential = false) {
+    let bundle = "";
+    const railway = fakeRailway({
+      create: (observation) => {
+        bundle = bundleOf(observation);
+        return { ...CREATED, stdout: JSON.stringify({ id }) };
+      },
+    });
+    const failure = (await startDetachedRun({
+      home: f.home,
+      runtime: runtimeFor(f, railway.exec),
+      member: MEMBER,
+      run: RUN,
+      now: () => new Date(STARTED_AT),
+    }).catch((error: unknown) => error)) as RuntimeError;
+
+    // Boolean assertions keep secrets out of regression-failure output.
+    expect(failure instanceof RuntimeError).toBe(true);
+    expect(failure.code).toBe("launch_ambiguous");
+    const values = [...forbiddenValues(f, bundle), id];
+    for (const value of values) {
+      expect(failure.message.toLowerCase().includes(value.toLowerCase())).toBe(false);
+      expect(
+        railway.calls.some((args) =>
+          args.some((arg) => arg.toLowerCase().includes(value.toLowerCase())),
+        ),
+      ).toBe(false);
+    }
+    if (shortCredential) expect(/\babc1234\b/iu.test(failure.message)).toBe(false);
+    const files = await readdir(f.home, { recursive: true, withFileTypes: true });
+    for (const file of files) {
+      if (!file.isFile()) continue;
+      const text = (await readFile(join(file.parentPath, file.name), "utf8")).toLowerCase();
+      for (const value of values) expect(text.includes(value.toLowerCase())).toBe(false);
+    }
+    expect(railway.calls.map((args) => args[1])).toEqual(["create"]);
+    expect(failure.message).toContain("railway sandbox list");
+    expect(failure.message).toMatch(/--confirm-worker-stopped\.$/u);
+    expect(readSidecarFile(f)).toEqual(sidecarOf());
+    expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+      state: "starting",
+      handle: { ref: "" },
+    });
+    expect(
+      (await readAuditLog(f.home)).filter((entry) => entry.event === "agent.remote_key_exported"),
+    ).toEqual([
+      expect.objectContaining({
+        wallet: ALPHA,
+        detail: "runtime=railway sandbox=unknown create_unparsed",
+      }),
+    ]);
+  }
+
+  it.each(["bare", "0x", "upper case", "substring"] as const)(
+    "treats a %s private-key sandbox id as unreadable",
+    async (form) => {
+      const f = await fixture();
+      const id =
+        form === "bare"
+          ? f.alphaKey.slice(2)
+          : form === "upper case"
+            ? f.alphaKey.toUpperCase()
+            : form === "substring"
+              ? `sbx_${f.alphaKey.slice(2)}`
+              : f.alphaKey;
+      await expectUnreadableId(f, id);
+    },
+  );
+
+  it.each(["original", "upper case"] as const)(
+    "treats a short credential sandbox id as unreadable (%s)",
+    async (form) => {
+      const f = await fixture();
+      const credential = "abc1234";
+      await f.secrets.set(agentSecretAccounts(ALPHA).tokens, tokens(credential, ALPHA_REFRESH));
+      await expectUnreadableId(
+        f,
+        form === "original" ? credential : credential.toUpperCase(),
+        true,
+      );
+    },
+  );
+});
+
+// Directory permissions inject failures into the real synchronous sidecar I/O.
+// Root and Windows do not enforce these POSIX permission bits.
+describe.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  "railway launch sidecar persistence failures",
+  () => {
+    function restorePermissionsAfterStart(f: Fixture, adapter: ReturnType<typeof runtimeFor>) {
+      return {
+        ...adapter,
+        async start(...args: Parameters<typeof adapter.start>) {
+          try {
+            return await adapter.start(...args);
+          } finally {
+            // Restore before the registry handles rejection, so its reservation
+            // removal is governed by the error code, not directory permissions.
+            chmodSync(runsDirectory(f.home), 0o700);
+          }
+        },
+      };
+    }
+
+    it("retains an id-less failed launch until stale-start confirmation clears it and permits dissolve", async () => {
+      const f = await fixture();
+      let bundle = "";
+      const railway = fakeRailway({
+        create: (observation) => {
+          bundle = bundleOf(observation);
+          chmodSync(runsDirectory(f.home), 0o500);
+          return CREATED;
+        },
+        destroy: () => ({
+          code: 1,
+          stdout: "",
+          stderr: `destroy failed: ${ALPHA_ACCESS} ${f.alphaKey}`,
+        }),
+      });
+      let time = Date.parse(STARTED_AT);
+      const now = () => new Date(time);
+      const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec, { now }));
+
+      const failure = (await startDetachedRun({
+        home: f.home,
+        runtime,
+        member: MEMBER,
+        run: RUN,
+        now,
+      }).catch((error: unknown) => error)) as RuntimeError;
+
+      expect(failure).toMatchObject({ code: "launch_ambiguous" });
+      expect(failure.message).toContain("EACCES");
+      expect(failure.message).toContain(`railway sandbox destroy ${SANDBOX_ID}`);
+      expect(failure.message).toContain(`vapi swarm stop team ${RUN_ID} --confirm-worker-stopped`);
+      for (const value of forbiddenValues(f, bundle)) expect(failure.message).not.toContain(value);
+      expect(readSidecarFile(f)).toEqual(sidecarOf());
+      expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+        state: "starting",
+        handle: { ref: "" },
+      });
+      // Both id writes fail; the mandatory second write aborts before remote exec.
+      expect(railway.calls).toEqual([
+        expect.arrayContaining(["sandbox", "create"]),
+        ["sandbox", "destroy", SANDBOX_ID],
+      ]);
+
+      const owner = ownerCommands(f, railway.exec, now);
+      await owner.blocked();
+      await owner.command(["stop", "team", RUN_ID, "--confirm-worker-stopped"], 1);
+      expect(readSidecarFile(f)).toEqual(sidecarOf());
+      time += 5 * 60 * 1_000 + 1;
+      expect(
+        await owner.command(["stop", "team", RUN_ID, "--confirm-worker-stopped"], 0),
+      ).toMatchObject({ stopped: [{ runId: RUN_ID, state: "stopped" }] });
+      expect(await exists(railwaySidecarPath(f.home, RUN_ID))).toBe(false);
+      expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({ state: "stopped" });
+      expect(await owner.command(["dissolve", "team"], 0)).toMatchObject({ status: "dissolved" });
+      expect(railway.calls.filter((args) => args[1] === "destroy")).toHaveLength(1);
+    });
+
+    it("drops the reservation and names stop before forget when the identified orphan write fails", async () => {
+      const f = await fixture();
+      const railway = fakeRailway({
+        detach: () => {
+          chmodSync(runsDirectory(f.home), 0o500);
+          return { code: 1, stdout: "", stderr: `exec failed: ${ALPHA_ACCESS}` };
+        },
+        destroy: () => ({ code: 1, stdout: "", stderr: `destroy failed: ${ALPHA_ROUTER}` }),
+      });
+      const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec));
+
+      const failure = (await startDetachedRun({
+        home: f.home,
+        runtime,
+        member: MEMBER,
+        run: RUN,
+      }).catch((error: unknown) => error)) as Error;
+
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toMatchObject({ code: "launch_ambiguous" });
+      expect(failure.message).toContain(`railway sandbox exec ${SANDBOX_ID} failed`);
+      const stop = `vapi swarm stop team ${RUN_ID}`;
+      const forget = `vapi swarm forget-run team ${RUN_ID} --confirm-destroyed`;
+      expect(failure.message).toContain(stop);
+      expect(failure.message.indexOf(stop)).toBeLessThan(failure.message.indexOf(forget));
+      for (const value of forbiddenValues(f)) expect(failure.message).not.toContain(value);
+      expect(readSidecarFile(f)).toEqual(sidecarOf({ sandboxId: SANDBOX_ID }));
+      expect(await readRunRecord(f.home, RUN_ID)).toBeUndefined();
+      const owner = ownerCommands(f, railway.exec);
+      await owner.blocked();
+      await owner.command(["stop", "team", RUN_ID], 1);
+      expect(readSidecarFile(f)).toEqual(sidecarOf({ state: "orphaned", sandboxId: SANDBOX_ID }));
+      await owner.forgetAndDissolve();
+    });
+
+    it("retains ambiguity when destroy succeeds but the id-less launch marker cannot be removed", async () => {
+      const f = await fixture();
+      const railway = fakeRailway({
+        create: () => {
+          chmodSync(runsDirectory(f.home), 0o500);
+          return CREATED;
+        },
+      });
+      const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec));
+
+      const failure = (await startDetachedRun({
+        home: f.home,
+        runtime,
+        member: MEMBER,
+        run: RUN,
+      }).catch((error: unknown) => error)) as RuntimeError;
+
+      expect(failure).toMatchObject({ code: "launch_ambiguous" });
+      expect(failure.message).toContain("EACCES");
+      expect(failure.message).toContain(`Sandbox ${SANDBOX_ID} was destroyed`);
+      expect(failure.message).toContain("only the local launch marker could not be removed");
+      expect(failure.message).toMatch(/--confirm-worker-stopped\.$/u);
+      expect(readSidecarFile(f)).toEqual(sidecarOf());
+      expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+        state: "starting",
+        handle: { ref: "" },
+      });
+      expect(railway.calls.at(-1)).toEqual(["sandbox", "destroy", SANDBOX_ID]);
+    });
+
+    it.each(["succeeds", "fails"] as const)(
+      "preserves reconciliation instructions verbatim when destroy %s and the id-less marker remains",
+      async (destroy) => {
+        const f = await fixture();
+        const railway = fakeRailway({
+          create: () => {
+            chmodSync(runsDirectory(f.home), 0o500);
+            return CREATED;
+          },
+          destroy: () =>
+            destroy === "succeeds" ? OK : { code: 1, stdout: "", stderr: "destroy failed" },
+        });
+        const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec));
+
+        const failure = (await startDetachedRun({
+          home: f.home,
+          runtime,
+          member: MEMBER,
+          run: RUN,
+        }).catch((error: unknown) => error)) as RuntimeError;
+
+        expect(failure).toMatchObject({ code: "launch_ambiguous" });
+        expect(failure.message).toContain(
+          destroy === "succeeds"
+            ? `Sandbox ${SANDBOX_ID} was destroyed`
+            : `railway sandbox destroy ${SANDBOX_ID}`,
+        );
+        expect(failure.message.split("\n").at(-1)).toBe(
+          `After checking railway sandbox list and destroying any worker, wait for the five-minute reconciliation window, then run vapi swarm stop team ${RUN_ID} --confirm-worker-stopped.`,
+        );
+      },
+    );
+
+    it.each(["succeeds", "fails"] as const)(
+      "preserves the bearer swarm recovery command when destroy %s and the id-less marker remains",
+      async (destroy) => {
+        const f = await fixture();
+        await writeSwarm(f.home, { ...f.swarm, name: "bearer" });
+        const railway = fakeRailway({
+          create: () => {
+            chmodSync(runsDirectory(f.home), 0o500);
+            return CREATED;
+          },
+          destroy: () =>
+            destroy === "succeeds" ? OK : { code: 1, stdout: "", stderr: "destroy failed" },
+        });
+        const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec));
+
+        const failure = (await startDetachedRun({
+          home: f.home,
+          runtime,
+          member: { ...MEMBER, swarm: "bearer" },
+          run: RUN,
+        }).catch((error: unknown) => error)) as RuntimeError;
+
+        expect(failure).toMatchObject({ code: "launch_ambiguous" });
+        expect(readSidecarFile(f)).toEqual(sidecarOf({ swarm: "bearer" }));
+        expect(railway.calls.map((args) => args[1])).toEqual(["create", "destroy"]);
+        expect(failure.message).toContain(
+          `vapi swarm stop bearer ${RUN_ID} --confirm-worker-stopped.`,
+        );
+      },
+    );
+
+    it.each(["before-create", "ENOENT"] as const)(
+      "retains ambiguity when %s cleanup cannot remove the local launch marker",
+      async (stage) => {
+        const f = await fixture();
+        const railway = fakeRailway({
+          create: () => {
+            chmodSync(runsDirectory(f.home), 0o500);
+            throw Object.assign(new Error(`spawn railway ENOENT ${ALPHA_ACCESS}`), {
+              code: "ENOENT",
+            });
+          },
+        });
+        const adapter = runtimeFor(f, railway.exec, {
+          fs: {
+            stat: async (path) => {
+              if (stage === "before-create" && path.endsWith("member.env")) {
+                chmodSync(runsDirectory(f.home), 0o500);
+                throw new Error(`env file refused ${ALPHA_ACCESS}`);
+              }
+              return await stat(path);
+            },
+          },
+        });
+        const runtime = restorePermissionsAfterStart(f, adapter);
+
+        const failure = (await startDetachedRun({
+          home: f.home,
+          runtime,
+          member: MEMBER,
+          run: RUN,
+        }).catch((error: unknown) => error)) as RuntimeError;
+
+        expect(failure).toMatchObject({ code: "launch_ambiguous" });
+        expect(failure.message).toContain(
+          stage === "before-create" ? "env file refused" : "spawn railway ENOENT",
+        );
+        expect(failure.message).toContain(
+          "No sandbox was created; only the local launch marker could not be removed",
+        );
+        expect(failure.message).toContain("EACCES");
+        expect(failure.message).toMatch(/--confirm-worker-stopped\.$/u);
+        for (const value of forbiddenValues(f)) expect(failure.message).not.toContain(value);
+        expect(readSidecarFile(f)).toEqual(sidecarOf());
+        expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+          state: "starting",
+          handle: { ref: "" },
+        });
+        if (stage === "before-create") expect(railway.exec).not.toHaveBeenCalled();
+        else expect(railway.calls).toHaveLength(1);
+      },
+    );
+
+    it.each(["after-create", "during-destroy"] as const)(
+      "keeps the starting reservation when %s signal cleanup cannot record the known id or destroy it",
+      async (stage) => {
+        const f = await fixture();
+        const before = process.listeners("SIGTERM");
+        captureStderr();
+        let finishSignal!: () => void;
+        const signalled = new Promise<void>((resolve) => {
+          finishSignal = resolve;
+        });
+        let recordAtExit: boolean | undefined;
+        vi.spyOn(process, "kill").mockImplementation(() => {
+          recordAtExit = existsSync(runRecordPath(f.home, RUN_ID));
+          finishSignal();
+          return true;
+        });
+        let destroys = 0;
+        const railway = fakeRailway({
+          create: () => {
+            chmodSync(runsDirectory(f.home), 0o500);
+            return CREATED;
+          },
+          destroy: async () => {
+            destroys += 1;
+            if (stage === "during-destroy" && destroys === 1) {
+              addedListener("SIGTERM", before)("SIGTERM");
+              await signalled;
+              return OK;
+            }
+            return { code: 1, stdout: "", stderr: "destroy failed" };
+          },
+        });
+        const adapter = runtimeFor(f, railway.exec, {
+          fs: {
+            rm: async (path, options) => {
+              if (stage === "after-create") {
+                addedListener("SIGTERM", before)("SIGTERM");
+                await signalled;
+              }
+              await rm(path, options);
+            },
+          },
+        });
+        const runtime = restorePermissionsAfterStart(f, adapter);
+
+        const failure = (await startDetachedRun({
+          home: f.home,
+          runtime,
+          member: MEMBER,
+          run: RUN,
+        }).catch((error: unknown) => error)) as RuntimeError;
+
+        expect(failure).toMatchObject({ code: "launch_ambiguous" });
+        expect(failure.message).toContain("interrupted by SIGTERM");
+        expect(failure.message).toContain("--confirm-worker-stopped");
+        expect(recordAtExit).toBe(true);
+        expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+          state: "starting",
+          handle: { ref: "" },
+        });
+        expect(readSidecarFile(f)).toEqual(sidecarOf());
+        expect(railway.calls.filter((args) => args[1] === "destroy")).toHaveLength(
+          stage === "after-create" ? 1 : 2,
+        );
+        expect(process.listeners("SIGTERM")).toEqual(before);
+      },
+    );
+
+    it("names stop before forget when a during-destroy signal cannot record the identified orphan and both destroys fail", async () => {
+      const f = await fixture();
+      const before = process.listeners("SIGTERM");
+      captureStderr();
+      let finishSignal!: () => void;
+      const signalled = new Promise<void>((resolve) => {
+        finishSignal = resolve;
+      });
+      let recordAtExit: boolean | undefined;
+      vi.spyOn(process, "kill").mockImplementation(() => {
+        recordAtExit = existsSync(runRecordPath(f.home, RUN_ID));
+        finishSignal();
+        return true;
+      });
+      let destroys = 0;
+      const railway = fakeRailway({
+        detach: () => ({ code: 1, stdout: "", stderr: "exec failed" }),
+        destroy: async () => {
+          destroys += 1;
+          if (destroys === 1) {
+            expect(readSidecarFile(f)).toEqual(sidecarOf({ sandboxId: SANDBOX_ID }));
+            chmodSync(runsDirectory(f.home), 0o500);
+            addedListener("SIGTERM", before)("SIGTERM");
+            await signalled;
+          }
+          return { code: 1, stdout: "", stderr: "destroy failed" };
+        },
+      });
+      const runtime = restorePermissionsAfterStart(f, runtimeFor(f, railway.exec));
+
+      const failure = (await startDetachedRun({
+        home: f.home,
+        runtime,
+        member: MEMBER,
+        run: RUN,
+      }).catch((error: unknown) => error)) as Error;
+
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toMatchObject({ code: "launch_ambiguous" });
+      expect(readSidecarFile(f)).toEqual(sidecarOf({ sandboxId: SANDBOX_ID }));
+      expect(recordAtExit).toBe(true);
+      expect(await readRunRecord(f.home, RUN_ID)).toBeUndefined();
+      expect(destroys).toBe(2);
+      expect(process.listeners("SIGTERM")).toEqual(before);
+      const stop = `vapi swarm stop team ${RUN_ID}`;
+      const forget = `vapi swarm forget-run team ${RUN_ID} --confirm-destroyed`;
+      expect(failure.message).toContain(stop);
+      expect(failure.message).toContain(forget);
+      expect(failure.message.indexOf(stop)).toBeLessThan(failure.message.indexOf(forget));
+    });
+  },
+);
+
 describe("railway runtime create failures", () => {
+  it.each(["nonzero", "no-id"] as const)(
+    "retains launch ambiguity when its export audit cannot be written (%s)",
+    async (outcome) => {
+      const f = await fixture();
+      await mkdir(join(f.home, "audit.log"));
+      const railway = fakeRailway({
+        create: () => ({
+          code: outcome === "nonzero" ? 1 : 0,
+          stdout: "Created",
+          stderr: "timeout",
+        }),
+      });
+      const failure = await startDetachedRun({
+        home: f.home,
+        runtime: runtimeFor(f, railway.exec),
+        member: MEMBER,
+        run: RUN,
+      }).catch((error: unknown) => error);
+      expect(failure).toMatchObject({
+        code: "launch_ambiguous",
+        message: expect.stringContaining("Could not record export audit"),
+      });
+      expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+        state: "starting",
+        handle: { ref: "" },
+      });
+      expect(readSidecarFile(f)).toMatchObject({ state: "creating" });
+    },
+  );
+
+  it.each(["missing-binary", "env-file-refused"] as const)(
+    "drops the reservation when create never reached Railway (%s)",
+    async (outcome) => {
+      const f = await fixture();
+      const railway = fakeRailway({
+        create: () => {
+          throw Object.assign(new Error("spawn railway ENOENT"), { code: "ENOENT" });
+        },
+      });
+      const runtime = runtimeFor(
+        f,
+        railway.exec,
+        outcome === "env-file-refused"
+          ? {
+              fs: {
+                stat: async (path) =>
+                  path.endsWith("member.env") ? { mode: 0o100644 } : await stat(path),
+              },
+            }
+          : {},
+      );
+      const failure = await startDetachedRun({
+        home: f.home,
+        runtime,
+        member: MEMBER,
+        run: RUN,
+      }).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toMatchObject({ code: "launch_ambiguous" });
+      expect(await readRunRecord(f.home, RUN_ID)).toBeUndefined();
+      expect(await exists(railwaySidecarPath(f.home, RUN_ID))).toBe(false);
+      if (outcome === "env-file-refused") expect(railway.exec).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { poll: "throws", destroy: "wrong-project" },
+    { poll: "inconclusive", destroy: "wrong-project" },
+    { poll: "inconclusive", destroy: "plain-not-found" },
+    { poll: "throws", destroy: "success-warning" },
+  ] as const)(
+    "requires exit zero to stop a running Railway record ($poll, $destroy)",
+    async ({ poll, destroy }) => {
+      const f = await fixture();
+      const railway = fakeRailway({
+        cat: () => {
+          if (poll === "throws") throw new Error("status request timed out");
+          return MISSING_RESULT;
+        },
+        destroy: () => ({
+          code: destroy === "success-warning" ? 0 : 1,
+          stdout: "",
+          stderr:
+            destroy === "success-warning"
+              ? "Warning: experimental feature"
+              : destroy === "plain-not-found"
+                ? "sandbox not found"
+                : `sandbox ${SANDBOX_ID} not found in project other`,
+        }),
+      });
+      const record = {
+        v: 1 as const,
+        runId: RUN_ID,
+        kind: "railway" as const,
+        member: MEMBER,
+        run: RUN,
+        handle: handle(),
+        startedAt: STARTED_AT,
+        state: "running" as const,
+      };
+      await writeRunRecord(f.home, record);
+      await writeFile(
+        railwaySidecarPath(f.home, RUN_ID),
+        JSON.stringify(sidecarOf({ state: "running", sandboxId: SANDBOX_ID })),
+      );
+      const operation = stopRun({
+        home: f.home,
+        runtime: runtimeFor(f, railway.exec),
+        record,
+        now: () => new Date(STARTED_AT),
+      });
+      if (destroy === "success-warning") {
+        await expect(operation).resolves.toMatchObject({ state: "stopped" });
+        expect((await readRunRecord(f.home, RUN_ID))?.state).toBe("stopped");
+        expect(await exists(railwaySidecarPath(f.home, RUN_ID))).toBe(false);
+      } else {
+        await expect(operation).rejects.toThrow(
+          `vapi swarm forget-run team ${RUN_ID} --confirm-destroyed`,
+        );
+        expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+          state: "unknown",
+          endedAt: STARTED_AT,
+          detail: expect.stringContaining("not found"),
+        });
+        expect(readSidecarFile(f)).toMatchObject({ state: "running", sandboxId: SANDBOX_ID });
+      }
+      expect(railway.calls.filter((call) => call[1] === "destroy")).toEqual([
+        ["sandbox", "destroy", SANDBOX_ID],
+      ]);
+    },
+  );
+
+  it("requires exit zero to stop a starting Railway record with a saved id", async () => {
+    const f = await fixture();
+    const railway = fakeRailway({ cat: () => SANDBOX_GONE, destroy: () => SANDBOX_GONE });
+    const record = {
+      v: 1 as const,
+      runId: RUN_ID,
+      kind: "railway" as const,
+      member: MEMBER,
+      run: RUN,
+      handle: handle(),
+      startedAt: STARTED_AT,
+      state: "starting" as const,
+    };
+    await writeRunRecord(f.home, record);
+    await expect(
+      stopRun({
+        home: f.home,
+        runtime: runtimeFor(f, railway.exec),
+        record,
+        now: () => new Date(STARTED_AT),
+      }),
+    ).rejects.toThrow("sandbox destroy");
+    expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({
+      state: "unknown",
+      endedAt: STARTED_AT,
+      detail: expect.stringContaining("sandbox destroy"),
+    });
+  });
+
   it("keeps a creating sidecar and warns that a sandbox may exist when create exits non-zero", async () => {
     const f = await fixture();
     const railway = fakeRailway({
@@ -1985,6 +2965,8 @@ describe("railway runtime create failures", () => {
       .start(MEMBER, RUN)
       .catch((error: unknown) => error)) as Error;
 
+    expect(failure).toBeInstanceOf(RuntimeError);
+    expect(failure).toMatchObject({ code: "launch_ambiguous" });
     expect(failure.message).toContain("railway sandbox create failed");
     expect(failure.message).toContain(`A sandbox holding ${ALPHA}'s private key may still exist`);
     expect(failure.message).toContain("railway sandbox list");
@@ -2003,6 +2985,8 @@ describe("railway runtime create failures", () => {
       .start(MEMBER, RUN)
       .catch((error: unknown) => error)) as Error;
 
+    expect(failure).toBeInstanceOf(RuntimeError);
+    expect(failure).toMatchObject({ code: "launch_ambiguous" });
     expect(failure.message).toContain("socket hang up");
     expect(failure.message).toContain("railway sandbox list");
     expect(readSidecarFile(f)).toEqual(sidecarOf());
@@ -2067,9 +3051,14 @@ describe("railway runtime create failures", () => {
       create: () => ({ code: 0, stdout: "Sandbox created\n", stderr: "" }),
     });
 
-    await expect(runtimeFor(f, railway.exec).start(MEMBER, RUN)).rejects.toThrow(
-      /railway sandbox list/u,
-    );
+    const failure = await runtimeFor(f, railway.exec)
+      .start(MEMBER, RUN)
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(RuntimeError);
+    expect(failure).toMatchObject({
+      code: "launch_ambiguous",
+      message: expect.stringContaining("railway sandbox list"),
+    });
     expect(readSidecarFile(f)).toEqual(sidecarOf());
   });
 
@@ -2106,32 +3095,95 @@ describe("railway runtime create failures", () => {
 
 describe("railway runtime sandbox-gone detection", () => {
   it.each([
-    ["bash: railway: command not found", false],
-    ["Error: file not found", false],
-    ["Error: not found", false],
-    ["Error: does not exist", false],
-    ["HTTP 404 Not Found", false],
+    "bash: railway: command not found",
+    "Error: file not found",
+    "Error: not found",
+    "Error: does not exist",
+    "HTTP 404 Not Found",
     // Another sandbox, or another thing that is not found, says nothing about this one.
-    ["Error: sandbox abc not found", false],
-    [`Failed to destroy sandbox ${SANDBOX_ID}: project not found`, false],
-    [`Error: sandbox ${SANDBOX_ID}: environment not found`, false],
-    ["Error: sandbox token not found", false],
-    [`Failed to destroy sandbox ${SANDBOX_ID}: workspace not found`, false],
-    [`HTTP 404 for ${SANDBOX_ID}: project not found`, false],
-    [`HTTP 404 for ${SANDBOX_ID}0`, false],
-    ["Error: Sandbox not found", true],
-    [`Error: Sandbox ${SANDBOX_ID} not found`, true],
-    [`Error: sandbox '${SANDBOX_ID}' was not found`, true],
-    [`HTTP 404 for ${SANDBOX_ID}`, true],
-  ] as const)("stop on destroy stderr %j treats the sandbox as gone: %s", async (stderr, gone) => {
+    "Error: sandbox abc not found",
+    `Failed to destroy sandbox ${SANDBOX_ID}: project not found`,
+    `Error: sandbox ${SANDBOX_ID}: environment not found`,
+    "Error: sandbox token not found",
+    `Failed to destroy sandbox ${SANDBOX_ID}: workspace not found`,
+    `HTTP 404 for ${SANDBOX_ID}: project not found`,
+    `HTTP 404 for ${SANDBOX_ID}0`,
+    "Error: Sandbox not found",
+    `Error: Sandbox ${SANDBOX_ID} not found`,
+    `Error: sandbox '${SANDBOX_ID}' was not found`,
+    `HTTP 404 for ${SANDBOX_ID}`,
+  ] as const)("default stop rejects nonzero destroy stderr %j", async (stderr) => {
     const f = await fixture();
+    await mkdir(runsDirectory(f.home), { recursive: true });
+    await writeFile(
+      railwaySidecarPath(f.home, RUN_ID),
+      JSON.stringify(sidecarOf({ state: "running", sandboxId: SANDBOX_ID })),
+    );
     const railway = fakeRailway({ destroy: () => ({ code: 1, stdout: "", stderr }) });
     const stopping = createRailwayRuntime({ home: f.home, exec: railway.exec }).stop(handle());
-    if (gone) await expect(stopping).resolves.toBeUndefined();
-    else await expect(stopping).rejects.toThrow(`railway sandbox destroy ${SANDBOX_ID} failed`);
+    await expect(stopping).rejects.toThrow(`railway sandbox destroy ${SANDBOX_ID} failed`);
+    expect(readSidecarFile(f)).toEqual(sidecarOf({ state: "running", sandboxId: SANDBOX_ID }));
   });
 
-  it("leaves the run record running when stop hits an unrelated failure", async () => {
+  it("keeps default-stop failures blocking until owner confirmation", async () => {
+    const f = await fixture();
+    const railway = fakeRailway({ destroy: () => SANDBOX_GONE });
+    const runtime = runtimeFor(f, railway.exec);
+    const record = await startDetachedRun({ home: f.home, runtime, member: MEMBER, run: RUN });
+    await expect(runtime.stop(record.handle)).rejects.toThrow("not found");
+    const owner = ownerCommands(f, railway.exec);
+    await owner.blocked();
+    await owner.command(["stop", "team", RUN_ID], 1);
+    expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({ state: "unknown" });
+    await owner.forgetAndDissolve();
+  });
+
+  it("accepts successful default stops with stderr warnings", async () => {
+    const f = await fixture();
+    const railway = fakeRailway({
+      destroy: () => ({ code: 0, stdout: "", stderr: "Warning: experimental feature" }),
+    });
+    const runtime = runtimeFor(f, railway.exec);
+    await runtime.start(MEMBER, RUN);
+    await expect(runtime.stop(handle())).resolves.toBeUndefined();
+    expect(await exists(railwaySidecarPath(f.home, RUN_ID))).toBe(false);
+  });
+
+  it.each([0, 1])(
+    "retries terminal cleanup and permits strict-stop recovery (exit %s)",
+    async (exitCode) => {
+      const f = await fixture();
+      const railway = fakeRailway({
+        cat: () => ({
+          code: 0,
+          stdout: JSON.stringify({ v: 1, exitCode, result: {} }),
+          stderr: "",
+        }),
+        destroy: () => ({ ...SANDBOX_GONE, stderr: `${SANDBOX_GONE.stderr.trim()} ${f.alphaKey}` }),
+      });
+      const runtime = runtimeFor(f, railway.exec);
+      const record = await startDetachedRun({ home: f.home, runtime, member: MEMBER, run: RUN });
+      for (let refresh = 0; refresh < 2; refresh++) {
+        expect(await refreshRunRecord(f.home, record, runtime)).toMatchObject({
+          state: "running",
+          detail: expect.stringContaining(
+            `${exitCode === 0 ? "finished" : "failed"}; sandbox destroy failed`,
+          ),
+        });
+        expect((await readRunRecord(f.home, RUN_ID))?.detail).not.toContain(f.alphaKey);
+      }
+      expect(railway.calls.filter((call) => call[1] === "destroy")).toHaveLength(2);
+      expect(readSidecarFile(f)).toEqual(sidecarOf({ state: "running", sandboxId: SANDBOX_ID }));
+      const owner = ownerCommands(f, railway.exec);
+      await owner.blocked();
+      await owner.command(["stop", "team", RUN_ID], 1);
+      expect(await readRunRecord(f.home, RUN_ID)).toMatchObject({ state: "unknown" });
+      await owner.blocked();
+      await owner.forgetAndDissolve();
+    },
+  );
+
+  it("marks the run unknown when stop hits an unrelated failure", async () => {
     const f = await fixture();
     const railway = fakeRailway({
       destroy: () => ({ code: 1, stdout: "", stderr: "Error: request timed out" }),
@@ -2147,7 +3199,7 @@ describe("railway runtime sandbox-gone detection", () => {
     await expect(
       stopRun({ home: f.home, runtime: runtimeFor(f, railway.exec), record }),
     ).rejects.toThrow(/request timed out/u);
-    expect((await readRunRecord(f.home, RUN_ID))?.state).toBe("running");
+    expect((await readRunRecord(f.home, RUN_ID))?.state).toBe("unknown");
   });
 
   it("reports running with the error when status hits an unrelated failure", async () => {
@@ -2286,7 +3338,7 @@ describe("railway sidecar helpers", () => {
     expect(await exists(railwaySidecarPath(f.home, RUN_ID))).toBe(false);
   });
 
-  it("deletes the sidecar of a sandbox that is clearly gone", async () => {
+  it("keeps the sidecar when destroy only reports that a sandbox is gone", async () => {
     const f = await fixture();
     await mkdir(runsDirectory(f.home), { recursive: true });
     await writeFile(
@@ -2297,8 +3349,36 @@ describe("railway sidecar helpers", () => {
 
     await expect(
       destroyRailwaySidecar(f.home, RUN_ID, { exec: railway.exec }),
-    ).resolves.toMatchObject({ destroyed: true });
-    expect(await exists(railwaySidecarPath(f.home, RUN_ID))).toBe(false);
+    ).resolves.toMatchObject({ destroyed: false });
+    expect(await exists(railwaySidecarPath(f.home, RUN_ID))).toBe(true);
+  });
+
+  it.each([
+    ["creating", "null"],
+    ["kept", "timeout"],
+    ["running", "thrown"],
+    ["orphaned", "gone"],
+  ] as const)("keeps %s sidecars on %s destroy failures", async (state, outcome) => {
+    const f = await fixture();
+    await mkdir(runsDirectory(f.home), { recursive: true });
+    await writeFile(
+      railwaySidecarPath(f.home, RUN_ID),
+      JSON.stringify(sidecarOf({ state, sandboxId: SANDBOX_ID })),
+    );
+    const railway = fakeRailway({
+      destroy: () => {
+        if (outcome === "thrown") throw new Error("socket hang up");
+        return {
+          code: outcome === "null" ? null : outcome === "timeout" ? 124 : 1,
+          stdout: "",
+          stderr: SANDBOX_GONE.stderr,
+        };
+      },
+    });
+    expect(await destroyRailwaySidecar(f.home, RUN_ID, { exec: railway.exec })).toMatchObject({
+      destroyed: false,
+    });
+    expect(readSidecarFile(f)).toMatchObject({ state: "orphaned", sandboxId: SANDBOX_ID });
   });
 
   it("keeps an orphaned sidecar with the destroy command when the destroy fails", async () => {

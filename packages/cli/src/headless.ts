@@ -1,5 +1,5 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { rmSync } from "node:fs";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir as osTmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -22,14 +22,15 @@ import {
 } from "@vapi-network/core/secrets";
 import { registeredAgentProfileSchema, runAgent } from "@vapi-network/mcp";
 
-import { buildAgentRunDeps, positiveUsdOption } from "./agent.js";
 import {
-  UsageError,
-  getEnvironment,
-  redactDetachedRunValue,
-  type CliDependencies,
-  type CliIo,
-} from "./cli.js";
+  buildAgentRunDeps,
+  positiveUsdOption,
+  redactAgentRunResult,
+  printAgentRefills,
+} from "./agent.js";
+import { UsageError } from "./args.js";
+import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
+import { redactDetachedRunValue } from "./run-redaction.js";
 
 /**
  * Headless `vapi agent run --bundle-env <VAR>`: one swarm member running on a
@@ -226,14 +227,16 @@ export async function runHeadlessAgent(input: {
       dependencies: runDependencies,
     });
     const execute = dependencies.agent?.runAgent ?? runAgent;
-    const result = redactDetachedRunValue(await execute(task, agentDependencies), redaction);
+    const result = redactAgentRunResult(await execute(task, agentDependencies), redaction);
     const exitCode = result.stoppedBecause.reason === "finished" ? 0 : 1;
     if (resultFile !== undefined) {
       await writeJsonAtomic(resultFile, { v: 1, exitCode, result }, { mode: 0o600 });
     }
-    if (json) io.stdout(JSON.stringify(result));
-    else if (result.stoppedBecause.reason === "finished") io.stdout(result.answer ?? "");
-    else io.stderr(result.stoppedBecause.detail ?? result.stoppedBecause.reason);
+    // The result is already redacted; another text pass would erase public transaction hashes.
+    if (!json) printAgentRefills(result, input.io);
+    if (json) input.io.stdout(JSON.stringify(result));
+    else if (result.stoppedBecause.reason === "finished") input.io.stdout(result.answer ?? "");
+    else input.io.stderr(result.stoppedBecause.detail ?? result.stoppedBecause.reason);
     return exitCode;
   } catch (error) {
     const raw = error instanceof Error ? error.message : String(error);

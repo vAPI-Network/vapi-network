@@ -31,6 +31,64 @@ afterEach(async () => {
 });
 
 describe("runAgent", () => {
+  it("records a final-answer refill and emits public evidence before stopped", async () => {
+    const refill = refillPurchase();
+    const deps = await agentDeps([{ ...textReply("Done."), refill }]);
+    const events: AgentEvent[] = [];
+    deps.onEvent = (event) => events.push(event);
+    const result = await runAgent("Do work", deps);
+    expect(result.refills?.[0]?.warnings?.[0]?.code).toBe("receipt_unavailable");
+    expect(events.filter((event) => event.type === "refill")).toEqual([
+      { type: "refill", ...result.refills![0] },
+    ]);
+    expect(events.map((event) => event.type)).toEqual(["step", "refill", "stopped"]);
+    expect(JSON.stringify(result)).not.toContain("private-receipt-sentinel");
+    expect(JSON.stringify(events)).not.toContain("private-receipt-sentinel");
+  });
+
+  it.each([
+    { code: "refill_pending", withRefill: true },
+    { code: "refill_pending", withRefill: false },
+    { code: "http", withRefill: true },
+  ] as const)(
+    "preserves $code guidance with purchase evidence: $withRefill",
+    async ({ code, withRefill }) => {
+      const deps = await agentDeps([]);
+      const events: AgentEvent[] = [];
+      deps.onEvent = (event) => events.push(event);
+      const message =
+        "Payment settled, but chat could not complete. Retry chat; do not repeat the purchase.";
+      deps.chat = vi
+        .fn()
+        .mockRejectedValue(
+          new RouterClientError(
+            code,
+            message,
+            undefined,
+            withRefill ? refillPurchase() : undefined,
+          ),
+        );
+      const result = await runAgent("Do work", deps);
+      expect(result.stoppedBecause).toEqual({ type: "stopped", reason: "error", detail: message });
+      expect(JSON.stringify(result)).not.toContain("private-receipt-sentinel");
+      expect(JSON.stringify(events)).not.toContain("private-receipt-sentinel");
+      if (withRefill) {
+        expect(result.refills?.[0]?.receipt.id).toBe("refill-receipt");
+        expect(result.refills?.[0]?.warnings?.[0]?.code).toBe("receipt_unavailable");
+        expect(events.map((event) => event.type)).toEqual(["step", "refill", "stopped"]);
+      } else {
+        expect(result).not.toHaveProperty("refills");
+      }
+    },
+  );
+
+  it("keeps upstream http messages out of ordinary Router errors", async () => {
+    const deps = await agentDeps([]);
+    deps.chat = vi.fn().mockRejectedValue(new RouterClientError("http", "upstream-secret"));
+    const result = await runAgent("Do work", deps);
+    expect(result.stoppedBecause.detail).toBe("The vAPI Router request failed.");
+  });
+
   it("returns a generated run id and uses an injected id in lifecycle audit records", async () => {
     const generatedDeps = await agentDeps([textReply("Done.")]);
     const generated = await runAgent("Do work", generatedDeps);
@@ -805,4 +863,20 @@ async function auditRecords(home: string): Promise<AuditEntry[]> {
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line) as AuditEntry);
+}
+
+function refillPurchase(): NonNullable<ChatResult["refill"]> {
+  return {
+    receipt: {
+      id: "refill-receipt",
+      timestamp: "2026-09-23T12:00:00.000Z",
+      resourceUrl: "https://example.com/private-receipt-sentinel",
+      quote: { network: "eip155:8453", amountAtomic: "5000000" },
+      settlement: { outcome: "succeeded", transaction: `0x${"ab".repeat(32)}` },
+    },
+    balance: { purchasedUsd: 5, spentUsd: 0, remainingUsd: 5 },
+    warnings: [
+      { code: "receipt_unavailable", message: "Keep this receipt; do not repeat the purchase." },
+    ],
+  };
 }

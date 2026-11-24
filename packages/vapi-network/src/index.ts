@@ -1,5 +1,6 @@
 export * as cli from "@vapi-network/cli";
 export * as core from "@vapi-network/core";
+export * as tasks from "@vapi-network/core/tasks";
 export * as mcp from "@vapi-network/mcp";
 export * as sources from "@vapi-network/sources";
 

@@ -478,8 +478,8 @@ function libsecretStore(
       requireSuccess(result, `store the passphrase of ${name} in the secret service`);
     },
     async remove(name) {
-      // `secret-tool clear` succeeds whether or not it matched anything, so the
-      // lookup is what tells a person their passphrase was really there.
+      // The lookup is what tells a person their passphrase was really there:
+      // `secret-tool clear` reports nothing about what it matched.
       const existed = (await lookup(name)) !== undefined;
       const result = await run(SECRET_TOOL_BINARY, [
         "clear",
@@ -489,6 +489,11 @@ function libsecretStore(
         accountFor(name),
       ]);
       requireBinary(result);
+      // Some libsecret builds exit 1 with nothing on stderr when `clear` matches
+      // no item. Removing an entry the lookup did not find is not a failure.
+      // Any other exit code, any message, and a silent failure to remove an
+      // entry the lookup did find are still reported.
+      if (!existed && result.code === 1 && result.stderr.trim().length === 0) return false;
       requireSuccess(result, `remove the passphrase of ${name} from the secret service`);
       return existed;
     },

@@ -12,14 +12,29 @@ const env = {
   VAPI_TASKS_V2_USDC_VERSION_84532: "2",
 };
 describe("local V2 trust anchors", () => {
-  it("has no deployment pins until the ceremony and refuses an unconfigured chain", () => {
-    expect(TRUSTED_TASKS_V2_DEPLOYMENTS).toEqual({});
-    expect(() => getTrustedTasksV2Deployment(8453, { env: {} })).toThrow(
-      "No locally pinned V2 deployment",
-    );
-    expect(() => getTrustedTasksV2Deployment(84532, { env: {} })).toThrow(
-      "No locally pinned V2 deployment",
-    );
+  it("resolves the verified Base mainnet deployment without overrides or notices", () => {
+    const notice = vi.fn();
+    expect(getTrustedTasksV2Deployment(8453, { env: {}, notice })).toEqual({
+      escrowFactoryV2: getAddress("0x3586A4C92b55a83175D911aBA9B50329319E34BD"),
+      disputeResolverV3: getAddress("0xEe36F3B19dcC38B6b5676B6cdcDd63a6d7Fbb435"),
+      bountyPoolFactoryV1: getAddress("0xD03264c27AE3900834d6C5ba85cd15C56B21452f"),
+      usdc: getAddress("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"),
+      usdcName: "USD Coin",
+      usdcVersion: "2",
+      offerTtlSeconds: 604800,
+      reviewWindowSeconds: 604800,
+      evidenceWindowSeconds: 172800,
+      choiceWindowSeconds: 604800,
+    });
+    expect(notice).not.toHaveBeenCalled();
+    expect(Object.keys(TRUSTED_TASKS_V2_DEPLOYMENTS)).toEqual(["8453"]);
+  });
+  it("requires an explicit override for Base Sepolia and unknown chains", () => {
+    for (const chainId of [84532, 1]) {
+      expect(() => getTrustedTasksV2Deployment(chainId, { env: {} })).toThrow(
+        "No locally pinned V2 deployment",
+      );
+    }
   });
   it("accepts only a complete chain-specific staging override and logs it", () => {
     const notice = vi.fn();
@@ -30,9 +45,10 @@ describe("local V2 trust anchors", () => {
       usdcVersion: "2",
     });
     expect(notice).toHaveBeenCalledWith(expect.stringContaining("untrusted override"));
-    expect(() => getTrustedTasksV2Deployment(8453, { env, notice })).toThrow(
-      "No locally pinned V2 deployment",
+    expect(getTrustedTasksV2Deployment(8453, { env, notice })).toEqual(
+      TRUSTED_TASKS_V2_DEPLOYMENTS[8453],
     );
+    expect(notice).toHaveBeenCalledTimes(1);
   });
   it.each(Object.keys(env))("refuses an override missing %s", (key) => {
     const incomplete: NodeJS.ProcessEnv = { ...env };

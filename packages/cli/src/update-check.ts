@@ -3,7 +3,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 
 import { createPublicFetch, getVapiPaths } from "@vapi-network/core";
 
-import { runCli, type CliDependencies, type CliIo } from "./cli.js";
+import { runCli } from "./cli.js";
+import { type CliDependencies, type CliIo } from "./cli-context.js";
 import { CLI_VERSION } from "./version.js";
 
 const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1_000;

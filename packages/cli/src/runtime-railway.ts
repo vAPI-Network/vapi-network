@@ -38,6 +38,7 @@ import {
   usdToAtomic,
   WalletStore,
   writeJsonAtomic,
+  withFileLock,
   type AgentProfile,
   type SecretStore,
   type SwarmBalanceReader,
@@ -55,9 +56,12 @@ import {
   type MemberBundleConfig,
 } from "@vapi-network/core/secrets";
 import {
+  readRunRecord,
+  withMemberRunLock,
   redactRunText,
   redactRunValue,
   registeredAgentProfileSchema,
+  runRecordPath,
   runResultPath,
   runsDirectory,
   STARTING_RECONCILIATION_TIMEOUT_MS,
@@ -132,6 +136,8 @@ export const RAILWAY_CHECKPOINT_RULE =
   "1-64 letters, digits, '.', '_' or '-', starting with a letter or digit";
 
 const SANDBOX_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
+const UNREADABLE_SANDBOX_ID_MESSAGE =
+  "Could not read a sandbox id from the railway sandbox create output (expected JSON with id or sandboxId).";
 const MISSING_FILE_PATTERN = /no such file or directory/iu;
 const HTTP_NOT_FOUND_PATTERN = /\b404\b/u;
 /** Any other thing a Railway error can report missing; its not-found says nothing about the sandbox. */
@@ -182,9 +188,7 @@ export function parseSandboxId(stdout: string): string {
     const id = sandboxIdOf(parsed);
     if (id !== undefined) return id;
   }
-  throw new Error(
-    "Could not read a sandbox id from the railway sandbox create output (expected JSON with id or sandboxId).",
-  );
+  throw new Error(UNREADABLE_SANDBOX_ID_MESSAGE);
 }
 
 function sandboxIdOf(value: unknown): string | undefined {
@@ -195,6 +199,39 @@ function sandboxIdOf(value: unknown): string | undefined {
     if (typeof id === "string" && SANDBOX_ID_PATTERN.test(id)) return id;
   }
   return "sandbox" in record ? sandboxIdOf(record.sandbox) : undefined;
+}
+
+function sandboxScope(stdout: string, id: string): RuntimeHandle["railwayScope"] {
+  const trimmed = stdout.trim();
+  for (const candidate of [trimmed, ...trimmed.split(/\r?\n/u).reverse()]) {
+    try {
+      const value: unknown = JSON.parse(candidate);
+      if (sandboxIdOf(value) !== id || typeof value !== "object" || value === null) continue;
+      const outer = value as Record<string, unknown>;
+      const sandbox =
+        typeof outer.sandbox === "object" &&
+        outer.sandbox !== null &&
+        sandboxIdOf(outer.sandbox) === id
+          ? (outer.sandbox as Record<string, unknown>)
+          : outer;
+      const projectId =
+        typeof sandbox.projectId === "string" && sandbox.projectId.length > 0
+          ? sandbox.projectId
+          : undefined;
+      const environmentId =
+        typeof sandbox.environmentId === "string" && sandbox.environmentId.length > 0
+          ? sandbox.environmentId
+          : undefined;
+      if (projectId !== undefined || environmentId !== undefined)
+        return {
+          ...(projectId === undefined ? {} : { projectId }),
+          ...(environmentId === undefined ? {} : { environmentId }),
+        };
+    } catch {
+      // Scope is optional. Never replace missing creation metadata with today's link.
+    }
+  }
+  return undefined;
 }
 
 export type RemoteKeyRefusalCode =
@@ -692,6 +729,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
         ...(run.parentRunId === undefined ? {} : { parentRunId: run.parentRunId }),
       });
       const secretValues = collectSecrets([bundle, privateKey, privateKey.slice(2)], credentials);
+      const credentialValues = collectSecretValues([], credentials);
 
       // One `agent.remote_key_exported` line per export: once `sandbox create`
       // ran, whether this path or the signal handler gets to write it.
@@ -722,20 +760,37 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
       };
       let directory: string | undefined;
       let sandboxId: string | undefined;
+      // Updated only after an atomic id-carrying write succeeds.
+      let recordedSandboxId: string | undefined;
+      let orphanOnDisk = false;
       // Set just before `sandbox create` runs: from then on the key may have left.
       let attempted = false;
       let interrupted: NodeJS.Signals | undefined;
+      let launchPersistence: Promise<void> | undefined;
       const saveSidecar = (next: RailwaySidecar): void => {
         if (interrupted !== undefined) return;
         sidecar = next;
         writeSidecarSync(sidecarPath, next);
+        if (next.sandboxId !== undefined) recordedSandboxId = next.sandboxId;
+        if (next.state === "orphaned") orphanOnDisk = true;
       };
       const dropSidecar = (): void => {
         if (interrupted === undefined) rmSync(sidecarPath, { force: true });
       };
+      const ambiguousInstruction = `After checking railway sandbox list and destroying any worker, wait for the five-minute reconciliation window, then run vapi swarm stop ${member.swarm ?? policy.swarm.name} ${run.runId} --confirm-worker-stopped.`;
+      const destroyedInstruction = `Verify destruction in the original Railway project/environment, then run vapi swarm forget-run ${member.swarm ?? policy.swarm.name} ${run.runId} --confirm-destroyed.`;
       const assertNotInterrupted = (): void => {
         if (interrupted !== undefined) {
-          throw new Error(`Starting ${account} on Railway was interrupted by ${interrupted}.`);
+          const message = `Starting ${account} on Railway was interrupted by ${interrupted}.`;
+          if (attempted && recordedSandboxId === undefined)
+            throw new RuntimeError(
+              "launch_ambiguous",
+              `${message} A sandbox may exist; check railway sandbox list. ${ambiguousInstruction}`,
+            );
+          if (sandboxId === undefined) throw new Error(message);
+          throw new Error(
+            `${message} Destroy it yourself with: railway sandbox destroy ${sandboxId}\n${destroyedInstruction}`,
+          );
         }
       };
 
@@ -743,6 +798,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
       // delete the env file, record the sandbox, try a bounded destroy, re-raise.
       const cleanUpAfterSignal = async (signal: NodeJS.Signals): Promise<void> => {
         const id = sandboxId;
+        let sidecarRecorded = false;
         try {
           if (directory !== undefined) rmSync(directory, { recursive: true, force: true });
         } catch {
@@ -755,13 +811,18 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
               ? { ...sidecar, state: "creating" }
               : { ...sidecar, state: "orphaned", sandboxId: id },
           );
+          if (id !== undefined) {
+            recordedSandboxId = id;
+            orphanOnDisk = true;
+          }
+          sidecarRecorded = true;
         } catch {
           // The stderr line below still tells the owner what to destroy.
         }
         process.stderr.write(
           id === undefined
             ? `Interrupted while starting ${account} on Railway. A sandbox holding its private key may exist: find it with railway sandbox list and run railway sandbox destroy <id>.\n`
-            : `Interrupted while starting ${account} on Railway. Sandbox ${id} holds its private key; destroying it. If it is still listed, run: railway sandbox destroy ${id}\n`,
+            : `Interrupted while starting ${account} on Railway. Sandbox ${id} holds its private key; destroying it. If destroy does not exit 0, run: railway sandbox destroy ${id}\n${destroyedInstruction}\n`,
         );
         if (attempted) {
           try {
@@ -772,10 +833,31 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
         }
         if (id !== undefined) {
           try {
-            await withTimeout(destroySandbox(exec, id), signalDestroyTimeoutMs);
+            await withTimeout(destroySandbox(exec, id, secretValues), signalDestroyTimeoutMs);
             rmSync(sidecarPath, { force: true });
+            sidecarRecorded = true; // Successful destruction also permits retiring the start.
           } catch {
             // The sidecar stays "orphaned" for `vapi swarm stop` to retry.
+          }
+        }
+        // A pending launch-reference write must settle before retiring the
+        // reservation, or its rename could recreate a starting blocker afterward.
+        await launchPersistence?.catch(() => undefined);
+        if (id !== undefined && sidecarRecorded) {
+          try {
+            const reservation = await readRunRecord(home, run.runId);
+            if (
+              reservation?.kind === "railway" &&
+              reservation.state === "starting" &&
+              reservation.member.account === account &&
+              (reservation.handle.ref === "" || reservation.handle.ref === id)
+            ) {
+              // The durable orphan permits forget-run even if the signal exits
+              // before startDetachedRun's catch runs.
+              rmSync(runRecordPath(home, run.runId), { force: true });
+            }
+          } catch {
+            // Retained metadata stays blocking and a normal stop can retry it.
           }
         }
         removeSignalHandlers();
@@ -823,7 +905,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
           // here on destroys this sandbox rather than pointing at a list.
           if (created.code === 0) {
             try {
-              sandboxId = parseSandboxId(created.stdout);
+              sandboxId = readSandboxId(created.stdout, secretValues, credentialValues);
               saveSidecar({ ...sidecar, sandboxId });
             } catch {
               // An unreadable id is reported below; the sidecar is written again there.
@@ -855,7 +937,17 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
         if (createError !== undefined || created === undefined || created.code !== 0) {
           if (!attempted) {
             // Nothing reached railway, so nothing can exist remotely and nothing was exported.
-            dropSidecar();
+            try {
+              dropSidecar();
+            } catch (error) {
+              throw new RuntimeError(
+                "launch_ambiguous",
+                `${withLeftover([
+                  `railway sandbox create failed: ${scrub(errorMessage(createError), secretValues)}`,
+                  `No sandbox was created; only the local launch marker could not be removed: ${scrub(errorMessage(error), secretValues)}`,
+                ])}\n${ambiguousInstruction}`,
+              );
+            }
             throw new Error(
               withLeftover([
                 `railway sandbox create failed: ${scrub(errorMessage(createError), secretValues)}`,
@@ -864,7 +956,17 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
           }
           if (createError !== undefined && hasCode(createError, "ENOENT")) {
             // The binary never started: no sandbox was created and nothing was exported.
-            dropSidecar();
+            try {
+              dropSidecar();
+            } catch (error) {
+              throw new RuntimeError(
+                "launch_ambiguous",
+                `${withLeftover([
+                  `railway sandbox create failed: ${scrub(errorMessage(createError), secretValues)}`,
+                  `No sandbox was created; only the local launch marker could not be removed: ${scrub(errorMessage(error), secretValues)}`,
+                ])}\n${ambiguousInstruction}`,
+              );
+            }
             throw new RuntimeError(
               "runtime_unavailable",
               withLeftover([
@@ -872,34 +974,49 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
               ]),
             );
           }
-          await audit("runtime=railway sandbox=none create_failed");
           // The sidecar stays "creating": create may have gone through before it failed.
-          throw new Error(
+          const failure = new RuntimeError(
+            "launch_ambiguous",
             withLeftover([
               createError !== undefined || created === undefined
                 ? `railway sandbox create failed: ${scrub(errorMessage(createError), secretValues)}`
                 : `railway sandbox create failed${describeFailure(created, secretValues)}`,
               `A sandbox holding ${account}'s private key may still exist. Check with railway sandbox list and destroy it with railway sandbox destroy <id>.`,
+              ambiguousInstruction,
             ]),
           );
+          try {
+            await audit("runtime=railway sandbox=none create_failed");
+          } catch (error) {
+            failure.message += `\nCould not record export audit: ${scrub(errorMessage(error), secretValues)}`;
+          }
+          throw failure;
         }
 
         let id: string;
         try {
-          id = sandboxId ?? parseSandboxId(created.stdout);
+          id = sandboxId ?? readSandboxId(created.stdout, secretValues, credentialValues);
         } catch (error) {
-          await audit("runtime=railway sandbox=unknown create_unparsed");
           // Without an id nothing here can destroy it, so the owner must.
-          throw new Error(
+          const failure = new RuntimeError(
+            "launch_ambiguous",
             withLeftover([
               errorMessage(error),
               `A sandbox holding ${account}'s private key may be running. Find it with railway sandbox list and destroy it with railway sandbox destroy <id>.`,
               `Until then that key can spend ${account}'s balance; it stops at the idle timeout (${idleTimeoutMinutes} minutes).`,
+              ambiguousInstruction,
             ]),
           );
+          try {
+            await audit("runtime=railway sandbox=unknown create_unparsed");
+          } catch (auditError) {
+            failure.message += `\nCould not record export audit: ${scrub(errorMessage(auditError), secretValues)}`;
+          }
+          throw failure;
         }
 
         sandboxId = id;
+        const railwayScope = sandboxScope(created.stdout, id);
         try {
           saveSidecar({ ...sidecar, sandboxId: id });
           const handle: RuntimeHandle = {
@@ -908,8 +1025,15 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
             member,
             startedAt,
             ref: id,
+            ...(railwayScope === undefined ? {} : { railwayScope }),
           };
-          await persistLaunch?.(handle);
+          assertNotInterrupted();
+          launchPersistence = Promise.resolve().then(async () => {
+            assertNotInterrupted();
+            await persistLaunch?.(handle);
+          });
+          await launchPersistence;
+          assertNotInterrupted();
           await audit(`runtime=railway sandbox=${id}`);
           if (leftover.length > 0) throw new Error(leftover.join("\n"));
           await waitUntilReady(id, secretValues);
@@ -940,28 +1064,57 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
           saveSidecar({ ...sidecar, state: "running" });
         } catch (error) {
           const cause = scrub(errorMessage(error), secretValues);
+          const displayId = displaySandboxId(id, secretValues, credentialValues);
           // After a signal the handler destroys the sandbox and owns the sidecar.
-          if (interrupted !== undefined) throw new Error(cause);
+          if (interrupted !== undefined) {
+            if (recordedSandboxId === undefined) assertNotInterrupted();
+            throw new Error(
+              `${cause}\nDestroy it yourself with: railway sandbox destroy ${id}\n${destroyedInstruction}`,
+            );
+          }
           try {
-            await destroySandbox(exec, id);
+            await destroySandbox(exec, id, secretValues);
           } catch (destroyError) {
             try {
               saveSidecar({ ...sidecar, state: "orphaned", sandboxId: id });
             } catch {
               // The error below still names the sandbox and the command.
             }
+            const lines = (sandboxId: string): string[] => [
+              cause,
+              `Could not destroy sandbox ${sandboxId}, which holds ${account}'s private key: ${scrub(errorMessage(destroyError), secretValues).replaceAll(id, sandboxId)}`,
+              `Destroy it yourself with: railway sandbox destroy ${sandboxId}`,
+            ];
+            if (recordedSandboxId === undefined)
+              throw new RuntimeError(
+                "launch_ambiguous",
+                [...lines(displayId), ambiguousInstruction].join("\n"),
+              );
             throw new Error(
               [
-                cause,
-                `Could not destroy sandbox ${id}, which holds ${account}'s private key: ${scrub(errorMessage(destroyError), secretValues)}`,
-                `Destroy it yourself with: railway sandbox destroy ${id}`,
+                ...lines(id),
+                ...(orphanOnDisk
+                  ? []
+                  : [
+                      `Retry cleanup with: vapi swarm stop ${member.swarm ?? policy.swarm.name} ${run.runId}`,
+                    ]),
+                destroyedInstruction,
               ].join("\n"),
             );
           }
+          assertNotInterrupted();
           try {
             dropSidecar();
-          } catch {
-            // The sandbox is gone; a stale sidecar only costs a retry later.
+          } catch (removalError) {
+            if (recordedSandboxId === undefined)
+              throw new RuntimeError(
+                "launch_ambiguous",
+                [
+                  cause,
+                  `Sandbox ${displayId} was destroyed; only the local launch marker could not be removed: ${scrub(errorMessage(removalError), secretValues)}`,
+                  ambiguousInstruction,
+                ].join("\n"),
+              );
           }
           throw new Error(cause);
         }
@@ -972,6 +1125,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
           member,
           startedAt,
           ref: id,
+          ...(railwayScope === undefined ? {} : { railwayScope }),
         };
       } finally {
         removeSignalHandlers();
@@ -996,7 +1150,6 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
       if (outcome.code !== 0) {
         if (MISSING_FILE_PATTERN.test(outcome.stderr)) return { state: "running" };
         if (sandboxGone(outcome.stderr, id)) {
-          await removeSidecar(home, handle.runId);
           return { state: "unknown", detail: "sandbox gone" };
         }
         // Not clearly gone: keep the run tracked and say why.
@@ -1023,7 +1176,7 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
       // A finished member's key must not sit in an idle VM. Until the destroy
       // succeeds the run stays running, so the next refresh retries it.
       try {
-        await destroySandbox(exec, id);
+        await destroySandbox(exec, id, []);
       } catch (error) {
         return {
           state: "running",
@@ -1037,7 +1190,8 @@ export function createRailwayRuntime(options: RailwayRuntimeOptions): Runtime {
     async stop(handle: RuntimeHandle): Promise<void> {
       const id = sandboxRef(handle);
       if (id === undefined) throw new Error("Invalid railway runtime sandbox id.");
-      await destroySandbox(exec, id);
+      // The Railway adapter always requires exit 0, with or without requireSuccessfulExit.
+      await destroySandbox(exec, id, []);
       await removeSidecar(home, handle.runId);
     },
   };
@@ -1076,39 +1230,117 @@ export async function destroyRailwaySidecar(
   runId: string,
   options: { exec?: RailwayExec } = {},
 ): Promise<{ runId: string; sandboxId?: string; destroyed: boolean; error?: string }> {
-  const sidecar = await readSidecar(home, runId);
-  if (sidecar === undefined) {
-    return { runId, destroyed: false, error: `No readable railway sidecar for run ${runId}.` };
-  }
-  const id = sidecar.sandboxId;
-  if (id === undefined) {
-    const holder = sidecar.account === "" ? "a member" : sidecar.account;
-    return {
-      runId,
-      destroyed: false,
-      error: `Run ${runId} has no sandbox id, and a sandbox holding ${holder}'s private key may exist. Find it with railway sandbox list and run railway sandbox destroy <id>.`,
-    };
-  }
   try {
-    await destroySandbox(options.exec ?? defaultRailwayExec, id);
+    const observed = await readSidecar(home, runId);
+    const record = await readRunRecord(home, runId);
+    const account = sidecarAccount(observed, record);
+    const destroy = async () => {
+      const currentRecord = await readRunRecord(home, runId);
+      const sidecar = await readSidecar(home, runId);
+      if (sidecarAccount(sidecar, currentRecord) !== account) {
+        throw new RuntimeError(
+          "runtime_unavailable",
+          `Run ${runId} changed members while waiting for its lock. Retry cleanup.`,
+        );
+      }
+      if (currentRecord?.state === "forgotten") {
+        return sidecar === undefined
+          ? { runId, destroyed: true }
+          : {
+              runId,
+              destroyed: false,
+              error: `Run ${runId} was already forgotten but still has a sidecar. Inspect its current metadata; nothing was rewritten.`,
+            };
+      }
+      if (sidecar === undefined) {
+        return { runId, destroyed: false, error: `No readable railway sidecar for run ${runId}.` };
+      }
+      const id = sidecar.sandboxId;
+      if (id === undefined) {
+        const holder = sidecar.account === "" ? "a member" : sidecar.account;
+        return {
+          runId,
+          destroyed: false,
+          error: `Run ${runId} has no sandbox id, and a sandbox holding ${holder}'s private key may exist. Find it with railway sandbox list and run railway sandbox destroy <id>.`,
+        };
+      }
+      try {
+        const outcome = await (options.exec ?? defaultRailwayExec)(
+          RAILWAY_CLI.binary,
+          RAILWAY_CLI.destroy(id),
+        );
+        if (outcome.code !== 0)
+          throw new Error(`railway sandbox destroy ${id} failed${describeFailure(outcome, [])}`);
+      } catch (error) {
+        // An unattributed legacy sidecar is already unresolved. Preserve its
+        // existing metadata rather than rewriting it without a member lock.
+        if (account !== undefined)
+          await writeSidecar(home, runId, { ...sidecar, state: "orphaned" }).catch(() => undefined);
+        return {
+          runId,
+          sandboxId: id,
+          destroyed: false,
+          error: `${scrub(errorMessage(error), [])}\nDestroy it yourself with: railway sandbox destroy ${id}`,
+        };
+      }
+      if (
+        account === undefined &&
+        sidecarAccount(await readSidecar(home, runId), await readRunRecord(home, runId)) !==
+          undefined
+      )
+        throw new RuntimeError(
+          "runtime_unavailable",
+          `Run ${runId} acquired member ownership during cleanup. Retry under its member lock.`,
+        );
+      await removeSidecar(home, runId);
+      return { runId, sandboxId: id, destroyed: true };
+    };
+    if (account !== undefined) return await withMemberRunLock(home, account, destroy);
+    // Legacy metadata can have no member at all. Forget cannot act on such a
+    // sidecar; serialize its cleanup by run id and reject any new ownership.
+    return await withFileLock(join(runsDirectory(home), `.sidecar-${runId}.lock`), destroy, {
+      timeoutMs: 5_000,
+      lockedMessage: `Run ${runId} is changing sidecar state.`,
+    });
   } catch (error) {
-    await writeSidecar(home, runId, { ...sidecar, state: "orphaned" }).catch(() => undefined);
     return {
       runId,
-      sandboxId: id,
       destroyed: false,
-      error: `${scrub(errorMessage(error), [])}\nDestroy it yourself with: railway sandbox destroy ${id}`,
+      error:
+        error instanceof RuntimeError
+          ? error.message
+          : `Could not reconcile the current Railway run/sidecar for ${runId}.`,
     };
   }
-  await removeSidecar(home, runId);
-  return { runId, sandboxId: id, destroyed: true };
 }
 
-/** Destroys a sandbox; a clear sandbox-scoped not-found counts as destroyed. */
-async function destroySandbox(exec: RailwayExec, id: string): Promise<void> {
+function sidecarAccount(
+  sidecar: RailwaySidecar | undefined,
+  record: RunRecord | undefined,
+): string | undefined {
+  if (
+    record !== undefined &&
+    (record.kind !== "railway" ||
+      (sidecar?.account && sidecar.account !== record.member.account) ||
+      (sidecar?.swarm && record.member.swarm && sidecar.swarm !== record.member.swarm))
+  ) {
+    throw new RuntimeError(
+      "runtime_unavailable",
+      `Run ${record.runId} has mismatched Railway ownership metadata; nothing was changed.`,
+    );
+  }
+  return record?.member.account || sidecar?.account || undefined;
+}
+
+/** Only a successful destroy exit proves this sandbox is gone. */
+async function destroySandbox(
+  exec: RailwayExec,
+  id: string,
+  secrets: readonly string[],
+): Promise<void> {
   const outcome = await exec(RAILWAY_CLI.binary, RAILWAY_CLI.destroy(id));
-  if (outcome.code === 0 || sandboxGone(outcome.stderr, id)) return;
-  throw new Error(`railway sandbox destroy ${id} failed${describeFailure(outcome, [])}`);
+  if (outcome.code === 0) return;
+  throw new Error(`railway sandbox destroy ${id} failed${describeFailure(outcome, secrets)}`);
 }
 
 /**
@@ -1530,6 +1762,15 @@ function collectSecrets(
   base: readonly string[],
   credentials: { tokens: string; routerStake?: string; routerBalance?: string },
 ): string[] {
+  return collectSecretValues(base, credentials).filter(
+    (value) => value.length >= MINIMUM_SECRET_LENGTH,
+  );
+}
+
+function collectSecretValues(
+  base: readonly string[],
+  credentials: { tokens: string; routerStake?: string; routerBalance?: string },
+): string[] {
   const values = [...base, credentials.tokens];
   if (credentials.routerStake !== undefined) values.push(credentials.routerStake);
   if (credentials.routerBalance !== undefined) values.push(credentials.routerBalance);
@@ -1538,7 +1779,7 @@ function collectSecrets(
   } catch {
     // Opaque token text is already covered as a whole.
   }
-  return values.filter((value) => value.length >= MINIMUM_SECRET_LENGTH);
+  return values;
 }
 
 function collectStrings(value: unknown, into: string[]): void {
@@ -1555,6 +1796,33 @@ function scrub(text: string, secrets: readonly string[]): string {
   return redactRunText(scrubbed);
 }
 
+function displaySandboxId(
+  id: string,
+  secrets: readonly string[],
+  credentialValues: readonly string[],
+): string {
+  if (credentialValues.includes(id) || secrets.includes(id)) return "[redacted]";
+  let displayed = id;
+  for (const secret of secrets) displayed = displayed.replaceAll(secret, "[redacted]");
+  return displayed;
+}
+
+function readSandboxId(
+  stdout: string,
+  secrets: readonly string[],
+  credentialValues: readonly string[],
+): string {
+  const id = parseSandboxId(stdout);
+  const normalized = id.toLowerCase();
+  if (
+    credentialValues.some((value) => normalized === value.toLowerCase()) ||
+    secrets.some((value) => normalized.includes(value.toLowerCase()))
+  ) {
+    throw new Error(UNREADABLE_SANDBOX_ID_MESSAGE);
+  }
+  return id;
+}
+
 function describeFailure(outcome: RailwayExecResult, secrets: readonly string[]): string {
   const line = outcome.stderr
     .split(/\r?\n/u)
@@ -1562,7 +1830,12 @@ function describeFailure(outcome: RailwayExecResult, secrets: readonly string[])
     .find((part) => part.length > 0);
   const exit = outcome.code === null ? "no exit code" : `exit ${outcome.code}`;
   if (line === undefined) return ` (${exit}).`;
-  return ` (${exit}): ${scrub(line, secrets).slice(0, 300)}`;
+  // The bundle is base64url text; a shorter word after the name is a diagnostic, not a value.
+  const redacted = line.replace(
+    new RegExp(`${RAILWAY_CLI.bundleVariable}["']?\\s*[=:]\\s*["']?[A-Za-z0-9_-]{32,}`, "gu"),
+    `${RAILWAY_CLI.bundleVariable}=[redacted]`,
+  );
+  return ` (${exit}): ${scrub(redacted, secrets).slice(0, 300)}`;
 }
 
 function errorMessage(error: unknown): string {

@@ -56,7 +56,7 @@ An account name and its recorded address identify one swarm account. Every new m
 
 Capital commands reconcile a sender's unfinished automatic ceiling sweep before planning or resuming another leg. Automatic sweeps perform the reciprocal check under the same sender lock. They reconcile signed movement legs when possible and skip with `unfinished_movement` while an authorization may still settle. The standalone `vapi sweep` command uses the same sender lock and refuses until the movement resumes or is safely cancelled.
 
-The relay accepts at most 50 USDC per transfer by default. Funding and sweep amounts above that limit become several legs in one durable movement. A retry resumes the unfinished leg and skips every sent leg.
+The relay accepts at most 50 USDC per transfer by default. Funding and sweep amounts above that limit become several legs in one durable movement. A retry resumes the unfinished leg and skips every sent leg. Before calling the relay, each fresh transfer appends its signed authorization and strictly syncs the receipt ledger file and parent directory. Directory sync is skipped on Windows. If sync fails, no relay request is sent. A successful failed-row append releases the reservation once and reports that no money moved. If that append also fails, the transfer returns `unknown`, keeps its reservation and can be resumed. Terminal receipt sync remains best effort.
 
 The `even` strategy splits whole cents and gives every remainder cent to the first linked member. Recipient ceilings can reduce a member's executable leg without reallocating that blocked amount.
 
@@ -191,17 +191,38 @@ vapi swarm stop research --all
 
 The CLI waits up to about 30 seconds for a new sandbox to answer before it starts the member. The task reaches the sandbox base64url-encoded, so quotes and shell characters arrive unchanged.
 
-`vapi swarm runs` reads each sandbox's result. It also reconciles a `starting` record from its saved local process id or Railway sidecar. A finished run's sandbox is destroyed on that call, so a member key does not sit in an idle sandbox. If that destroy fails, the run stays `running` with a sanitized detail. Human output prints a warning and JSON includes `detail`. The command exits with code 1 until cleanup succeeds. `vapi swarm stop` stops both recovered starts and running workers.
+`vapi swarm runs` reads each sandbox's result and reconciles saved launch references. A finished run's sandbox is destroyed on that call. A failed cleanup leaves the run `running` with a sanitized detail and exits with code 1. `vapi swarm stop` attempts to stop recovered starts, running workers and unknown runs.
 
-A sandbox counts as gone only when `railway` says the sandbox was not found (`sandbox not found`, or `sandbox <id> not found` for this id), or answers 404 naming this sandbox id and nothing else. A not-found for a project, environment, token, workspace or another sandbox is not "gone". Any other destroy or exec failure is an error: `vapi swarm stop` keeps the run `running`, prints the error and exits with code 1.
+Every Railway destroy requires `railway sandbox destroy <id>` to exit **0**, including failed-launch and signal cleanup, persistence rollback, terminal-status cleanup and direct adapter stops. Railway's experimental-feature warning on stderr is harmless on a successful exit. A non-zero exit, timeout, interruption or thrown error never proves destruction, even if its output says “not found”: human CLI text does not verify absence in the original project/environment. Failed stops of running or starting records with a saved sandbox id become `unknown` and keep blocking. Failed terminal-status cleanup stays `running` and retries on the next refresh; an explicit stop can then move it to `unknown` if destroy still fails. When persistence succeeds, failed launch cleanup with a known id retains an `orphaned` sidecar that blocks dissolution and allows owner confirmation even if its reservation was removed. A text-only “not found” during status returns `unknown` and leaves the sidecar unchanged. It does not prove absence in the original Railway scope. Sidecar cleanup also retains failed destroys as `orphaned`. Local-worker stops are unchanged.
+
+A Railway reservation stays `starting` through nonterminal status polls: a `running` response, including a failed request or missing result file, cannot confirm launch completion or relax the strict stop rule.
+
+If the sandbox was already destroyed and Railway cannot return a successful destroy, verify its destruction yourself in the **original** project and environment. Then explicitly confirm it in the CLI:
+
+```sh
+railway sandbox list --project <original-project> --environment <original-environment>
+vapi swarm forget-run research <runId> --confirm-destroyed
+```
+
+`forget-run` refuses without the flag, refuses running or starting records, and refuses id-less sidecars. It accepts an unknown/orphaned Railway run with a sandbox id, including an orphaned sidecar without a run record, and finished, failed or stopped Railway records whose orphaned sidecar has a sandbox id. Before changing state, it prints the sandbox id, the recorded original project/environment and the scoped list command to check. Legacy records without scope say **not recorded** and print placeholders; identify the original scope yourself rather than relying on today's Railway link. Creation JSON scope fields, when present, are retained in the run handle. The command does not run Railway or infer destruction from a missing row. Listing is an aid for human verification; Railway CLI 5.30.1's list is not a complete automatic absence proof.
+
+The retained run record becomes `forgotten` with `forgottenAt` and `confirmedBy: "cli"`; it no longer blocks dissolution. A matching sidecar is retired. An orphan-only sidecar first receives a blocking run record, so a failed final write remains unresolved and can be retried. No MCP forget tool or confirmation flag is exposed: agents can attempt a normal stop but cannot confirm away their money guard. The dissolution refusal names `vapi swarm stop` for live workers and the CLI confirmation command for unknown/orphaned ones.
+
+Detached starts for local and Railway swarm members take the swarm lock first, then the member lock, re-read swarm membership and write the `starting` reservation. They release the swarm lock before launching under the member lock alone and verify that the reservation is unchanged. A locked, missing or changed swarm returns `RuntimeError("swarm_unavailable")` and starts no worker. A failed launch-lock handoff retains the reservation and names `stop --confirm-worker-stopped`; a changed reservation is never launched or overwritten. Standalone agents take only the member lock.
+
+Polls, stops, CLI confirmation and cleanup of an identified member share its lifecycle lock. A poll re-reads the run inside that lock before contacting Railway: an older `running` snapshot cannot move a stored `unknown` run to finished or overwrite stopped/forgotten state and confirmation. Start and stop use an internal refresh while already holding the lock. Cleanup re-reads the sidecar under that same lock, so a failed destroy cannot recreate an orphan after confirmation removed it. Lock contention leaves metadata unchanged and reports a busy member.
 
 `--keep-sandbox` keeps a finished run's sandbox for inspection, with the member key still inside it. `vapi swarm runs` leaves a kept sandbox up and lists it as `kept`. `vapi swarm stop <name> --all`, or `vapi swarm stop <name> <runId>`, destroys it. Without that, it stays up until the idle timeout (30 minutes).
 
 ### Orphaned sandboxes
 
-Every railway run has a sidecar file at `<home>/runs/<runId>.railway.json`, mode `0600`, where `<home>` is `~/.vapi` or `VAPI_HOME`. The CLI writes it before `railway sandbox create` and adds the sandbox id as soon as `create` prints one. The sidecar holds the run id, member, swarm, state, sandbox id and checkpoint, never a key, bundle or credential. It is deleted once the sandbox is destroyed.
+Every railway run has a sidecar file at `<home>/runs/<runId>.railway.json`, mode `0600`, where `<home>` is `~/.vapi` or `VAPI_HOME`. The CLI writes it before `railway sandbox create` and adds the sandbox id as soon as `create` prints one. The sidecar holds the run id, member, swarm, state, sandbox id and checkpoint, never a key, bundle or credential. It is deleted after destroy exits 0 or the owner confirms verified destruction with `vapi swarm forget-run <name> <runId> --confirm-destroyed`.
 
 The run registry writes a `starting` reservation before it launches a worker. The local adapter saves its process id before detaching. The Railway adapter saves its sidecar before create and copies the sandbox id into the reservation before remote execution. `vapi swarm runs` reconciles these references after a launcher crash. `vapi swarm stop` stops the recovered worker and clears the active reservation.
+
+A create that reached Railway but failed, timed out, threw or returned no readable sandbox id raises `RuntimeError("launch_ambiguous")`, names the confirmation command and retains its `starting` reservation and id-less `creating` sidecar. Each-mode rollback preserves that error code. An id that matches the member key, the bundle or a credential exported with the member counts as unreadable and is not saved or passed to `railway`. A missing Railway binary or failure before create removes both files when the local cleanup works.
+
+If a failed launch leaves an id-less launch marker, because the sandbox id could not be saved or the marker could not be removed, it also returns `launch_ambiguous` and keeps the `starting` reservation for the same five-minute confirmation, even when no sandbox was created or a known sandbox was destroyed. If the id was saved but the `orphaned` write fails, use `vapi swarm stop <name> <runId>` to retry cleanup, then `vapi swarm forget-run <name> <runId> --confirm-destroyed` after verifying destruction.
 
 An unreconciled `starting` record remains fail-closed. After five minutes, `vapi swarm runs` exits with code 1 and names the terminal-only confirmation command. First use `railway sandbox list` to find and destroy any sandbox that may hold the member key. Then run `vapi swarm stop <name> <runId> --confirm-worker-stopped` to retire the matching id-less `creating` sidecar and clear the reservation under the member lock. The command keeps a mismatched sidecar, and sidecars with ids follow the normal destroy path. MCP does not expose this override. Never confirm while the worker may still run.
 
@@ -209,14 +230,17 @@ An unreconciled `starting` record remains fail-closed. After five minutes, `vapi
 | ------------- | --------------------------------------------------------------------------------- |
 | `creating`    | Before `create` returns, or `create` failed in a way that may have left a sandbox |
 | `running`     | The member started in its sandbox                                                 |
-| `orphaned`    | A destroy after a failed start failed, or was cut off by Ctrl-C or SIGTERM        |
+| `orphaned`    | A destroy failed or was interrupted                                               |
 | `kept`        | The run finished with `--keep-sandbox`                                            |
 
-A sandbox becomes orphaned in three ways:
+A sidecar can remain unresolved in these cases:
 
 - `railway sandbox create` exits with an error, or prints no sandbox id; the sandbox may exist anyway, and the sidecar stays `creating`.
-- The start fails after `create` (readiness, `exec`), and destroying the sandbox fails too; the error names the sandbox id and the `railway sandbox destroy <id>` command.
-- Ctrl-C or SIGTERM arrives during the start. The CLI deletes the env file, records the sidecar, tries to destroy a known sandbox for up to 5 seconds, then exits on the signal.
+- The start fails after `create` (readiness, `exec`), and destroying the sandbox fails too; the error names `railway sandbox destroy <id>` and `vapi swarm forget-run <name> <runId> --confirm-destroyed`. When the identified orphaned sidecar is saved, it blocks dissolution even after the failed-launch reservation is removed.
+- A status request reports “not found.” The sidecar stays unchanged and blocks dissolution. A tracked running run becomes `unknown`; a `starting` record stays `starting` until `vapi swarm stop` resolves it. With no run record, run `vapi swarm stop <name> --all`; a failed destroy marks the sidecar `orphaned`. Verify destruction in the original project/environment before using `vapi swarm forget-run <name> <runId> --confirm-destroyed`.
+- Ctrl-C or SIGTERM arrives during the start. The CLI deletes the env file, records the sidecar, tries to destroy a known sandbox for up to 5 seconds, then exits on the signal. A known-id orphan retires its matching starting reservation once the sidecar is durable, so owner confirmation remains available even if the process exits before launch returns.
+
+After a failed persistence rollback or direct adapter stop, use `vapi swarm stop <name> <runId>` to retry cleanup. If it fails, verify destruction in the original Railway project/environment and use `vapi swarm forget-run <name> <runId> --confirm-destroyed`.
 
 A failed start also names the env file path if the CLI could not delete it, so you can remove it yourself.
 
@@ -228,9 +252,9 @@ vapi swarm stop research --all
 vapi swarm stop research <runId>
 ```
 
-`vapi swarm dissolve <name>` refuses while a railway run of that swarm is running or a sidecar of that swarm exists, and names `vapi swarm stop <name> --all`. If a swarm file is gone anyway, `vapi swarm runs <name>` and `vapi swarm stop <name>` still work while runs or sidecars of that name remain.
+`vapi swarm dissolve <name>` refuses while a Railway worker or sidecar may hold a member key, including unknown/orphaned records. It names the stop command and, for unresolved runs, the explicit CLI confirmation command. If a swarm file is gone anyway, `vapi swarm runs <name>` and `vapi swarm stop <name>` still work while runs or sidecars of that name remain.
 
-`vapi swarm stop` retries the destroy for those sidecars and deletes each sidecar whose sandbox is destroyed. It exits with code 1 while any sandbox stays up. A sidecar without a sandbox id cannot be destroyed automatically, so find the sandbox yourself:
+`vapi swarm stop` retries the destroy for those sidecars and deletes a sidecar only after destroy exits 0. Other outcomes leave it `orphaned` and name `vapi swarm forget-run <name> <runId> --confirm-destroyed`, including for kept sandboxes with terminal records. It exits with code 1 while any sandbox stays up. A sidecar without a sandbox id cannot be destroyed automatically, so find the sandbox yourself:
 
 ```sh
 railway sandbox list

@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, open, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import { z } from "zod";
@@ -14,6 +15,8 @@ import type { X402SettlementOutcome } from "./x402.js";
 
 interface ReceiptTestHooks {
   beforeRenameReplace?: (path: string) => void | Promise<void>;
+  beforeSync?: (path: string, handle: FileHandle) => void | Promise<void>;
+  afterSync?: (path: string) => void | Promise<void>;
 }
 
 let receiptTestHooks: ReceiptTestHooks | undefined;
@@ -299,14 +302,52 @@ export async function appendReceipt(
   );
   await withReceiptJournalLock(path, async () => {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    const created = await stat(path).then(
+      () => false,
+      (error: unknown) => {
+        if (isMissingFile(error)) return true;
+        throw error;
+      },
+    );
     const handle = await open(path, "a", 0o600);
     try {
       await handle.writeFile(`${JSON.stringify(parsed)}\n`, "utf8");
+      // Retirement retries durability strictly; a written row must still be returned.
+      await syncReceiptHandle(handle, path).catch(() => undefined);
     } finally {
       await handle.close();
     }
+    if (created) await syncReceiptDirectory(dirname(path)).catch(() => undefined);
   });
   return parsed;
+}
+
+async function syncReceiptHandle(handle: FileHandle, path: string): Promise<void> {
+  await receiptTestHooks?.beforeSync?.(path, handle);
+  await handle.sync();
+  await receiptTestHooks?.afterSync?.(path);
+}
+
+/** Flush the ledger and its directory before retirement. Missing files and sync failures throw. */
+export async function syncReceipts(path = getVapiPaths().receipts): Promise<void> {
+  await syncReceiptPath(path, process.platform === "win32" ? "r+" : "r");
+  await syncReceiptDirectory(dirname(path));
+}
+
+async function syncReceiptDirectory(path: string): Promise<void> {
+  // Windows cannot flush a directory handle; NTFS journals the entry itself.
+  // Requiring it there would keep every settled purchase from retiring.
+  if (process.platform === "win32") return;
+  await syncReceiptPath(path);
+}
+
+async function syncReceiptPath(path: string, flags: "r" | "r+" = "r"): Promise<void> {
+  const handle = await open(path, flags);
+  try {
+    await syncReceiptHandle(handle, path);
+  } finally {
+    await handle.close();
+  }
 }
 
 export async function readReceipts(
@@ -320,7 +361,7 @@ export async function readReceipts(
     if (isMissingFile(error)) return [];
     throw error;
   }
-  const records = coalesceTransferReceiptRevisions(
+  const records = coalesceReceiptRevisions(
     raw
       .split("\n")
       .filter((line) => line.trim().length > 0)
@@ -342,17 +383,18 @@ export async function readReceipts(
 }
 
 /**
- * A transfer writes its signed authorization before contacting the relay, then
- * appends the terminal outcome under the same receipt id. Keep the file
- * append-only while presenting those records as one logical receipt.
+ * Transfers and Router purchases append settlement revisions under the same
+ * receipt id. Keep the file append-only while presenting each as one logical
+ * receipt at its original position.
  */
-function coalesceTransferReceiptRevisions(receipts: readonly Receipt[]): Receipt[] {
+function coalesceReceiptRevisions(receipts: readonly Receipt[]): Receipt[] {
   const coalesced: Receipt[] = [];
-  const transferIndexes = new Map<string, number>();
+  const revisionIndexes = new Map<string, number>();
   for (const receipt of receipts) {
-    const existing = receipt.kind === "transfer" ? transferIndexes.get(receipt.id) : undefined;
+    const revisable = receipt.kind === "transfer" || receipt.source === "router.topup";
+    const existing = revisable ? revisionIndexes.get(receipt.id) : undefined;
     if (existing === undefined) {
-      if (receipt.kind === "transfer") transferIndexes.set(receipt.id, coalesced.length);
+      if (revisable) revisionIndexes.set(receipt.id, coalesced.length);
       coalesced.push(receipt);
     } else {
       coalesced[existing] = receipt;
@@ -408,12 +450,20 @@ export async function renameReceiptWallet(
     await receiptTestHooks?.beforeRenameReplace?.(path);
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const temporaryPath = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-    await writeFile(temporaryPath, lines.join("\n"), {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
-    });
-    await rename(temporaryPath, path);
+    try {
+      const handle = await open(temporaryPath, "wx", 0o600);
+      try {
+        await handle.writeFile(lines.join("\n"), "utf8");
+        await syncReceiptHandle(handle, temporaryPath);
+      } finally {
+        await handle.close();
+      }
+      await rename(temporaryPath, path);
+      // Replacement committed: rejecting here would roll back only the wallet name.
+      await syncReceiptDirectory(dirname(path)).catch(() => undefined);
+    } finally {
+      await unlink(temporaryPath).catch(() => undefined);
+    }
     return changed;
   });
 }

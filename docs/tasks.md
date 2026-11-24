@@ -1,23 +1,23 @@
 # Task commands
 
-Tasks is an onchain task market with USDC escrow, delivery, review and disputes. The commands below require a server with Tasks enabled.
+Tasks is an onchain task market with USDC escrow, delivery, review and disputes. Tasks V2 is live on Base mainnet (chain 8453). Solidproof signed off the audit on 23 November 2026. The platform fee is 0% at launch; the owner Safe may raise it to at most 20%. Each task and each pool budget is capped at 5,000 USDC. Disputes cost 10% of the milestone, with a 20 USDC minimum and 500 USDC maximum.
 
 The task SDK in `@vapi-network/core/tasks` talks to the vAPI task API and builds delivery manifests. The CLI verbs below use its shared actions. The local MCP server exposes the same task verbs.
 
 | Verb                 | What it does                                                                 | Moves money            |
 | -------------------- | ---------------------------------------------------------------------------- | ---------------------- |
-| `search`             | Finds tasks and workers.                                                     | No                     |
+| `search`             | Browses public tasks.                                                        | No                     |
 | `show`               | Shows lifecycle, milestones, next action and receipts.                       | No                     |
 | `pending`            | Lists the acting wallet's pending actions.                                   | No                     |
 | `checkin`            | Records a worker check-in.                                                   | No                     |
 | `post`               | Posts a task, bounty or pool, optionally funding with the vault.             | Only with `--fund`     |
 | `propose`            | Proposes terms for a task.                                                   | No                     |
 | `submit`             | Submits proof for an open bounty.                                            | No                     |
-| `milestone`          | Submit, approve, reject or finalize a zero-based V2 milestone                | On approve/finalize    |
+| `milestone`          | Submit, approve, reject, finalize or close a rejected V2 milestone           | On approve/finalize    |
 | `cancel`             | Cancel a V2 offer, unpaid remainder or expire                                | Refunds only           |
 | `claim`              | Pay a stored pool claim as its verifier                                      | Yes                    |
 | `award`              | Awards a proposal or submission.                                             | No                     |
-| `sign`               | Signs the task scope.                                                        | No                     |
+| `sign`               | Signs scope or V2 consent, or revokes consent nonces.                        | No                     |
 | `fund`               | Locks USDC in escrow.                                                        | Yes                    |
 | `deliver`            | Delivers files and a note through a manifest hash.                           | No                     |
 | `release`            | Pays the worker from escrow.                                                 | Yes                    |
@@ -39,7 +39,7 @@ The task SDK in `@vapi-network/core/tasks` talks to the vAPI task API and builds
 | `watch`              | Watches task events and moves money only when auto-release is on.            | Only with auto-release |
 | `status`             | Shows signed-in chain state and participant events, or the public task card. | No                     |
 
-The local CLI and MCP share these verbs. Hosted API availability can lag the local tools; unsupported operations report the server error without claiming success.
+The local CLI and MCP share these verbs. The [coverage table](./tasks-coverage.md) compares them with the hosted service. Unsupported operations report the server error without claiming success.
 
 ## CLI
 
@@ -86,6 +86,11 @@ Show uses the authenticated task route when a bearer exists; otherwise it reads 
 
 A server with Tasks enabled provides public search, status, submissions, events and participant routes. OAuth reads require `tasks:read`; writes require `tasks:write`, which also grants read access. Proposals and submissions locally sign the exact canonical JSON payload.
 
+### Legacy V1 scope and recovery
+
+The following scope-binding rules apply to the retained V1 compatibility path.
+V2 uses the verified deployment and participant write path described below.
+
 Scope acceptance is signed by the local vault account and requires `tasks:write`. Worker acceptance may create an unfunded escrow with the same local signer. Fund, deliver, release, refund, dispute, counter-evidence, resolve-unmatched and watch auto-release submit their transactions from the selected local vault wallet. Base Sepolia reads `BASE_SEPOLIA_RPC_URL` and defaults to `https://sepolia.base.org`. It trusts escrow factory `0x6Ba83621eb386B3E093032096251cA504F6ee033`. Configure another chain, or override that pin, with `VAPI_TASKS_ESCROW_FACTORY_<chainId>`. Chains without a trusted factory are rejected before signing.
 
 Before signing a chain action, the client reads the factory payment token and the token's EIP-712 name and version through the trusted RPC. It verifies that each escrow clone belongs to that factory and matches the buyer, seller, token, amount, terms hash, state and deadline. It also recomputes the accepted scope hash locally and verifies both party signatures. A money verb rejects a task with more than one possible milestone instead of guessing; watch may use an event's `milestoneId` for auto-release. Clone addresses must match the trusted factory prediction for the bound seller and the milestone salt. Review windows match signed acceptance terms; work durations match signed terms or a locally trusted default. Storage reads are checked against public getters; an unsupported layout is refused.
@@ -125,9 +130,15 @@ At exit `1`, invalid usage has JSON `{ok:false,error:{code:"usage_error",message
 
 Sign, fund, deliver and release wait up to `120s` for vAPI to index a confirmed transaction. `--no-wait` skips polling, while `--timeout` changes the limit. An indexing timeout prints a status command and keeps exit code `0` because the transaction succeeded.
 
-## Tasks v2 (Base Sepolia beta)
+## Tasks V2 on Base mainnet
 
-This Base Sepolia beta is unaudited: the Tasks v2 contracts go to an external audit before any mainnet deploy. Use test funds only.
+Tasks V2 is live on Base mainnet (chain 8453). Solidproof signed off the audit on 23 November 2026. The platform fee is 0% at launch; the owner Safe may raise it to at most 20%. Each task and each pool budget is capped at 5,000 USDC. Disputes cost 10% of the milestone, with a 20 USDC minimum and 500 USDC maximum.
+
+Pools use poster verification at launch; the automatic checker is off.
+Evidence and vote commitment windows last 48 hours each; the reveal window lasts 24 hours.
+vAPI Guardians are reviewers. A Guardian needs 10,000 vAPI staked and a vAPI ID,
+then registers a seat and sets availability. Seat, stake and availability must mature
+through the 24-hour warm-up. The registry has 250 seats. Keep stake through reveal.
 
 Post and fund in one call with the local vault. Work is divided into milestones with amounts, deadlines and acceptance criteria.
 The worker submits each milestone, then the poster reviews it during the review window.
@@ -142,26 +153,12 @@ The dispute fee is 10% of the milestone, minimum 20 USDC, maximum 500 USDC, whic
 A worker who delivered on time keeps the bond on a voluntary refund. There is no mediation and no appeal.
 
 The CLI verbs and matching local MCP tools are listed in [MCP](#mcp).
-Use `milestone` for submit, approve, reject and finalize; use `dispute`, `counter-evidence` and `resolve-unmatched` for disputes.
-The participant commands do not include jury voting commands.
+Use `milestone` for submit, approve, reject, finalize and close-rejected; use `dispute`, `counter-evidence` and `resolve-unmatched` for disputes.
+Jury and vote commands are described in [jury steps](#v2-jury-and-reviewer-steps).
 
-Base Sepolia uses chain 84532. The placeholders below are filled after the Sepolia deploy.
-The pin map remains empty, so these operator overrides are required before signing. This is a command template, not a verified live run.
-
-```sh
-export VAPI_TASKS_V2_ESCROW_FACTORY_84532='<ESCROW_FACTORY_V2>'
-export VAPI_TASKS_V2_DISPUTE_RESOLVER_V3_84532='<DISPUTE_RESOLVER_V3>'
-export VAPI_TASKS_V2_POOL_FACTORY_84532='<BOUNTY_POOL_FACTORY_V1>'
-export VAPI_TASKS_V2_USDC_84532='<USDC>'
-export VAPI_TASKS_V2_USDC_NAME_84532='USD Coin'
-export VAPI_TASKS_V2_USDC_VERSION_84532=2
-vapi task post --title "Research shortlist" --brief brief.md --amount 100 --deadline 7d \
-  --shape task --milestone "30|Shortlist approved|3d" \
-  --milestone "70|Intros completed|7d" --fund --yes
-```
-
-Confirm the deployed token domain before setting its name and version. In cloud environments, prefix these input names with `VAPI_NETWORK_`.
-The one-call flow depends on the server returning a supported funding preparation; the limitations below still apply.
+Base mainnet uses the verified local pins below. No deployment overrides are needed.
+Base Sepolia (84532) remains available only with a complete explicit local V2 override.
+The following commands are templates; replace files and identifiers with your own values.
 
 ```sh
 # One worker, two milestones; amounts sum to the budget.
@@ -198,15 +195,15 @@ console.log(shown.lifecycle, shown.nextAction);
 const pending = await tasks.pending();
 ```
 
-Check-ins accept `on-track`, `blocked` and `need-input`. The hosted API requires a note, so when `--note` is omitted the CLI uses the status with spaces, such as `on track`. Check-in links are recorded as HTTP(S) references. `pending` prints one action per line with its amount, due time and deep link. Withdrawal needs no signature: the CLI selects the acting wallet's single active submission, or accepts `--proposal-id` explicitly. Proof and file options cannot be combined with withdrawal.
+Check-ins accept `on-track`, `blocked` and `need-input`. The hosted API requires a note, so when `--note` is omitted the CLI uses the status with spaces, such as `on track`. Check-in links are recorded as HTTP(S) references. `pending` prints one action per line with its amount, due time and deep link. Stored-entry withdrawal needs no signature: the CLI selects the acting wallet's single active submission, or accepts `--proposal-id` explicitly. Proof and file options cannot be combined with withdrawal. V2 bounty commitments and chain withdrawals are not yet supported by this client; a stored entry alone is not an onchain commitment. See [action coverage](./tasks-coverage.md).
 
 Signed-in `show` reads the hosted canonical lifecycle and next action; JSON preserves `lifecycle` and `nextAction`. Human output includes declared milestone amounts, acceptance text, deadlines and state, followed by a next-action line. These reads and `post --fund` use the hosted MCP read/preparation transport with the same device-link bearer; `vapi login` grants `mcp:call` along with the Tasks scopes. No authorization is signed on the hosted service.
 
 `post --fund` posts once and uses the returned existing deposit intent with the local vault. It checks `maxPerTaskUsd`, the wallet's daily cap and `approveAboveUsd` before reserving spend or signing. `--yes` grants threshold approval and cannot override caps. The existing `maxPerTaskUsd` and `autoReleaseBelowUsd` profile fields are preserved; this change adds no new release automation. A returned intent must match the verified local escrow, signer, amount, token domain, type and deadline. The same scope binding and onchain verification as `task fund` apply.
 
-The T7 hosted implementation returns the created task plus `funding.error` for fresh posts until create-and-fund is available: `funding_requires_accepted_scope`, `bounty_funding_not_available_yet` or `pool_funding_not_available_yet`. CLI JSON retains both the task and that error and exits `1`; local MCP returns the same error with the task. No success is invented for unsupported funding. The existing task path remains award → sign → worker creates escrow → fund.
+The client retains a created task when the server returns `funding.error`, and reports the funding failure. Do not post again to retry funding. V2 funding uses hosted preparation, local deployment verification and local signing. The legacy scope path remains award → sign → worker creates escrow → fund.
 
-`task fund` first probes `GET /v1/tasks/:id/fund`. A standard x402 `exact` challenge uses the same local payment implementation as Call, checks its network, USDC asset, destination and amount against the task, and applies task and daily spend policy. Local scope and escrow verification still apply. A missing challenge route keeps the existing signed deposit-intent path. Both protocols share a locked funding-attempt journal under the vault's `tasks/` directory. Before signing, it records the protocol, verified coordinates, amount, nonce and authorization expiry. An unresolved attempt blocks both protocols, including when a later challenge probe returns 404. A hosted funded observation retires the attempt without releasing accounted spend. An expired authorization can be released only after the trusted RPC returns `authorizationState(poster, nonce) = false`; a failed or ambiguous RPC read keeps it blocked. A signer failure that produces no authorization releases its reservation and permits retry. x402 funding is tested with recorded responses; the live T26 route has not been verified.
+`task fund` first probes `GET /v1/tasks/:id/fund`. A standard x402 `exact` challenge uses the same local payment implementation as Call, checks its network, USDC asset, destination and amount against the task, and applies task and daily spend policy. Local scope and escrow verification still apply. A missing challenge route keeps the existing signed deposit-intent path. Both protocols share a locked funding-attempt journal under the vault's `tasks/` directory. Before signing, it records the protocol, verified coordinates, amount, nonce and authorization expiry. An unresolved attempt blocks both protocols, including when a later challenge probe returns 404. A hosted funded observation retires the attempt without releasing accounted spend. An expired authorization can be released only after the trusted RPC returns `authorizationState(poster, nonce) = false`; a failed or ambiguous RPC read keeps it blocked. A signer failure that produces no authorization releases its reservation and permits retry. x402 funding is tested with recorded responses; availability depends on the server.
 
 Both funding paths poll the hosted escrow state unless `--no-wait` is supplied. They print `escrow funded` only after a hosted funded observation. `--no-wait` and an indexing timeout retain a pending result; payment acknowledgement alone is insufficient. `watch` also understands `task.checkin`, `task.stalled`, `task.claimed`, `task.judging`, `task.milestone` and `task.released`. Judging prints `deadline passed, N submissions, pick winners`; event JSON retains the original payload.
 
@@ -561,26 +558,39 @@ has closed; its principal goes to the poster. Pruning an eligible seat reverts.
 MCP equivalents are `tasks.close-rejected {id,i}`, `tasks.bump-consent-nonce {id,newNonce}`,
 `tasks.prune-reviewer {id,reviewer}` and `tasks.prune-reviewers {id,reviewers}`.
 
-## Base mainnet address release
+## Verified Base mainnet deployment
 
-`TRUSTED_TASKS_V2_DEPLOYMENTS` in `packages/core/src/tasks/v2-trust.ts` stays empty
-until deployment verification. Add the chain **8453** tuple in that one table:
-`escrowFactoryV2`, `disputeResolverV3`, `bountyPoolFactoryV1`, `usdc`, `usdcName`,
-`usdcVersion`, and the verified `offerTtlSeconds`, `evidenceWindowSeconds` and
-`choiceWindowSeconds` and `reviewWindowSeconds` for the intended creation defaults.
-All four windows can be set in this same tuple. No addresses
-come from hosted readiness. The factories' registered clones and resolver/registry
-wiring must match the audited deployment record and runtime hashes.
+The local trust table in `packages/core/src/tasks/v2-trust.ts` pins chain 8453.
+All SDK, CLI and MCP checks use it. Hosted readiness cannot replace these pins.
+The contracts are verified on Base mainnet and match the `tasks-v2-audit-3` suite.
 
-Before release, verify the deployment record, owners/timelock, USDC domain, windows,
-EIP-2935 history address, launch caps, paused factories and reviewer launch gate.
-Rehearse funding, dispute rounds, split revocation, draw/rearm, reveal, cause 6 and
-maintenance against the verified test deployment. Add the verified 8453 tuple and
-adapt the empty-table test. Bump every package manifest together plus
-`EXPECTED_VERSION` in `scripts/pack-check.mjs`, `CLI_VERSION` in
-`packages/cli/src/version.ts` and `VAPI_CLIENT_VERSION` in
-`packages/core/src/support-report.ts`; update both versions in `server.json`.
-Move the Unreleased changelog into that
-release. Run format, lint, typecheck, tests, build and `pnpm pack:check`, then follow
-the repository's manual staged-package release with public access and an explicit
-`latest` or `next` tag. This compatibility change does not activate or publish mainnet.
+| Contract            | Base mainnet address                         |
+| ------------------- | -------------------------------------------- |
+| EscrowFactoryV2     | `0x3586A4C92b55a83175D911aBA9B50329319E34BD` |
+| DisputeResolverV3   | `0xEe36F3B19dcC38B6b5676B6cdcDd63a6d7Fbb435` |
+| BountyPoolFactoryV1 | `0xD03264c27AE3900834d6C5ba85cd15C56B21452f` |
+| USDC                | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
+| OutcomeRegistryV1   | `0xa4E8D29657f7B85886aBB8C02756aE43aD4872Aa` |
+| ReviewerRegistryV2  | `0x9CABaE0013732fF8Fb3C779061000Ce582ae0cA6` |
+
+USDC uses the EIP-712 domain name `USD Coin` and version `2`.
+The offer TTL, review window and bounty choice window are 604800 seconds (seven days).
+The evidence window is 172800 seconds (48 hours). The jury commit window is 48 hours;
+the reveal window is 24 hours. These are separate from the seven-day delivery review window.
+
+Base mainnet reads the configured RPC or `BASE_RPC_URL`; the default is `https://mainnet.base.org`.
+Other chains, including Base Sepolia, require a complete explicit V2 override with factories,
+resolver, USDC and its domain. Each override prints an untrusted-override notice.
+Legacy V1 factory and duration overrides do not establish V2 trust.
+
+See [action coverage](./tasks-coverage.md) for hosted actions that need additional client work.
+
+The hosted close and nonce-revocation actions also accept their hosted action names locally:
+
+```sh
+vapi task milestone <id> close-rejected --index 0
+vapi task sign <id> --action bump-consent-nonce --new-nonce 7
+```
+
+The dedicated close-rejected and bump-consent-nonce verbs remain available.
+Reviewer pruning uses a verified task binding in this client; hosted pruning is deployment-scoped.

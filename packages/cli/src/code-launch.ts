@@ -11,13 +11,9 @@ import {
   type RouterClientDeps,
 } from "@vapi-network/core/router-client";
 
-import {
-  UsageError,
-  getEnvironment,
-  targetWallet,
-  type CliDependencies,
-  type CliIo,
-} from "./cli.js";
+import { targetWallet } from "./wallet-session.js";
+import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
+import { UsageError } from "./args.js";
 import {
   VAPI_CODEX_DEFAULT_MODEL,
   VAPI_CODEX_PROFILE,

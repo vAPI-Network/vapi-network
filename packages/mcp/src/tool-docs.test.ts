@@ -8,14 +8,14 @@ import { privateKeyToAccount } from "viem/accounts";
 import { createVapiServer } from "./server.js";
 
 /**
- * A tool an agent can call but the README never names is a tool nobody knows
- * how to ask for. Registration is the source of truth; the README follows it.
+ * A tool an agent can call but the MCP guide never names is a tool nobody knows
+ * how to ask for. Registration is the source of truth; docs/mcp.md follows it.
  */
 
 const PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" as Hex;
 
-/** The repository README, which is also the npm page of the distribution. */
-const readme = await readFile(new URL("../../../README.md", import.meta.url), "utf8");
+/** The MCP guide, which the repository README links as the tool list. */
+const guide = await readFile(new URL("../../../docs/mcp.md", import.meta.url), "utf8");
 
 async function registeredToolNames(): Promise<string[]> {
   const server = createVapiServer({
@@ -29,9 +29,9 @@ async function registeredToolNames(): Promise<string[]> {
 }
 
 describe("every registered MCP tool is documented", () => {
-  it("names each tool in README.md", async () => {
+  it("names each tool in docs/mcp.md", async () => {
     const undocumented = (await registeredToolNames()).filter(
-      (name) => !readme.includes(`\`${name}\``),
+      (name) => !guide.includes(`\`${name}\``),
     );
 
     expect(undocumented).toEqual([]);
@@ -39,7 +39,7 @@ describe("every registered MCP tool is documented", () => {
 
   it("lists each deprecated alias under a Deprecated heading", async () => {
     const aliases = (await registeredToolNames()).filter((name) => !name.includes("."));
-    const deprecated = readme.slice(readme.indexOf("#### Deprecated tool aliases"));
+    const deprecated = guide.slice(guide.indexOf("#### Deprecated tool aliases"));
 
     expect(aliases).not.toEqual([]);
     for (const alias of aliases) expect(deprecated).toContain(`\`${alias}\``);

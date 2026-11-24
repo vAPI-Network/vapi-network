@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { inspect } from "node:util";
@@ -96,7 +96,276 @@ async function paths() {
   };
 }
 
+describe("payment and task pre-sign journals", () => {
+  it.each(["none", "task", "evidence"] as const)(
+    "runs both journals before signing and releases unsent task spend on %s failure",
+    async (failure) => {
+      const localPaths = await paths();
+      const account = privateKeyToAccount(PRIVATE_KEY);
+      const sign = vi.spyOn(account, "signTypedData");
+      const onUnsent = vi.fn(async () => {});
+      const stages: string[] = [];
+      const send = vi.fn(async (request: Request) => ({
+        request,
+        response: paidResponse(),
+        finish() {},
+        waitFor: async <T>(operation: Promise<T>) => await operation,
+      }));
+      const result = completeX402Payment({
+        challenge: {
+          request: new Request("https://vendor.example/paid"),
+          response: paymentRequired(),
+          finish() {},
+          waitFor: async <T>(operation: Promise<T>) => await operation,
+        },
+        account,
+        caps: { perCallAtomic: "1", perDayAtomic: "10000" },
+        config: getDefaultConfig({}),
+        ledgerPath: localPaths.ledgerPath,
+        wallet: "main",
+        now: NOW,
+        taskFunding: {
+          taskKey: "task-journal-test",
+          maxPerTaskAtomic: 10000n,
+          beforeSign: async (data, reservation) => {
+            expect(sign).not.toHaveBeenCalled();
+            expect(data.message).toMatchObject({ from: account.address, to: PAY_TO, value: 2500n });
+            expect(data.domain.verifyingContract).toBe(NETWORKS[BASE_MAINNET_CAIP2].usdc);
+            expect(reservation).toMatchObject({ id: expect.any(String), date: "2026-09-23" });
+            expect((await readSpendLedger(localPaths.ledgerPath, NOW)).spentAtomic).toBe("2500");
+            stages.push("task");
+            if (failure === "task") throw new Error("task journal failed");
+          },
+          onUnsent,
+        },
+        beforeSign: async (evidence) => {
+          expect(sign).not.toHaveBeenCalled();
+          expect(evidence).toMatchObject({
+            network: BASE_MAINNET_CAIP2,
+            amountAtomic: "2500",
+            authorization: { from: account.address, to: PAY_TO, value: "2500" },
+          });
+          stages.push("evidence");
+          if (failure === "evidence") throw new Error("payment journal failed");
+        },
+        send,
+      });
+      if (failure === "none") {
+        expect((await result).settlementOutcome).toBe("succeeded");
+        expect(stages).toEqual(["task", "evidence"]);
+        expect(sign).toHaveBeenCalledOnce();
+        expect(send).toHaveBeenCalledOnce();
+        expect(onUnsent).not.toHaveBeenCalled();
+        expect((await readSpendLedger(localPaths.ledgerPath, NOW)).spentAtomic).toBe("2500");
+      } else {
+        await expect(result).rejects.toThrow("journal failed");
+        expect(stages).toEqual(failure === "task" ? ["task"] : ["task", "evidence"]);
+        expect(sign).not.toHaveBeenCalled();
+        expect(send).not.toHaveBeenCalled();
+        expect(onUnsent).toHaveBeenCalledOnce();
+        expect((await readSpendLedger(localPaths.ledgerPath, NOW)).spentAtomic).toBe("0");
+      }
+    },
+  );
+});
+
 describe("payRequest", () => {
+  it("retains settlement evidence when the final receipt clock throws", async () => {
+    const localPaths = await paths();
+    const paid = paidResponse();
+    let finalClock = false;
+    const get = paid.headers.get.bind(paid.headers);
+    vi.spyOn(paid.headers, "get").mockImplementation((name) => {
+      if (name.toLowerCase() === "x-vapi-payment-proof") finalClock = true;
+      return get(name);
+    });
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(paymentRequired())
+      .mockResolvedValueOnce(paid);
+    const result = await payRequest({
+      url: "https://vendor.example/paid",
+      init: { method: "POST" },
+      account: privateKeyToAccount(PRIVATE_KEY),
+      wallet: "main",
+      caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+      config: getDefaultConfig(),
+      fetchImpl,
+      paths: localPaths,
+      now: NOW,
+      nowMs: () => {
+        if (finalClock) throw new Error("private-clock-error");
+        return 0;
+      },
+      lookup: async () => ["93.184.216.34"],
+    });
+    expect(result.receipt).toMatchObject({
+      outcome: "paid",
+      settlement: { outcome: "succeeded" },
+      quote: { amountAtomic: "2500" },
+      latencyMs: 0,
+    });
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "payment_followup_unavailable" })]),
+    );
+    expect(JSON.stringify(result)).not.toContain("private-clock-error");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect((await readReceipts(localPaths.receiptsPath))[0]?.id).toBe(result.receipt.id);
+  });
+
+  it("keeps evidence when the clock throws immediately after the settled response", async () => {
+    const localPaths = await paths();
+    let responded = false;
+    const fetchImpl = vi.fn<typeof fetch>(async () => {
+      if (fetchImpl.mock.calls.length === 1) return paymentRequired();
+      responded = true;
+      return paidResponse();
+    });
+    const result = await payRequest({
+      url: "https://vendor.example/paid",
+      init: { method: "POST" },
+      account: privateKeyToAccount(PRIVATE_KEY),
+      wallet: "main",
+      caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+      config: getDefaultConfig(),
+      fetchImpl,
+      paths: localPaths,
+      now: NOW,
+      nowMs: () => {
+        if (responded) throw new Error("clock unavailable after response");
+        return 0;
+      },
+      lookup: async () => ["93.184.216.34"],
+    });
+    expect(result.receipt.settlement).toMatchObject({
+      outcome: "succeeded",
+      transaction: `0x${"33".repeat(32)}`,
+    });
+    expect((await readReceipts(localPaths.receiptsPath))[0]?.settlement).toEqual(
+      result.receipt.settlement,
+    );
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("validates receipt metadata before sending a payment", async () => {
+    const localPaths = await paths();
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(paymentRequired())
+      .mockResolvedValueOnce(paidResponse());
+    await expect(
+      payRequest({
+        url: "https://vendor.example/paid",
+        init: { method: "POST" },
+        account: privateKeyToAccount(PRIVATE_KEY),
+        wallet: "main",
+        source: "",
+        caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+        config: getDefaultConfig(),
+        fetchImpl,
+        paths: localPaths,
+        now: NOW,
+        lookup: async () => ["93.184.216.34"],
+      }),
+    ).rejects.toBeDefined();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("returns a warning when receipt validation fails after settlement", async () => {
+    const localPaths = await paths();
+    let settled = false;
+    const fetchImpl = vi.fn<typeof fetch>(async () => {
+      if (settled) throw new Error("Unexpected repeat payment");
+      if (fetchImpl.mock.calls.length === 1) return paymentRequired();
+      settled = true;
+      return paidResponse();
+    });
+    const result = await payRequest({
+      url: "https://vendor.example/paid",
+      init: { method: "POST" },
+      account: privateKeyToAccount(PRIVATE_KEY),
+      wallet: "main",
+      caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+      config: getDefaultConfig(),
+      fetchImpl,
+      paths: localPaths,
+      now: NOW,
+      nowMs: () => (settled ? NaN : 0),
+      lookup: async () => ["93.184.216.34"],
+    });
+    expect(result).toMatchObject({
+      receipt: { outcome: "paid", settlement: { outcome: "succeeded" } },
+      warnings: [{ code: "receipt_unavailable" }],
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains the settled receipt when response-proof processing fails after confirmation", async () => {
+    const localPaths = await paths();
+    const paid = paidResponse();
+    const get = paid.headers.get.bind(paid.headers);
+    vi.spyOn(paid.headers, "get").mockImplementation((name) => {
+      if (name.toLowerCase() === "x-vapi-payment-proof")
+        throw new Error("private-proof-error-must-not-leak");
+      return get(name);
+    });
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(paymentRequired())
+      .mockResolvedValueOnce(paid);
+    const result = await payRequest({
+      url: "https://vendor.example/paid",
+      init: { method: "POST" },
+      account: privateKeyToAccount(PRIVATE_KEY),
+      wallet: "main",
+      caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+      config: getDefaultConfig(),
+      fetchImpl,
+      paths: localPaths,
+      now: NOW,
+      lookup: async () => ["93.184.216.34"],
+    });
+    expect(result).toMatchObject({
+      receipt: { outcome: "paid", settlement: { outcome: "succeeded" } },
+      warnings: [{ code: "payment_followup_unavailable" }],
+    });
+    expect(JSON.stringify(result)).not.toContain("private-proof-error-must-not-leak");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([true, false])(
+    "receipt-write failure becomes a warning only after confirmed settlement=%s",
+    async (confirmed) => {
+      const localPaths = await paths();
+      await mkdir(localPaths.receiptsPath);
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValueOnce(confirmed ? paymentRequired() : new Response("unpaid"));
+      if (confirmed) fetchImpl.mockResolvedValueOnce(paidResponse());
+      const payment = payRequest({
+        url: "https://vendor.example/paid",
+        init: { method: "POST" },
+        account: privateKeyToAccount(PRIVATE_KEY),
+        wallet: "main",
+        caps: { perCallAtomic: "10000", perDayAtomic: "10000" },
+        config: getDefaultConfig(),
+        fetchImpl,
+        paths: localPaths,
+        now: NOW,
+        lookup: async () => ["93.184.216.34"],
+      });
+      if (confirmed) {
+        await expect(payment).resolves.toMatchObject({
+          receipt: { wallet: "main", outcome: "paid", settlement: { outcome: "succeeded" } },
+          warnings: [{ code: "receipt_unavailable" }],
+        });
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+      } else {
+        await expect(payment).rejects.toMatchObject({ code: "EISDIR" });
+      }
+    },
+  );
+
   it("preserves a non-secret Uint8Array consumed response body", async () => {
     const localPaths = await paths();
     const bytes = Uint8Array.from([0, 1, 2, 127, 255]);

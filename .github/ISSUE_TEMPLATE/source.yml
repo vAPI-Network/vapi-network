@@ -1,7 +1,11 @@
 name: New discovery source or signer
 description: Propose a catalog to search or a wallet to sign with
-labels: [source]
+labels: [source, needs-triage]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        A source is a catalog of many providers, such as a registry or an index. A single provider's API is listed with `vapi publish` and needs no change to the client.
   - type: input
     id: name
     attributes: { label: Name and URL }
@@ -9,10 +13,8 @@ body:
   - type: textarea
     id: shape
     attributes:
-      {
-        label: Read API or signing interface,
-        description: "Endpoint/spec link, auth needs, rate limits, listing fields available (resource, accepts, description, input schema)",
-      }
+      label: Read API or signing interface
+      description: "Endpoint or spec link, auth needs, rate limits, listing fields available (resource, accepts, description, input schema)"
     validations: { required: true }
   - type: checkboxes
     id: willing

@@ -24,7 +24,7 @@ import {
   type DocsAskResponse,
   type DocsReadResponse,
   type DocsSearchResponse,
-  type Receipt,
+  type RouterPurchaseResult,
   type RouterModel,
   type ResolvedWallet,
   type SecretStore,
@@ -62,7 +62,7 @@ let warnedWalletOption = false;
 export type VapiClientOptions = {
   /** Account name. Defaults to VAPI_WALLET, then the vault default. Pass a viem/VapiPaymentAccount object instead to sign with an injected server account. */
   account?: string | VapiPaymentAccount;
-  /** @deprecated Use `account`. Removed in 0.7. */
+  /** @deprecated Use `account`; removed in the next major release. */
   wallet?: string;
   /** Local state directory. Defaults to VAPI_HOME or ~/.vapi. */
   home?: string;
@@ -88,7 +88,7 @@ export type VapiClient = {
   router: {
     models(): Promise<RouterModel[]>;
     usage(): Promise<AgentRouterUsage>;
-    buy(usd: RouterTopupTier): Promise<{ receipt: Receipt; balance: AgentRouterUsage["balance"] }>;
+    buy(usd: RouterTopupTier): Promise<RouterPurchaseResult>;
     chat(req: ChatRequest): Promise<ChatResult>;
     /**
      * Base URL and key for any OpenAI-compatible framework. The key stays in

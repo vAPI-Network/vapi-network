@@ -9,7 +9,7 @@ import { z } from "zod";
 import { AgentLinkError, agentFetch, withAgentCredentialLock } from "./agent-link.js";
 import { getVapiPaths } from "./config.js";
 import { explorerTransactionUrl } from "./networks.js";
-import { appendReceipt, readReceipts, type Receipt } from "./receipts.js";
+import { appendReceipt, readReceipts, syncReceipts, type Receipt } from "./receipts.js";
 import type { SecretStore } from "./secret-store.js";
 import { fetchSiblings, SiblingsError, type Sibling } from "./siblings.js";
 import { releaseSpend, reserveSpend, SpendCapError } from "./spend-policy.js";
@@ -353,13 +353,58 @@ export async function transferBetweenAccounts(args: TransferArgs): Promise<Trans
       if (existing !== undefined && existing.transfer?.status !== "failed") {
         throw transferError("authorization_invalid");
       }
-      await appendTransferReceipt(context, request, {
-        receiptId,
-        status: "unknown",
-        txHash: null,
-        replayed: false,
-        reservedOn,
-      });
+      try {
+        await appendTransferReceipt(context, request, {
+          receiptId,
+          status: "unknown",
+          txHash: null,
+          replayed: false,
+          reservedOn,
+        });
+      } catch (error) {
+        let persisted: Receipt | undefined;
+        try {
+          persisted = await findTransferReceipt(context, nonce);
+        } catch {
+          // A failed read cannot rule out a resumable signed authorization, so the reservation
+          // stays. If nothing was written after all, --resume reports resume_not_found and the
+          // reservation counts against its day's allowance only.
+          authorizationPersisted = true;
+        }
+        if (persisted !== undefined && persisted.transfer?.status !== "failed") {
+          authorizationPersisted = true;
+        }
+        if (!authorizationPersisted) throw error;
+        return transferResult(context, {
+          status: "unknown",
+          txHash: null,
+          nonce: request.authorization.nonce,
+          replayed: false,
+        });
+      }
+      try {
+        await syncReceipts(context.receiptsPath);
+      } catch (error) {
+        try {
+          await appendTransferReceipt(context, request, {
+            receiptId,
+            status: "failed",
+            txHash: null,
+            replayed: false,
+            reservedOn,
+            error: transferError("network_error"),
+          });
+        } catch {
+          authorizationPersisted = true;
+          return transferResult(context, {
+            status: "unknown",
+            txHash: null,
+            nonce: request.authorization.nonce,
+            replayed: false,
+          });
+        }
+        throw error;
+      }
       authorizationPersisted = true;
       args.signal?.throwIfAborted();
       return await postRelay(context, request, { receiptId, reservedOn, resumed: false });
@@ -609,13 +654,14 @@ async function postRelay(
       );
     }
     const txHash = body.data.txHash as Hex | null;
+    // A failed write leaves the latest row unknown; resuming records sent as a replay.
     await appendTransferReceipt(context, request, {
       receiptId: options.resumed ? randomUUID() : options.receiptId,
       status: "sent",
       txHash,
       replayed: body.data.replayed,
       httpStatus: response.status,
-    });
+    }).catch(() => undefined);
     return transferResult(context, {
       status: "sent",
       txHash,
@@ -636,13 +682,14 @@ async function postRelay(
     );
   }
   if (code === "authorization_used" && options.resumed) {
+    // A failed write leaves the latest row unknown; resuming records sent as a replay.
     await appendTransferReceipt(context, request, {
       receiptId: randomUUID(),
       status: "sent",
       txHash: null,
       replayed: true,
       httpStatus: response.status,
-    });
+    }).catch(() => undefined);
     return transferResult(context, {
       status: "sent",
       txHash: null,
@@ -692,7 +739,7 @@ async function recordUnknown(
     replayed: false,
     reservedOn,
     httpStatus,
-  });
+  }).catch(() => undefined);
   return transferResult(context, {
     status: "unknown",
     txHash: null,
@@ -709,23 +756,32 @@ async function failTransfer(
   code: TransferErrorCode,
   httpStatus?: number,
   resetsAt?: string,
-): Promise<never> {
+): Promise<TransferResult> {
+  // Persist the non-resumable failure before releasing its spend reservation.
+  try {
+    await appendTransferReceipt(context, request, {
+      receiptId,
+      status: "failed",
+      txHash: null,
+      replayed: false,
+      reservedOn,
+      httpStatus,
+      error: transferError(code),
+    });
+  } catch {
+    return transferResult(context, {
+      status: "unknown",
+      txHash: null,
+      nonce: request.authorization.nonce,
+      replayed: false,
+    });
+  }
   const reservationReleased = await releaseReservation(
     context,
     reservedOn,
     request.authorization.nonce,
   );
-  const error = transferError(code, { reservationReleased, resetsAt });
-  await appendTransferReceipt(context, request, {
-    receiptId,
-    status: "failed",
-    txHash: null,
-    replayed: false,
-    reservedOn,
-    httpStatus,
-    error,
-  }).catch(() => undefined);
-  throw error;
+  throw transferError(code, { reservationReleased, resetsAt });
 }
 
 async function releaseReservation(
@@ -786,7 +842,7 @@ async function withTransferLock<T>(
   try {
     return await operation();
   } finally {
-    await handle.close();
+    await handle.close().catch(() => undefined);
     await unlink(lockPath).catch(() => undefined);
   }
 }

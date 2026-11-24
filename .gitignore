@@ -20,3 +20,7 @@ coverage
 
 # vAPI Desktop .mcpb bundles
 dist-mcpb/
+
+# Local agent notes and PR drafts
+.context/
+.context-*

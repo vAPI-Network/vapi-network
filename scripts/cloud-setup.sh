@@ -11,6 +11,8 @@ vapi_cloud_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$vapi_cloud_root"
 # shellcheck source=scripts/cloud-env.sh
 source "$vapi_cloud_root/scripts/cloud-env.sh"
+# Before anything that can fail: commits from any shell carry the project identity.
+bash "$vapi_cloud_root/scripts/cloud-git-identity.sh"
 
 if ! command -v node >/dev/null || [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
   printf '%s\n' 'Cloud setup requires Node.js 22; install it in the Cloud computer image and Build computer.' >&2

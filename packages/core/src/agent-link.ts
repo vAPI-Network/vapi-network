@@ -5,9 +5,10 @@ import { dirname } from "node:path";
 
 import { createSiweMessage } from "viem/siwe";
 
+import { FileLockedError } from "./atomic-file.js";
 import { appendAudit } from "./audit.js";
 import { DEVICE_NAME_PATTERN } from "./device.js";
-import { createPublicFetch } from "./net-guard.js";
+import { createPublicFetch, describeNetworkFailure } from "./net-guard.js";
 import type { SecretStore } from "./secret-store.js";
 import type { AgentLink, WalletName, WalletStore } from "./wallet-store.js";
 
@@ -68,6 +69,7 @@ const ALLOWED_AGENT_SCOPES = new Set<string>([
   "tasks:write",
 ]);
 const publicFetch = createPublicFetch({ allowPrivateNetwork: false });
+const AGENT_REVOCATION_TIMEOUT_MS = 10_000;
 
 export async function startDeviceLink(args: {
   apiBase: string;
@@ -225,7 +227,7 @@ export async function pollDeviceLink(args: {
         throw new AgentLinkError("access_denied", "The owner denied the agent link.");
       }
       if (response.status === 400 && error === "expired_token") throw expiredLinkError();
-      throw httpError("The vAPI agent link request failed.");
+      throw linkRequestError(response.status, payload);
     }
   } finally {
     clearTimeout(expiryTimer);
@@ -305,6 +307,34 @@ export async function renameAgentLinkWallet(args: {
   });
 }
 
+async function withLinkPurchaseLock<T>(
+  wallets: WalletStore,
+  wallet: WalletName,
+  operation: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await wallets.withRouterPurchaseLock(wallet, operation);
+  } catch (error) {
+    if (!(error instanceof FileLockedError)) throw error;
+    throw httpError("A Router purchase is in progress. Retry login or logout after it completes.");
+  }
+}
+
+/**
+ * Lock order: wallet → client-id → publish.
+ * The publish lock is a leaf; acquire no other credential locks while holding it.
+ * Hold it only across local reads and writes, never a network request.
+ */
+export async function withCredentialPublishLock<T>(
+  wallets: WalletStore,
+  wallet: WalletName,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const digest = createHash("sha256").update(wallet).digest("hex").slice(0, 24);
+  const lockPath = `${wallets.registryPath}.${digest}.agent-publish.lock`;
+  return await withCredentialLockFile(lockPath, operation);
+}
+
 export async function saveAgentLink(args: {
   secrets: SecretStore;
   wallets: WalletStore;
@@ -315,57 +345,69 @@ export async function saveAgentLink(args: {
   label: string;
   home?: string;
 }): Promise<AgentLink> {
-  if (!args.secrets.available) {
-    throw new Error(
-      "No OS secret store is available on this machine, so the agent link cannot be stored safely. Nothing was saved.",
-    );
-  }
-
-  const link: AgentLink = {
-    apiBase: args.apiBase,
-    clientId: args.start.clientId,
-    owner: args.result.owner,
-    label: args.label,
-    scopes: [...args.result.tokens.scopes],
-    linkedAt: new Date().toISOString(),
-    ...(args.result.routerKey === undefined || args.result.routerBaseUrl === undefined
-      ? {}
-      : { routerBaseUrl: args.result.routerBaseUrl }),
-  };
-
-  await withAgentCredentialLock(args.wallets, `wallet:${args.wallet}`, async () => {
-    await args.wallets.reload();
-    const previousLink = args.wallets.entry(args.wallet)?.link;
-    const accounts = agentSecretAccounts(args.wallet);
-    const previousSecrets = await readSecretSnapshot(args.secrets, accounts);
-
-    try {
-      await safeSetSecret(args.secrets, accounts.tokens, JSON.stringify(args.result.tokens));
-      await writeOptionalSecret(args.secrets, accounts.routerStake, args.result.routerKey);
-      // Balance keys belong to the prior owner/link generation and are never returned here.
-      await writeOptionalSecret(args.secrets, accounts.routerBalance, undefined);
-      await args.wallets.setLink(args.wallet, link);
-    } catch (error) {
-      const secretsRestored = await restoreSecretSnapshot(args.secrets, accounts, previousSecrets);
-      const metadataRestored = await restoreLinkMetadata(args.wallets, args.wallet, previousLink);
-      if (!secretsRestored || !metadataRestored) {
-        // A missing link is safer than metadata that can select the wrong owner's credentials.
-        await args.wallets.clearLink(args.wallet).catch(() => undefined);
-        throw httpError(
-          "The agent link could not be stored consistently. Local link metadata was cleared; run vapi login again.",
-        );
-      }
-      throw error;
+  return await withLinkPurchaseLock(args.wallets, args.wallet, async () => {
+    if (!args.secrets.available) {
+      throw new Error(
+        "No OS secret store is available on this machine, so the agent link cannot be stored safely. Nothing was saved.",
+      );
     }
-  });
 
-  await appendAudit(args.home ?? args.wallets.home, {
-    event: "agent.linked",
-    wallet: args.wallet,
-    owner: args.result.owner,
-    tty: Boolean(process.stderr.isTTY),
+    const link: AgentLink = {
+      apiBase: args.apiBase,
+      clientId: args.start.clientId,
+      owner: args.result.owner,
+      label: args.label,
+      scopes: [...args.result.tokens.scopes],
+      linkedAt: new Date().toISOString(),
+      ...(args.result.routerKey === undefined || args.result.routerBaseUrl === undefined
+        ? {}
+        : { routerBaseUrl: args.result.routerBaseUrl }),
+    };
+
+    await withAgentCredentialLock(args.wallets, `wallet:${args.wallet}`, async () => {
+      await withCredentialPublishLock(args.wallets, args.wallet, async () => {
+        await args.wallets.reload();
+        const previousLink = args.wallets.entry(args.wallet)?.link;
+        const accounts = agentSecretAccounts(args.wallet);
+        const previousSecrets = await readSecretSnapshot(args.secrets, accounts);
+
+        try {
+          await safeSetSecret(args.secrets, accounts.tokens, JSON.stringify(args.result.tokens));
+          await writeOptionalSecret(args.secrets, accounts.routerStake, args.result.routerKey);
+          // Balance keys belong to the prior owner/link generation and are never returned here.
+          await writeOptionalSecret(args.secrets, accounts.routerBalance, undefined);
+          await args.wallets.setLink(args.wallet, link);
+        } catch (error) {
+          const secretsRestored = await restoreSecretSnapshot(
+            args.secrets,
+            accounts,
+            previousSecrets,
+          );
+          const metadataRestored = await restoreLinkMetadata(
+            args.wallets,
+            args.wallet,
+            previousLink,
+          );
+          if (!secretsRestored || !metadataRestored) {
+            // A missing link is safer than metadata that can select the wrong owner's credentials.
+            await args.wallets.clearLink(args.wallet).catch(() => undefined);
+            throw httpError(
+              "The agent link could not be stored consistently. Local link metadata was cleared; run vapi login again.",
+            );
+          }
+          throw error;
+        }
+      });
+    });
+
+    await appendAudit(args.home ?? args.wallets.home, {
+      event: "agent.linked",
+      wallet: args.wallet,
+      owner: args.result.owner,
+      tty: Boolean(process.stderr.isTTY),
+    });
+    return link;
   });
-  return link;
 }
 
 export async function agentAccessToken(args: {
@@ -389,13 +431,35 @@ export async function agentFetch(
   url: string,
   init?: RequestInit,
 ): Promise<Response> {
+  return await agentFetchWithin(args, url, init, undefined);
+}
+
+/**
+ * `agentFetch` with one deadline over remote requests and refresh response bodies.
+ * Credential locks retain their own timeout. A caller's own `init.signal` still
+ * reaches only its requests, so cancelling a request cannot drop a refreshed
+ * token before it is stored.
+ */
+async function agentFetchWithin(
+  args: Parameters<typeof agentFetch>[0],
+  url: string,
+  init: RequestInit | undefined,
+  signal: AbortSignal | undefined,
+): Promise<Response> {
   const fetchImpl = args.fetchImpl ?? publicFetch;
-  const accessToken = await resolveAgentAccessToken(args, {});
-  const response = await safeAgentFetch(fetchImpl, url, withBearer(init, accessToken));
+  const accessToken = await resolveAgentAccessToken(args, { signal });
+  const response = await abortable(signal, () =>
+    safeAgentFetch(fetchImpl, url, withBearer(init, accessToken)),
+  );
   if (response.status !== 401) return response;
 
-  const refreshedToken = await resolveAgentAccessToken(args, { rejectedAccessToken: accessToken });
-  const refreshedResponse = await safeAgentFetch(fetchImpl, url, withBearer(init, refreshedToken));
+  const refreshedToken = await resolveAgentAccessToken(args, {
+    rejectedAccessToken: accessToken,
+    signal,
+  });
+  const refreshedResponse = await abortable(signal, () =>
+    safeAgentFetch(fetchImpl, url, withBearer(init, refreshedToken)),
+  );
   if (refreshedResponse.status === 401) {
     throw new AgentLinkError("not_linked", AGENT_LINK_REVOKED_MESSAGE);
   }
@@ -408,41 +472,61 @@ export async function forgetAgentLink(args: {
   wallet: WalletName;
   fetchImpl?: typeof fetch;
   home?: string;
+  revocationTimeoutMs?: number;
 }): Promise<void> {
-  const link = args.wallets.entry(args.wallet)?.link;
-  let revokedError: AgentLinkError | undefined;
-  if (link !== undefined) {
-    try {
-      await agentFetch(args, apiEndpoint(link.apiBase, "/api/agents/self"), {
-        method: "DELETE",
-      });
-    } catch (error) {
-      if (
-        error instanceof AgentLinkError &&
-        error.code === "not_linked" &&
-        error.message === AGENT_LINK_REVOKED_MESSAGE
-      ) {
-        revokedError = error;
-      }
-      // Remote revocation is best effort. Local secrets must still be removed.
-    }
-  }
-
-  if (args.secrets.available) {
+  return await withLinkPurchaseLock(args.wallets, args.wallet, async () => {
+    await args.wallets.reload();
+    const link = args.wallets.entry(args.wallet)?.link;
+    let revokedError: AgentLinkError | undefined;
     if (link !== undefined) {
-      await removeSecretAccounts(args.secrets, agentSecretAccounts(args.wallet));
+      const deadline = new AbortController();
+      const timer = setTimeout(
+        () => deadline.abort(),
+        args.revocationTimeoutMs ?? AGENT_REVOCATION_TIMEOUT_MS,
+      );
+      try {
+        // Let any in-flight local token write finish before cleanup can remove it.
+        await agentFetchWithin(
+          args,
+          apiEndpoint(link.apiBase, "/api/agents/self"),
+          { method: "DELETE", signal: deadline.signal },
+          deadline.signal,
+        );
+      } catch (error) {
+        if (
+          error instanceof AgentLinkError &&
+          error.code === "not_linked" &&
+          error.message === AGENT_LINK_REVOKED_MESSAGE
+        ) {
+          revokedError = error;
+        }
+        // Remote revocation is best effort. Local secrets must still be removed.
+      } finally {
+        clearTimeout(timer);
+      }
     }
-  }
-  if (args.wallets.entry(args.wallet) !== undefined) await args.wallets.clearLink(args.wallet);
-  if (link !== undefined) {
-    await appendAudit(args.home ?? args.wallets.home, {
-      event: "agent.unlinked",
-      wallet: args.wallet,
-      owner: link.owner,
-      tty: Boolean(process.stderr.isTTY),
+
+    await withAgentCredentialLock(args.wallets, `wallet:${args.wallet}`, async () => {
+      await withCredentialPublishLock(args.wallets, args.wallet, async () => {
+        if (args.secrets.available) {
+          if (link !== undefined) {
+            await removeSecretAccounts(args.secrets, agentSecretAccounts(args.wallet));
+          }
+        }
+        if (args.wallets.entry(args.wallet) !== undefined)
+          await args.wallets.clearLink(args.wallet);
+      });
     });
-  }
-  if (revokedError !== undefined) throw revokedError;
+    if (link !== undefined) {
+      await appendAudit(args.home ?? args.wallets.home, {
+        event: "agent.unlinked",
+        wallet: args.wallet,
+        owner: link.owner,
+        tty: Boolean(process.stderr.isTTY),
+      });
+    }
+    if (revokedError !== undefined) throw revokedError;
+  });
 }
 
 async function resolveAgentAccessToken(
@@ -453,7 +537,7 @@ async function resolveAgentAccessToken(
     fetchImpl?: typeof fetch;
     now?: () => number;
   },
-  options: { rejectedAccessToken?: string },
+  options: { rejectedAccessToken?: string; signal?: AbortSignal | undefined },
 ): Promise<string> {
   await args.wallets.reload();
   const link = args.wallets.entry(args.wallet)?.link;
@@ -467,12 +551,20 @@ async function resolveAgentAccessToken(
   }
 
   return await withAgentCredentialLock(args.wallets, link.clientId, async () => {
-    await args.wallets.reload();
-    const currentLink = args.wallets.entry(args.wallet)?.link;
-    if (currentLink === undefined) throw notLinkedError();
-    const currentAccounts = agentSecretAccounts(args.wallet);
-    const current = parseTokens(await safeGetSecret(args.secrets, currentAccounts.tokens));
-    if (current === undefined) throw notLinkedError();
+    options.signal?.throwIfAborted();
+    const { currentLink, currentAccounts, current } = await withCredentialPublishLock(
+      args.wallets,
+      args.wallet,
+      async () => {
+        await args.wallets.reload();
+        const currentLink = args.wallets.entry(args.wallet)?.link;
+        if (currentLink === undefined) throw notLinkedError();
+        const currentAccounts = agentSecretAccounts(args.wallet);
+        const current = parseTokens(await safeGetSecret(args.secrets, currentAccounts.tokens));
+        if (current === undefined) throw notLinkedError();
+        return { currentLink, currentAccounts, current };
+      },
+    );
     if (
       options.rejectedAccessToken !== undefined &&
       current.accessToken !== options.rejectedAccessToken
@@ -483,24 +575,28 @@ async function resolveAgentAccessToken(
       return current.accessToken;
     }
 
-    if (current.refreshToken === undefined) {
+    const refreshToken = current.refreshToken;
+    if (refreshToken === undefined) {
       throw new AgentLinkError("not_linked", REMOTE_AGENT_TOKEN_EXPIRED_MESSAGE);
     }
 
-    const response = await safeFetch(
-      args.fetchImpl ?? publicFetch,
-      apiEndpoint(currentLink.apiBase, "/oauth/token"),
-      {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          grant_type: "refresh_token",
-          refresh_token: current.refreshToken,
-          client_id: currentLink.clientId,
-        }),
-      },
-    );
-    const payload = await responseRecord(response);
+    const { response, payload } = await abortable(options.signal, async () => {
+      const response = await safeFetch(
+        args.fetchImpl ?? publicFetch,
+        apiEndpoint(currentLink.apiBase, "/oauth/token"),
+        {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "refresh_token",
+            refresh_token: refreshToken,
+            client_id: currentLink.clientId,
+          }),
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+        },
+      );
+      return { response, payload: await responseRecord(response) };
+    });
     if (!response.ok) {
       if (response.status === 400 && stringField(payload, "error") === "invalid_grant") {
         throw new AgentLinkError("not_linked", AGENT_LINK_REVOKED_MESSAGE);
@@ -510,16 +606,49 @@ async function resolveAgentAccessToken(
 
     const refreshed: AgentTokens = {
       accessToken: requiredString(payload, "access_token"),
-      refreshToken: stringField(payload, "refresh_token") ?? current.refreshToken,
+      refreshToken: stringField(payload, "refresh_token") ?? refreshToken,
       expiresAt: now() + requiredNumber(payload, "expires_in") * 1_000,
       scopes:
         stringField(payload, "scope") === undefined
           ? [...current.scopes]
           : splitScopes(requiredString(payload, "scope")),
     };
-    await safeSetSecret(args.secrets, currentAccounts.tokens, JSON.stringify(refreshed));
-    return refreshed.accessToken;
+    return await withCredentialPublishLock(args.wallets, args.wallet, async () => {
+      await args.wallets.reload();
+      if (args.wallets.entry(args.wallet)?.link === undefined) throw notLinkedError();
+      // The publish lock makes this re-check and write exclusive with login and logout.
+      const stored = parseTokens(await safeGetSecret(args.secrets, currentAccounts.tokens));
+      if (
+        stored === undefined ||
+        stored.refreshToken !== refreshToken ||
+        stored.accessToken !== current.accessToken
+      ) {
+        throw notLinkedError();
+      }
+      options.signal?.throwIfAborted();
+      await safeSetSecret(args.secrets, currentAccounts.tokens, JSON.stringify(refreshed));
+      return refreshed.accessToken;
+    });
   });
+}
+
+/** Bound injected transports too, even when they ignore the abort signal. */
+async function abortable<T>(
+  signal: AbortSignal | undefined,
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (signal === undefined) return await operation();
+  signal.throwIfAborted();
+  let onAbort: () => void = () => undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([operation(), aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
 }
 
 type AgentSecretAccountSet = ReturnType<typeof agentSecretAccounts>;
@@ -601,6 +730,13 @@ export async function withAgentCredentialLock<T>(
 ): Promise<T> {
   const digest = createHash("sha256").update(clientId).digest("hex").slice(0, 24);
   const lockPath = `${wallets.registryPath}.${digest}.agent-link.lock`;
+  return await withCredentialLockFile(lockPath, operation);
+}
+
+async function withCredentialLockFile<T>(
+  lockPath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
   await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
   const deadline = Date.now() + 30_000;
   let handle: FileHandle | undefined;
@@ -621,7 +757,7 @@ export async function withAgentCredentialLock<T>(
   try {
     return await operation();
   } finally {
-    await handle.close();
+    await handle.close().catch(() => undefined);
     await unlink(lockPath).catch(() => undefined);
   }
 }
@@ -705,8 +841,8 @@ async function safeFetch(
 ): Promise<Response> {
   try {
     return await fetchImpl(input, init);
-  } catch {
-    throw httpError("The vAPI agent link request failed.");
+  } catch (error) {
+    throw httpError(`The vAPI agent link request failed: ${networkFailure(error, input)}`);
   }
 }
 
@@ -717,9 +853,19 @@ async function safeAgentFetch(
 ): Promise<Response> {
   try {
     return await fetchImpl(input, init);
-  } catch {
-    throw httpError("The vAPI agent request failed.");
+  } catch (error) {
+    throw httpError(`The vAPI agent request failed: ${networkFailure(error, input)}`);
   }
+}
+
+function networkFailure(error: unknown, input: RequestInfo | URL): string {
+  let url: URL;
+  try {
+    url = new URL(input instanceof Request ? input.url : input);
+  } catch {
+    return "the request did not reach vAPI.";
+  }
+  return describeNetworkFailure(error, url);
 }
 
 function deviceAuthorizationError(
@@ -736,7 +882,27 @@ function deviceAuthorizationError(
   if (status === 400 && error === "invalid_scope") {
     return new AgentLinkError("invalid_scope", "The requested agent scope is not allowed.");
   }
-  return httpError("The vAPI agent link request failed.");
+  return linkRequestError(status, payload);
+}
+
+const SERVER_ERROR_CODE = /^[a-z][a-z0-9_]{0,31}$/u;
+
+/**
+ * Names the HTTP status and the server's error code, so a refused link can be
+ * told apart from a rate limit or a proxy answering in vAPI's place. Only an
+ * error code of at most 32 lowercase letters, digits and underscores is
+ * repeated. Sentences, descriptions and any other field of the response never
+ * are, because this message reaches terminals and MCP clients.
+ */
+function linkRequestError(status: number, payload: Record<string, unknown>): AgentLinkError {
+  const code = stringField(payload, "error");
+  const detail =
+    code !== undefined && SERVER_ERROR_CODE.test(code)
+      ? `HTTP ${status}, ${code}`
+      : `HTTP ${status}`;
+  const hint =
+    status === 429 ? " Too many link requests; wait a few minutes and run vapi login again." : "";
+  return httpError(`The vAPI agent link request failed (${detail}).${hint}`);
 }
 
 function notLinkedError(): AgentLinkError {
@@ -758,14 +924,23 @@ function apiEndpoint(apiBase: string, path: string): string {
   return new URL(path, new URL(apiBase).origin).toString();
 }
 
+/**
+ * A failed response often has no JSON body (a gateway or proxy error page), so
+ * it reads as an empty record and the caller reports the HTTP status. Only a
+ * successful response must be a JSON object.
+ */
 async function responseRecord(response: Response): Promise<Record<string, unknown>> {
   let payload: unknown;
   try {
     payload = await response.json();
   } catch {
+    if (!response.ok) return {};
     throw httpError("The vAPI agent link response was invalid.");
   }
-  if (!isRecord(payload)) throw httpError("The vAPI agent link response was invalid.");
+  if (!isRecord(payload)) {
+    if (!response.ok) return {};
+    throw httpError("The vAPI agent link response was invalid.");
+  }
   return payload;
 }
 

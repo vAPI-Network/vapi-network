@@ -120,11 +120,11 @@ export const TASK_HELP = `Usage:
   vapi task post --title <text> --brief <file|-> --deadline <duration|ISO> [--shape task|bounty|pool] [--amount <usd>] [--milestone "amount|acceptance|deadline"...] [--proof <preset>[:mustContain]...] [--checkin none|6h|24h|72h|7d] [--winners <n> --reward-per-winner <usd> --choice-window <sec>] [--reward-per-claim <usd> --budget <usd> --gate open|proven --verifier poster|vapi --open-check allowlist|invite] [--fund] [--yes] [--no-wait] [--timeout 120s] [--intake proposals|submissions] [--max-awards <k>] [--webhook <https-url>] [--account <name>] [--json]
   vapi task propose <id> --price <usd> --duration <duration> --note <text> [--account <name>] [--json]
   vapi task submit <id> [--proof <https-url>...] [--file <path>...] [--withdraw] [--proposal-id <id>] [--account <name>] [--json]
-  vapi task milestone <id> --index N submit|approve|reject|finalize [--proof <https-url>...] [--file <path>...] [--proof-json <file>] [--note <text>] [--reason <text>] [--json]
+  vapi task milestone <id> --index N submit|approve|reject|finalize|close-rejected [--proof <https-url>...] [--file <path>...] [--proof-json <file>] [--note <text>] [--reason <text>] [--json]
   vapi task cancel <id> offer|remainder|expire [--json]
   vapi task claim <id> --claimant <addr> [--json]
   vapi task award <id> [<proposalId>|--worker <addr>|--winners a,b,c] [--account <name>] [--json]
-  vapi task sign <id> [--action award-consent|split-consent --index N --to-worker <base-units>] [--yes] [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task sign <id> [--action award-consent|split-consent|bump-consent-nonce --index N --to-worker <base-units> --new-nonce N] [--yes] [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task fund <id> [--yes] [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task deliver <id> --files <path...> --note <text> [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task release <id> [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
@@ -515,7 +515,7 @@ async function taskCommandInner(
       ...(verb === "jury" ? ["--index", "--step"] : []),
       ...(verb === "vote" ? ["--index", "--commit", "--to-worker"] : []),
       ...(verb === "claim-owed" ? ["--to"] : []),
-      ...(verb === "bump-consent-nonce" ? ["--new-nonce"] : []),
+      ...(["bump-consent-nonce", "sign"].includes(verb!) ? ["--new-nonce"] : []),
       ...(verb === "prune-reviewer" ? ["--reviewer"] : []),
       ...(verb === "prune-reviewers" ? ["--reviewers"] : []),
       ...(verb === "reviewer-status" ? ["--address"] : []),

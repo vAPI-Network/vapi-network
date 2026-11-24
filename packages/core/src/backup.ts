@@ -1243,7 +1243,9 @@ async function exportBackupSourceAttempt(
         ? { default: snapshot.default }
         : {}),
       accounts: accounts.map((account) => {
-        const entry = snapshot.wallets[account.name];
+        const entry = Object.hasOwn(snapshot.wallets, account.name)
+          ? snapshot.wallets[account.name]
+          : undefined;
         const ceilingAtomic =
           entry?.ceilingAtomic === null
             ? null

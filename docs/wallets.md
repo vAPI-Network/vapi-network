@@ -80,6 +80,22 @@ VAPI_VAULT_PASSWORD="$VAULT_PASSWORD" vapi vault unlock
 VAPI_KEYSTORE_PASSWORD is deprecated for vault passwords; use VAPI_VAULT_PASSWORD instead.
 ```
 
+## Linux without a keyring
+
+On Linux without a working keyring (servers, containers, GitHub Codespaces), set
+`VAPI_VAULT_PASSWORD` before `vapi setup`; the device key and agent link are then
+kept in `~/.vapi/secrets.json`, encrypted with that password. The choice is made once
+per vault.
+
+```bash
+read -rs -p 'Vault password (at least 12 characters): ' VAPI_VAULT_PASSWORD
+export VAPI_VAULT_PASSWORD
+vapi setup
+```
+
+In GitHub Codespaces, add `VAPI_VAULT_PASSWORD` as a Codespaces secret with at least
+12 characters before running setup.
+
 ## Three layers against loss
 
 Losing a device should cost as little as possible. Three layers cover it, cheapest first.
@@ -175,6 +191,12 @@ A restored leg requires extra review. Check its sender balance and explorer hist
 
 The ceiling is 5 USDC for new and existing accounts unless the terminal sets another value. `--ceiling off` disables automatic sweeps. An automatic ceiling sweep returns funds to the linked owner, or to the treasury for a swarm member, and never lowers the account below its per-day cap. Automatic ceiling enforcement and `vapi sweep` refuse to sign while an open movement leg from that account may still settle. Resume the movement first. If it cannot resume, wait for any signed authorization to expire and cancel it from the terminal.
 
+Sent ETH by mistake? The wallet keeps the ETH you sent on Base. Send it back minus the Base network fee; a tiny amount may stay behind.
+
+```sh
+vapi sweep <your-address> --asset eth
+```
+
 The `--all` flag shows every account of the same owner, including accounts on other devices. Rows from other devices are read-only, and no command acts on them. The default account's link supplies the agent bearer, or the first linked local account does when the default is not linked. If no local account is linked, the command prints the local accounts and tells you to run `vapi login`. The request sends only the agent bearer; keys and phrases stay on the machine. With `--all --json`, the object contains `accounts` and `siblings`, plus `siblingsError` when the remote read fails.
 
 Wallet commands accept this selector:
@@ -212,7 +234,7 @@ vapi
 This screen comes from a vault restored from the BIP-39 test phrase into an empty home, so the account holds nothing and is not linked yet:
 
 ```text
-vAPI 0.13.0        home /tmp/vapi-docs-home        registry api.vapinetwork.ai
+vAPI 0.15.1        home /tmp/vapi-docs-home        registry api.vapinetwork.ai
 
 Owner      not linked   console: https://api.vapinetwork.ai/agents
 Vault      unlocked on this device (macOS Keychain)   backup: vapi backup
