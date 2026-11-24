@@ -16,7 +16,7 @@ for each payment. The same wallet gives each agent its own capped account, buys 
 access on vAPI Router and moves USDC between your accounts.
 
 vAPI Network builds payment and trust infrastructure for AI agents. Call,
-Router, Stake and Agents are live on production. Tasks is coming soon. See
+Router, Stake and Agents are live on production. Tasks V2 is live on Base mainnet. See
 [vapinetwork.ai](https://vapinetwork.ai) and the
 [documentation](https://docs.vapinetwork.ai).
 
@@ -85,7 +85,7 @@ The client also talks to hosted vAPI services. Their source is not in this repos
 | Transfer relay | submit a transfer you signed between your own accounts, and pay its gas                  |
 | Cloud backup   | keep an encrypted vault copy that only the owner can restore                             |
 | Funding page   | take a card, wallet or bridge deposit and deliver USDC on Base                           |
-| Tasks          | preview task posting and escrow; coming soon on production                               |
+| Tasks          | audited task posting and USDC escrow on Base mainnet                                     |
 
 A payment to an x402 API does not pass through these services. The client signs it
 and sends it to the API's own endpoint. Search also reads Coinbase Bazaar, x402scan
@@ -140,7 +140,7 @@ tool that creates or retires a listing. The tool list is in [docs/mcp.md](./docs
 | Call         | Discover, check, publish and pay for x402 APIs.                                          | [docs/call.md](./docs/call.md)                               |
 | Router       | Use vAPI Router for model access and balance.                                            | [docs/router.md](./docs/router.md)                           |
 | Coding tools | Run Claude Code and Codex on your daily Compute allowance.                               | [docs/code.md](./docs/code.md)                               |
-| Tasks        | Preview task posting, USDC escrow and delivery; coming soon on production.               | [docs/tasks.md](./docs/tasks.md)                             |
+| Tasks        | Post tasks, bounties and pools with audited USDC escrow on Base mainnet.                 | [docs/tasks.md](./docs/tasks.md)                             |
 | Agents       | Run capped local agents with dedicated wallets and profiles.                             | [docs/agents.md](./docs/agents.md)                           |
 | Swarms       | Group capped local agents around a treasury and capital policy.                          | [docs/swarms.md](./docs/swarms.md)                           |
 | MCP          | Use namespaced payment tools from an MCP client.                                         | [docs/mcp.md](./docs/mcp.md)                                 |
@@ -155,6 +155,26 @@ Configuration, funding, networks and bug reports are in
 [docs/configuration.md](./docs/configuration.md). Two runnable SDK examples are in [examples/](./examples).
 When something fails, start with [docs/troubleshooting.md](./docs/troubleshooting.md).
 The full list of guides is in [docs/README.md](./docs/README.md).
+
+Tasks V2 is live on Base mainnet. Solidproof signed off the audit on 23 November 2026.
+The launch platform fee is 0%; the owner Safe may raise it to at most 20%.
+Tasks and pool budgets are capped at 5,000 USDC. Disputes cost 10%, minimum 20 and maximum 500 USDC.
+
+| Command                     | Purpose                                                          |
+| --------------------------- | ---------------------------------------------------------------- |
+| `vapi task post`            | Post a task, bounty or pool; add `--fund` to fund it locally.    |
+| `vapi task pending`         | List the acting wallet's next actions.                           |
+| `vapi task milestone`       | Submit, approve, reject, finalize or close a rejected milestone. |
+| `vapi task sign`            | Sign award or split consent, or revoke older consents.           |
+| `vapi task award`           | Award a worker or bounty winners.                                |
+| `vapi task claim`           | Pay a stored pool claim as the poster verifier.                  |
+| `vapi task dispute`         | Raise or settle a milestone dispute.                             |
+| `vapi task jury`            | Open, draw, rearm or resolve a matched jury.                     |
+| `vapi task vote`            | Commit or reveal a jury ballot from this machine.                |
+| `vapi task reviewer-status` | Read Guardian seat, stake, ID and availability.                  |
+
+The [Tasks guide](./docs/tasks.md) covers launch rules, addresses and recovery.
+The [coverage table](./docs/tasks-coverage.md) lists hosted actions still missing from the client.
 
 ## Packages
 

@@ -159,3 +159,30 @@ Names, labels and caps do not change an account's key.
 Two runnable examples live in [`examples/`](../examples):
 [`pay-with-sdk.ts`](../examples/pay-with-sdk.ts) (`pnpm example:pay -- weather`)
 and [`wallets.ts`](../examples/wallets.ts) (`pnpm example:wallets -- agent-demo`).
+
+## Tasks V2 SDK
+
+Tasks V2 is live on Base mainnet (chain 8453). Solidproof signed off the audit on 23 November 2026. The platform fee is 0% at launch; the owner Safe may raise it to at most 20%. Each task and each pool budget is capped at 5,000 USDC. Disputes cost 10% of the milestone, with a 20 USDC minimum and 500 USDC maximum.
+
+Import the HTTP transport and local action executor from `@vapi-network/core/tasks`.
+The bundled distribution exports them through its `tasks` namespace; `createVapiClient` has no Tasks namespace.
+`createTasksClient` provides typed reads, proposals, check-ins and V2 preparation/confirmation.
+`executeTaskV2` applies local policy, verifies the deployment and calldata, then signs with the local wallet.
+`runTaskV2Jury` and `runTaskV2Vote` manage jury progress and sealed local ballots.
+`readTaskV2ReviewerStatus` reads Guardian readiness from the pinned deployment.
+
+| Action                                                           | SDK entry                                                                                 |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Reads, post, check-in and pending                                | `createTasksClient` and shared operations                                                 |
+| Hosted canonical show and post-and-fund preparation              | `createHostedTasksClient` from `@vapi-network/mcp`                                        |
+| Milestone, cancel, award, consent, dispute, bond and owed credit | `executeTaskV2`                                                                           |
+| Close rejected milestone or revoke consent nonce                 | `executeTaskV2` with `close-rejected` or `bump-consent-nonce`                             |
+| Prune reviewer seats                                             | `executeTaskV2` with `prune-reviewer` or `prune-reviewers`, using a verified task binding |
+| Jury and vote                                                    | `runTaskV2Jury`, `runTaskV2Vote`                                                          |
+| Guardian readiness                                               | `readTaskV2ReviewerStatus`                                                                |
+| Recover or abandon an operation                                  | `recoverTaskV2`                                                                           |
+
+Chain 8453 resolves through `getTrustedTasksV2Deployment` without operator overrides.
+Base Sepolia still requires a complete explicit override and emits an untrusted-override notice.
+See [Tasks](./tasks.md) for contract addresses, launch windows and Guardian requirements.
+The [coverage table](./tasks-coverage.md) records missing hosted actions, including bounty commitments and reviewer administration.

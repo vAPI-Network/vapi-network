@@ -15,9 +15,11 @@ export {
   readTaskFile,
   resolveTaskBearer,
   taskEventState,
+  taskEventLine,
   taskMoneySnapshot,
   taskPolicyForWallet,
   taskRequest,
+  requireTaskMethod,
   taskStateMatches,
   validTaskBrief,
 } from "./operation-support.js";
@@ -50,6 +52,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { TasksChainUnavailableError, type TasksChain } from "./chain-port.js";
 import { TasksClientError, type TasksClient } from "./client.js";
 import type { PendingTransactions } from "./pending-transactions.js";
+import { redactTaskV2Ballots, taskReadWithoutBallots } from "./v2-public.js";
 import { parseFeeBp, taskMoney, type TaskMoney } from "./money.js";
 import {
   TASK_LIMITS,
@@ -62,6 +65,7 @@ import {
   proposalTerms,
   taskMoneySnapshot,
   taskRequest,
+  requireTaskMethod,
   validTaskBrief,
   type MoneySnapshot,
   type TaskOperationContext,
@@ -114,6 +118,7 @@ export async function postTask(
     deadlineAt: string;
     webhook?: string;
     onFeeUnavailable?: () => void;
+    fund?: boolean;
   },
 ): Promise<{
   result: CreateOrderResponse & { webhook?: Awaited<ReturnType<TasksClient["configureWebhook"]>> };
@@ -121,6 +126,8 @@ export async function postTask(
   feeUnavailable: boolean;
   unsupportedFields: string[];
   postingMovesMoney: false;
+  fundingIdempotencyKey?: string;
+  funding?: { error?: string; kind?: "eip712" | "transaction"; [key: string]: unknown };
 }> {
   let deployment: Awaited<ReturnType<TasksClient["deployment"]>>;
   try {
@@ -136,12 +143,14 @@ export async function postTask(
   const feeUnavailable = feeBp === null;
   if (feeUnavailable) input.onFeeUnavailable?.();
   const money = taskMoney(input.amount, feeBp);
-  const result = await taskRequest(
+  const postingKey = context.randomUUID();
+  const response = await taskRequest(
     "post",
-    "createOrder",
+    input.fund ? "post" : "createOrder",
     () =>
-      context.client.createOrder(
+      (input.fund ? requireTaskMethod(context.client, "post") : context.client.createOrder)(
         {
+          ...(input.fund ? { fund: true } : {}),
           ...input.order,
           market: {
             intake: input.intake ?? "proposals",
@@ -154,12 +163,25 @@ export async function postTask(
               amountBaseUnits: input.amount.toString(),
             },
             deadlineAt: input.deadlineAt,
+            ...input.order.market,
           },
         },
-        { idempotencyKey: context.randomUUID() },
+        { idempotencyKey: postingKey },
       ),
     context,
   );
+  const result =
+    "task" in response ? (response.task as CreateOrderResponse) : (response as CreateOrderResponse);
+  let funding =
+    "funding" in response
+      ? (response.funding as {
+          error?: string;
+          kind?: "eip712" | "transaction";
+          [key: string]: unknown;
+        })
+      : undefined;
+  if (input.fund && !funding?.error && !funding?.kind)
+    funding = { error: "funding_intent_unavailable" };
   let webhook: Awaited<ReturnType<TasksClient["configureWebhook"]>> | undefined;
   if (input.webhook !== undefined) {
     try {
@@ -186,6 +208,7 @@ export async function postTask(
     feeUnavailable,
     unsupportedFields: [],
     postingMovesMoney: false,
+    ...(funding === undefined ? {} : { funding, fundingIdempotencyKey: postingKey }),
   };
 }
 export async function proposeTask(
@@ -236,8 +259,53 @@ export async function proposeTask(
 }
 export async function submitTask(
   context: TaskOperationContext,
-  input: { id: string; proof: SubmissionProof[]; files: UploadFileInput[]; unlock: TaskUnlock },
+  input: {
+    id: string;
+    proof: SubmissionProof[];
+    files: UploadFileInput[];
+    unlock: TaskUnlock;
+    withdraw?: boolean;
+    proposalId?: string;
+    address?: string;
+  },
 ): Promise<SubmitResponse> {
+  if (input.withdraw) {
+    let proposalId = input.proposalId;
+    if (!proposalId) {
+      if (!input.address)
+        throw new TaskInputError("The acting wallet address is required to select a submission.");
+      const { workOrder } = await taskRequest(
+        "submit",
+        "getOrder",
+        () => context.client.getOrder(input.id),
+        context,
+      );
+      if (workOrder.id !== input.id || workOrder.version !== "work-order-view-v1")
+        throw new TaskInputError("A private task view is required to withdraw a submission.");
+      const matches = workOrder.proposals.filter(
+        (item) =>
+          item.providerAddress.toLowerCase() === input.address!.toLowerCase() &&
+          item.state === "pending" &&
+          item.signedPayload.kind === "submission",
+      );
+      if (matches.length !== 1)
+        throw new TaskInputError(
+          "Supply proposalId when a single active submission cannot be selected.",
+        );
+      proposalId = matches[0]!.id;
+    }
+    return taskRequest(
+      "submit",
+      "submit",
+      () =>
+        context.client.submit(
+          input.id,
+          { withdraw: true, proposalId },
+          { idempotencyKey: context.randomUUID() },
+        ),
+      context,
+    );
+  }
   const task = await taskRequest(
     "submit",
     "publicTask",
@@ -326,11 +394,15 @@ export type PrivateTaskView = GetOrderResponse & {
   receipts: ReturnType<typeof orderReceipts>;
   receiptUrl?: string;
   receiptUrlSource?: "escrow";
+  lifecycle: import("./v2.js").TaskLifecycle | null;
+  nextAction: import("./v2.js").TaskNextAction;
 };
 export type PublicTaskView = {
   task: NonNullable<Awaited<ReturnType<TasksClient["publicTask"]>>>;
   receiptUrl?: string;
   receiptUrlSource?: "server";
+  lifecycle: import("./v2.js").TaskLifecycle | null;
+  nextAction: import("./v2.js").TaskNextAction;
 };
 export function showTask(
   context: TaskOperationContext,
@@ -351,30 +423,41 @@ export async function showTask(
   if (input.signedIn) {
     const result = await taskRequest(
       "show",
-      "getOrder",
-      () => context.client.getOrder(input.id),
+      typeof context.client.show === "function" ? "show" : "getOrder",
+      () =>
+        taskReadWithoutBallots("show", () =>
+          context.client.show ? context.client.show(input.id) : context.client.getOrder(input.id),
+        ),
       context,
     );
     if (result.workOrder.id !== input.id)
       throw new TaskOperationError("invalid_response", "The response belongs to a different task.");
     const receipts = orderReceipts(result.workOrder, context.baseUrl);
-    return { ...result, receipts, ...(receipts[0] ?? {}) };
+    return redactTaskV2Ballots({
+      ...result,
+      lifecycle: result.lifecycle ?? result.workOrder.lifecycle ?? null,
+      nextAction: result.nextAction ?? result.workOrder.nextAction ?? { action: "none" as const },
+      receipts,
+      ...(receipts[0] ?? {}),
+    });
   }
   const task = await taskRequest(
     "show",
     "publicTask",
-    () => context.client.publicTask(input.id),
+    () => taskReadWithoutBallots("show", () => context.client.publicTask(input.id)),
     context,
   );
   if (!task) throw new TaskOperationError("not_found", `Task ${input.id} was not found.`);
   if (task.id !== input.id)
     throw new TaskOperationError("invalid_response", "The response belongs to a different task.");
-  return {
+  return redactTaskV2Ballots({
     task,
+    lifecycle: task.lifecycle ?? null,
+    nextAction: task.nextAction ?? { action: "none" as const },
     ...(task.receiptUrl
       ? { receiptUrl: task.receiptUrl, receiptUrlSource: "server" as const }
       : {}),
-  };
+  });
 }
 export async function taskStatus(
   context: TaskOperationContext,
@@ -386,7 +469,7 @@ export async function taskStatus(
       "chainState",
       async () => {
         try {
-          return await context.client.chainState(input.id);
+          return await taskReadWithoutBallots("status", () => context.client.chainState(input.id));
         } catch (error) {
           if (error instanceof TasksClientError && error.status === 404) {
             if (isMissingTaskEntity(error.serverCode, error.message))
@@ -408,7 +491,9 @@ export async function taskStatus(
       "events",
       async () => {
         try {
-          return await context.client.events(input.id, { wait: 0 });
+          return await taskReadWithoutBallots("status", () =>
+            context.client.events(input.id, { wait: 0 }),
+          );
         } catch (error) {
           if (error instanceof TasksClientError && error.status === 404) {
             if (isMissingTaskEntity(error.serverCode, error.message)) return null;
@@ -422,28 +507,30 @@ export async function taskStatus(
       },
       context,
     );
-    return {
+    return redactTaskV2Ballots({
       task: { id: input.id },
       chainState,
       events: page ? [...page.events].sort((a, b) => a.sequence - b.sequence) : null,
       nextAfter: page?.nextAfter ?? null,
-    };
+    });
   }
   const task = await taskRequest(
     "status",
     "publicTask",
-    () => context.client.publicTask(input.id),
+    () => taskReadWithoutBallots("status", () => context.client.publicTask(input.id)),
     context,
   );
   if (!task) throw new TaskOperationError("not_found", `Task ${input.id} was not found.`);
   if (task.id !== input.id)
     throw new TaskOperationError("invalid_response", "The response belongs to a different task.");
-  return {
+  return redactTaskV2Ballots({
     task,
+    lifecycle: task.lifecycle ?? null,
+    nextAction: task.nextAction ?? { action: "none" as const },
     ...(task.receiptUrl
       ? { receiptUrl: task.receiptUrl, receiptUrlSource: "server" as const }
       : {}),
-  };
+  });
 }
 export async function awardTask(
   context: TaskOperationContext,
@@ -609,11 +696,21 @@ export async function fundTaskOperation(
     approval?: TaskFundingApproval;
     idempotencyKey?: () => string;
     beforeChainFund?: () => void;
+    fundingIntent?: unknown;
+    expectedGrossBaseUnits?: bigint;
     counterparty?: string;
   },
 ) {
   const snapshot =
     input.snapshot ?? (await taskMoneySnapshot(context.client, input.id, undefined, context));
+  if (
+    input.expectedGrossBaseUnits !== undefined &&
+    BigInt(snapshot.money.gross.baseUnits) !== input.expectedGrossBaseUnits
+  )
+    throw new TaskOperationError(
+      "invalid_response",
+      "The returned escrow amount differs from the posted budget.",
+    );
   const client = cachedMoneyClient(context.client, snapshot);
   const chain = new Proxy(context.chain, {
     get(target, property) {
@@ -636,6 +733,7 @@ export async function fundTaskOperation(
           client,
           chain,
           orderId: input.id,
+          ...(input.fundingIntent === undefined ? {} : { fundingIntent: input.fundingIntent }),
           ...(input.counterparty === undefined ? {} : { counterparty: input.counterparty }),
           policy: input.policy,
           caps: input.caps,

@@ -18,7 +18,7 @@ Guides for the `vapi-network` client in this repository. Product documentation f
 | [Call](./call.md)                  | Searching, inspecting, paying, checking and publishing x402 APIs. |
 | [Router](./router.md)              | Hosted model access, Compute, Router balance and staking status.  |
 | [Claude Code and Codex](./code.md) | Running coding tools on your Compute allowance.                   |
-| [Tasks](./tasks.md)                | Task commands and tools; Tasks is coming soon on production.      |
+| [Tasks](./tasks.md)                | Task commands and tools for audited Base mainnet escrow.          |
 | [Agents](./agents.md)              | Capped local agents with their own accounts and profiles.         |
 | [Swarms](./swarms.md)              | Groups of agents around a treasury and a capital policy.          |
 

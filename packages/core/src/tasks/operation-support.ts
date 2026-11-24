@@ -13,6 +13,7 @@ import { SpendCapError } from "../spend-policy.js";
 import type { WalletName } from "../wallet-name.js";
 import type { WalletStore } from "../wallet-store.js";
 import { TasksChainUnavailableError, type TasksChain } from "./chain-port.js";
+import { taskV2OutcomeLines } from "./v2-events.js";
 import { TasksClientError, type TasksClient } from "./client.js";
 import type { PendingTransactions } from "./pending-transactions.js";
 import { parseFeeBp, taskMoney, type TaskMoney } from "./money.js";
@@ -28,6 +29,7 @@ export class TaskOperationError extends Error {
     readonly code: string,
     message: string,
     readonly manifestHash?: `0x${string}`,
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "TaskOperationError";
@@ -49,6 +51,10 @@ export const PENDING_SERVER_ROUTES: ReadonlySet<TaskRoute> = new Set([
   "events",
   "submit",
   "feed",
+  "show",
+  "post",
+  "checkin",
+  "pending",
 ]);
 
 export function isMissingTaskEntity(code: unknown, message: unknown): boolean {
@@ -363,6 +369,11 @@ export const TASK_WATCH_STATES = [
   "closed",
   "completed",
   "cancelled",
+  "checkin",
+  "stalled",
+  "claimed",
+  "judging",
+  "milestone",
 ] as const;
 export function taskEventState(event: { type: string; payload: Record<string, unknown> }): string {
   return typeof event.payload.state === "string"
@@ -509,6 +520,13 @@ export function cachedMoneyClient(client: TasksClient, snapshot: MoneySnapshot):
 export function fundingRefusalReason(
   error: unknown,
 ): "policy.perTask" | "policy.perDay" | undefined {
+  // x402 payments wrap the reservation's SpendCapError in a structured
+  // SpendCapExceededError; read the cause first, then the structured cap.
+  if (error instanceof Error && error.name === "SpendCapExceededError") {
+    const fromCause = fundingRefusalReason(error.cause);
+    if (fromCause) return fromCause;
+    return "cap" in error && error.cap === "per_day" ? "policy.perDay" : undefined;
+  }
   if (!(
     error instanceof SpendCapError ||
     (error instanceof Error && error.name === "SpendCapError")
@@ -534,3 +552,39 @@ export type TaskUnlock = () => Promise<{
   address: `0x${string}`;
   signMessage(message: string): Promise<`0x${string}`>;
 }>;
+
+/** Human alert copy; event JSON stays byte-for-value intact. */
+export function taskEventLine(event: {
+  sequence: number;
+  type: string;
+  payload: Record<string, unknown>;
+}): string {
+  const label =
+    event.type === "task.judging"
+      ? `deadline passed, ${event.payload.submissionCount} submissions, pick winners`
+      : event.type === "task.claimed"
+        ? "first submission received"
+        : event.type === "task.checkin"
+          ? `check-in: ${event.payload.status ?? "received"}`
+          : event.type === "task.stalled"
+            ? "task stalled"
+            : event.type === "task.milestone"
+              ? "milestone updated"
+              : event.type === "task.released"
+                ? "escrow released"
+                : event.type;
+  return `${event.sequence}: ${[label, ...taskV2OutcomeLines(event.payload)].join(" · ")}`;
+}
+
+export function requireTaskMethod<K extends keyof TasksClient>(
+  client: TasksClient,
+  name: K,
+): NonNullable<TasksClient[K]> {
+  const method = client[name];
+  if (typeof method !== "function")
+    throw new TaskOperationError(
+      "not_supported",
+      `Task method ${name} is not supported by this SDK adapter.`,
+    );
+  return method.bind(client) as NonNullable<TasksClient[K]>;
+}

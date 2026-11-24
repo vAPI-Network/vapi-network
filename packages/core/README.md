@@ -20,7 +20,11 @@ Eight entry points: `@vapi-network/core`, `@vapi-network/core/secrets`, `@vapi-n
 - The `@vapi-network/core/api-key` entry point stores and resolves the registry API key without placing it in parsed MCP configuration.
 - The `@vapi-network/core/agent-link` entry point handles device linking and agent tokens for a wallet.
 - The `@vapi-network/core/router-client` entry point lists router models, reads usage and buys router balance.
-- The `@vapi-network/core/tasks` entry point provides the task SDK, manifests and local chain actions. Tasks is coming soon on production; these require a preview server.
+- The `@vapi-network/core/tasks` entry point provides the task SDK, manifests and local chain actions. Tasks V2 is live on Base mainnet with verified local deployment pins.
+
+Tasks V2 is live on Base mainnet (chain 8453). Solidproof signed off the audit on 23 November 2026. The platform fee is 0% at launch; the owner Safe may raise it to at most 20%. Each task and each pool budget is capped at 5,000 USDC. Disputes cost 10% of the milestone, with a 20 USDC minimum and 500 USDC maximum.
+See the [Tasks guide](https://github.com/vAPI-Network/vapi-network/blob/main/docs/tasks.md) for addresses, Guardian requirements, windows and recovery.
+The [action coverage table](https://github.com/vAPI-Network/vapi-network/blob/main/docs/tasks-coverage.md) lists hosted actions still missing from the client.
 
 ## Exports
 

@@ -27,6 +27,10 @@ embedding, and `@vapi-network/cli/cli` is the executable itself.
 
 Most users should install or run the unscoped `vapi-network` package instead.
 
+Tasks V2 is live on Base mainnet (chain 8453). Solidproof signed off the audit on 23 November 2026. The platform fee is 0% at launch; the owner Safe may raise it to at most 20%. Each task and each pool budget is capped at 5,000 USDC. Disputes cost 10% of the milestone, with a 20 USDC minimum and 500 USDC maximum.
+See the [Tasks guide](https://github.com/vAPI-Network/vapi-network/blob/main/docs/tasks.md) for addresses, Guardian requirements, windows and recovery.
+The [action coverage table](https://github.com/vAPI-Network/vapi-network/blob/main/docs/tasks-coverage.md) lists hosted actions still missing from the client.
+
 ## Exports
 
 | Name              | What it is                                                                                                                                                                                                                                                           | Since            |

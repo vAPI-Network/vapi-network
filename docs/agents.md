@@ -17,7 +17,7 @@ Agents is live on production. Link accounts and set each agent's daily Router al
 
 ## Task policy
 
-`maxPerTaskUsd` (default $100), set with `--max-per-task`, caps the running total of escrow funding and dispute fees reserved for one task. Tasks is coming soon on production. Escrow funding also counts against the wallet's per-day cap
+`maxPerTaskUsd` (default $100), set with `--max-per-task`, caps the running total of escrow funding and dispute fees reserved for one task. Tasks V2 is live on Base mainnet. Escrow funding also counts against the wallet's per-day cap
 (`--call-budget`) and asks for approval above `--approve-above`.
 
 `autoReleaseBelowUsd` (default $25), set with `--auto-release-below`, lets

@@ -277,20 +277,36 @@ Usage:
   vapi stake open [--account <name>] [--no-browser] [--json]
   vapi task search [--open] [--min <usd>] [--tab trending|new|closing|paid] [--limit <n>] [--json]
   vapi task show <id> [--account <name>] [--json]
-  vapi task post --title <text> --brief <file|-> --amount <usd> --deadline <duration|ISO> [--intake proposals|submissions] [--max-awards <k>] [--webhook <https-url>] [--account <name>] [--json]
+  vapi task pending [--account <name>] [--json]
+  vapi task checkin <id> --status on-track|blocked|need-input [--note <text>] [--link <url>] [--account <name>] [--json]
+  vapi task post --title <text> --brief <file|-> --deadline <duration|ISO> [--shape task|bounty|pool] [--amount <usd>] [--milestone "amount|acceptance|deadline"...] [--proof <preset>[:mustContain]...] [--checkin none|6h|24h|72h|7d] [--winners <n> --reward-per-winner <usd> --choice-window <sec>] [--reward-per-claim <usd> --budget <usd> --gate open|proven --verifier poster|vapi --open-check allowlist|invite] [--fund] [--yes] [--no-wait] [--timeout 120s] [--intake proposals|submissions] [--max-awards <k>] [--webhook <https-url>] [--account <name>] [--json]
   vapi task propose <id> --price <usd> --duration <duration> --note <text> [--account <name>] [--json]
-  vapi task submit <id> --proof <https-url> [--proof <https-url>...] [--file <path>...] [--account <name>] [--json]
-  vapi task award <id> <proposalId> [--account <name>] [--json]
-  vapi task sign <id> [--account <name>] [--json]
-  vapi task fund <id> [--yes] [--account <name>] [--json]
-  vapi task deliver <id> --files <path...> --note <text> [--account <name>] [--json]
-  vapi task release <id> [--account <name>] [--json]
-  vapi task refund <id> [--account <name>] [--json]
-  vapi task dispute <id> --evidence-hash <0x + 64 hex> [--account <name>] [--json]
+  vapi task submit <id> [--proof <https-url>...] [--file <path>...] [--withdraw] [--proposal-id <id>] [--account <name>] [--json]
+  vapi task milestone <id> --index N submit|approve|reject|finalize|close-rejected [--proof <https-url>...] [--file <path>...] [--proof-json <file>] [--note <text>] [--reason <text>] [--json]
+  vapi task cancel <id> offer|remainder|expire [--json]
+  vapi task claim <id> --claimant <addr> [--json]
+  vapi task award <id> [<proposalId>|--worker <addr>|--winners a,b,c] [--account <name>] [--json]
+  vapi task sign <id> [--action award-consent|split-consent|bump-consent-nonce --index N --to-worker <base-units> --new-nonce N] [--yes] [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task fund <id> [--yes] [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task deliver <id> --files <path...> --note <text> [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task release <id> [--no-wait] [--timeout 120s] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task refund <id> [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task dispute <id> [--evidence-hash <0x + 64 hex>|--index N --evidence <text>] [--action raise|resolve-unmatched|split --to-worker <base-units>] [--yes] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task counter-evidence <id> [--evidence-hash <0x + 64 hex>|--index N --evidence <text>] [--yes] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task resolve-unmatched <id> [--index N] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task close-rejected <id> --index N [--account <name>] [--json]
+  vapi task bump-consent-nonce <id> --new-nonce N [--account <name>] [--json]
+  vapi task prune-reviewer <id> --reviewer <address> [--account <name>] [--json]
+  vapi task prune-reviewers <id> --reviewers a,b,c [--account <name>] [--json]
+  vapi task jury <id> --index N --step open|draw|rearm|resolve [--account <name>] [--json]
+  vapi task vote <id> --index N (--commit worker|poster|split [--to-worker <base-units>] | --reveal) [--account <name>] [--json]
+  vapi task approve-bond <id> [--yes] [--account <name>] [--json]
+  vapi task claim-owed <id> [--to <0x…>] [--account <name>] [--json]
+  vapi task reviewer-status [--address <0x…>] [--account <name>] [--json]
   vapi task message <id> <text> [--account <name>] [--json]
   vapi task thread <id> [--after <cursor>] [--account <name>] [--json]
-  vapi task watch <id> [--until <state>] [--auto-release] [--timeout 7d] [--interval 5s] [--account <name>] [--json]
-  vapi task status <id> [--account <name>] [--json]
+  vapi task watch <id> [--until <state>] [--auto-release] [--timeout 7d] [--interval 5s] [--counterparty <0x…>] [--account <name>] [--json]
+  vapi task status <id> [--operation <uuid> --step <v2-step> --recover|--abandon] [--account <name>] [--json]
   vapi export-key [--network <caip2>] [--account <name>] [--json]
   vapi backup [--account <name>] [--cloud [off]] [--json]
   vapi restore [--accounts <n> | --from-owner [--owner <0x…>]] [--json]
@@ -328,7 +344,7 @@ Solana listings remain searchable; inspect and pay return \`unsupported_network\
 
 \`vapi docs\` asks the public vAPI documentation assistant; \`vapi docs search\` searches documentation excerpts and \`vapi docs read\` reads one Markdown page. They need no account, wallet or payment.
 
-\`vapi task --help\` lists task options and availability. Task exit codes: 0 ok, 1 error, 2 policy refusal (JSON ok:false with a policy. reason) or invalid usage (JSON error), 3 approval needed in non-interactive mode. Posting moves no money; the current create-order contract does not store amount, deadline, intake, max awards or webhook yet.
+\`vapi task --help\` lists task options and availability. Task exit codes: 0 ok, 1 error or invalid usage, 2 policy refusal, 3 approval needed in non-interactive mode. Tasks V2 is live on Base mainnet. Posting moves money only with --fund; task and daily caps apply before signing.
 
 \`vapi check <url>\` grades an x402 API's 402 without paying: status, transport, declared version and its required fields, the exact scheme, canonical USDC, payTo, maxTimeoutSeconds, advertised extensions, and the origin's /.well-known/x402. It looks for OpenAPI beside the checked path, at /openapi.json, then through same-origin service-desc links in /.well-known/api-catalog. No wallet, no payment, no registry call. It exits 1 when a rule fails. A 402 that answers with Stripe/Tempo's MPP challenge (WWW-Authenticate: Payment) is recognised and reported as transport mpp; vapi pay cannot pay it.
 
@@ -615,6 +631,7 @@ export async function runCli(
         runIo.stdout(
           JSON.stringify({
             ok: false,
+            ...(error instanceof TaskCommandError ? error.details : {}),
             error: {
               code:
                 error instanceof UsageError ? "usage_error" : (errorCodeOf(error) ?? "task_error"),
