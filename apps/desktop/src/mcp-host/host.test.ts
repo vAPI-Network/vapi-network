@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 import { createMcpHost } from "./host.js";
@@ -56,6 +56,7 @@ describe("createMcpHost", () => {
   let claude: ReturnType<typeof privateKeyToAccount>;
   let research: ReturnType<typeof privateKeyToAccount>;
   let seen: SignerRequest[];
+  let fetched: string[];
   afterEach(async () => {
     await host?.close();
     await rm(home, { recursive: true, force: true });
@@ -81,6 +82,7 @@ describe("createMcpHost", () => {
     claude = privateKeyToAccount(generatePrivateKey());
     research = privateKeyToAccount(generatePrivateKey());
     seen = [];
+    fetched = [];
     const signer = async (message: SignerRequest): Promise<SignerResponse> => {
       seen.push(message);
       if (message.type === "listWallets") {
@@ -102,6 +104,11 @@ describe("createMcpHost", () => {
       socketPath: join(home, "mcp.sock"),
       home,
       signer,
+      // Answers at once, so no reply waits on a hosted service (views are reported missing).
+      fetchImpl: async (input) => {
+        fetched.push(input instanceof Request ? input.url : String(input));
+        return new Response("Not found", { status: 404 });
+      },
     });
   });
 
@@ -180,6 +187,17 @@ describe("createMcpHost", () => {
         },
       },
     ]);
+  });
+
+  it("loads views through the fetch it was given", async () => {
+    await request(
+      join(home, "mcp.sock"),
+      [JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} })],
+      1,
+    );
+    await vi.waitFor(() => {
+      expect(fetched.some((url) => url.includes("/mcp/apps/"))).toBe(true);
+    });
   });
 
   it("keeps serving after a client hangs up before its reply", async () => {
