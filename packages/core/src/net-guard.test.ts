@@ -212,7 +212,7 @@ describe("describeNetworkFailure", () => {
     );
   });
 
-  it("names a proxy variable and how Node.js uses it", () => {
+  it("names the protocol's proxy variable and how Node.js uses it", async () => {
     expect(
       describeNetworkFailure(new Error("x"), url, { https_proxy: "http://proxy.internal:3128" }),
     ).toBe(
@@ -224,11 +224,30 @@ describe("describeNetworkFailure", () => {
         NODE_USE_ENV_PROXY: "1",
       }),
     ).toBe(
-      "could not connect to api.vapinetwork.ai. The request went through the proxy in HTTPS_PROXY.",
+      "could not connect to api.vapinetwork.ai. NODE_USE_ENV_PROXY=1 and HTTPS_PROXY are set, so the proxy may have refused the connection.",
     );
-    expect(describeNetworkFailure(new Error("x"), url, { HTTPS_PROXY: " " })).toBe(
-      "could not connect to api.vapinetwork.ai.",
+    const unresolved = await assertPublicUrl(url, {
+      ...guardedOptions,
+      lookup: vi.fn<LookupFn>().mockRejectedValue(new Error("EAI_AGAIN")),
+    }).catch((error: unknown) => error);
+    expect(
+      describeNetworkFailure(unresolved, url, {
+        HTTPS_PROXY: "http://proxy.internal:3128",
+        NODE_USE_ENV_PROXY: "1",
+      }),
+    ).toBe(
+      "the DNS lookup for api.vapinetwork.ai failed. vapi looks api.vapinetwork.ai up on this machine before it uses the proxy in HTTPS_PROXY, so the name must resolve here too.",
     );
+    // Node.js reads no ALL_PROXY, and HTTP_PROXY only for http: URLs.
+    for (const env of [
+      { HTTPS_PROXY: " " },
+      { ALL_PROXY: "http://p:1" },
+      { HTTP_PROXY: "http://p:1" },
+    ]) {
+      expect(describeNetworkFailure(new Error("x"), url, env)).toBe(
+        "could not connect to api.vapinetwork.ai.",
+      );
+    }
   });
 
   it("reads a guard error from another bundle by name", () => {

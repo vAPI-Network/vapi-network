@@ -276,22 +276,20 @@ function guardError(url: URL, reason: "blocked" | "unresolved" = "blocked"): Net
   );
 }
 
-const PROXY_VARIABLES = [
-  "HTTPS_PROXY",
-  "https_proxy",
-  "HTTP_PROXY",
-  "http_proxy",
-  "ALL_PROXY",
-  "all_proxy",
-];
+// The variables Node.js reads for each protocol under NODE_USE_ENV_PROXY=1; it has no ALL_PROXY.
+const PROXY_VARIABLES: Readonly<Record<string, readonly string[]>> = {
+  "https:": ["HTTPS_PROXY", "https_proxy"],
+  "http:": ["HTTP_PROXY", "http_proxy"],
+};
 const SYSTEM_ERROR_CODE = /^[A-Z][A-Z0-9_]{1,39}$/u;
 
 /**
  * Says why a request to `url` never got an answer, in words that are safe to
  * print: the host, and a Node system error code such as `ECONNREFUSED`, never
- * the error's own message. When a proxy variable is set it adds how Node.js
- * treats it: the proxy is used only with `NODE_USE_ENV_PROXY=1`, and the host
- * must still resolve on this machine because the guard checks it first.
+ * the error's own message. When the proxy variable for the URL's protocol is
+ * set it adds how Node.js treats it: the proxy is used only with
+ * `NODE_USE_ENV_PROXY=1`, and the host must still resolve on this machine
+ * because the guard looks it up first.
  */
 export function describeNetworkFailure(
   error: unknown,
@@ -312,13 +310,18 @@ export function describeNetworkFailure(
     const code = systemErrorCode(error);
     reason = `could not connect to ${host}${code === undefined ? "" : ` (${code})`}`;
   }
-  const proxy = PROXY_VARIABLES.find((name) => (env[name] ?? "").trim() !== "");
+  const proxy = (PROXY_VARIABLES[url.protocol] ?? []).find(
+    (name) => (env[name] ?? "").trim() !== "",
+  );
   let hint = "";
   if (proxy !== undefined) {
-    hint =
-      env.NODE_USE_ENV_PROXY === "1"
-        ? ` The request went through the proxy in ${proxy}.`
-        : ` ${proxy} is set, but Node.js uses it only with NODE_USE_ENV_PROXY=1 (Node.js 22.21 or later): run the command again with NODE_USE_ENV_PROXY=1.`;
+    if (env.NODE_USE_ENV_PROXY !== "1") {
+      hint = ` ${proxy} is set, but Node.js uses it only with NODE_USE_ENV_PROXY=1 (Node.js 22.21 or later): run the command again with NODE_USE_ENV_PROXY=1.`;
+    } else if (guard === "unresolved") {
+      hint = ` vapi looks ${host} up on this machine before it uses the proxy in ${proxy}, so the name must resolve here too.`;
+    } else if (guard === undefined) {
+      hint = ` NODE_USE_ENV_PROXY=1 and ${proxy} are set, so the proxy may have refused the connection.`;
+    }
   }
   return `${reason}.${hint}`;
 }

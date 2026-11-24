@@ -14,6 +14,9 @@ sentence under it is the summary shown on the
 
 ### Fixed
 
+- A caller of a file lock that loses a race over a removed lock file keeps waiting for the lock instead of failing. Before, a tomb another caller had already deleted could make the operation reject with `ENOENT`, and on Windows a waiter breaking a crashed process's lock could reject with `EPERM` or `EBUSY` naming a `.stale.` file.
+- `vapi login` says why the link request never reached vAPI: a failed DNS lookup, a timeout, or the system error code of the connection, such as `ECONNREFUSED`. When `HTTPS_PROXY` is set without `NODE_USE_ENV_PROXY=1`, it says that Node.js uses the proxy only with that variable. Before, every such failure printed `The vAPI agent link request failed.` with no reason.
+
 ## 0.15.1 - 2026-11-24
 
 `vapi docs` and the MCP docs tools read the new docs site at docs.vapinetwork.ai, and Router key writes, resumed transfers and lock files are safe against races.
