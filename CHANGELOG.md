@@ -12,6 +12,10 @@ sentence under it is the summary shown on the
 
 ## Unreleased
 
+## 0.15.1 - 2026-11-24
+
+`vapi docs` and the MCP docs tools read the new docs site at docs.vapinetwork.ai, and Router key writes, resumed transfers and lock files are safe against races.
+
 ### Fixed
 
 - The docs client supports the new docs site's search and Markdown pages while retaining GitBook fallbacks. CLI questions return the closest three documentation sections when the site has no assistant.
