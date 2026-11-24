@@ -12,6 +12,10 @@ sentence under it is the summary shown on the
 
 ## Unreleased
 
+## 0.15.2 - 2026-11-24
+
+`vapi login` says why a link request never reached vAPI, lock files survive more races, and `vapi agent run --result-file` prints refill transaction hashes again.
+
 ### Fixed
 
 - A caller of a file lock that loses a race over a removed lock file keeps waiting for the lock instead of failing. Before, a tomb another caller had already deleted could make the operation reject with `ENOENT`, and on Windows a waiter breaking a crashed process's lock could reject with `EPERM` or `EBUSY` naming a `.stale.` file.
