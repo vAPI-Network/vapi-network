@@ -96,6 +96,79 @@ async function paths() {
   };
 }
 
+describe("payment and task pre-sign journals", () => {
+  it.each(["none", "task", "evidence"] as const)(
+    "runs both journals before signing and releases unsent task spend on %s failure",
+    async (failure) => {
+      const localPaths = await paths();
+      const account = privateKeyToAccount(PRIVATE_KEY);
+      const sign = vi.spyOn(account, "signTypedData");
+      const onUnsent = vi.fn(async () => {});
+      const stages: string[] = [];
+      const send = vi.fn(async (request: Request) => ({
+        request,
+        response: paidResponse(),
+        finish() {},
+        waitFor: async <T>(operation: Promise<T>) => await operation,
+      }));
+      const result = completeX402Payment({
+        challenge: {
+          request: new Request("https://vendor.example/paid"),
+          response: paymentRequired(),
+          finish() {},
+          waitFor: async <T>(operation: Promise<T>) => await operation,
+        },
+        account,
+        caps: { perCallAtomic: "1", perDayAtomic: "10000" },
+        config: getDefaultConfig({}),
+        ledgerPath: localPaths.ledgerPath,
+        wallet: "main",
+        now: NOW,
+        taskFunding: {
+          taskKey: "task-journal-test",
+          maxPerTaskAtomic: 10000n,
+          beforeSign: async (data, reservation) => {
+            expect(sign).not.toHaveBeenCalled();
+            expect(data.message).toMatchObject({ from: account.address, to: PAY_TO, value: 2500n });
+            expect(data.domain.verifyingContract).toBe(NETWORKS[BASE_MAINNET_CAIP2].usdc);
+            expect(reservation).toMatchObject({ id: expect.any(String), date: "2026-09-23" });
+            expect((await readSpendLedger(localPaths.ledgerPath, NOW)).spentAtomic).toBe("2500");
+            stages.push("task");
+            if (failure === "task") throw new Error("task journal failed");
+          },
+          onUnsent,
+        },
+        beforeSign: async (evidence) => {
+          expect(sign).not.toHaveBeenCalled();
+          expect(evidence).toMatchObject({
+            network: BASE_MAINNET_CAIP2,
+            amountAtomic: "2500",
+            authorization: { from: account.address, to: PAY_TO, value: "2500" },
+          });
+          stages.push("evidence");
+          if (failure === "evidence") throw new Error("payment journal failed");
+        },
+        send,
+      });
+      if (failure === "none") {
+        expect((await result).settlementOutcome).toBe("succeeded");
+        expect(stages).toEqual(["task", "evidence"]);
+        expect(sign).toHaveBeenCalledOnce();
+        expect(send).toHaveBeenCalledOnce();
+        expect(onUnsent).not.toHaveBeenCalled();
+        expect((await readSpendLedger(localPaths.ledgerPath, NOW)).spentAtomic).toBe("2500");
+      } else {
+        await expect(result).rejects.toThrow("journal failed");
+        expect(stages).toEqual(failure === "task" ? ["task"] : ["task", "evidence"]);
+        expect(sign).not.toHaveBeenCalled();
+        expect(send).not.toHaveBeenCalled();
+        expect(onUnsent).toHaveBeenCalledOnce();
+        expect((await readSpendLedger(localPaths.ledgerPath, NOW)).spentAtomic).toBe("0");
+      }
+    },
+  );
+});
+
 describe("payRequest", () => {
   it("retains settlement evidence when the final receipt clock throws", async () => {
     const localPaths = await paths();

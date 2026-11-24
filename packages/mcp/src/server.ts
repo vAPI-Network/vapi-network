@@ -101,9 +101,14 @@ import {
   createTasksTools,
   tasksSearchTool,
   tasksShowTool,
+  tasksPendingTool,
+  tasksCheckinTool,
   tasksPostTool,
   tasksProposeTool,
   tasksSubmitTool,
+  tasksMilestoneTool,
+  tasksCancelTool,
+  tasksClaimTool,
   tasksAwardTool,
   tasksSignTool,
   tasksFundTool,
@@ -113,6 +118,15 @@ import {
   tasksDisputeTool,
   tasksCounterEvidenceTool,
   tasksResolveUnmatchedTool,
+  tasksJuryTool,
+  tasksCloseRejectedTool,
+  tasksBumpConsentNonceTool,
+  tasksPruneReviewerTool,
+  tasksPruneReviewersTool,
+  tasksVoteTool,
+  tasksApproveBondTool,
+  tasksClaimOwedTool,
+  tasksReviewerStatusTool,
   tasksMessageTool,
   tasksThreadTool,
   tasksWatchTool,
@@ -720,9 +734,14 @@ export function createVapiServer(options: VapiServerOptions = {}) {
   });
   server.registerTool("tasks.search", tasksSearchTool, tasks.search);
   server.registerTool("tasks.show", tasksShowTool, tasks.show);
+  server.registerTool("tasks.pending", tasksPendingTool, tasks.pending);
+  server.registerTool("tasks.checkin", tasksCheckinTool, tasks.checkin);
   server.registerTool("tasks.post", tasksPostTool, tasks.post);
   server.registerTool("tasks.propose", tasksProposeTool, tasks.propose);
   server.registerTool("tasks.submit", tasksSubmitTool, tasks.submit);
+  server.registerTool("tasks.milestone", tasksMilestoneTool, tasks.milestone);
+  server.registerTool("tasks.cancel", tasksCancelTool, tasks.cancel);
+  server.registerTool("tasks.claim", tasksClaimTool, tasks.claim);
   server.registerTool("tasks.award", tasksAwardTool, tasks.award);
   server.registerTool("tasks.sign", tasksSignTool, tasks.sign);
   server.registerTool("tasks.fund", tasksFundTool, tasks.fund);
@@ -732,6 +751,19 @@ export function createVapiServer(options: VapiServerOptions = {}) {
   server.registerTool("tasks.dispute", tasksDisputeTool, tasks.dispute);
   server.registerTool("tasks.counter-evidence", tasksCounterEvidenceTool, tasks.counterEvidence);
   server.registerTool("tasks.resolve-unmatched", tasksResolveUnmatchedTool, tasks.resolveUnmatched);
+  server.registerTool("tasks.close-rejected", tasksCloseRejectedTool, tasks.closeRejected);
+  server.registerTool(
+    "tasks.bump-consent-nonce",
+    tasksBumpConsentNonceTool,
+    tasks.bumpConsentNonce,
+  );
+  server.registerTool("tasks.prune-reviewer", tasksPruneReviewerTool, tasks.pruneReviewer);
+  server.registerTool("tasks.prune-reviewers", tasksPruneReviewersTool, tasks.pruneReviewers);
+  server.registerTool("tasks.jury", tasksJuryTool, tasks.jury);
+  server.registerTool("tasks.vote", tasksVoteTool, tasks.vote);
+  server.registerTool("tasks.approve-bond", tasksApproveBondTool, tasks.approveBond);
+  server.registerTool("tasks.claim-owed", tasksClaimOwedTool, tasks.claimOwed);
+  server.registerTool("tasks.reviewer-status", tasksReviewerStatusTool, tasks.reviewerStatus);
   server.registerTool("tasks.message", tasksMessageTool, tasks.message);
   server.registerTool("tasks.thread", tasksThreadTool, tasks.thread);
   server.registerTool("tasks.watch", tasksWatchTool, tasks.watch);

@@ -10,6 +10,10 @@ import { WalletStore, type SecretStore } from "@vapi-network/core";
 import { agentSecretAccounts } from "@vapi-network/core/agent-link";
 import {
   canonicalJson,
+  checkinResponseSchema,
+  pendingActionsResponseSchema,
+  taskTermsSchema,
+  taskLifecycleSchema,
   createTasksClient,
   TasksClientError,
   createPendingTransactions,
@@ -63,8 +67,8 @@ function privateOrderResponse(response: PrivateOrderResponse): PrivateOrderRespo
 
 // Fixtures implement the public client's response types; transport/schema coverage lives in core.
 function taskResponse<Method extends keyof TasksClient>(
-  response: Awaited<ReturnType<TasksClient[Method]>>,
-): Awaited<ReturnType<TasksClient[Method]>> {
+  response: Awaited<ReturnType<NonNullable<TasksClient[Method]>>>,
+): Awaited<ReturnType<NonNullable<TasksClient[Method]>>> {
   return response;
 }
 
@@ -864,7 +868,7 @@ describe("vapi task", () => {
     },
   );
 
-  it("reads a brief file and accepts the exact injected ten-minute deadline", async () => {
+  it("reads a brief file and accepts the exact injected one-hour deadline", async () => {
     const { home, client, dependencies } = await fixture();
     const path = join(home, "brief.md");
     await writeFile(path, BRIEF);
@@ -878,7 +882,7 @@ describe("vapi task", () => {
         "--amount",
         "0.000001",
         "--deadline",
-        "2026-10-08T12:10:00.000Z",
+        "2026-10-08T13:00:00.000Z",
       ],
       dependencies,
     );
@@ -960,6 +964,7 @@ describe("vapi task", () => {
     const [id, input, options] = vi.mocked(client.submit).mock.calls[0]!;
     expect(id).toBe(ID);
     expect(options).toEqual({ idempotencyKey: KEY });
+    if (!("signedPayload" in input)) throw new Error("Expected signed submission");
     expect(input.signedPayload.kind).toBe("submission");
     expect(input.signedPayload.proof).toEqual([
       { kind: "url", value: "https://example.com/a" },
@@ -1468,6 +1473,7 @@ describe("vapi task", () => {
       (await invoke(["submit", ID, "--proof", "https://example.com/proof"], dependencies)).code,
     ).toBe(0);
     const input = vi.mocked(client.submit).mock.calls[0]![1];
+    if (!("signedPayload" in input)) throw new Error("Expected signed submission");
     expect(
       await verifyMessage({
         address: input.signedPayload.providerAddress as `0x${string}`,
@@ -3097,5 +3103,908 @@ describe("vapi task", () => {
     it("keeps task copy in the product vocabulary", () => {
       expect(TASK_HELP).not.toMatch(/\b(?:gig|job|freelance|vendor|client)\b|—|!/iu);
     });
+  });
+});
+
+describe("Tasks v2 terminal verbs", () => {
+  const postArgs = ["post", "--title", "Build a page", "--brief", "-", "--deadline", "7d"];
+  it("parses task milestones, all proof presets and cadence without losing base units", async () => {
+    const { dependencies, client } = await fixture();
+    dependencies.readStdin = async () => BRIEF;
+    const result = await invoke(
+      [
+        ...postArgs,
+        "--shape",
+        "task",
+        "--amount",
+        "100",
+        "--milestone",
+        "30|Shortlist approved|3d",
+        "--milestone",
+        "70|Intros completed|2026-10-15T12:00:00Z",
+        "--proof",
+        "x-post:vAPI: Tasks",
+        "--proof",
+        "pr:approved",
+        "--checkin",
+        "24h",
+      ],
+      dependencies,
+    );
+    expect(result.code).toBe(0);
+    expect(client.createOrder).toHaveBeenCalledWith(
+      expect.objectContaining({
+        shape: "task",
+        milestones: [
+          {
+            index: 1,
+            amountBaseUnits: "30000000",
+            acceptance: "Shortlist approved",
+            deadlineAt: "2026-10-11T12:00:00.000Z",
+          },
+          {
+            index: 2,
+            amountBaseUnits: "70000000",
+            acceptance: "Intros completed",
+            deadlineAt: "2026-10-15T12:00:00.000Z",
+          },
+        ],
+        proofSpec: [
+          { preset: "x-post", mustContain: "vAPI: Tasks" },
+          { preset: "pr", mustContain: "approved" },
+        ],
+        checkin: "24h",
+      }),
+      { idempotencyKey: KEY },
+    );
+  });
+  it("parses bounty rewards, winner count and choice window", async () => {
+    const { dependencies, client } = await fixture();
+    dependencies.readStdin = async () => BRIEF;
+    const result = await invoke(
+      [
+        ...postArgs,
+        "--shape",
+        "bounty",
+        "--winners",
+        "3",
+        "--reward-per-winner",
+        "25.000001",
+        "--choice-window",
+        "3600",
+      ],
+      dependencies,
+    );
+    expect(result.code).toBe(0);
+    expect(client.createOrder).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bounty: {
+          winners: 3,
+          rewardPerWinnerBaseUnits: "25000001",
+          deadlineAt: "2026-10-15T12:00:00.000Z",
+          choiceWindowSeconds: 3600,
+        },
+        market: expect.objectContaining({
+          budget: expect.objectContaining({ amountBaseUnits: "25000001" }),
+        }),
+      }),
+      expect.any(Object),
+    );
+  });
+  it.each(["proven", "open"])("parses pool budget, reward, gate %s and verifier", async (gate) => {
+    const { dependencies, client } = await fixture();
+    dependencies.readStdin = async () => BRIEF;
+    expect(
+      (
+        await invoke(
+          [
+            ...postArgs,
+            "--shape",
+            "pool",
+            "--reward-per-claim",
+            "5",
+            "--budget",
+            "100",
+            "--gate",
+            gate,
+            "--verifier",
+            "vapi",
+            ...(gate === "open" ? ["--open-check", "allowlist"] : []),
+          ],
+          dependencies,
+        )
+      ).code,
+    ).toBe(0);
+    expect(client.createOrder).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pool: {
+          rewardPerClaimBaseUnits: "5000000",
+          budgetBaseUnits: "100000000",
+          gate,
+          verifier: "vapi",
+          ...(gate === "open" ? { openCheck: "allowlist" } : {}),
+        },
+      }),
+      expect.any(Object),
+    );
+  });
+  it.each([
+    ["--shape", "other", "--amount", "1"],
+    ["--amount", "1", "--checkin", "1h"],
+    ["--amount", "6", ...Array.from({ length: 6 }, () => ["--milestone", "1|Done|3d"]).flat()],
+    ["--amount", "1", "--proof", "file:contains"],
+    ["--shape", "bounty", "--reward-per-winner", "1", "--winners", "0"],
+    ["--shape", "bounty", "--reward-per-winner", "1", "--choice-window", "0"],
+    ["--shape", "pool", "--reward-per-claim", "1", "--budget", "2", "--gate", "invalid"],
+    ["--shape", "pool", "--reward-per-claim", "1", "--budget", "2", "--verifier", "invalid"],
+  ])("rejects invalid v2 flags before posting %#", async (flags) => {
+    const { dependencies, client } = await fixture();
+    dependencies.readStdin = async () => BRIEF;
+    expect((await invoke([...postArgs, ...flags], dependencies)).code).toBe(1);
+    expect(client.createOrder).not.toHaveBeenCalled();
+  });
+  it("keeps canonical lifecycle and nextAction in the show JSON snapshot", async () => {
+    const { v2Terms, v2Lifecycle, v2NextAction } =
+      await import("../../core/src/tasks/fixtures/tasks-v2.js");
+    const value = taskResponse<"getOrder">({
+      ...order(),
+      workOrder: { ...order().workOrder, terms: taskTermsSchema.parse(v2Terms) },
+      lifecycle: taskLifecycleSchema.parse(v2Lifecycle),
+      nextAction: v2NextAction,
+    });
+    const { dependencies } = await fixture(true, fakeClient({ show: vi.fn(async () => value) }));
+    const result = await invoke(["show", ID], dependencies);
+    expect({
+      command: result.value!.command,
+      lifecycle: result.value!.lifecycle,
+      nextAction: result.value!.nextAction,
+    }).toMatchInlineSnapshot(`
+      {
+        "command": "task show",
+        "lifecycle": {
+          "milestones": [
+            {
+              "amountBaseUnits": "30000000",
+              "dueAt": "2026-10-11T12:00:00.000Z",
+              "id": "22222222-2222-4222-8222-222222222222",
+              "status": "pending",
+            },
+          ],
+          "shape": "task",
+          "state": "Active",
+          "substate": "Stalled",
+        },
+        "nextAction": {
+          "action": "checkin",
+          "dueAt": "2026-10-08T11:00:00.000Z",
+        },
+      }
+    `);
+    const human = await invoke(["show", ID], dependencies, false);
+    expect(human.stdout.join("\n")).toContain("Active / Stalled");
+    expect(human.stdout.join("\n")).toContain("1 | 30.00 | Shortlist approved");
+    expect(human.stdout.join("\n")).toContain("Next action: checkin");
+  });
+  it.each(["on-track", "blocked", "need-input"])(
+    "records %s check-ins and supplies an optional-note default",
+    async (status) => {
+      const { v2Checkins } = await import("../../core/src/tasks/fixtures/tasks-v2.js");
+      const client = fakeClient({
+        checkin: vi.fn(async () => checkinResponseSchema.parse(v2Checkins)),
+      });
+      const { dependencies } = await fixture(true, client);
+      expect(
+        (
+          await invoke(
+            ["checkin", ID, "--status", status, "--link", "https://example.com/proof"],
+            dependencies,
+          )
+        ).code,
+      ).toBe(0);
+      expect(client.checkin).toHaveBeenCalledWith(
+        ID,
+        { status, note: status.replaceAll("-", " "), link: "https://example.com/proof" },
+        { idempotencyKey: KEY },
+      );
+      expect(
+        (await invoke(["checkin", ID, "--status", status, "--note", "Please review"], dependencies))
+          .code,
+      ).toBe(0);
+    },
+  );
+  it("renders one pending line with amount, due time and deep link", async () => {
+    const { v2Pending } = await import("../../core/src/tasks/fixtures/tasks-v2.js");
+    const client = fakeClient({
+      pending: vi.fn(async () => pendingActionsResponseSchema.parse(v2Pending)),
+    });
+    const { dependencies } = await fixture(true, client);
+    const result = await invoke(["pending"], dependencies, false);
+    expect(result.stdout.at(-1)).toBe(
+      `Build a page · deliver · $30.00 USDC · due 2026-10-11T12:00:00.000Z · https://api.vapinetwork.ai/orders/${ID}`,
+    );
+  });
+  it("withdraws the selected submission without unlocking or signing", async () => {
+    const { dependencies, client, store } = await fixture();
+    const unlock = vi.spyOn(store, "unlock");
+    expect(
+      (await invoke(["submit", ID, "--withdraw", "--proposal-id", PROPOSAL_ID], dependencies)).code,
+    ).toBe(0);
+    expect(client.submit).toHaveBeenCalledWith(
+      ID,
+      { withdraw: true, proposalId: PROPOSAL_ID },
+      { idempotencyKey: KEY },
+    );
+    expect(unlock).not.toHaveBeenCalled();
+    expect(
+      (await invoke(["submit", ID, "--withdraw", "--proof", "https://example.com"], dependencies))
+        .code,
+    ).toBe(1);
+  });
+  it("guards post --fund with maxPerTaskUsd before signing and without reserving spend", async () => {
+    const created = milestoneOrder();
+    const client = fakeClient({
+      post: vi.fn(async () => ({
+        task: taskResponse<"createOrder">(created),
+        funding: { kind: "eip712" as const },
+      })),
+      getOrder: vi.fn(async () => created),
+    });
+    const { dependencies, home } = await fixture(true, client);
+    dependencies.readStdin = async () => BRIEF;
+    await writeProfile(home, { maxPerTaskUsd: 99 });
+    const chain = fakeChain();
+    dependencies.tasks!.chain = chain;
+    const result = await invoke(
+      [...postArgs, "--amount", "100", "--fund", "--yes", "--no-wait"],
+      dependencies,
+    );
+    expect(result.code).toBe(2);
+    expect(result.value).toMatchObject({
+      ok: false,
+      reason: "policy.perTask",
+      funding: { reason: "policy.perTask" },
+    });
+    expect(chain.fund).not.toHaveBeenCalled();
+    expect(await readFile(join(home, "spend-ledger.json"), "utf8").catch(() => null)).toBeNull();
+  });
+  it("preserves the created task when T7 cannot yet fund a fresh post", async () => {
+    const { v2FundingUnavailable } = await import("../../core/src/tasks/fixtures/tasks-v2.js");
+    const client = fakeClient({
+      post: vi.fn(async () => ({
+        task: taskResponse<"createOrder">(order()),
+        funding: v2FundingUnavailable,
+      })),
+    });
+    const { dependencies } = await fixture(true, client);
+    dependencies.readStdin = async () => BRIEF;
+    const result = await invoke([...postArgs, "--amount", "100", "--fund"], dependencies);
+    expect(result.code).toBe(1);
+    expect(result.value).toMatchObject({
+      workOrder: { id: ID },
+      funding: v2FundingUnavailable,
+      postingMovesMoney: false,
+    });
+  });
+  it("streams every recorded v2 event and prints the judging prompt", async () => {
+    const { v2Events } = await import("../../core/src/tasks/fixtures/tasks-v2.js");
+    const events = v2Events.map((event, index) => ({
+      ...event,
+      sequence: index + 1,
+      at: NOW.toISOString(),
+      actor: ADDRESS,
+    }));
+    const client = fakeClient({
+      events: vi.fn(async () => ({ events, nextAfter: events.length })),
+    });
+    const { dependencies } = await fixture(true, client);
+    const json = await invoke(["watch", ID, "--until", "released"], dependencies, true, true);
+    expect(json.code).toBe(0);
+    expect(json.values.filter((item) => item.event).map((item) => item.event)).toEqual(events);
+    const human = await invoke(["watch", ID, "--until", "released"], dependencies, false);
+    expect(human.stdout.join("\n")).toContain("deadline passed, 3 submissions, pick winners");
+  });
+  it("does not announce funding when --no-wait skips hosted confirmation", async () => {
+    const { dependencies, home } = await fixture(
+      true,
+      fakeClient({ getOrder: async () => milestoneOrder() }),
+    );
+    await writeProfile(home);
+    dependencies.tasks!.chain = fakeChain();
+    const result = await invoke(["fund", ID, "--yes", "--no-wait"], dependencies, false);
+    expect(result.code).toBe(0);
+    expect(result.stdout.join("\n")).not.toMatch(/escrow funded/iu);
+  });
+});
+
+describe("post-and-fund confirmation", () => {
+  it("reserves the escrow amount before signing the returned intent and announces only hosted confirmation", async () => {
+    const { readSpendLedger } = await import("@vapi-network/core");
+    const created = taskResponse<"createOrder">(milestoneOrder());
+    const intent = {
+      kind: "eip712" as const,
+      operationId: "sig_recorded",
+      typedData: { message: { value: "100000000" } },
+    };
+    let funded = false;
+    const client = fakeClient({
+      post: vi.fn(async () => ({ task: created, funding: intent })),
+      getOrder: vi.fn(async () => milestoneOrder({ escrowState: funded ? "locked" : "created" })),
+    });
+    const { dependencies, home } = await fixture(true, client);
+    dependencies.readStdin = async () => BRIEF;
+    await writeProfile(home);
+    const chain = fakeChain({
+      fund: vi.fn(async (input) => {
+        expect(input.fundingIntent).toEqual(intent);
+        expect(
+          (await readSpendLedger(join(home, "spend-ledger.json"), NOW, "worker")).spentAtomic,
+        ).toBe("100000000");
+        funded = true;
+        return chainResult();
+      }),
+    });
+    dependencies.tasks!.chain = chain;
+    const result = await invoke(
+      [
+        "post",
+        "--title",
+        "Build a page",
+        "--brief",
+        "-",
+        "--amount",
+        "100",
+        "--deadline",
+        "7d",
+        "--fund",
+        "--yes",
+      ],
+      dependencies,
+      false,
+    );
+    expect(result.code).toBe(0);
+    expect(client.post).toHaveBeenCalledOnce();
+    expect(chain.fund).toHaveBeenCalledOnce();
+    expect(result.stdout).toContain("escrow funded");
+  });
+  it("preserves the created task when local funding fails", async () => {
+    const created = taskResponse<"createOrder">(milestoneOrder());
+    const client = fakeClient({
+      post: vi.fn(async () => ({ task: created, funding: { kind: "eip712" as const } })),
+      getOrder: vi.fn(async () => milestoneOrder()),
+    });
+    const { dependencies, home } = await fixture(true, client);
+    dependencies.readStdin = async () => BRIEF;
+    await writeProfile(home);
+    dependencies.tasks!.chain = fakeChain({
+      fund: vi.fn(async () => {
+        throw new TasksChainError("The recorded local scope is unavailable.", false, {
+          authorizationExposed: false,
+        });
+      }),
+    });
+    const result = await invoke(
+      [
+        "post",
+        "--title",
+        "Build a page",
+        "--brief",
+        "-",
+        "--amount",
+        "100",
+        "--deadline",
+        "7d",
+        "--fund",
+        "--yes",
+      ],
+      dependencies,
+    );
+    expect(result.code).toBe(1);
+    expect(result.value).toMatchObject({
+      workOrder: { id: ID },
+      ok: false,
+      funding: { state: "unknown" },
+    });
+  });
+});
+
+describe("Tasks V2 prepared write arguments", () => {
+  const worker = "0x3333333333333333333333333333333333333333";
+  const cases: Array<[string[], object]> = [
+    [
+      ["milestone", ID, "submit", "--index", "0", "--proof", "https://proof.example/result"],
+      {
+        write: {
+          action: "submit",
+          i: 0,
+          proof: [{ preset: "link", value: "https://proof.example/result" }],
+        },
+      },
+    ],
+    [["milestone", ID, "approve", "--index", "0"], { write: { action: "approve", i: 0 } }],
+    [
+      ["milestone", ID, "reject", "--index", "4", "--reason", "Missing the requested proof"],
+      { write: { action: "reject", i: 4, reason: "Missing the requested proof" } },
+    ],
+    [["milestone", ID, "finalize", "--index", "1"], { write: { action: "finalize", i: 1 } }],
+    [["cancel", ID, "offer"], { write: { action: "cancel-offer" } }],
+    [["cancel", ID, "remainder"], { write: { action: "cancel-remainder" } }],
+    [["cancel", ID, "expire"], { write: { action: "expire" } }],
+    [["award", ID, "--worker", worker], { write: { action: "award", worker } }],
+    [
+      ["award", ID, "--winners", `${worker},${ADDRESS}`],
+      { write: { action: "award-bounty", winners: [worker, ADDRESS] } },
+    ],
+    [["sign", ID, "--action", "award-consent"], { consent: { action: "award-consent" } }],
+    [
+      ["sign", ID, "--action", "split-consent", "--index", "0", "--to-worker", "12000000"],
+      { consent: { action: "split-consent", i: 0, toWorker: "12000000" } },
+    ],
+    [
+      ["dispute", ID, "--index", "0", "--evidence", "proof text"],
+      { write: { action: "raise-dispute", i: 0, evidence: "proof text" } },
+    ],
+    [
+      ["dispute", ID, "--action", "split", "--index", "0", "--to-worker", "12000000"],
+      { write: { action: "split", i: 0, toWorker: "12000000" } },
+    ],
+    [
+      ["counter-evidence", ID, "--index", "0", "--evidence", "counter proof"],
+      { write: { action: "counter-evidence", i: 0, evidence: "counter proof" } },
+    ],
+    [["resolve-unmatched", ID, "--index", "0"], { write: { action: "resolve-unmatched", i: 0 } }],
+    [["claim", ID, "--claimant", worker], { write: { action: "pay-claim", claimant: worker } }],
+  ];
+  it.each(cases)(
+    "parses %j and retains lifecycle and operation in JSON",
+    async (args, expected) => {
+      const f = await fixture();
+      const executeV2 = vi.fn(async () => ({
+        ok: true as const,
+        money: v2TestMoney(),
+        orderId: ID,
+        operation: v2TestOperation(),
+        lifecycle: { shape: "task" as const, state: "Active" as const, milestones: [] },
+        nextAction: { action: "none" as const },
+      }));
+      f.dependencies.tasks!.chain = { ...missingTasksChain, available: true, executeV2 };
+      const result = await invoke(args, f.dependencies);
+      expect(result.code).toBe(0);
+      expect(executeV2).toHaveBeenCalledWith(expect.objectContaining({ id: ID, ...expected }));
+      expect(result.values[0]).toMatchObject({
+        lifecycle: { state: "Active" },
+        nextAction: { action: "none" },
+        operation: { state: "confirmed" },
+      });
+    },
+  );
+  it.each(["-1", "5", "0.5", "x"])(
+    "refuses invalid zero-based index %s before signing",
+    async (index) => {
+      const f = await fixture();
+      const executeV2 = vi.fn();
+      f.dependencies.tasks!.chain = { ...missingTasksChain, executeV2 };
+      const result = await invoke(["milestone", ID, "approve", "--index", index], f.dependencies);
+      expect(result.code).toBe(1);
+      expect(result.value).toMatchObject({
+        error: { message: expect.stringContaining("milestone index") },
+      });
+      expect(result.stdout.join("\n")).not.toContain("C0");
+      expect(executeV2).not.toHaveBeenCalled();
+    },
+  );
+  it("preserves a disabled-host error code and never prints success", async () => {
+    const f = await fixture();
+    f.dependencies.tasks!.chain = {
+      ...missingTasksChain,
+      executeV2: vi
+        .fn()
+        .mockRejectedValue(
+          new TasksClientError("http", "V2 writes disabled", 404, "v2_writes_disabled"),
+        ),
+    };
+    const result = await invoke(["cancel", ID, "offer"], f.dependencies);
+    expect(result.code).not.toBe(0);
+    expect(result.values[0]).toMatchObject({ error: { code: "v2_writes_disabled" } });
+  });
+});
+
+function v2TestMoney() {
+  return {
+    gross: { usd: "100.00", baseUnits: "100000000" },
+    fee: { usd: "5.00", baseUnits: "5000000" },
+    net: { usd: "95.00", baseUnits: "95000000" },
+    feeBp: 500,
+    escrow: ESCROW as `0x${string}`,
+    line: `$100.00 gross · $5.00 fee · $95.00 net · escrow ${ESCROW}`,
+  };
+}
+function v2TestOperation(): import("@vapi-network/core/tasks").TaskV2Operation {
+  return {
+    id: KEY,
+    kind: "tasks-v2-write" as const,
+    state: "confirmed" as const,
+    step: "v2-approve" as const,
+    expectedActor: ADDRESS,
+    transactionHash: `0x${"ab".repeat(32)}` as `0x${string}`,
+    plan: {
+      version: "work-transaction-plan-v2" as const,
+      operationId: KEY,
+      step: "v2-approve" as const,
+      chainId: 8453,
+      network: "eip155:8453",
+      from: ADDRESS,
+      to: ESCROW,
+      value: "0" as const,
+      data: "0x1234" as `0x${string}`,
+    },
+  };
+}
+
+it("passes the original post funding key and prepared operation through an approval refusal", async () => {
+  const created = taskResponse<"createOrder">(order());
+  created.workOrder.terms = {
+    shape: "task",
+    milestones: [
+      {
+        index: 1,
+        amountBaseUnits: "100000000",
+        acceptance: "A useful delivery",
+        deadlineAt: "2026-10-15T12:00:00.000Z",
+      },
+    ],
+  };
+  const prepared = {
+    orderId: ID,
+    operation: {
+      ...v2TestOperation(),
+      state: "prepared" as const,
+      step: "v2-fund" as const,
+      transactionHash: null,
+      plan: { ...v2TestOperation().plan, step: "v2-fund" as const },
+    },
+  };
+  const post = vi.fn(async () => ({
+    task: created,
+    funding: { kind: "transaction" as const, ...prepared },
+  }));
+  const client = fakeClient({ post, getOrder: vi.fn(async () => created), prepareV2: vi.fn() });
+  const f = await fixture(true, client);
+  f.dependencies.readStdin = async () => BRIEF;
+  const executeV2 = vi.fn().mockResolvedValue({
+    ok: false,
+    approval: true,
+    money: v2TestMoney(),
+    lifecycle: null,
+    nextAction: null,
+    ...prepared,
+  });
+  f.dependencies.tasks!.chain = { ...missingTasksChain, available: true, executeV2 };
+  const result = await invoke(
+    [
+      "post",
+      "--title",
+      "Build a page",
+      "--brief",
+      "-",
+      "--amount",
+      "100",
+      "--deadline",
+      "7d",
+      "--fund",
+    ],
+    f.dependencies,
+  );
+  expect(result.code).toBe(3);
+  expect(post).toHaveBeenCalledWith(expect.any(Object), { idempotencyKey: KEY });
+  expect(executeV2).toHaveBeenCalledWith(
+    expect.objectContaining({ preparationKey: KEY, prepared: expect.objectContaining(prepared) }),
+  );
+});
+
+describe("Tasks V2 jury and reviewer verbs", () => {
+  const COMMITMENT = `0x${"cd".repeat(32)}` as `0x${string}`;
+  const SALT = `0x${"5a".repeat(32)}` as `0x${string}`;
+  function juryChain() {
+    const executeV2 = vi.fn(async () => ({
+      ok: true as const,
+      money: v2TestMoney(),
+      orderId: ID,
+      operation: v2TestOperation(),
+      lifecycle: null,
+      nextAction: null,
+    }));
+    const ballot = {
+      version: "vapi-tasks-ballot-v1" as const,
+      orderId: ID,
+      chainId: 8453,
+      resolver: ADDRESS,
+      escrow: ESCROW,
+      i: 0,
+      caseId: COMMITMENT,
+      voter: ADDRESS,
+      outcome: 2 as const,
+      toWorker: "40000000",
+      salt: SALT,
+      commitment: COMMITMENT,
+      createdAt: NOW.toISOString(),
+    } as const;
+    const juryV2 = {
+      assertJuryOpenable: vi.fn(async () => {}),
+      caseState: vi
+        .fn()
+        .mockResolvedValueOnce({ state: 6, name: "Snapshotting", resolver: ADDRESS })
+        .mockResolvedValue({ state: 3, name: "JuryDrawPending", resolver: ADDRESS }),
+      sealBallot: vi.fn(async () => ({ ballot, reused: false, path: "/home/ballot.json" })),
+      openBallot: vi.fn(async () => ({ ballot, path: "/home/ballot.json" })),
+      assertSealedCase: vi.fn(async () => {}),
+    };
+    return {
+      executeV2,
+      juryV2,
+      chain: { ...missingTasksChain, available: true, executeV2, juryV2 },
+    };
+  }
+
+  it.each([
+    [["milestone", ID, "close-rejected", "--index", "0"], { action: "close-rejected", i: 0 }],
+    [
+      ["sign", ID, "--action", "bump-consent-nonce", "--new-nonce", "7"],
+      { action: "bump-consent-nonce", newNonce: "7" },
+    ],
+    [["close-rejected", ID, "--index", "0"], { action: "close-rejected", i: 0 }],
+    [
+      ["bump-consent-nonce", ID, "--new-nonce", "7"],
+      { action: "bump-consent-nonce", newNonce: "7" },
+    ],
+    [
+      ["prune-reviewer", ID, "--reviewer", ADDRESS],
+      { action: "prune-reviewer", reviewer: ADDRESS },
+    ],
+    [
+      ["prune-reviewers", ID, "--reviewers", `${ADDRESS},${ESCROW}`],
+      { action: "prune-reviewers", reviewers: [ADDRESS, ESCROW] },
+    ],
+    [["jury", ID, "--index", "0", "--step", "draw"], { action: "draw-jury", i: 0 }],
+    [["jury", ID, "--index", "1", "--step", "rearm"], { action: "rearm-draw", i: 1 }],
+    [["jury", ID, "--index", "0", "--step", "resolve"], { action: "resolve", i: 0 }],
+    [["approve-bond", ID, "--yes"], { action: "approve-bond" }],
+    [["claim-owed", ID], { action: "claim-owed" }],
+    [["claim-owed", ID, "--to", ESCROW], { action: "claim-owed", to: ESCROW }],
+  ])("sends %j as one hosted write", async (args, write) => {
+    const f = await fixture();
+    const fake = juryChain();
+    f.dependencies.tasks!.chain = fake.chain;
+    const result = await invoke(args, f.dependencies);
+    expect(result.code).toBe(0);
+    expect(fake.executeV2).toHaveBeenCalledTimes(1);
+    expect(fake.executeV2).toHaveBeenCalledWith(expect.objectContaining({ id: ID, write }));
+    expect(result.value).toMatchObject({ operation: { state: "confirmed" } });
+  });
+
+  it("repeats jury open while the case is Snapshotting", async () => {
+    const f = await fixture();
+    const fake = juryChain();
+    f.dependencies.tasks!.chain = fake.chain;
+    const result = await invoke(["jury", ID, "--index", "0", "--step", "open"], f.dependencies);
+    expect(result.code).toBe(0);
+    expect(fake.executeV2).toHaveBeenCalledTimes(2);
+    expect(result.value).toMatchObject({ rounds: 2, caseState: "JuryDrawPending" });
+  });
+
+  it("commits only the commitment of a locally sealed split ballot", async () => {
+    const f = await fixture();
+    const fake = juryChain();
+    f.dependencies.tasks!.chain = fake.chain;
+    const result = await invoke(
+      ["vote", ID, "--index", "0", "--commit", "split", "--to-worker", "40000000"],
+      f.dependencies,
+    );
+    expect(result.code).toBe(0);
+    expect(fake.juryV2.sealBallot).toHaveBeenCalledWith({
+      id: ID,
+      i: 0,
+      outcome: 2,
+      toWorker: "40000000",
+    });
+    expect(fake.executeV2).toHaveBeenCalledWith(
+      expect.objectContaining({ write: { action: "commit-vote", i: 0, commitment: COMMITMENT } }),
+    );
+    expect(result.stdout.join("")).not.toContain(SALT.slice(2));
+  });
+
+  it("keeps hosted echoes of a reveal out of CLI JSON and errors", async () => {
+    const echo = { salt: SALT, toWorker: "40000000" };
+    const leaks = (text: string) => text.includes(SALT.slice(2, 18)) || text.includes("40000000");
+    const f = await fixture();
+    const fake = juryChain();
+    const original = fake.executeV2.getMockImplementation()!;
+    fake.executeV2.mockImplementation(
+      async () => ({ ...(await original()), debug: echo, request: echo }) as never,
+    );
+    f.dependencies.tasks!.chain = fake.chain;
+    const ok = await invoke(["vote", ID, "--index", "0", "--reveal"], f.dependencies);
+    expect(ok.code).toBe(0);
+    expect(leaks(ok.stdout.join("\n") + ok.stderr.join("\n"))).toBe(false);
+    fake.executeV2.mockRejectedValueOnce(
+      new TasksClientError("http", `bad reveal ${JSON.stringify(echo)}`, 409, SALT.slice(2)),
+    );
+    const failed = await invoke(["vote", ID, "--index", "0", "--reveal"], f.dependencies);
+    expect(failed.code).toBe(1);
+    expect(failed.value).toMatchObject({ error: { code: "v2_vote_rejected" } });
+    expect(leaks(failed.stdout.join("\n") + failed.stderr.join("\n"))).toBe(false);
+  });
+
+  it("redacts a recovered prepared reveal in task status JSON", async () => {
+    const operation = {
+      ...v2TestOperation(),
+      state: "prepared" as const,
+      step: "v2-reveal-vote" as const,
+      transactionHash: null,
+      plan: {
+        ...v2TestOperation().plan,
+        step: "v2-reveal-vote" as const,
+        to: ADDRESS,
+        // revealVote(escrow, 0, Split, 40000000, salt)
+        data: `0xdeadbeef${SALT.slice(2)}` as `0x${string}`,
+      },
+    };
+    const f = await fixture(
+      true,
+      fakeClient({
+        operationV2: vi.fn(async () => ({
+          orderId: ID,
+          operation,
+          recovered: false,
+          scanComplete: true,
+          debug: { salt: SALT },
+        })) as never,
+      }),
+    );
+    const result = await invoke(
+      ["status", ID, "--operation", KEY, "--step", "v2-reveal-vote"],
+      f.dependencies,
+    );
+    expect(result.code).toBe(0);
+    expect(result.value).toMatchObject({
+      operation: { plan: { data: "[redacted: reveal calldata]" } },
+    });
+    expect(result.stdout.join("\n")).not.toContain(SALT.slice(2, 18));
+  });
+
+  it("reveals the ballot read back by the onchain commitment", async () => {
+    const f = await fixture();
+    const fake = juryChain();
+    f.dependencies.tasks!.chain = fake.chain;
+    const result = await invoke(["vote", ID, "--index", "0", "--reveal"], f.dependencies);
+    expect(result.code).toBe(0);
+    expect(fake.executeV2).toHaveBeenCalledWith(
+      expect.objectContaining({
+        write: { action: "reveal-vote", i: 0, outcome: 2, toWorker: "40000000", salt: SALT },
+      }),
+    );
+  });
+
+  it.each([
+    ["jury", ID, "--index", "0"],
+    ["jury", ID, "--index", "5", "--step", "open"],
+    ["jury", ID, "--index", "0", "--step", "appeal"],
+    ["vote", ID, "--index", "0"],
+    ["vote", ID, "--index", "0", "--commit", "split"],
+    ["vote", ID, "--index", "0", "--commit", "worker", "--to-worker", "5"],
+    ["vote", ID, "--index", "0", "--commit", "maybe"],
+    ["vote", ID, "--index", "0", "--commit", "worker", "--reveal"],
+    ["vote", ID, "--index", "0", "--reveal", "--to-worker", "5"],
+    ["claim-owed", ID, "--to", "0x1234"],
+    ["reviewer-status", "--address", "0x1234"],
+  ])("refuses %j before any signing", async (...args) => {
+    const f = await fixture();
+    const fake = juryChain();
+    f.dependencies.tasks!.chain = fake.chain;
+    const result = await invoke(args, f.dependencies);
+    expect(result.code).toBe(1);
+    expect(result.value).toMatchObject({ error: { code: "usage_error" } });
+    expect(fake.executeV2).not.toHaveBeenCalled();
+    expect(fake.juryV2.sealBallot).not.toHaveBeenCalled();
+  });
+
+  it("names the milestone index in jury usage errors", async () => {
+    const f = await fixture();
+    const result = await invoke(["jury", ID, "--index", "5", "--step", "open"], f.dependencies);
+    expect(result.value).toMatchObject({
+      error: { message: expect.stringContaining("milestone index") },
+    });
+    expect(result.stdout.join("\n")).not.toContain("C0");
+  });
+
+  it("reads reviewer status for --address from local RPC reads", async () => {
+    const f = await fixture();
+    f.dependencies.env = {
+      VAPI_TASKS_V2_ESCROW_FACTORY_8453: ADDRESS,
+      VAPI_TASKS_V2_POOL_FACTORY_8453: ADDRESS,
+      VAPI_TASKS_V2_USDC_8453: ADDRESS,
+      VAPI_TASKS_V2_USDC_NAME_8453: "USD Coin",
+      VAPI_TASKS_V2_USDC_VERSION_8453: "2",
+      VAPI_TASKS_V2_DISPUTE_RESOLVER_V3_8453: ESCROW,
+    };
+    const values: Record<string, unknown> = {
+      implementation: ADDRESS,
+      DISPUTE_RESOLVER: ESCROW,
+      registry: ADDRESS,
+      vapiId: ADDRESS,
+      stakeGate: ADDRESS,
+      staking: ADDRESS,
+      isReviewer: true,
+      hasId: true,
+      stakedBalance: 2000n,
+      threshold: 1000n,
+      isEligible: true,
+      available: true,
+      suspended: false,
+      claimable: 0n,
+      missedReveals: 0,
+    };
+    f.dependencies.tasks!.rpcFor = () =>
+      ({
+        getChainId: async () => 8453,
+        readContract: async ({ functionName }: { functionName: string }) => values[functionName],
+      }) as unknown as import("viem").PublicClient;
+    const result = await invoke(["reviewer-status", "--address", ESCROW], f.dependencies);
+    expect(result.code).toBe(0);
+    expect(result.value).toMatchObject({
+      command: "task reviewer-status",
+      resolver: "0x2222222222222222222222222222222222222222",
+      staked: "2000",
+      threshold: "1000",
+      ready: true,
+    });
+    expect(result.stderr.join("\n")).toContain("untrusted override");
+  });
+});
+
+describe("audit-3 outcome presentation", () => {
+  it.each([
+    ["show", true],
+    ["show", false],
+    ["status", true],
+    ["status", false],
+  ] as const)(
+    "shows cause 6 in %s with signedIn=%s without naming a winner",
+    async (verb, signedIn) => {
+      const settlement = { cause: 6, paidToWorker: "100", disputed: false, disputeWinner: 1 };
+      const value = order();
+      const client = fakeClient({
+        show: async () => ({
+          ...value,
+          workOrder: { ...value.workOrder, v2State: { outcomes: [settlement] } },
+        }),
+        chainState: async () => ({
+          workOrderId: ID,
+          milestones: [],
+          observedAt: NOW.toISOString(),
+          outcomes: [settlement],
+        }),
+        events: async () => ({ events: [], nextAfter: 0 }),
+        publicTask: async () => ({ ...card(), outcomes: [settlement] }),
+      });
+      const { dependencies } = await fixture(signedIn, client);
+      const json = await invoke([verb, ID], dependencies);
+      expect(json.code).toBe(0);
+      expect(JSON.stringify(json.value)).toContain('"disputed":true,"disputeWinner":0');
+      expect(JSON.stringify(json.value)).toContain(
+        "status quo final after round 2 without a verdict; no dispute winner",
+      );
+      const human = await invoke([verb, ID], dependencies, false);
+      expect(human.code).toBe(0);
+      expect(human.stdout.join("\n")).toContain(
+        "Disputed: status quo final after round 2 without a verdict; no dispute winner.",
+      );
+    },
+  );
+
+  it("includes membership and stake-retention guidance in task help", async () => {
+    const { dependencies } = await fixture();
+    const result = await invoke(["--help"], dependencies, false);
+    expect(result.stdout.join("\n")).toContain("mayVote reports jury membership only");
+    expect(result.stdout.join("\n")).toContain("even a cancelled unstake can cost the vote");
   });
 });

@@ -21,6 +21,7 @@ import {
   taskReservedAtomic,
 } from "../spend-policy.js";
 import type { WalletName } from "../wallet-name.js";
+import { withFundingAttempt } from "./funding-attempts.js";
 import { canonicalJson } from "./canonical-json.js";
 import {
   TasksChainError,
@@ -38,7 +39,13 @@ import {
   sha256Hex,
   type FrozenDeliveryManifest,
 } from "./delivery-manifest.js";
-import { formatBaseUnitsUsd, parseFeeBp, taskMoney, type TaskMoney } from "./money.js";
+import {
+  taskPolicyAtomic as policyAtomic,
+  formatBaseUnitsUsd,
+  parseFeeBp,
+  taskMoney,
+  type TaskMoney,
+} from "./money.js";
 import { freezeScopeTerms } from "./scope-terms.js";
 import { createScopeBindings, type ScopeBinding, type ScopeBindings } from "./scope-bindings.js";
 import {
@@ -64,6 +71,7 @@ export type TaskFundingApproval =
   { granted: true } | { granted: false } | { ask: (summary: FundingSummary) => Promise<boolean> };
 
 export type FundTaskInput = TaskActionInput & {
+  fundingIntent?: unknown;
   pending?: PendingTransactions;
   policy: { maxPerTaskUsd: number; approveAboveUsd: number };
   caps: SpendCaps;
@@ -81,130 +89,162 @@ export type FundTaskOutcome =
 
 export async function fundTask(input: FundTaskInput): Promise<FundTaskOutcome> {
   const milestone = await resolveMilestone(input);
-  const money = await milestoneMoney(input.client, milestone);
-  const grossAtomic = BigInt(money.gross.baseUnits);
-  const existingReservationId = input.pending?.existingReservationId
-    ? await input.pending.existingReservationId(milestone.id)
-    : undefined;
-  const retainedReservation = input.pending?.retainedReservation
-    ? await input.pending.retainedReservation(milestone.id)
-    : undefined;
-  const today = input.now().toISOString().slice(0, 10);
-  const maxPerTaskAtomic = policyAtomic(input.policy.maxPerTaskUsd);
-  const approveAboveAtomic = policyAtomic(input.policy.approveAboveUsd);
-  const dayRemainingAtomic = await escrowFundingDayRemainingAtomic({
-    caps: input.caps,
-    ledgerPath: input.ledgerPath,
-    wallet: input.wallet,
-    now: input.now(),
-    ...(existingReservationId ? { reservationId: existingReservationId } : {}),
-  });
-  const dayRemainingUsd = Number(formatBaseUnitsUsd(dayRemainingAtomic));
-  const taskReserved = await taskReservedAtomic({
-    ledgerPath: input.ledgerPath,
-    wallet: input.wallet,
-    taskKey: milestone.workOrderId,
-    now: input.now(),
-    ...(existingReservationId ? { excludeReservationId: existingReservationId } : {}),
-  });
-  const resumedFromPriorDay =
-    retainedReservation?.date !== undefined &&
-    retainedReservation.date !== today &&
-    retainedReservation.exposed === true &&
-    retainedReservation.invalidated !== true;
-  const decision = decideFunding({
-    amountUsd: Number(money.gross.usd),
-    ...input.policy,
-    dayRemainingUsd: resumedFromPriorDay ? Number(money.gross.usd) : dayRemainingUsd,
-  });
-  // The policy API uses numbers. Compare atomic units too, so floating-point
-  // precision cannot bypass a cap or approval at large or fractional amounts.
-  if (grossAtomic > maxPerTaskAtomic || taskReserved + grossAtomic > maxPerTaskAtomic)
-    return { outcome: "refused", reason: "policy.perTask", money };
-  if (grossAtomic > dayRemainingAtomic && !resumedFromPriorDay)
-    return { outcome: "refused", reason: "policy.perDay", money };
-  if ("ok" in decision && !decision.ok)
-    return { outcome: "refused", reason: decision.reason, money };
-  if ("approval" in decision || grossAtomic > approveAboveAtomic) {
-    if (input.approval && "ask" in input.approval) {
-      if (!(await input.approval.ask({ money, dayRemainingUsd })))
-        return { outcome: "declined", money };
-    } else if (!input.approval?.granted) {
-      return { outcome: "approval_needed", money };
-    }
-  }
-  requireChain(input.chain);
-  const performFunding = async (): Promise<FundTaskOutcome> => {
-    const currentReservation = input.pending?.retainedReservation
-      ? await input.pending.retainedReservation(milestone.id)
-      : retainedReservation;
-    const idempotencyKey = input.pending
-      ? await input.pending.reservationId(milestone.id, () => operationKey(input))
-      : operationKey(input);
-    // Reserve only after policy, approval, and chain availability. A raced cap
-    // failure propagates as SpendCapError; refusal outcomes above stay read-only.
-    const reservation = await reserveSpend(grossAtomic, input.caps, {
-      kind: "escrow-funding",
-      taskKey: milestone.workOrderId,
-      maxPerTaskAtomic,
-      wallet: input.wallet,
+  return withFundingAttempt(
+    {
       ledgerPath: input.ledgerPath,
-      now: input.now(),
-      reservationId: idempotencyKey,
-      reuseExistingEscrowReservation: input.pending !== undefined,
-      ...(currentReservation?.exposed === true && currentReservation.invalidated !== true
-        ? { resumeEscrowReservation: currentReservation }
-        : {}),
-    });
-    await input.pending?.bindReservation?.(milestone.id, {
-      id: idempotencyKey,
       wallet: input.wallet,
-      amountAtomic: grossAtomic.toString(),
-      date: reservation.date,
-    });
-    try {
-      const fundingOperation = {
-        orderId: milestone.workOrderId,
-        escrowId: milestone.id,
-        grossBaseUnits: grossAtomic,
-        ...(input.counterparty ? { counterparty: input.counterparty } : {}),
-        idempotencyKey,
-      };
-      const result = await input.chain.fund(fundingOperation);
-      return { outcome: "done", money, result };
-    } catch (error) {
-      const exposed = input.pending ? await input.pending.exposure(milestone.id) : false;
-      if (
-        !reservation.reservationReused &&
-        !exposed &&
-        error instanceof TasksChainError &&
-        !error.broadcast &&
-        !error.authorizationExposed
-      ) {
-        try {
-          await input.pending?.invalidateReservation?.(milestone.id);
-          await releaseSpend(grossAtomic, {
-            ledgerPath: input.ledgerPath,
-            wallet: input.wallet,
-            now: input.now(),
-            reservedOn: reservation.date,
-            reservationId: idempotencyKey,
-          });
-          await input.pending?.clearReservation?.(milestone.id);
-        } catch (rollbackError) {
-          throw new AggregateError(
-            [error, rollbackError],
-            "Task funding failed and its spend reservation could not be released.",
-            { cause: error },
-          );
+      taskId: milestone.workOrderId,
+      milestoneId: milestone.id,
+      client: input.client,
+      chain: input.chain,
+      now: input.now,
+      ...(input.pending ? { pending: input.pending } : {}),
+    },
+    async (journal) => {
+      const money = await milestoneMoney(input.client, milestone);
+      const grossAtomic = BigInt(money.gross.baseUnits);
+      const existingReservationId = input.pending?.existingReservationId
+        ? await input.pending.existingReservationId(milestone.id)
+        : undefined;
+      const retainedReservation = input.pending?.retainedReservation
+        ? await input.pending.retainedReservation(milestone.id)
+        : undefined;
+      const today = input.now().toISOString().slice(0, 10);
+      const maxPerTaskAtomic = policyAtomic(input.policy.maxPerTaskUsd);
+      const approveAboveAtomic = policyAtomic(input.policy.approveAboveUsd);
+      const dayRemainingAtomic = await escrowFundingDayRemainingAtomic({
+        caps: input.caps,
+        ledgerPath: input.ledgerPath,
+        wallet: input.wallet,
+        now: input.now(),
+        ...(existingReservationId ? { reservationId: existingReservationId } : {}),
+      });
+      const dayRemainingUsd = Number(formatBaseUnitsUsd(dayRemainingAtomic));
+      const taskReserved = await taskReservedAtomic({
+        ledgerPath: input.ledgerPath,
+        wallet: input.wallet,
+        taskKey: milestone.workOrderId,
+        now: input.now(),
+        ...(existingReservationId ? { excludeReservationId: existingReservationId } : {}),
+      });
+      const resumedFromPriorDay =
+        retainedReservation?.date !== undefined &&
+        retainedReservation.date !== today &&
+        retainedReservation.exposed === true &&
+        retainedReservation.invalidated !== true;
+      const decision = decideFunding({
+        amountUsd: Number(money.gross.usd),
+        ...input.policy,
+        dayRemainingUsd: resumedFromPriorDay ? Number(money.gross.usd) : dayRemainingUsd,
+      });
+      // The policy API uses numbers. Compare atomic units too, so floating-point
+      // precision cannot bypass a cap or approval at large or fractional amounts.
+      if (grossAtomic > maxPerTaskAtomic || taskReserved + grossAtomic > maxPerTaskAtomic)
+        return { outcome: "refused", reason: "policy.perTask", money };
+      if (grossAtomic > dayRemainingAtomic && !resumedFromPriorDay)
+        return { outcome: "refused", reason: "policy.perDay", money };
+      if ("ok" in decision && !decision.ok)
+        return { outcome: "refused", reason: decision.reason, money };
+      if ("approval" in decision || grossAtomic > approveAboveAtomic) {
+        if (input.approval && "ask" in input.approval) {
+          if (!(await input.approval.ask({ money, dayRemainingUsd })))
+            return { outcome: "declined", money };
+        } else if (!input.approval?.granted) {
+          return { outcome: "approval_needed", money };
         }
       }
-      throw error;
-    }
-  };
-  return input.pending
-    ? input.pending.withFundingLock(milestone.id, performFunding)
-    : performFunding();
+      requireChain(input.chain);
+      const performFunding = async (): Promise<FundTaskOutcome> => {
+        const currentReservation = input.pending?.retainedReservation
+          ? await input.pending.retainedReservation(milestone.id)
+          : retainedReservation;
+        const idempotencyKey = input.pending
+          ? await input.pending.reservationId(milestone.id, () => operationKey(input))
+          : operationKey(input);
+        // Reserve only after policy, approval, and chain availability. A raced cap
+        // failure propagates as SpendCapError; refusal outcomes above stay read-only.
+        const reservation = await reserveSpend(grossAtomic, input.caps, {
+          kind: "escrow-funding",
+          taskKey: milestone.workOrderId,
+          maxPerTaskAtomic,
+          wallet: input.wallet,
+          ledgerPath: input.ledgerPath,
+          now: input.now(),
+          reservationId: idempotencyKey,
+          reuseExistingEscrowReservation: input.pending !== undefined,
+          ...(currentReservation?.exposed === true && currentReservation.invalidated !== true
+            ? { resumeEscrowReservation: currentReservation }
+            : {}),
+        });
+        await input.pending?.bindReservation?.(milestone.id, {
+          id: idempotencyKey,
+          wallet: input.wallet,
+          amountAtomic: grossAtomic.toString(),
+          date: reservation.date,
+        });
+        try {
+          await journal.record({
+            protocol: "intent",
+            amount: grossAtomic.toString(),
+            reservationId: idempotencyKey,
+            reservedOn: reservation.date,
+          });
+          const fundingOperation = {
+            orderId: milestone.workOrderId,
+            escrowId: milestone.id,
+            grossBaseUnits: grossAtomic,
+            beforeFundingSignature: async (
+              authorization: import("./chain-port.js").FundingAuthorization,
+            ) =>
+              journal.record({
+                protocol: "intent",
+                amount: grossAtomic.toString(),
+                reservationId: idempotencyKey,
+                reservedOn: reservation.date,
+                authorization,
+              }),
+            ...(input.fundingIntent === undefined ? {} : { fundingIntent: input.fundingIntent }),
+            ...(input.counterparty ? { counterparty: input.counterparty } : {}),
+            idempotencyKey,
+          };
+          const result = await input.chain.fund(fundingOperation);
+          return { outcome: "done", money, result };
+        } catch (error) {
+          const exposed = input.pending ? await input.pending.exposure(milestone.id) : false;
+          if (
+            !reservation.reservationReused &&
+            !exposed &&
+            error instanceof TasksChainError &&
+            !error.broadcast &&
+            !error.authorizationExposed
+          ) {
+            try {
+              await input.pending?.invalidateReservation?.(milestone.id);
+              await releaseSpend(grossAtomic, {
+                ledgerPath: input.ledgerPath,
+                wallet: input.wallet,
+                now: input.now(),
+                reservedOn: reservation.date,
+                reservationId: idempotencyKey,
+              });
+              await input.pending?.clearReservation?.(milestone.id);
+              await journal.abandonUnsent();
+            } catch (rollbackError) {
+              throw new AggregateError(
+                [error, rollbackError],
+                "Task funding failed and its spend reservation could not be released.",
+                { cause: error },
+              );
+            }
+          }
+          throw error;
+        }
+      };
+      return input.pending
+        ? input.pending.withFundingLock(milestone.id, performFunding)
+        : performFunding();
+    },
+  );
 }
 
 export type TaskDeliveryFile = ({ path: string; name?: never } | { name: string; path?: never }) & {
@@ -925,15 +965,4 @@ function mayHaveBroadcast(error: unknown): boolean {
   return (
     typeof error === "object" && error !== null && "broadcast" in error && error.broadcast === true
   );
-}
-
-/** Floor policy USD to atomic units, including scientific notation, never round a cap up. */
-function policyAtomic(value: number): bigint {
-  if (!Number.isFinite(value) || value < 0)
-    throw new Error("Task policy USD amounts must be finite and non-negative.");
-  const [mantissa = "0", exponent = "0"] = value.toString().split("e");
-  const [whole = "0", fraction = ""] = mantissa.split(".");
-  const digits = BigInt(whole + fraction);
-  const scale = 6 + Number(exponent) - fraction.length;
-  return scale >= 0 ? digits * 10n ** BigInt(scale) : digits / 10n ** BigInt(-scale);
 }

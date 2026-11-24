@@ -579,6 +579,9 @@ export async function buildX402Payment(args: {
   nowSeconds?: number;
   maximumValidBeforeSeconds?: number;
   nonce?: Hex;
+  /** Validate and journal the exact EVM authorization before any signature exists. */
+  beforeSignTypedData?: (typedData: X402TypedData) => Promise<void>;
+  onSigned?: () => void;
   fetchImpl?: typeof fetch;
   paymentId?: string;
   beforeSign?: (evidence: X402SigningEvidence) => Promise<void>;
@@ -645,6 +648,7 @@ export async function buildX402Payment(args: {
       ? {}
       : { maximumValidBeforeSeconds: args.maximumValidBeforeSeconds }),
   });
+  await args.beforeSignTypedData?.(typedData);
   await args.beforeSign?.({
     network: args.quote.accepted.network,
     token: args.quote.accepted.asset,
@@ -652,6 +656,7 @@ export async function buildX402Payment(args: {
     authorization,
   });
   const signature = await args.signer.signTypedData(typedData);
+  args.onSigned?.();
   const payload: X402PaymentPayload = {
     x402Version: 2,
     resource: args.quote.resource,
@@ -675,6 +680,9 @@ export async function buildCompatibleX402Payment(args: {
   nowSeconds?: number;
   maximumValidBeforeSeconds?: number;
   nonce?: Hex;
+  /** Validate and journal the exact EVM authorization before any signature exists. */
+  beforeSignTypedData?: (typedData: X402TypedData) => Promise<void>;
+  onSigned?: () => void;
   fetchImpl?: typeof fetch;
   paymentId?: string;
   beforeSign?: (evidence: X402SigningEvidence) => Promise<void>;
@@ -686,6 +694,8 @@ export async function buildCompatibleX402Payment(args: {
   const payment = await buildX402Payment({
     signer: args.account,
     quote: args.quote,
+    ...(args.beforeSignTypedData ? { beforeSignTypedData: args.beforeSignTypedData } : {}),
+    ...(args.onSigned ? { onSigned: args.onSigned } : {}),
     ...(args.nowSeconds === undefined ? {} : { nowSeconds: args.nowSeconds }),
     ...(args.maximumValidBeforeSeconds === undefined
       ? {}

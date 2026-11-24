@@ -16,6 +16,7 @@ import {
   canonicalJson,
   TasksPartiesNotBoundError,
   TasksClientError,
+  TaskOperationError,
   createPendingTransactions,
   createTasksClient,
   missingTasksChain,
@@ -1050,7 +1051,7 @@ describe("task wallet and route boundaries", () => {
         title: "Build an API",
         brief: "Build a complete useful API.",
         amountUsd: "12.50",
-        deadline: "10m",
+        deadline: "1h",
         intake: "submissions",
         maxAwards: 3,
         webhookUrl: "https://example.test/hook",
@@ -1090,7 +1091,7 @@ describe("task wallet and route boundaries", () => {
           audience: "anyone",
           proofKinds: ["url", "file"],
           budget: { network: "eip155:8453", asset: "USDC", amountBaseUnits: "12500000" },
-          deadlineAt: "2026-10-08T12:10:00.000Z",
+          deadlineAt: "2026-10-08T13:00:00.000Z",
         },
       },
       expect.objectContaining({ idempotencyKey: expect.any(String) }),
@@ -1491,10 +1492,19 @@ describe("task MCP tools", () => {
             "dispute",
             "counter-evidence",
             "resolve-unmatched",
+            "close-rejected",
+            "approve-bond",
+            "claim-owed",
           ].includes(verb)
         ) {
           expect(tool.description).toMatch(/^Executes the user's own /u);
           expect(tool.description).toContain("nothing is custodial");
+        } else if (verb === "post") {
+          expect(tool.description).toContain("Posts a task with a budget");
+          expect(tool.description).toContain("local vault");
+          expect(tool.description).toContain("policy");
+        } else if (["award", "milestone", "cancel", "claim"].includes(verb)) {
+          expect(tool.description).toMatch(/hosted-prepared/u);
         } else {
           expect(tool.description).toContain("Does not move money");
         }
@@ -1847,6 +1857,13 @@ describe("task MCP tools", () => {
           "message needs sign-in. Call auth.link for the acting wallet.",
         );
         const ledgerBeforeRefusal = await readFile(ledgerPath);
+        // Policy checks use a fresh milestone: the funded one must refuse another attempt.
+        const policyId = "44444444-4444-4444-8444-444444444444";
+        const policyOrder = structuredClone(moneyOrder);
+        policyOrder.workOrder.id = policyId;
+        policyOrder.workOrder.milestones[0]!.id = "55555555-5555-4555-8555-555555555555";
+        policyOrder.workOrder.milestones[0]!.workOrderId = policyId;
+        policyOrder.workOrder.milestones[0]!.escrowState = "created";
         await mkdir(join(home, "agents"));
         await writeFile(
           join(home, "agents", "strict.json"),
@@ -1861,9 +1878,10 @@ describe("task MCP tools", () => {
             createdAt: "2026-10-08T00:00:00.000Z",
           }),
         );
+        getOrder.mockResolvedValueOnce(policyOrder);
         const refused = await behaviorServer.callTool({
           name: "tasks.fund",
-          arguments: { id: ID },
+          arguments: { id: policyId },
         });
         expect(refused).toMatchObject({
           isError: true,
@@ -1890,9 +1908,10 @@ describe("task MCP tools", () => {
             createdAt: "2026-10-08T00:00:00.000Z",
           }),
         );
+        getOrder.mockResolvedValueOnce(policyOrder);
         const approval = await behaviorServer.callTool({
           name: "tasks.fund",
-          arguments: { id: ID },
+          arguments: { id: policyId },
         });
         expect(approval).toMatchObject({
           isError: true,
@@ -1921,9 +1940,10 @@ describe("task MCP tools", () => {
           }),
         );
         await store.setSpendCaps("main", { perCallAtomic: "1000000", perDayAtomic: "99999" });
+        getOrder.mockResolvedValueOnce(policyOrder);
         const perDay = await behaviorServer.callTool({
           name: "tasks.fund",
-          arguments: { id: ID },
+          arguments: { id: policyId },
         });
         expect(perDay).toMatchObject({
           isError: true,
@@ -2015,9 +2035,10 @@ describe("task MCP tools", () => {
           },
         });
         try {
+          getOrder.mockResolvedValueOnce(policyOrder);
           const missingFund = await noChainServer.callTool({
             name: "tasks.fund",
-            arguments: { id: ID },
+            arguments: { id: policyId },
           });
           expect(missingFund).toMatchObject({ isError: true });
           expect(JSON.parse(missingFund.content[0]!.text)).toEqual({
@@ -2105,6 +2126,619 @@ describe("task MCP tools", () => {
       }
     } finally {
       await server.close();
+    }
+  });
+});
+
+describe("Tasks v2 local MCP parity", () => {
+  it("posts native v2 terms, records check-ins, filters pending actions and withdraws without signing", async () => {
+    const { v2Terms, v2Checkins, v2Pending } =
+      await import("../../../core/src/tasks/fixtures/tasks-v2.js");
+    const client = {
+      deployment: vi.fn(async () => ({ configured: true, network: "eip155:8453", feeBp: 0 })),
+      createOrder: vi.fn(async () => ({ workOrder: { id: ID } })),
+      checkin: vi.fn(async () => v2Checkins),
+      pending: vi.fn(async () => v2Pending),
+      submit: vi.fn(async () => ({ proposal: { id: ESCROW, state: "withdrawn" } })),
+    } as unknown as TasksClient;
+    const chain = { ...missingTasksChain, signScopeMessage: vi.fn() };
+    const { server } = await watchServer({
+      client,
+      chain,
+      now: () => new Date(NOW),
+      randomUUID: () => ID,
+    });
+    const posted = await server.callTool({
+      name: "tasks.post",
+      arguments: {
+        ...v2Terms,
+        title: "Build a page",
+        brief: "Build a working page with tests.",
+        amountUsd: "100",
+        deadline: "7d",
+      },
+    });
+    expect(posted.isError, JSON.stringify(posted)).not.toBe(true);
+    expect(client.createOrder).toHaveBeenCalledWith(expect.objectContaining(v2Terms), {
+      idempotencyKey: ID,
+    });
+    for (const status of ["on-track", "blocked", "need-input"]) {
+      const checkin = await server.callTool({
+        name: "tasks.checkin",
+        arguments: { id: ID, status, note: "Shortlist ready", link: "https://example.com/proof" },
+      });
+      expect(checkin.isError, JSON.stringify(checkin)).not.toBe(true);
+      expect(client.checkin).toHaveBeenLastCalledWith(
+        ID,
+        { status, note: "Shortlist ready", link: "https://example.com/proof" },
+        { idempotencyKey: ID },
+      );
+    }
+    const pending = await server.callTool({ name: "tasks.pending", arguments: { role: "worker" } });
+    expect(pending.structuredContent).toMatchObject(v2Pending);
+    expect(
+      (await server.callTool({ name: "tasks.pending", arguments: { role: "poster" } }))
+        .structuredContent,
+    ).toMatchObject({ pendingActions: [] });
+    const withdrawn = await server.callTool({
+      name: "tasks.submit",
+      arguments: { id: ID, withdraw: true, proposalId: ESCROW },
+    });
+    expect(withdrawn.isError, JSON.stringify(withdrawn)).not.toBe(true);
+    expect(client.submit).toHaveBeenCalledWith(
+      ID,
+      { withdraw: true, proposalId: ESCROW },
+      { idempotencyKey: ID },
+    );
+    expect(chain.signScopeMessage).not.toHaveBeenCalled();
+    expect(
+      (
+        await server.callTool({
+          name: "tasks.submit",
+          arguments: { id: ID, withdraw: true, proofUrls: ["https://example.com/proof"] },
+        })
+      ).isError,
+    ).toBe(true);
+  });
+  it("preserves the canonical hosted lifecycle and all recorded deck watch payloads", async () => {
+    const { v2Events, v2Lifecycle, v2NextAction } =
+      await import("../../../core/src/tasks/fixtures/tasks-v2.js");
+    const events = v2Events.map((event, i) => ({
+      ...event,
+      sequence: i + 1,
+      at: NOW,
+      actor: privateKeyToAccount(PRIVATE_KEY).address,
+    }));
+    const client = {
+      show: vi.fn(async () => ({
+        workOrder: { id: ID, title: "Task", version: "work-order-view-v1", milestones: [] },
+        lifecycle: v2Lifecycle,
+        nextAction: v2NextAction,
+      })),
+      events: vi.fn(async () => ({ events, nextAfter: events.length })),
+    } as unknown as TasksClient;
+    const { server } = await watchServer({ client, now: () => new Date(NOW) });
+    const shown = await server.callTool({ name: "tasks.show", arguments: { id: ID } });
+    expect(shown.structuredContent).toMatchObject({
+      lifecycle: v2Lifecycle,
+      nextAction: v2NextAction,
+    });
+    const watched = await server.callTool({
+      name: "tasks.watch",
+      arguments: { id: ID, waitSeconds: 1, until: "released" },
+    });
+    expect(watched.isError, JSON.stringify(watched)).not.toBe(true);
+    expect(watched.structuredContent).toMatchObject({ events, nextCursor: events.length });
+  });
+  it("keeps the posted task when T7 funding is unavailable", async () => {
+    const { v2FundingUnavailable } = await import("../../../core/src/tasks/fixtures/tasks-v2.js");
+    const client = {
+      deployment: vi.fn(async () => ({ configured: true, network: "eip155:8453", feeBp: 0 })),
+      post: vi.fn(async () => ({ task: { workOrder: { id: ID } }, funding: v2FundingUnavailable })),
+    } as unknown as TasksClient;
+    const { server } = await watchServer({ client, now: () => new Date(NOW) });
+    const result = await server.callTool({
+      name: "tasks.post",
+      arguments: {
+        title: "Build a page",
+        brief: "Build a working page.",
+        amountUsd: "100",
+        deadline: "7d",
+        fund: true,
+      },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      workOrder: { id: ID },
+      funding: v2FundingUnavailable,
+    });
+  });
+  it("never accepts model-supplied approval for post-and-fund", async () => {
+    const client = {
+      deployment: vi.fn(async () => ({ configured: true, network: "eip155:8453", feeBp: 0 })),
+      post: vi.fn(async () => ({ task: { workOrder: { id: ID } }, funding: { kind: "eip712" } })),
+      getOrder: vi.fn(async () => ({
+        workOrder: {
+          version: "work-order-view-v1",
+          id: ID,
+          milestones: [
+            {
+              id: ESCROW,
+              workOrderId: ID,
+              amountBaseUnits: "1000000",
+              escrowContract: "0x2222222222222222222222222222222222222222",
+            },
+          ],
+        },
+      })),
+    } as unknown as TasksClient;
+    const chain = { ...missingTasksChain, available: true, fund: vi.fn() };
+    const { server, home } = await watchServer({ client, chain, now: () => new Date(NOW) });
+    const result = await server.callTool({
+      name: "tasks.post",
+      arguments: {
+        title: "Build a page",
+        brief: "Build a working page.",
+        amountUsd: "1",
+        deadline: "7d",
+        fund: true,
+      },
+    });
+    expect(result.structuredContent).toMatchObject({ ok: false, approval: true });
+    expect(chain.fund).not.toHaveBeenCalled();
+    expect(await readFile(join(home, "spend-ledger.json"), "utf8").catch(() => null)).toBeNull();
+    const attemptedApproval = await server.callTool({
+      name: "tasks.post",
+      arguments: {
+        title: "Build a page",
+        brief: "Build a working page.",
+        amountUsd: "1",
+        deadline: "7d",
+        fund: true,
+        yes: true,
+      },
+    });
+    expect(attemptedApproval.isError).toBe(true);
+    expect(chain.fund).not.toHaveBeenCalled();
+  });
+  it("keeps tool descriptions free of the hosted guard phrase", async () => {
+    const { server } = await watchServer({ now: () => new Date(NOW) });
+    for (const tool of (await server.listTools()).tools.filter((tool) =>
+      tool.name.startsWith("tasks."),
+    ))
+      expect(tool.description).not.toMatch(/fund transfer/iu);
+  });
+});
+
+describe("hosted-prepared V2 participant tools", () => {
+  const worker = `0x${"33".repeat(20)}`;
+  it.each([
+    [
+      "milestone",
+      { action: "submit", i: 0, proof: [{ preset: "link", value: "https://example.test/proof" }] },
+      {
+        write: {
+          action: "submit",
+          i: 0,
+          proof: [{ preset: "link", value: "https://example.test/proof" }],
+        },
+      },
+    ],
+    [
+      "milestone",
+      { action: "reject", i: 0, reason: "Missing proof" },
+      { write: { action: "reject", i: 0, reason: "Missing proof" } },
+    ],
+    ["cancel", { scope: "remainder" }, { write: { action: "cancel-remainder" } }],
+    ["award", { worker }, { write: { action: "award", worker } }],
+    ["award", { winners: [worker] }, { write: { action: "award-bounty", winners: [worker] } }],
+    ["sign", { action: "award-consent" }, { consent: { action: "award-consent" } }],
+    [
+      "sign",
+      { action: "split-consent", i: 0, toWorker: "1000000" },
+      { consent: { action: "split-consent", i: 0, toWorker: "1000000" } },
+    ],
+    [
+      "claim",
+      { action: "pay", claimant: worker },
+      { write: { action: "pay-claim", claimant: worker } },
+    ],
+    [
+      "dispute",
+      { i: 0, evidence: "Proof text" },
+      { write: { action: "raise-dispute", i: 0, evidence: "Proof text" } },
+    ],
+    [
+      "counter-evidence",
+      { i: 0, evidence: "Counter proof" },
+      { write: { action: "counter-evidence", i: 0, evidence: "Counter proof" } },
+    ],
+  ])(
+    "dispatches %s through the shared executor without granting approval",
+    async (verb, fields, expected) => {
+      const executeV2 = vi.fn().mockResolvedValue({
+        ok: true,
+        orderId: ID,
+        operation: { id: ESCROW, state: "confirmed" },
+        lifecycle: { shape: "task", state: "Active" },
+        nextAction: { action: "none" },
+      });
+      const { server } = await watchServer({
+        client: {} as TasksClient,
+        chain: { ...missingTasksChain, executeV2 },
+        now: () => new Date(NOW),
+      });
+      const result = await server.callTool({
+        name: `tasks.${verb}`,
+        arguments: { id: ID, ...fields },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(executeV2).toHaveBeenCalledWith(
+        expect.objectContaining({ id: ID, approval: { granted: false }, ...expected }),
+      );
+      expect(result.structuredContent).toMatchObject({
+        operation: { state: "confirmed" },
+        lifecycle: { state: "Active" },
+        nextAction: { action: "none" },
+      });
+    },
+  );
+  it("rejects an out-of-range C0 index and incompatible award fields before signing", async () => {
+    const executeV2 = vi.fn();
+    const { server } = await watchServer({
+      client: {} as TasksClient,
+      chain: { ...missingTasksChain, executeV2 },
+      now: () => new Date(NOW),
+    });
+    expect(
+      (
+        await server.callTool({
+          name: "tasks.milestone",
+          arguments: { id: ID, action: "approve", i: 5 },
+        })
+      ).isError,
+    ).toBe(true);
+    expect(
+      (
+        await server.callTool({
+          name: "tasks.award",
+          arguments: { id: ID, worker, winners: [worker] },
+        })
+      ).isError,
+    ).toBe(true);
+    expect(executeV2).not.toHaveBeenCalled();
+  });
+});
+
+describe("V2 jury and reviewer tools", () => {
+  const COMMITMENT = `0x${"cd".repeat(32)}` as `0x${string}`;
+  const SALT = `0x${"5a".repeat(32)}` as `0x${string}`;
+  const RESOLVER = `0x${"99".repeat(20)}`;
+  function juryChain() {
+    const executeV2 = vi.fn().mockResolvedValue({
+      ok: true,
+      orderId: ID,
+      operation: { id: ESCROW, state: "confirmed" },
+      lifecycle: null,
+      nextAction: null,
+    });
+    const ballot = {
+      version: "vapi-tasks-ballot-v1",
+      orderId: ID,
+      chainId: 84532,
+      resolver: RESOLVER,
+      escrow: RESOLVER,
+      i: 0,
+      caseId: COMMITMENT,
+      voter: RESOLVER,
+      outcome: 1,
+      toWorker: "0",
+      salt: SALT,
+      commitment: COMMITMENT,
+      createdAt: NOW,
+    };
+    const juryV2 = {
+      assertJuryOpenable: vi.fn(async () => {}),
+      caseState: vi.fn(async () => ({ state: 3, name: "JuryDrawPending", resolver: RESOLVER })),
+      sealBallot: vi.fn(async () => ({ ballot, reused: false, path: "/home/ballot.json" })),
+      openBallot: vi.fn(async () => ({ ballot, path: "/home/ballot.json" })),
+      assertSealedCase: vi.fn(async () => {}),
+    };
+    return {
+      executeV2,
+      juryV2,
+      chain: { ...missingTasksChain, executeV2, juryV2 } as unknown as TasksChain,
+    };
+  }
+
+  it.each([
+    ["milestone", { action: "close-rejected", i: 0 }, { action: "close-rejected", i: 0 }],
+    [
+      "sign",
+      { action: "bump-consent-nonce", newNonce: "7" },
+      { action: "bump-consent-nonce", newNonce: "7" },
+    ],
+    ["close-rejected", { i: 0 }, { action: "close-rejected", i: 0 }],
+    ["bump-consent-nonce", { newNonce: "7" }, { action: "bump-consent-nonce", newNonce: "7" }],
+    ["prune-reviewer", { reviewer: RESOLVER }, { action: "prune-reviewer", reviewer: RESOLVER }],
+    [
+      "prune-reviewers",
+      { reviewers: [RESOLVER] },
+      { action: "prune-reviewers", reviewers: [RESOLVER] },
+    ],
+    ["jury", { i: 0, step: "open" }, { action: "open-jury", i: 0 }],
+    ["jury", { i: 2, step: "resolve" }, { action: "resolve", i: 2 }],
+    ["approve-bond", {}, { action: "approve-bond" }],
+    ["claim-owed", {}, { action: "claim-owed" }],
+    ["claim-owed", { to: RESOLVER }, { action: "claim-owed", to: RESOLVER }],
+    [
+      "vote",
+      { i: 0, action: "commit", outcome: "poster" },
+      { action: "commit-vote", i: 0, commitment: COMMITMENT },
+    ],
+    [
+      "vote",
+      { i: 0, action: "reveal" },
+      { action: "reveal-vote", i: 0, outcome: 1, toWorker: "0", salt: SALT },
+    ],
+  ])(
+    "runs tasks.%s through the shared executor without granting approval",
+    async (verb, fields, write) => {
+      const fake = juryChain();
+      const { server } = await watchServer({
+        client: {} as TasksClient,
+        chain: fake.chain,
+        now: () => new Date(NOW),
+      });
+      const result = await server.callTool({
+        name: `tasks.${verb}`,
+        arguments: { id: ID, ...fields },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(fake.executeV2).toHaveBeenCalledWith(
+        expect.objectContaining({ id: ID, approval: { granted: false }, write }),
+      );
+      // A sealed ballot's salt never appears in a tool result.
+      expect(JSON.stringify(result.structuredContent)).not.toContain(SALT.slice(2, 12));
+    },
+  );
+
+  it("returns no salt or vote when a vote step fails", async () => {
+    for (const failure of ["seal", "execute"] as const) {
+      const fake = juryChain();
+      if (failure === "seal")
+        fake.juryV2.sealBallot.mockRejectedValueOnce(
+          new Error(`voteCommitment reverted with args [0, 2, "40000000", "${SALT}"]`),
+        );
+      else
+        fake.executeV2.mockRejectedValueOnce(
+          new TaskOperationError("chain_error", `estimate failed for ${SALT}`, undefined, {
+            operation: { plan: { data: `0xdeadbeef${SALT.slice(2)}` } },
+          }),
+        );
+      const { server } = await watchServer({
+        client: {} as TasksClient,
+        chain: fake.chain,
+        now: () => new Date(NOW),
+      });
+      const result = await server.callTool({
+        name: "tasks.vote",
+        arguments:
+          failure === "seal"
+            ? { id: ID, i: 0, action: "commit", outcome: "split", toWorker: "40000000" }
+            : { id: ID, i: 0, action: "reveal" },
+      });
+      expect(result.isError, failure).toBe(true);
+      const text = JSON.stringify(result);
+      expect(text, failure).not.toContain(SALT.slice(2, 18));
+      if (failure === "seal") expect(text).not.toContain("40000000");
+    }
+  });
+
+  it("keeps hosted echoes of a reveal out of tasks.vote and tasks.status results", async () => {
+    const echo = { salt: SALT, toWorker: "40000000" };
+    const leaks = (value: unknown) => {
+      const text = JSON.stringify(value);
+      return text.includes(SALT.slice(2, 18)) || text.includes("40000000");
+    };
+    const fake = juryChain();
+    const original = fake.executeV2.getMockImplementation()!;
+    fake.executeV2.mockImplementation(
+      async () => ({ ...(await original()), debug: echo }) as never,
+    );
+    const prepared = {
+      id: ESCROW,
+      kind: "tasks-v2-write",
+      state: "prepared",
+      step: "v2-reveal-vote",
+      expectedActor: RESOLVER,
+      transactionHash: null,
+      plan: {
+        version: "work-transaction-plan-v2",
+        operationId: ESCROW,
+        step: "v2-reveal-vote",
+        chainId: 84532,
+        network: "eip155:84532",
+        from: RESOLVER,
+        to: RESOLVER,
+        data: `0xdeadbeef${SALT.slice(2)}`,
+        value: "0",
+      },
+    };
+    const { server } = await watchServer({
+      client: {
+        operationV2: vi.fn(async () => ({
+          orderId: ID,
+          operation: prepared,
+          recovered: false,
+          scanComplete: true,
+          debug: echo,
+        })),
+        getOrder: vi.fn(async () => ({ workOrder: { id: ID }, lifecycle: null, nextAction: null })),
+      } as unknown as TasksClient,
+      chain: fake.chain,
+      now: () => new Date(NOW),
+    });
+    const voted = await server.callTool({
+      name: "tasks.vote",
+      arguments: { id: ID, i: 0, action: "reveal" },
+    });
+    expect(voted.isError).not.toBe(true);
+    expect(leaks(voted)).toBe(false);
+    fake.executeV2.mockRejectedValueOnce(
+      new TasksClientError("http", `bad reveal ${JSON.stringify(echo)}`, 409, SALT.slice(2)),
+    );
+    const failed = await server.callTool({
+      name: "tasks.vote",
+      arguments: { id: ID, i: 0, action: "reveal" },
+    });
+    expect(failed.isError).toBe(true);
+    expect(JSON.parse((failed.content as Array<{ text: string }>)[0]!.text).code).toBe(
+      "v2_vote_rejected",
+    );
+    expect(leaks(failed)).toBe(false);
+    const status = await server.callTool({
+      name: "tasks.status",
+      arguments: { id: ID, operationId: ESCROW, step: "v2-reveal-vote" },
+    });
+    expect(status.isError, JSON.stringify(status)).not.toBe(true);
+    expect(status.structuredContent).toMatchObject({
+      operation: { plan: { data: "[redacted: reveal calldata]" } },
+    });
+    expect(leaks(status)).toBe(false);
+  });
+
+  it("validates jury and vote arguments before any signing", async () => {
+    const fake = juryChain();
+    const { server } = await watchServer({
+      client: {} as TasksClient,
+      chain: fake.chain,
+      now: () => new Date(NOW),
+    });
+    for (const arguments_ of [
+      { name: "tasks.jury", arguments: { id: ID, i: 0, step: "appeal" } },
+      { name: "tasks.jury", arguments: { id: ID, i: 5, step: "open" } },
+      { name: "tasks.vote", arguments: { id: ID, i: 0, action: "commit" } },
+      { name: "tasks.vote", arguments: { id: ID, i: 0, action: "commit", outcome: "split" } },
+      {
+        name: "tasks.vote",
+        arguments: { id: ID, i: 0, action: "commit", outcome: "worker", toWorker: "5" },
+      },
+      { name: "tasks.vote", arguments: { id: ID, i: 0, action: "reveal", outcome: "worker" } },
+      { name: "tasks.claim-owed", arguments: { id: ID, to: "0x1234" } },
+      { name: "tasks.reviewer-status", arguments: { address: "0x1234" } },
+    ]) {
+      const result = await server.callTool(arguments_);
+      expect(result.isError, JSON.stringify(arguments_)).toBe(true);
+      expect(JSON.parse((result.content as Array<{ text: string }>)[0]!.text).code).toBe(
+        "invalid_input",
+      );
+    }
+    expect(fake.executeV2).not.toHaveBeenCalled();
+    expect(fake.juryV2.sealBallot).not.toHaveBeenCalled();
+  });
+
+  it("reads reviewer status for an address from local RPC reads", async () => {
+    const values: Record<string, unknown> = {
+      implementation: RESOLVER,
+      DISPUTE_RESOLVER: RESOLVER,
+      registry: RESOLVER,
+      vapiId: RESOLVER,
+      stakeGate: RESOLVER,
+      staking: RESOLVER,
+      isReviewer: true,
+      hasId: false,
+      stakedBalance: 0n,
+      threshold: 1000n,
+      isEligible: false,
+      available: false,
+      suspended: false,
+      claimable: 0n,
+      missedReveals: 0,
+    };
+    const { server } = await watchServer({
+      client: {
+        deployment: vi.fn(async () => ({ configured: true, chainId: 84532 })),
+      } as unknown as TasksClient,
+      chain: juryChain().chain,
+      now: () => new Date(NOW),
+      rpcFor: () =>
+        ({
+          getChainId: async () => 84532,
+          readContract: async ({ functionName }: { functionName: string }) => values[functionName],
+        }) as unknown as import("viem").PublicClient,
+    });
+    vi.stubEnv("VAPI_TASKS_V2_ESCROW_FACTORY_84532", RESOLVER);
+    vi.stubEnv("VAPI_TASKS_V2_POOL_FACTORY_84532", RESOLVER);
+    vi.stubEnv("VAPI_TASKS_V2_USDC_84532", RESOLVER);
+    vi.stubEnv("VAPI_TASKS_V2_USDC_NAME_84532", "USD Coin");
+    vi.stubEnv("VAPI_TASKS_V2_USDC_VERSION_84532", "2");
+    vi.stubEnv("VAPI_TASKS_V2_DISPUTE_RESOLVER_V3_84532", RESOLVER);
+    const notice = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await server.callTool({
+        name: "tasks.reviewer-status",
+        arguments: { address: RESOLVER },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        isReviewer: true,
+        hasId: false,
+        staked: "0",
+        threshold: "1000",
+        meetsStake: false,
+        ready: false,
+      });
+    } finally {
+      notice.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("audit-3 outcome presentation", () => {
+  it.each(["show", "status"] as const)(
+    "labels cause 6 in tasks.%s as disputed without a winner",
+    async (verb) => {
+      const settlement = { cause: 6, paidToWorker: "100", disputed: false, disputeWinner: 1 };
+      const client = {
+        show: async () => ({
+          workOrder: {
+            id: ID,
+            title: "Task",
+            version: "work-order-view-v1",
+            milestones: [],
+            v2State: { outcomes: [settlement] },
+          },
+        }),
+        chainState: async () => ({
+          workOrderId: ID,
+          milestones: [],
+          observedAt: NOW,
+          outcomes: [settlement],
+        }),
+        events: async () => ({ events: [], nextAfter: 0 }),
+      } as unknown as TasksClient;
+      const { server } = await watchServer({ client, now: () => new Date(NOW) });
+      const result = await server.callTool({ name: `tasks.${verb}`, arguments: { id: ID } });
+      expect(result.isError).not.toBe(true);
+      for (const output of [JSON.stringify(result.structuredContent), result.content[0]!.text]) {
+        expect(output).toContain('"disputed":true,"disputeWinner":0');
+        expect(output).toContain(
+          "status quo final after round 2 without a verdict; no dispute winner",
+        );
+      }
+    },
+  );
+
+  it("warns reviewers that membership does not guarantee a vote and stake must stay through reveal", async () => {
+    const { server } = await watchServer({ client: {} as TasksClient, now: () => new Date(NOW) });
+    const tools = (await server.listTools()).tools;
+    for (const name of ["tasks.jury", "tasks.vote"]) {
+      const description = tools.find((tool) => tool.name === name)!.description;
+      expect(description).toContain("mayVote reports jury membership only");
+      expect(description).toContain("Do not touch your stake until you have revealed");
+      expect(description).toContain("even a cancelled unstake can cost the vote");
     }
   });
 });
