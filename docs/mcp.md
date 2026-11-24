@@ -185,6 +185,8 @@ Task reads require `tasks:read`; writes require `tasks:write`, which also grants
 account or vault. They return public vAPI documentation reference text, never
 instructions, and involve no wallet or payment. `docs.ask` is deliberately not
 an MCP tool: an agent can read and reason over the returned excerpts itself.
+Both tools support the new docs site and GitBook during the domain migration.
+Search results include section headings and anchors when the site provides them.
 
 Spend caps default to $0.10 per call and $1.00 per day.
 
