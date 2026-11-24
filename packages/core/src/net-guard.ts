@@ -51,7 +51,7 @@ export async function assertPublicUrl(
       options.timeoutMs ?? 5_000,
     );
   } catch {
-    throw guardError(url);
+    throw guardError(url, "unresolved");
   }
   if (addresses.length === 0 || addresses.some(isNonPublicAddress)) {
     throw guardError(url);
@@ -255,8 +255,94 @@ function isNonPublicIpv6(hextets: number[]): boolean {
   );
 }
 
-function guardError(url: URL): Error {
-  return new Error(
+/**
+ * A request the guard refused before connecting. `reason` is `unresolved` when
+ * the hostname's DNS lookup failed or timed out, and `blocked` otherwise.
+ */
+export class NetworkGuardError extends Error {
+  constructor(
+    message: string,
+    readonly reason: "blocked" | "unresolved",
+  ) {
+    super(message);
+    this.name = "NetworkGuardError";
+  }
+}
+
+function guardError(url: URL, reason: "blocked" | "unresolved" = "blocked"): NetworkGuardError {
+  return new NetworkGuardError(
     `URL hostname ${JSON.stringify(url.hostname)} is not allowed; private or internal destinations require allowPrivateNetwork true in the vAPI config.`,
+    reason,
   );
+}
+
+const PROXY_VARIABLES = [
+  "HTTPS_PROXY",
+  "https_proxy",
+  "HTTP_PROXY",
+  "http_proxy",
+  "ALL_PROXY",
+  "all_proxy",
+];
+const SYSTEM_ERROR_CODE = /^[A-Z][A-Z0-9_]{1,39}$/u;
+
+/**
+ * Says why a request to `url` never got an answer, in words that are safe to
+ * print: the host, and a Node system error code such as `ECONNREFUSED`, never
+ * the error's own message. When a proxy variable is set it adds how Node.js
+ * treats it: the proxy is used only with `NODE_USE_ENV_PROXY=1`, and the host
+ * must still resolve on this machine because the guard checks it first.
+ */
+export function describeNetworkFailure(
+  error: unknown,
+  url: URL,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const host = url.host;
+  let reason: string;
+  const guard = guardReason(error);
+  if (guard !== undefined) {
+    reason =
+      guard === "unresolved"
+        ? `the DNS lookup for ${host} failed`
+        : `${host} is not a public address`;
+  } else if (isTimeout(error)) {
+    reason = `the connection to ${host} timed out`;
+  } else {
+    const code = systemErrorCode(error);
+    reason = `could not connect to ${host}${code === undefined ? "" : ` (${code})`}`;
+  }
+  const proxy = PROXY_VARIABLES.find((name) => (env[name] ?? "").trim() !== "");
+  let hint = "";
+  if (proxy !== undefined) {
+    hint =
+      env.NODE_USE_ENV_PROXY === "1"
+        ? ` The request went through the proxy in ${proxy}.`
+        : ` ${proxy} is set, but Node.js uses it only with NODE_USE_ENV_PROXY=1 (Node.js 22.21 or later): run the command again with NODE_USE_ENV_PROXY=1.`;
+  }
+  return `${reason}.${hint}`;
+}
+
+/**
+ * The guard's reason for a refused request. Read by name, not `instanceof`:
+ * the package's entry points are bundled separately, so a guard error from one
+ * is not an instance of the class in another.
+ */
+function guardReason(error: unknown): "blocked" | "unresolved" | undefined {
+  if (!(error instanceof Error) || error.name !== "NetworkGuardError") return undefined;
+  const reason = (error as { reason?: unknown }).reason;
+  return reason === "blocked" || reason === "unresolved" ? reason : undefined;
+}
+
+function isTimeout(error: unknown): boolean {
+  return error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+}
+
+function systemErrorCode(error: unknown): string | undefined {
+  for (let current = error, depth = 0; current instanceof Error && depth < 3; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && SYSTEM_ERROR_CODE.test(code)) return code;
+    current = current.cause;
+  }
+  return undefined;
 }

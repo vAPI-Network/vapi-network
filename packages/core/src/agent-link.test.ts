@@ -308,6 +308,28 @@ describe("startDeviceLink", () => {
     },
   );
 
+  it("says why the start never reached vAPI, with the host and a safe error code", async () => {
+    const fetchImpl = (async () => {
+      throw new TypeError("fetch failed", {
+        cause: Object.assign(new Error("getaddrinfo ENOTFOUND api.vapinetwork.ai"), {
+          code: "ENOTFOUND",
+        }),
+      });
+    }) as typeof fetch;
+
+    const failure = await startDeviceLink({
+      apiBase: API_BASE,
+      account,
+      label: "researcher",
+      fetchImpl,
+    }).catch((error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: "http" });
+    expect((failure as Error).message).toMatch(
+      /^The vAPI agent link request failed: could not connect to api\.vapinetwork\.ai \(ENOTFOUND\)\./u,
+    );
+  });
+
   it("rejects an invalid device before making a request", async () => {
     const fetchImpl = vi.fn<typeof fetch>();
 

@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { assertPublicUrl, createPublicFetch, type LookupFn } from "./net-guard.js";
+import {
+  assertPublicUrl,
+  createPublicFetch,
+  describeNetworkFailure,
+  NetworkGuardError,
+  type LookupFn,
+} from "./net-guard.js";
 
 const guardedOptions = { allowPrivateNetwork: false } as const;
 const guardMessage = /allowPrivateNetwork true/;
@@ -162,5 +168,76 @@ describe("vAPI public network guard", () => {
       }),
     ).resolves.toBeUndefined();
     expect(lookup).not.toHaveBeenCalled();
+  });
+});
+
+describe("describeNetworkFailure", () => {
+  const url = new URL("https://api.vapinetwork.ai/oauth/device_authorization");
+
+  it("tells a failed DNS lookup apart from a blocked address", async () => {
+    const unresolved = await assertPublicUrl(url, {
+      ...guardedOptions,
+      lookup: vi.fn<LookupFn>().mockRejectedValue(new Error("getaddrinfo EAI_AGAIN")),
+    }).catch((error: unknown) => error);
+    const blocked = await assertPublicUrl(url, {
+      ...guardedOptions,
+      lookup: vi.fn<LookupFn>().mockResolvedValue(["10.0.0.5"]),
+    }).catch((error: unknown) => error);
+
+    expect(unresolved).toBeInstanceOf(NetworkGuardError);
+    expect(describeNetworkFailure(unresolved, url, {})).toBe(
+      "the DNS lookup for api.vapinetwork.ai failed.",
+    );
+    expect(describeNetworkFailure(blocked, url, {})).toBe(
+      "api.vapinetwork.ai is not a public address.",
+    );
+  });
+
+  it("names a system error code from the error or its cause, never the message", () => {
+    const refused = Object.assign(new Error("connect ECONNREFUSED 10.1.2.3:443 secret-ish"), {
+      code: "ECONNREFUSED",
+    });
+    const wrapped = new TypeError("fetch failed", { cause: refused });
+    const odd = Object.assign(new Error("boom"), { code: "not a code; rm -rf" });
+
+    expect(describeNetworkFailure(refused, url, {})).toBe(
+      "could not connect to api.vapinetwork.ai (ECONNREFUSED).",
+    );
+    expect(describeNetworkFailure(wrapped, url, {})).toBe(
+      "could not connect to api.vapinetwork.ai (ECONNREFUSED).",
+    );
+    expect(describeNetworkFailure(odd, url, {})).toBe("could not connect to api.vapinetwork.ai.");
+    expect(describeNetworkFailure(new DOMException("t", "TimeoutError"), url, {})).toBe(
+      "the connection to api.vapinetwork.ai timed out.",
+    );
+  });
+
+  it("names a proxy variable and how Node.js uses it", () => {
+    expect(
+      describeNetworkFailure(new Error("x"), url, { https_proxy: "http://proxy.internal:3128" }),
+    ).toBe(
+      "could not connect to api.vapinetwork.ai. https_proxy is set, but Node.js uses it only with NODE_USE_ENV_PROXY=1 (Node.js 22.21 or later): run the command again with NODE_USE_ENV_PROXY=1.",
+    );
+    expect(
+      describeNetworkFailure(new Error("x"), url, {
+        HTTPS_PROXY: "http://user:secret@proxy.internal:3128",
+        NODE_USE_ENV_PROXY: "1",
+      }),
+    ).toBe(
+      "could not connect to api.vapinetwork.ai. The request went through the proxy in HTTPS_PROXY.",
+    );
+    expect(describeNetworkFailure(new Error("x"), url, { HTTPS_PROXY: " " })).toBe(
+      "could not connect to api.vapinetwork.ai.",
+    );
+  });
+
+  it("reads a guard error from another bundle by name", () => {
+    const foreign = Object.assign(new Error("not allowed"), {
+      name: "NetworkGuardError",
+      reason: "unresolved",
+    });
+    expect(describeNetworkFailure(foreign, url, {})).toBe(
+      "the DNS lookup for api.vapinetwork.ai failed.",
+    );
   });
 });

@@ -8,7 +8,7 @@ import { createSiweMessage } from "viem/siwe";
 import { FileLockedError } from "./atomic-file.js";
 import { appendAudit } from "./audit.js";
 import { DEVICE_NAME_PATTERN } from "./device.js";
-import { createPublicFetch } from "./net-guard.js";
+import { createPublicFetch, describeNetworkFailure } from "./net-guard.js";
 import type { SecretStore } from "./secret-store.js";
 import type { AgentLink, WalletName, WalletStore } from "./wallet-store.js";
 
@@ -841,8 +841,8 @@ async function safeFetch(
 ): Promise<Response> {
   try {
     return await fetchImpl(input, init);
-  } catch {
-    throw httpError("The vAPI agent link request failed.");
+  } catch (error) {
+    throw httpError(`The vAPI agent link request failed: ${networkFailure(error, input)}`);
   }
 }
 
@@ -853,9 +853,19 @@ async function safeAgentFetch(
 ): Promise<Response> {
   try {
     return await fetchImpl(input, init);
-  } catch {
-    throw httpError("The vAPI agent request failed.");
+  } catch (error) {
+    throw httpError(`The vAPI agent request failed: ${networkFailure(error, input)}`);
   }
+}
+
+function networkFailure(error: unknown, input: RequestInfo | URL): string {
+  let url: URL;
+  try {
+    url = new URL(input instanceof Request ? input.url : input);
+  } catch {
+    return "the request did not reach vAPI.";
+  }
+  return describeNetworkFailure(error, url);
 }
 
 function deviceAuthorizationError(
