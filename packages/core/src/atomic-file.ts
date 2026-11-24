@@ -25,6 +25,7 @@ interface AtomicFileTestHooks {
   beforeLockAttempt?: (path: string) => void | Promise<void>;
   afterLockCreate?: (path: string) => void | Promise<void>;
   beforeStaleLockBreak?: (path: string) => void | Promise<void>;
+  afterLockRename?: (tombPath: string) => void | Promise<void>;
   afterMismatchedLockRename?: (path: string) => void | Promise<void>;
   afterMismatchedLockRestore?: (path: string) => void | Promise<void>;
   isProcessAlive?: (pid: number) => boolean;
@@ -178,13 +179,17 @@ async function removeStaleLock(path: string): Promise<void> {
     const pid = lockOwnerPid(owner);
     if (pid !== undefined && processIsAlive(pid)) return;
     await atomicFileTestHooks?.beforeStaleLockBreak?.(path);
-    await removeOwnedLock(path, [owner]);
+    await removeOwnedLock(path, [owner], true);
   } catch (error) {
     if (!hasCode(error, "ENOENT")) throw error;
   }
 }
 
-async function removeOwnedLock(path: string, owners: readonly string[]): Promise<void> {
+async function removeOwnedLock(
+  path: string,
+  owners: readonly string[],
+  staleDeadOwner = false,
+): Promise<void> {
   const tombPath = `${path}.stale.${randomBytes(16).toString("hex")}`;
   try {
     await rename(path, tombPath);
@@ -193,7 +198,7 @@ async function removeOwnedLock(path: string, owners: readonly string[]): Promise
       await removeOwnedTombs(path, owners);
       const currentOwner = await readFile(path, "utf8").catch(() => undefined);
       if (currentOwner !== undefined && owners.includes(currentOwner)) {
-        await removeOwnedLock(path, owners);
+        await removeOwnedLock(path, owners, staleDeadOwner);
       }
       return;
     }
@@ -203,6 +208,7 @@ async function removeOwnedLock(path: string, owners: readonly string[]): Promise
   let pendingError: unknown;
   let renamedOwner: string | undefined;
   try {
+    await atomicFileTestHooks?.afterLockRename?.(tombPath);
     renamedOwner = await readFile(tombPath, "utf8");
     if (!owners.includes(renamedOwner) && !lockOwnerReleased(renamedOwner)) {
       await atomicFileTestHooks?.afterMismatchedLockRename?.(path);
@@ -211,6 +217,7 @@ async function removeOwnedLock(path: string, owners: readonly string[]): Promise
       await atomicFileTestHooks?.afterMismatchedLockRestore?.(path);
     }
   } catch (error) {
+    if (hasCode(error, "ENOENT")) return;
     pendingError = error;
   }
 
@@ -222,7 +229,7 @@ async function removeOwnedLock(path: string, owners: readonly string[]): Promise
       !tombUnlinkTolerated(
         error,
         renamedOwner !== undefined &&
-          lockOwnerReleased(renamedOwner) &&
+          (lockOwnerReleased(renamedOwner) || staleDeadOwner) &&
           owners.includes(renamedOwner),
       ) &&
       pendingError === undefined
