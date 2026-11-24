@@ -21,6 +21,10 @@ sentence under it is the summary shown on the
 - SDK, CLI and MCP actions for closing rejected milestones, revoking consent nonces and pruning reviewer seats; audit-3 event decoding, including dispute fee flows and surplus sweeps. Verified Base mainnet deployment pins are included.
 - Hosted action aliases for milestone closing and consent nonce revocation in CLI and local MCP. The bundled SDK exports the Tasks API through its `tasks` namespace.
 
+## 0.15.2 - 2026-11-24
+
+`vapi login` says why a link request never reached vAPI, lock files survive more races, and `vapi agent run --result-file` prints refill transaction hashes again.
+
 ### Fixed
 
 - A caller of a file lock that loses a race over a removed lock file keeps waiting for the lock instead of failing. Before, a tomb another caller had already deleted could make the operation reject with `ENOENT`, and on Windows a waiter breaking a crashed process's lock could reject with `EPERM` or `EBUSY` naming a `.stale.` file.
