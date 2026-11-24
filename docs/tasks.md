@@ -99,7 +99,7 @@ Scope acceptance derives the local role from the order: the poster is the client
 
 Before signing, the CLI shows the direction, counterparty, amount, deadline and local signer. Signing requires `--yes` or, in an interactive non-JSON terminal outside CI, the prompt `Sign this scope? [y/N]`. Without consent in non-interactive mode it exits `3` with approval needed and does not sign or create the local binding.
 
-Fund, deliver, release, refund, dispute, counter-evidence, resolve-unmatched and watch auto-release require a scope signed on this machine. `--counterparty` only confirms the counterparty already stored in that local binding; it cannot import or recover a scope accepted in the console or on another machine. JSON and MCP scope results expose the verified address as `terms.counterparty`. The current scope payload does not contain parties. A follow-up in vapi-app must introduce `work-scope-signature-v2` with buyer and seller inside the signed payload.
+Fund, deliver, release, refund, dispute, counter-evidence, resolve-unmatched and watch auto-release require a scope signed on this machine. `--counterparty` only confirms the counterparty already stored in that local binding; it cannot import or recover a scope accepted in the console or on another machine. JSON and MCP scope results expose the verified address as `terms.counterparty`. The current scope payload does not contain parties. A later scope format will carry buyer and seller inside the signed payload.
 
 Base Sepolia pins default work and review durations to 604800 seconds. Locally configured defaults use `tasksEscrowDurationOverrides`, alongside `tasksEscrowFactoryOverrides`. Environment overrides are `VAPI_TASKS_WORK_DURATION_SECONDS_<chainId>` and `VAPI_TASKS_REVIEW_WINDOW_SECONDS_<chainId>`. A missing signed work duration requires a trusted local default; server readiness defaults are never used to authorize a duration.
 
@@ -252,10 +252,12 @@ Approval never bypasses a cap. Per-task and per-day refusals return `ok:false` w
 
 ## V2 participant writes
 
-Hosted V2 writes are off by default. No deployed V2 tuple or live write has been
-verified for these commands. Wire contracts follow vapi-app `tasks-v1`, PR #490
-(T11) and integration PR #493. V1 proposal awards, scope signing and escrow
-operations keep their existing path when the hosted API selects V1.
+Tasks V2 runs on Base mainnet (chain 8453) against the contracts pinned in the
+client. The hosted API decides per task whether a V2 write is available. When it
+reports a V1 order or V2 writes switched off, commands keep the V1 path, and an
+explicitly requested V2 action is refused with `v2_writes_disabled`. V1 proposal
+awards, scope signing and escrow operations keep their existing path when the
+hosted API selects V1.
 
 ```sh
 vapi task milestone <id> --index 0 submit --proof https://example.com/delivery
