@@ -999,6 +999,303 @@ describe("vapi agent run", () => {
     expect(JSON.stringify(envelope)).not.toContain(API_KEY);
   });
 
+  it.each([true, false])(
+    "prints the already-redacted refill result once (json: %s)",
+    async (json) => {
+      const home = await homeWithAgent();
+      const resultFile = join(home, "runs", "printed-refill.result.json");
+      const refill = refillPurchase();
+      const transaction = refill.receipt.settlement!.transaction!;
+      expect(transaction === PRIVATE_KEY).toBe(false);
+      const warning = refill.warnings![0]!.message;
+      refill.warnings![0]!.message += ` ${API_KEY}`;
+      const captured = captureIo();
+
+      expect(
+        await runCli(
+          [
+            "agent",
+            "run",
+            "researcher",
+            "Answer",
+            "--result-file",
+            resultFile,
+            ...(json ? ["--json"] : []),
+          ],
+          captured.io,
+          {
+            ...createDependencies({ env: { VAPI_API_KEY: API_KEY } }),
+            router: {
+              routerChat: async () => ({
+                ...textReply(`Done. ${PRIVATE_KEY} ${API_KEY} ${transaction}`),
+                refill,
+              }),
+            },
+          },
+        ),
+      ).toBe(0);
+
+      const file = await readFile(resultFile, "utf8");
+      for (const text of [...captured.stdout, ...captured.stderr, file]) {
+        expect(text.includes(PRIVATE_KEY)).toBe(false);
+        expect(text.includes(API_KEY)).toBe(false);
+      }
+      const envelope = JSON.parse(file);
+      const answer = "Done. [redacted private key] [redacted] [redacted private key]";
+      expect(envelope.result.answer).toBe(answer);
+      expect(envelope.result.refills[0].receipt.transaction).toBe(transaction);
+      if (json) {
+        const printed = onlyStdout(captured);
+        expect(printed.split("\n")).toHaveLength(1);
+        expect(JSON.parse(printed)).toEqual(envelope.result);
+        expect(captured.stderr).toEqual([]);
+      } else {
+        expect(onlyStdout(captured)).toBe(answer);
+        expect(captured.stderr).toEqual([
+          `Receipt: ${refill.receipt.id}`,
+          `Transaction: ${transaction}`,
+          `${warning} [redacted]`,
+        ]);
+      }
+    },
+  );
+
+  it.each([true, false])(
+    "redacts progress before the result-file result (json: %s)",
+    async (json) => {
+      const home = await homeWithAgent();
+      const resultFile = join(home, "runs", "progress.result.json");
+      const captured = captureIo();
+
+      expect(
+        await runCli(
+          [
+            "agent",
+            "run",
+            "researcher",
+            "Answer",
+            "--result-file",
+            resultFile,
+            ...(json ? ["--json"] : []),
+          ],
+          captured.io,
+          createDependencies({
+            env: { VAPI_API_KEY: API_KEY },
+            agent: {
+              runAgent: async (_task, deps) => {
+                deps.onEvent!({
+                  type: "declined",
+                  ref: "report",
+                  reason: `Do not pay ${PRIVATE_KEY} ${API_KEY}`,
+                });
+                return {
+                  runId: deps.runId!,
+                  answer: "Done.",
+                  paidUsd: 0,
+                  steps: 1,
+                  stoppedBecause: { type: "stopped", reason: "finished" },
+                };
+              },
+            },
+          }),
+        ),
+      ).toBe(0);
+
+      expect(allOutput(captured).includes(PRIVATE_KEY)).toBe(false);
+      expect(allOutput(captured).includes(API_KEY)).toBe(false);
+      const progress = "✗ declined report: Do not pay [redacted private key] [redacted]";
+      if (json) {
+        expect(captured.stderr).toEqual([progress]);
+        expect(JSON.parse(onlyStdout(captured)).answer).toBe("Done.");
+      } else {
+        expect(captured.stdout).toEqual([progress, "Done."]);
+        expect(captured.stderr).toEqual([]);
+      }
+    },
+  );
+
+  it.each([true, false])(
+    "redacts a rejected attached run in the result file and error output (json: %s)",
+    async (json) => {
+      const home = await homeWithAgent();
+      const resultFile = join(home, "runs", "error.result.json");
+      const captured = captureIo();
+
+      expect(
+        await runCli(
+          [
+            "agent",
+            "run",
+            "researcher",
+            "Answer",
+            "--result-file",
+            resultFile,
+            ...(json ? ["--json"] : []),
+          ],
+          captured.io,
+          createDependencies({
+            env: { VAPI_API_KEY: API_KEY },
+            agent: {
+              runAgent: async () => {
+                throw new Error(`Run failed: ${PRIVATE_KEY} ${API_KEY}`);
+              },
+            },
+          }),
+        ),
+      ).toBe(1);
+
+      const file = await readFile(resultFile, "utf8");
+      for (const text of [...captured.stdout, ...captured.stderr, file]) {
+        expect(text.includes(PRIVATE_KEY)).toBe(false);
+        expect(text.includes(API_KEY)).toBe(false);
+      }
+      const message = "Run failed: [redacted private key] [redacted]";
+      expect(JSON.parse(file)).toEqual({ v: 1, exitCode: 1, error: { message } });
+      if (json) {
+        expect(JSON.parse(onlyStdout(captured))).toEqual({ error: message, exitCode: 1 });
+        expect(captured.stderr).toEqual([]);
+      } else {
+        expect(captured.stdout).toEqual([]);
+        expect(captured.stderr).toEqual([message]);
+      }
+    },
+  );
+
+  it.each(["finished", "stopped"] as const)(
+    "redacts a key inside a JSON-shaped line of a %s result-file run",
+    async (outcome) => {
+      const home = await homeWithAgent();
+      const resultFile = join(home, "runs", "json-shaped.result.json");
+      // Valid JSON whose string value decodes to the key; as plain text it does not match.
+      const line = JSON.stringify({ key: PRIVATE_KEY }).replace("0x", "0\\u0078");
+      expect(line.includes(PRIVATE_KEY)).toBe(false);
+      expect((JSON.parse(line) as { key: string }).key === PRIVATE_KEY).toBe(true);
+      const refill = refillPurchase();
+      const transaction = refill.receipt.settlement!.transaction!;
+      refill.warnings![0]!.message = line;
+      const captured = captureIo();
+
+      expect(
+        await runCli(
+          ["agent", "run", "researcher", "Answer", "--result-file", resultFile],
+          captured.io,
+          createDependencies({
+            agent: {
+              runAgent: async (_task, deps) => ({
+                runId: deps.runId!,
+                answer: outcome === "finished" ? line : null,
+                paidUsd: 0,
+                steps: 1,
+                stoppedBecause:
+                  outcome === "finished"
+                    ? { type: "stopped", reason: "finished" }
+                    : { type: "stopped", reason: "error", detail: line },
+                refills: [
+                  {
+                    receipt: {
+                      id: refill.receipt.id,
+                      amountUsd: 5,
+                      network: "eip155:8453",
+                      transaction,
+                    },
+                    balance: refill.balance,
+                    warnings: refill.warnings!,
+                  },
+                ],
+              }),
+            },
+          }),
+        ),
+      ).toBe(outcome === "finished" ? 0 : 1);
+
+      const redacted = JSON.stringify({ key: "[redacted private key]" });
+      for (const text of [...captured.stdout, ...captured.stderr]) {
+        expect(text.includes(line)).toBe(false);
+        expect(text.includes(PRIVATE_KEY)).toBe(false);
+      }
+      expect(captured.stdout).toEqual(outcome === "finished" ? [redacted] : []);
+      expect(captured.stderr).toEqual([
+        `Receipt: ${refill.receipt.id}`,
+        `Transaction: ${transaction}`,
+        redacted,
+        ...(outcome === "finished" ? [] : [redacted]),
+      ]);
+    },
+  );
+
+  it("redacts the --json result of a result-file run a second time and keeps the refill hash", async () => {
+    const home = await homeWithAgent();
+    const resultFile = join(home, "runs", "second-pass.result.json");
+    // An environment secret that the first pass's own marker contains.
+    const marker = "private key";
+    const refill = refillPurchase();
+    const transaction = refill.receipt.settlement!.transaction!;
+    const captured = captureIo();
+
+    expect(
+      await runCli(
+        ["agent", "run", "researcher", "Answer", "--result-file", resultFile, "--json"],
+        captured.io,
+        {
+          ...createDependencies({ env: { EXAMPLE_PASSPHRASE: marker } }),
+          router: {
+            routerChat: async () => ({ ...textReply(`Done. ${PRIVATE_KEY}`), refill }),
+          },
+        },
+      ),
+    ).toBe(0);
+
+    const printed = onlyStdout(captured);
+    expect(printed.includes(PRIVATE_KEY)).toBe(false);
+    expect(printed.includes(marker)).toBe(false);
+    const result = JSON.parse(printed) as {
+      answer: string;
+      refills: Array<{ receipt: { transaction: string } }>;
+    };
+    expect(result.answer).toBe("Done. [redacted [redacted]]");
+    expect(result.refills[0]!.receipt.transaction).toBe(transaction);
+    expect(captured.stderr).toEqual([]);
+  });
+
+  it("redacts a non-hash refill transaction identically in the result file and output", async () => {
+    const home = await homeWithAgent();
+    const resultFile = join(home, "runs", "non-hash.result.json");
+    const purchase = refillPurchase();
+    const refill = {
+      ...purchase,
+      receipt: {
+        ...purchase.receipt,
+        settlement: {
+          ...purchase.receipt.settlement!,
+          transaction: `pending ${PRIVATE_KEY} ${API_KEY}`,
+        },
+      },
+    };
+    const captured = captureIo();
+
+    expect(
+      await runCli(
+        ["agent", "run", "researcher", "Answer", "--result-file", resultFile, "--json"],
+        captured.io,
+        {
+          ...createDependencies({ env: { VAPI_API_KEY: API_KEY } }),
+          router: { routerChat: async () => ({ ...textReply("Done."), refill }) },
+        },
+      ),
+    ).toBe(0);
+
+    const file = await readFile(resultFile, "utf8");
+    for (const text of [...captured.stdout, ...captured.stderr, file]) {
+      expect(text.includes(PRIVATE_KEY)).toBe(false);
+      expect(text.includes(API_KEY)).toBe(false);
+    }
+    const envelope = JSON.parse(file);
+    expect(envelope.result.refills[0].receipt.transaction).toBe(
+      "pending [redacted private key] [redacted]",
+    );
+    expect(JSON.parse(onlyStdout(captured))).toEqual(envelope.result);
+  });
+
   it("writes an atomic success envelope, honours env run ids, and keeps secrets out", async () => {
     const home = await homeWithAgent();
     const runId = "run_111111111111111111111111";
