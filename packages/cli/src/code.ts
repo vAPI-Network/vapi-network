@@ -260,7 +260,7 @@ export async function codeCommand(
   let result: Awaited<ReturnType<typeof routerCredentials>>;
   for (;;) {
     try {
-      result = await credentials(routerDeps(target, dependencies));
+      result = await credentials(await routerDeps(target, dependencies));
       break;
     } catch (error) {
       if (error instanceof RouterClientError && error.code === "not_linked" && !linked) {
@@ -276,7 +276,7 @@ export async function codeCommand(
       } else if (error instanceof RouterClientError && error.code === "no_router_key" && !rotated) {
         rotated = true;
         await (dependencies.router?.rotateRouterKey ?? rotateRouterKey)(
-          routerDeps(target, dependencies),
+          await routerDeps(target, dependencies),
         );
       } else throw error;
     }
@@ -322,7 +322,7 @@ export async function codeCommand(
   let compute: string;
   try {
     const usage = await (dependencies.router?.routerUsage ?? routerUsage)(
-      routerDeps(target, dependencies),
+      await routerDeps(target, dependencies),
     );
     const reset = new Date(usage.compute.resetsAt);
     if (!Number.isFinite(reset.getTime())) throw new Error("invalid reset time");

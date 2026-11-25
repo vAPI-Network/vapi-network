@@ -12,6 +12,11 @@ sentence under it is the summary shown on the
 
 ## Unreleased
 
+### Fixed
+
+- `vapi login`, `vapi logout`, `vapi whoami`, `vapi router`, `vapi stake`, `vapi task`, `vapi code`, `vapi agent`, `vapi docs` and cloud backup honor `allowPrivateNetwork` in the config. Before, they kept the address check on, so on a machine whose DNS answers with proxy addresses such as `198.18.0.0/15` they failed with `api.vapinetwork.ai is not a public address.` even with the flag set. With the flag unset nothing changes.
+- Router model, usage and chat errors say why the request never reached vAPI, the way `vapi login` does: `The vAPI Router usage request failed: api.vapinetwork.ai is not a public address.` Before, they printed `The vAPI Router usage request failed.` with no reason.
+
 ## 0.16.0 - 2026-11-24
 
 Tasks V2 runs on Base mainnet from the CLI, the SDK and local MCP, against the audited contracts pinned in the client.

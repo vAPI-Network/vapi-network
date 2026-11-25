@@ -1,4 +1,4 @@
-import { readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -35,7 +35,13 @@ import { exportKeystoreKeys } from "@vapi-network/core/secrets";
 
 import { parseArguments, requiredPositional, UsageError } from "./args.js";
 import { baseUsdcBalanceReader } from "./balance-reader.js";
-import { getEnvironment, isInteractive, type CliDependencies, type CliIo } from "./cli-context.js";
+import {
+  getEnvironment,
+  isInteractive,
+  loadCommandFetch,
+  type CliDependencies,
+  type CliIo,
+} from "./cli-context.js";
 import { offerDashboardLink } from "./dashboard.js";
 import { runLoginFlow } from "./login.js";
 import { registryBaseUrl } from "./publish-cli.js";
@@ -175,7 +181,7 @@ export async function accountsListCommand(
           account: linked.name,
           secrets: getSecretStore(dependencies),
           wallets: store,
-          fetchImpl: await siblingsFetchImpl(dependencies),
+          fetchImpl: await loadCommandFetch(dependencies),
           signal: controller.signal,
           ...(dependencies.now === undefined ? {} : { now: () => dependencies.now!().getTime() }),
         }),
@@ -258,20 +264,6 @@ function outputSiblingsError(
   }
   printLocalAccounts(accounts, io);
   io.stderr(message);
-}
-
-async function siblingsFetchImpl(dependencies: CliDependencies): Promise<typeof fetch> {
-  if (dependencies.fetchImpl !== undefined) return dependencies.fetchImpl;
-  const configPath = getVapiPaths().config;
-  let config;
-  try {
-    await stat(configPath);
-    config = await loadConfig(configPath, process.env);
-  } catch (error) {
-    if (!isMissingFile(error)) throw error;
-    config = getDefaultConfig(process.env);
-  }
-  return createPublicFetch({ allowPrivateNetwork: config.allowPrivateNetwork ?? false });
 }
 
 function shortAddress(address: string): string {

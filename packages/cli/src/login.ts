@@ -1,6 +1,5 @@
 import {
   activeAgentMarker,
-  createPublicFetch,
   ensureDeviceName,
   formatUsdc,
   getVapiPaths,
@@ -21,7 +20,13 @@ import {
 } from "@vapi-network/core/agent-link";
 
 import { parseArguments } from "./args.js";
-import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
+import {
+  commandFetch,
+  getEnvironment,
+  loadCommandFetch,
+  type CliDependencies,
+  type CliIo,
+} from "./cli-context.js";
 import { fetchWalletIdentity, formatIdentityLines } from "./identity.js";
 import { openInBrowser } from "./platform.js";
 import { registryBaseUrl } from "./publish-cli.js";
@@ -63,7 +68,7 @@ export async function runLoginFlow(
   ];
   const config = await loadConfig(paths.config, process.env, { notice: io.stderr });
   const apiBase = options.apiBase ?? registryBaseUrl(config);
-  const fetchImpl = dependencies.fetchImpl ?? createPublicFetch({ allowPrivateNetwork: false });
+  const fetchImpl = commandFetch(dependencies, config);
   const secrets = getSecretStore(dependencies);
   const device = await ensureDeviceName({
     env: getEnvironment(dependencies),
@@ -167,7 +172,7 @@ export async function logoutCommand(
     maximumPositionals: 0,
   });
   const target = await targetWallet(parsed, dependencies);
-  const fetchImpl = dependencies.fetchImpl ?? createPublicFetch({ allowPrivateNetwork: false });
+  const fetchImpl = await loadCommandFetch(dependencies, getVapiPaths(target.store.home).config);
   await forgetAgentLink({
     secrets: getSecretStore(dependencies),
     wallets: target.store,
@@ -261,7 +266,7 @@ async function lookupWalletIdentity(
     return await fetchWalletIdentity({
       baseUrl: registryBaseUrl(config),
       wallet: address,
-      ...(dependencies.fetchImpl === undefined ? {} : { fetchImpl: dependencies.fetchImpl }),
+      fetchImpl: commandFetch(dependencies, config),
     });
   } catch {
     return { ok: false };
@@ -300,7 +305,7 @@ export async function agentLinkStatus(
       secrets,
       wallets: target.store,
       wallet: target.name,
-      ...(dependencies.fetchImpl === undefined ? {} : { fetchImpl: dependencies.fetchImpl }),
+      fetchImpl: await loadCommandFetch(dependencies, getVapiPaths(target.store.home).config),
       ...(dependencies.now === undefined ? {} : { now: () => dependencies.now!().getTime() }),
     };
     return await withAgentCredentialLock(target.store, `wallet:${target.name}`, async () => {

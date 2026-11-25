@@ -1,16 +1,13 @@
 import { activeAgentMarker } from "@vapi-network/core";
 import { AGENT_LINK_REVOKED_MESSAGE } from "@vapi-network/core/agent-link";
-import {
-  RouterClientError,
-  ownerStake,
-  type RouterClientDeps,
-} from "@vapi-network/core/router-client";
+import { RouterClientError, ownerStake } from "@vapi-network/core/router-client";
 import { formatUnits } from "viem";
 
 import { UsageError, parseArguments } from "./args.js";
 import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
 import { openInBrowser } from "./platform.js";
-import { getSecretStore, targetWallet, type WalletTarget } from "./wallet-session.js";
+import { routerDeps } from "./router.js";
+import { targetWallet } from "./wallet-session.js";
 
 const WALLET_OPTION = "--wallet";
 export const STAKE_URL = "https://api.vapinetwork.ai/stake";
@@ -46,7 +43,9 @@ async function statusCommand(
   });
   const target = await targetWallet(parsed, dependencies);
   const readStake = dependencies.router?.ownerStake ?? ownerStake;
-  const result = await withRouterError(() => readStake(routerDeps(target, dependencies)));
+  const result = await withRouterError(async () =>
+    readStake(await routerDeps(target, dependencies)),
+  );
   const stakeFormatted = formatUnits(BigInt(result.stake), 18);
   if (json) {
     io.stdout(
@@ -88,15 +87,6 @@ async function openCommand(
     (dependencies.openUrl ?? openInBrowser)(STAKE_URL);
   }
   io.stdout(json ? JSON.stringify({ url: STAKE_URL }) : STAKE_URL);
-}
-
-function routerDeps(target: WalletTarget, dependencies: CliDependencies): RouterClientDeps {
-  return {
-    secrets: getSecretStore(dependencies),
-    wallets: target.store,
-    wallet: target.name,
-    ...(dependencies.fetchImpl === undefined ? {} : { fetchImpl: dependencies.fetchImpl }),
-  };
 }
 
 async function withRouterError<T>(operation: () => Promise<T>): Promise<T> {

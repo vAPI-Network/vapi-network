@@ -55,6 +55,8 @@ The raw file may also contain an `apiKey` fallback on platforms without an OS se
 
 The `device` field in `config.json` names the device sent with link requests, uses 1 to 32 lowercase letters, digits, or dashes, and is written from the hostname on first use.
 
+`allowPrivateNetwork` applies to every request the CLI makes to vAPI, including sign-in, Router, Tasks and cloud backup, as well as to discovery. A machine whose DNS answers with proxy addresses such as `198.18.0.0/15`, as behind a local proxy or a container egress gateway, needs it too; it turns the address check off for every destination, so only set it on a machine you trust.
+
 `BASE_RPC_URL` overrides the Base RPC. `ARC_RPC_URL` overrides the Arc mainnet RPC. `ARC_TESTNET_RPC_URL` and
 `SOLANA_RPC_URL` point those two networks at an endpoint you trust. On first
 use of the default home, the client copies an existing `~/.vapi/agent-cash/`

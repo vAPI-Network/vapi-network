@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import {
-  createPublicFetch,
   getCanonicalX402Usdc,
   getVapiPaths,
   KeystoreError,
@@ -99,6 +98,7 @@ import {
   type CliIo,
   type WalletTarget,
 } from "./cli.js";
+import { commandFetch } from "./cli-context.js";
 
 import { taskV2Command } from "./task-v2.js";
 import { TASK_JURY_VERBS, taskJuryCommand } from "./task-jury.js";
@@ -341,6 +341,7 @@ export async function taskContext(
   const env = getEnvironment(dependencies);
   const config = await loadConfig(getVapiPaths().config, env, { notice: io.stderr });
   const baseUrl = registryBaseUrl(config);
+  const fetchImpl = commandFetch(dependencies, config);
   let target: WalletTarget | undefined;
   try {
     target = await targetWallet(parsed, dependencies);
@@ -363,17 +364,14 @@ export async function taskContext(
             wallet: target.name,
             baseUrl,
             signInHint: "Run vapi login for this server.",
-            ...(dependencies.fetchImpl === undefined ? {} : { fetchImpl: dependencies.fetchImpl }),
+            fetchImpl,
             ...(dependencies.now === undefined ? {} : { now: () => dependencies.now!().getTime() }),
           }),
         );
   const options: TasksClientOptions = {
     baseUrl,
     ...(token === undefined ? {} : { token }),
-    fetch: publicNotFoundFetch(
-      dependencies.fetchImpl ?? createPublicFetch({ allowPrivateNetwork: false }),
-      baseUrl,
-    ),
+    fetch: publicNotFoundFetch(fetchImpl, baseUrl),
   };
   const injected = dependencies.tasks?.client;
   const client =

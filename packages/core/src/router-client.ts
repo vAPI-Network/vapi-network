@@ -19,7 +19,7 @@ import { sweepAboveCeiling } from "./ceiling.js";
 import type { SpendCaps, VapiConfig } from "./config.js";
 import { getVapiPaths, loadConfig } from "./config.js";
 import type { VapiPaymentAccount } from "./keystore.js";
-import { createPublicFetch } from "./net-guard.js";
+import { createPublicFetch, describeNetworkFailure } from "./net-guard.js";
 import { explorerAddressUrl, formatUsdc, getNetworkDefinition, requireRpcUrl } from "./networks.js";
 import { appendReceipt, readReceipts, syncReceipts, type Receipt } from "./receipts.js";
 import type { PaymentWarning } from "./payment-warning.js";
@@ -205,13 +205,17 @@ export async function listRouterModels(deps: {
   fetchImpl?: typeof fetch;
 }): Promise<RouterModel[]> {
   const fetchImpl = deps.fetchImpl ?? publicFetch;
+  const url = `${trimTrailingSlashes(deps.apiBase)}/api/router/models`;
   let response: Response;
   try {
-    response = await fetchImpl(`${trimTrailingSlashes(deps.apiBase)}/api/router/models`, {
+    response = await fetchImpl(url, {
       method: "GET",
     });
-  } catch {
-    throw new RouterClientError("http", "The vAPI Router model request failed.");
+  } catch (error) {
+    throw new RouterClientError(
+      "http",
+      transportFailureMessage("The vAPI Router model request failed.", error, url),
+    );
   }
   if (!response.ok) {
     throw new RouterClientError(
@@ -1215,9 +1219,10 @@ async function sendRouterChat(
   keyUsed: ChatResult["keyUsed"],
 ): Promise<ChatResult> {
   const fetchImpl = deps.fetchImpl ?? publicFetch;
+  const chatUrl = `${routerBaseUrl}/v1/chat/completions`;
   let response: Response;
   try {
-    response = await fetchImpl(`${routerBaseUrl}/v1/chat/completions`, {
+    response = await fetchImpl(chatUrl, {
       method: "POST",
       headers: {
         authorization: `Bearer ${routerKey}`,
@@ -1233,8 +1238,11 @@ async function sendRouterChat(
         ...(request.tool_choice === undefined ? {} : { tool_choice: request.tool_choice }),
       }),
     });
-  } catch {
-    throw new RouterClientError("http", "The vAPI Router request failed.");
+  } catch (error) {
+    throw new RouterClientError(
+      "http",
+      transportFailureMessage("The vAPI Router request failed.", error, chatUrl),
+    );
   }
 
   const body = await responseText(response);
@@ -1698,13 +1706,25 @@ async function consoleRequest(
   knownLink?: AgentLink,
 ): Promise<Response> {
   const link = knownLink ?? (await linkedWallet(deps));
+  // agentFetch rewords a transport error, so the original is kept here to say
+  // why the request never reached vAPI.
+  const transport = deps.fetchImpl ?? publicFetch;
+  let transportFailure: { error: unknown; input: RequestInfo | URL } | undefined;
+  const observedFetch: typeof fetch = async (input, requestInit) => {
+    try {
+      return await transport(input, requestInit);
+    } catch (error) {
+      transportFailure = { error, input };
+      throw error;
+    }
+  };
   try {
     return await agentFetch(
       {
         secrets: deps.secrets,
         wallets: deps.wallets,
         wallet: deps.wallet,
-        ...(deps.fetchImpl === undefined ? {} : { fetchImpl: deps.fetchImpl }),
+        fetchImpl: observedFetch,
       },
       `${trimTrailingSlashes(link.apiBase)}${path}`,
       init,
@@ -1713,8 +1733,28 @@ async function consoleRequest(
     if (error instanceof AgentLinkError && error.code === "not_linked") {
       throw linkStatusError(error);
     }
-    throw new RouterClientError("http", failureMessage);
+    throw new RouterClientError(
+      "http",
+      transportFailure === undefined
+        ? failureMessage
+        : transportFailureMessage(failureMessage, transportFailure.error, transportFailure.input),
+    );
   }
+}
+
+/** "The … request failed." plus the reason the request never reached the service. */
+function transportFailureMessage(
+  failureMessage: string,
+  error: unknown,
+  input: RequestInfo | URL,
+): string {
+  let url: URL;
+  try {
+    url = new URL(input instanceof Request ? input.url : input);
+  } catch {
+    return failureMessage;
+  }
+  return `${failureMessage.replace(/\.$/u, "")}: ${describeNetworkFailure(error, url)}`;
 }
 
 async function verifyAgentLink(deps: RouterClientDeps): Promise<void> {

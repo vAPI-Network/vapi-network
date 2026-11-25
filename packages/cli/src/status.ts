@@ -160,7 +160,7 @@ export async function collectStatus(
     agents: {
       routerUsage: async (name, signal) =>
         await readUsage(
-          routerDeps(await statusTarget(wallets, name, dependencies), {
+          await routerDeps(await statusTarget(wallets, name, dependencies), {
             ...dependencies,
             fetchImpl: withDeadlineSignal(fetchImpl, signal),
           }),

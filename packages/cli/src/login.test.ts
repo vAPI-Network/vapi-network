@@ -1,11 +1,11 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSiweMessage } from "viem/siwe";
 
-import { type SecretStore, WalletStore } from "@vapi-network/core";
+import { createPublicFetch, type SecretStore, WalletStore } from "@vapi-network/core";
 import {
   AGENT_LINK_STATEMENT,
   AGENT_LINK_REVOKED_MESSAGE,
@@ -18,6 +18,12 @@ import {
 } from "@vapi-network/core/agent-link";
 
 import { runCli, type CliDependencies, type CliIo } from "./cli.js";
+
+// A pass-through spy: tests read the options a command gives the address guard.
+vi.mock("@vapi-network/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@vapi-network/core")>();
+  return { ...actual, createPublicFetch: vi.fn(actual.createPublicFetch) };
+});
 
 const PASSPHRASE = "test-only-passphrase";
 const ACCESS_TOKEN = "access-token-that-must-stay-secret";
@@ -812,6 +818,64 @@ describe("vapi whoami and logout", () => {
     expect(entries[accounts.tokens]).toBeUndefined();
     expect(entries[accounts.routerStake]).toBeUndefined();
     expectNoSecrets(allOutput(captured));
+  });
+});
+
+describe("vapi login and logout with allowPrivateNetwork", () => {
+  async function allowPrivateNetwork(home: string): Promise<void> {
+    const path = join(home, "config.json");
+    const config = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+    await writeFile(path, JSON.stringify({ ...config, allowPrivateNetwork: true }));
+  }
+
+  it("signs in through a transport built with the flag on", async () => {
+    await allowPrivateNetwork(await initializedHome());
+    const start = vi.fn<typeof startDeviceLink>(async () => START);
+    const poll = vi.fn<typeof pollDeviceLink>(async () => RESULT);
+    vi.mocked(createPublicFetch).mockClear();
+
+    expect(
+      await runCli(
+        ["login", "--account", "researcher", "--no-browser"],
+        captureIo().io,
+        linkDependencies({ agentLink: { startDeviceLink: start, pollDeviceLink: poll } }),
+      ),
+    ).toBe(0);
+
+    const spy = vi.mocked(createPublicFetch);
+    expect(spy).toHaveBeenCalledWith({ allowPrivateNetwork: true });
+    const transport =
+      spy.mock.results[spy.mock.calls.findIndex(([options]) => options.allowPrivateNetwork)]!.value;
+    expect(start.mock.calls[0]![0].fetchImpl).toBe(transport);
+    expect(poll.mock.calls[0]![0].fetchImpl).toBe(transport);
+  });
+
+  it("signs out through a transport built with the flag on", async () => {
+    const home = await initializedHome();
+    await allowPrivateNetwork(home);
+    expect(
+      await runCli(
+        ["login", "--account", "researcher", "--no-browser"],
+        captureIo().io,
+        linkDependencies(),
+      ),
+    ).toBe(0);
+    const revoke = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+    vi.mocked(createPublicFetch).mockClear();
+    vi.mocked(createPublicFetch).mockImplementationOnce(() => revoke);
+
+    expect(
+      await runCli(["logout", "--account", "researcher", "--json"], captureIo().io, {
+        interactive: false,
+        env: {},
+        secretStore: currentSecretStore(),
+      }),
+    ).toBe(0);
+
+    expect(createPublicFetch).toHaveBeenCalledOnce();
+    expect(createPublicFetch).toHaveBeenCalledWith({ allowPrivateNetwork: true });
+    expect(revoke).toHaveBeenCalled();
+    expect((await WalletStore.open(home)).entry("researcher")?.link).toBeUndefined();
   });
 });
 

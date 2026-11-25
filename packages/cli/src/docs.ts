@@ -1,6 +1,13 @@
 import { askDocs, readDocs, searchDocs } from "@vapi-network/core";
 
-import { getEnvironment, output, type CliDependencies, type CliIo } from "./cli-context.js";
+import {
+  commandFetch,
+  getEnvironment,
+  loadCommandFetch,
+  output,
+  type CliDependencies,
+  type CliIo,
+} from "./cli-context.js";
 import { UsageError, parseArguments, requiredPositional } from "./args.js";
 
 const DOCS_USAGE =
@@ -32,7 +39,7 @@ async function docsAskCommand(
 ): Promise<void> {
   const parsed = parseArguments(argv, { valueOptions: new Set(), maximumPositionals: 1 });
   const question = requiredPositional(parsed.positionals[0], "<question>", DOCS_USAGE);
-  const result = await askDocs(question, requestOptions(dependencies));
+  const result = await askDocs(question, await requestOptions(dependencies));
   output(
     io,
     json,
@@ -54,7 +61,7 @@ async function docsSearchCommand(
 ): Promise<void> {
   const parsed = parseArguments(argv, { valueOptions: new Set(), maximumPositionals: 1 });
   const query = requiredPositional(parsed.positionals[0], "<query>", DOCS_USAGE);
-  const result = await searchDocs(query, requestOptions(dependencies));
+  const result = await searchDocs(query, await requestOptions(dependencies));
   output(
     io,
     json,
@@ -73,14 +80,15 @@ async function docsReadCommand(
 ): Promise<void> {
   const parsed = parseArguments(argv, { valueOptions: new Set(), maximumPositionals: 1 });
   const page = requiredPositional(parsed.positionals[0], "<url-or-path>", DOCS_USAGE);
-  const result = await readDocs(page, requestOptions(dependencies));
+  const result = await readDocs(page, await requestOptions(dependencies));
   output(io, json, result, result.markdown);
 }
 
-function requestOptions(dependencies: CliDependencies) {
+async function requestOptions(dependencies: CliDependencies) {
   return {
     env: getEnvironment(dependencies),
-    ...(dependencies.fetchImpl === undefined ? {} : { fetchImpl: dependencies.fetchImpl }),
+    // The docs must stay readable with a config that cannot be read: keep the address check on.
+    fetchImpl: await loadCommandFetch(dependencies).catch(() => commandFetch(dependencies, {})),
   };
 }
 
