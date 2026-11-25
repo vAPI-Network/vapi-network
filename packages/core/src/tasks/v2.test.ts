@@ -16,7 +16,7 @@ describe("Tasks v2 post terms", () => {
     expect(result.terms.milestones).toEqual(milestones);
     expect(milestones[0]!.deadlineAt).toBe("2026-10-11T12:00:00.000Z");
   });
-  it("refuses a post with any milestone leaving less than the one-hour minimum work time", () => {
+  it("requires the API's three-hour lead for a task and for each of its milestones", () => {
     expect(() =>
       prepareTaskPost(
         {
@@ -28,10 +28,48 @@ describe("Tasks v2 post terms", () => {
         },
         now,
       ),
-    ).toThrow("at least one hour");
-    expect(() => prepareTaskPost({ deadline: "20m", amountUsd: "1" }, now)).toThrow(
-      "at least one hour",
+    ).toThrow("Milestone deadlines must be at least 3 hours from now");
+    // The API measures from when the post arrives (MIN_WORK_TIME 1 h + award margin 1 h +
+    // funding lead 1 h), so the bare three hours are refused too.
+    for (const deadline of ["20m", "2h", "3h", "180m"])
+      expect(() => prepareTaskPost({ deadline, amountUsd: "1" }, now), deadline).toThrow(
+        "Task deadlines must be at least 3 hours from now when vAPI receives the post, so the task can still be funded and awarded. Use 181m or more.",
+      );
+    expect(prepareTaskPost({ deadline: "181m", amountUsd: "1" }, now).deadlineAt).toBe(
+      new Date(now.getTime() + 181 * 60_000).toISOString(),
     );
+    expect(() =>
+      prepareTaskPost(
+        { deadline: "3d", milestones: [parseTaskMilestone("1|First|2h", 1, now)] },
+        now,
+      ),
+    ).toThrow("Milestone deadlines must be at least 3 hours from now");
+    // Bounties, pools and legacy submissions posts keep the ten-minute floor.
+    expect(
+      prepareTaskPost({ shape: "bounty", deadline: "10m", rewardPerWinner: "1" }, now).terms.shape,
+    ).toBe("bounty");
+    expect(
+      prepareTaskPost({ deadline: "10m", amountUsd: "1", intake: "submissions" }, now).amount,
+    ).toBe(1_000_000n);
+    // The exception ends where the callers start sending shape terms: the API reads those as a
+    // task and asks for the three hours, so the client refuses them before the request.
+    const legacy = { deadline: "30m", amountUsd: "1", intake: "submissions" as const };
+    for (const withTerms of [
+      { proofSpec: [{ preset: "text" as const }] },
+      { checkin: "24h" as const },
+      { milestones: [parseTaskMilestone("1|First|30m", 1, now)] },
+    ])
+      expect(
+        () => prepareTaskPost({ ...legacy, ...withTerms }, now),
+        JSON.stringify(withTerms),
+      ).toThrow("deadlines must be at least 3 hours from now when vAPI receives the post");
+    expect(() => prepareTaskPost({ ...legacy, shape: "task" }, now)).toThrow(
+      "Task deadlines must be at least 3 hours from now",
+    );
+    expect(
+      prepareTaskPost({ ...legacy, deadline: "181m", proofSpec: [{ preset: "text" }] }, now).terms
+        .shape,
+    ).toBe("task");
   });
   it("uses per-winner market budgets and total escrow amounts", () => {
     const result = prepareTaskPost(

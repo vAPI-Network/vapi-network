@@ -28,8 +28,10 @@ import {
   type AgentRouterUsage,
   type RouterClientDeps,
 } from "@vapi-network/core/router-client";
+import { taskPolicyForWallet } from "@vapi-network/core/tasks";
 import {
   createAgentRunDeps,
+  registeredAgentProfileSchema,
   type RunAgentDeps,
   type Runtime,
   type RuntimeStatus,
@@ -1706,6 +1708,207 @@ describe("vapi agent lifecycle", () => {
     expect(captured.stdout).toEqual([
       `The wallet researcher still holds $2.5. Send it back with vapi sweep ${OWNER} --account researcher.`,
     ]);
+  });
+
+  it("does not bring back account task limits when an agent profile is removed", async () => {
+    // A plain account whose owner raised its task limits with `vapi accounts caps`.
+    const home = await temporaryHome();
+    process.env.VAPI_KEYSTORE_PASSWORD = PASSPHRASE;
+    const store = await WalletStore.open(home, { secrets: currentSecretStore() });
+    await store.create("researcher", PASSPHRASE, {
+      spendCaps: { perCallAtomic: "1000000", perDayAtomic: "2000000" },
+    });
+    await store.updateTaskPolicy("researcher", () => ({
+      maxPerTaskUsd: 5000,
+      approveAboveUsd: 5000,
+    }));
+    const policy = () =>
+      taskPolicyForWallet({
+        directory: home,
+        wallet: "researcher",
+        schema: registeredAgentProfileSchema,
+      });
+    expect(await policy()).toMatchObject({ maxPerTaskUsd: 5000, source: "account" });
+    const instructions = join(home, "instructions.md");
+    await writeFile(instructions, "Research carefully.");
+    const dependencies = createDependencies({
+      agentLink: {
+        startDeviceLink: async () => START,
+        pollDeviceLink: async () => LINK_RESULT,
+        forgetAgentLink: vi.fn<typeof forgetAgentLink>(async () => undefined as never),
+      },
+    });
+
+    // A profile takes over, and says that the account's own limits are gone.
+    const created = captureIo();
+    expect(
+      await runCli(
+        [
+          "agent",
+          "create",
+          "researcher",
+          "--model",
+          "router/test",
+          "--instructions",
+          instructions,
+          "--json",
+        ],
+        created.io,
+        dependencies,
+      ),
+    ).toBe(0);
+    expect(JSON.parse(onlyStdout(created))).toMatchObject({ clearedAccountTaskLimits: true });
+    expect(created.stderr).toContain(
+      "The task limits set for account researcher with vapi accounts caps were cleared. The agent profile holds them now: 100 USD per task, approval above 0.5 USD.",
+    );
+    expect(await policy()).toMatchObject({
+      maxPerTaskUsd: 100,
+      approveAboveUsd: 0.5,
+      source: "agent-profile",
+    });
+    expect((await WalletStore.open(home)).entry("researcher")).not.toHaveProperty("taskPolicy");
+
+    // With the profile removed the account is at the defaults, not back at 5,000 USD.
+    expect(
+      await runCli(["agent", "revoke", "researcher", "--json"], captureIo().io, dependencies),
+    ).toBe(0);
+    await expect(readAgentProfile(home, "researcher")).rejects.toThrow("No agent named researcher");
+    expect(await policy()).toEqual({
+      maxPerTaskUsd: 100,
+      approveAboveUsd: 0.5,
+      autoReleaseBelowUsd: 25,
+      source: "defaults",
+    });
+  });
+
+  describe("an account that already exists", () => {
+    /** A plain account whose owner tightened it: 10 USD per task, approval for everything. */
+    async function tightenedAccount() {
+      const home = await temporaryHome();
+      process.env.VAPI_KEYSTORE_PASSWORD = PASSPHRASE;
+      const store = await WalletStore.open(home, { secrets: currentSecretStore() });
+      await store.create("researcher", PASSPHRASE, {
+        spendCaps: { perCallAtomic: "1000000", perDayAtomic: "2000000" },
+      });
+      await store.updateTaskPolicy("researcher", () => ({ maxPerTaskUsd: 10, approveAboveUsd: 0 }));
+      const instructions = join(home, "instructions.md");
+      await writeFile(instructions, "Research carefully.");
+      const agentLink = {
+        startDeviceLink: async () => START,
+        pollDeviceLink: async () => LINK_RESULT,
+        forgetAgentLink: vi.fn<typeof forgetAgentLink>(async () => undefined as never),
+      };
+      const create = async (options: string[], overrides: Partial<CliDependencies> = {}) => {
+        const captured = captureIo();
+        const code = await runCli(
+          [
+            "agent",
+            "create",
+            "researcher",
+            "--model",
+            "router/test",
+            "--instructions",
+            instructions,
+            ...options,
+            "--json",
+          ],
+          captured.io,
+          createDependencies({ agentLink, ...overrides }),
+        );
+        return { code, captured };
+      };
+      const policy = () =>
+        taskPolicyForWallet({
+          directory: home,
+          wallet: "researcher",
+          schema: registeredAgentProfileSchema,
+        });
+      const revoke = async () =>
+        runCli(
+          ["agent", "revoke", "researcher", "--json"],
+          captureIo().io,
+          createDependencies({ agentLink }),
+        );
+      return { home, create, policy, revoke };
+    }
+    const TIGHTENED = { maxPerTaskUsd: 10, approveAboveUsd: 0, source: "account" };
+
+    it.each([
+      [
+        ["--max-per-task", "999999", "--yes"],
+        { env: { CLAUDECODE: "1" } },
+        "--max-per-task 999999",
+      ],
+      [["--approve-above", "5", "--yes"], {}, "--approve-above 5"],
+      [["--call-budget", "5", "--yes"], { env: { CLAUDECODE: "1" } }, "--call-budget 5"],
+      [
+        ["--call-budget", "5", "--yes"],
+        { env: { CLAUDECODE: "1" }, interactive: true, stdinIsTTY: true },
+        "--call-budget 5",
+      ],
+    ] as const)(
+      "refuses %j from an agent session or without a terminal, and changes nothing",
+      async (options, overrides, named) => {
+        const { home, create, policy } = await tightenedAccount();
+        const { code, captured } = await create([...options], overrides);
+        expect(code).toBe(2);
+        // With --json the refusal is the one line on stdout.
+        const refusal = JSON.parse(onlyStdout(captured)) as { error: string; exitCode: number };
+        expect(refusal.exitCode).toBe(2);
+        expect(refusal.error).toBe(
+          `Account researcher already exists, and ${named} would raise what it has now: 10 USD per task, approval above 0 USD, 2 USD per day. Raising a limit is a decision for a person. Nothing was changed. ${
+            "env" in overrides
+              ? "CLAUDECODE is set, so this is an agent session."
+              : "Standard input is not a terminal."
+          } Run the command yourself in a terminal, or leave these values at or below the account's.`,
+        );
+        expect(await policy()).toMatchObject(TIGHTENED);
+        await expect(readAgentProfile(home, "researcher")).rejects.toThrow("No agent named");
+        expect((await WalletStore.open(home)).entry("researcher")?.spendCaps).toEqual({
+          perCallAtomic: "1000000",
+          perDayAtomic: "2000000",
+        });
+      },
+    );
+
+    it("carries the owner's stricter task limits into the profile and back out of it", async () => {
+      const { create, policy, revoke } = await tightenedAccount();
+      // No limit option, no terminal: the profile takes 10 and 0, not the defaults of 100 and 0.5.
+      const { code, captured } = await create([]);
+      expect(code).toBe(0);
+      expect(JSON.parse(onlyStdout(captured))).toMatchObject({
+        maxPerTaskUsd: 10,
+        approveAboveUsd: 0,
+      });
+      expect(JSON.parse(onlyStdout(captured))).not.toHaveProperty("clearedAccountTaskLimits");
+      expect(captured.stderr).toContain(
+        "Account researcher keeps the task limits its owner set below the defaults. When the agent profile is removed it returns to 10 USD per task and approval above 0 USD. The agent profile holds the limits now: 10 USD per task, approval above 0 USD.",
+      );
+      expect(await policy()).toMatchObject({
+        maxPerTaskUsd: 10,
+        approveAboveUsd: 0,
+        source: "agent-profile",
+      });
+      expect(await revoke()).toBe(0);
+      expect(await policy()).toMatchObject(TIGHTENED);
+    });
+
+    it("lets a person at a terminal raise the profile, and returns to the owner's limits afterwards", async () => {
+      const { create, policy, revoke } = await tightenedAccount();
+      const { code } = await create(["--max-per-task", "500", "--approve-above", "0", "--yes"], {
+        interactive: true,
+        stdinIsTTY: true,
+      });
+      expect(code).toBe(0);
+      expect(await policy()).toMatchObject({
+        maxPerTaskUsd: 500,
+        approveAboveUsd: 0,
+        source: "agent-profile",
+      });
+      // Removing the profile does not leave the account at the laxer defaults.
+      expect(await revoke()).toBe(0);
+      expect(await policy()).toMatchObject(TIGHTENED);
+    });
   });
 
   it("still revokes when the retained wallet balance cannot be read", async () => {

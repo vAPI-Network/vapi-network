@@ -210,6 +210,147 @@ describe("postTask", () => {
   });
 });
 
+describe("postTask with funding while vAPI reports Tasks as unavailable", () => {
+  it("stops before the order is created, and still posts without funding", async () => {
+    const post = vi.fn();
+    const createOrder = vi.fn().mockResolvedValue({ workOrder: { id: ORDER } });
+    const context = {
+      client: {
+        deployment: vi.fn().mockResolvedValue({
+          configured: false,
+          chainId: 8453,
+          network: "eip155:8453",
+          feeBp: null,
+        }),
+        post,
+        createOrder,
+      } as unknown as TasksClient,
+      chain: missingTasksChain,
+      baseUrl: "https://tasks.example",
+      randomUUID: () => KEY,
+      signInHint: "Run vapi login.",
+    };
+    const input = {
+      order: {
+        title: "Build an API",
+        description: "Build the complete public API.",
+        policyFamily: "software-api" as const,
+      },
+      amount: 1_000_000n,
+      deadlineAt: "2026-10-10T12:00:00.000Z",
+    };
+    await expect(postTask(context, { ...input, fund: true })).rejects.toMatchObject({
+      code: "tasks_unavailable",
+      message:
+        "vAPI reports Tasks as unavailable on Base right now. Nothing was posted or signed and no money moved. Try again later.",
+    });
+    expect(post).not.toHaveBeenCalled();
+    expect(createOrder).not.toHaveBeenCalled();
+    expect(await postTask(context, input)).toMatchObject({ postingMovesMoney: false });
+    expect(createOrder).toHaveBeenCalledOnce();
+  });
+});
+
+describe("postTask with the live fee and limit from the pinned factory", () => {
+  // Production readiness on 2026-11-25 carried no fee.
+  const createOrder = vi.fn().mockResolvedValue({ workOrder: { id: ORDER } });
+  const context = (limitsV2: import("./v2-limits.js").TaskV2LimitsReader) => ({
+    client: {
+      deployment: vi.fn().mockResolvedValue({
+        configured: false,
+        chainId: 8453,
+        network: "eip155:8453",
+        feeBp: null,
+      }),
+      createOrder,
+    } as unknown as TasksClient,
+    chain: missingTasksChain,
+    limitsV2,
+    baseUrl: "https://tasks.example",
+    randomUUID: () => KEY,
+    signInHint: "Run vapi login.",
+  });
+  const order = {
+    title: "Build an API",
+    description: "Build the complete public API.",
+    policyFamily: "software-api" as const,
+  };
+  const live = async (chainId: number, shape: "task" | "bounty" | "pool") => ({
+    chainId,
+    shape,
+    feeBp: 0,
+    maxBaseUnits: 5_000_000_000n,
+  });
+  it("shows the on-chain fee instead of fee unavailable", async () => {
+    const onFeeUnavailable = vi.fn();
+    const reader = vi.fn(live);
+    const outcome = await postTask(context(reader), {
+      order,
+      amount: 100_000_000n,
+      deadlineAt: "2026-10-10T12:00:00.000Z",
+      onFeeUnavailable,
+    });
+    expect(reader).toHaveBeenCalledWith(8453, "task");
+    expect(outcome).toMatchObject({
+      feeUnavailable: false,
+      money: { feeBp: 0, line: "$100.00 gross · $0.00 fee · $100.00 net" },
+    });
+    expect(onFeeUnavailable).not.toHaveBeenCalled();
+  });
+  it("refuses a task above the live limit before it is posted", async () => {
+    createOrder.mockClear();
+    await expect(
+      postTask(context(live), {
+        order,
+        amount: 6_000_000_000n,
+        deadlineAt: "2026-10-10T12:00:00.000Z",
+      }),
+    ).rejects.toMatchObject({
+      code: "invalid_input",
+      message:
+        "The total of $6000.00 USDC is above the live limit of $5000.00 USDC per task on Base. Nothing was posted and no money moved.",
+    });
+    expect(createOrder).not.toHaveBeenCalled();
+  });
+  it("compares a bounty by winners times reward", async () => {
+    createOrder.mockClear();
+    const bounty = {
+      ...order,
+      shape: "bounty" as const,
+      bounty: {
+        winners: 3,
+        rewardPerWinnerBaseUnits: "2000000000",
+        deadlineAt: "2026-10-10T12:00:00.000Z",
+      },
+    };
+    await expect(
+      postTask(context(live), {
+        order: bounty,
+        amount: 2_000_000_000n,
+        deadlineAt: "2026-10-10T12:00:00.000Z",
+      }),
+    ).rejects.toThrow(
+      "The total of $6000.00 USDC is above the live limit of $5000.00 USDC per bounty",
+    );
+    expect(createOrder).not.toHaveBeenCalled();
+  });
+  it("falls back to the hosted fee when the factory cannot be read", async () => {
+    createOrder.mockClear();
+    const onFeeUnavailable = vi.fn();
+    for (const reader of [async () => undefined, async () => Promise.reject(new Error("rpc"))]) {
+      const outcome = await postTask(context(reader), {
+        order,
+        amount: 6_000_000_000n,
+        deadlineAt: "2026-10-10T12:00:00.000Z",
+        onFeeUnavailable,
+      });
+      expect(outcome).toMatchObject({ feeUnavailable: true, money: { fee: null } });
+    }
+    expect(onFeeUnavailable).toHaveBeenCalledTimes(2);
+    expect(createOrder).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("signed proposal payloads", () => {
   const deployment = {
     configured: true as const,
@@ -289,6 +430,60 @@ describe("signed proposal payloads", () => {
       await expect(recoverMessageAddress({ message, signature: body.signature })).resolves.toBe(
         worker.address,
       );
+    },
+  );
+});
+
+describe("a readiness document that reports Tasks as unavailable", () => {
+  // The production body of GET /api/tasks/readiness on 2026-11-25.
+  const unavailable = createTasksClient({
+    baseUrl: "https://api.example",
+    fetch: async () =>
+      new Response(
+        '{"configured":false,"chainId":8453,"network":"eip155:8453","networkLabel":"Base","feeBp":null,"explorerUrl":null,"capabilities":{"erc3009Funding":false,"vapiVerify":false},"eip3009Domain":null}',
+        { headers: { "content-type": "application/json" } },
+      ),
+  });
+  it.each(["propose", "submit"] as const)(
+    "refuses %s in plain words before the wallet is unlocked",
+    async (kind) => {
+      const unlock = vi.fn();
+      const context = {
+        ...operationFixture(),
+        client: {
+          getOrder: vi.fn().mockResolvedValue({
+            workOrder: { id: ORDER, title: "Build an API", description: "Build the public API." },
+          }),
+          publicTask: vi.fn().mockResolvedValue({
+            id: ORDER,
+            title: "Build an API",
+            briefFull: "Build the complete public API.",
+            durationSeconds: 3600,
+            amount: { gross: "1000000" },
+          }),
+          deployment: () => unavailable.deployment(),
+        } as unknown as TasksClient,
+      };
+      await expect(
+        kind === "propose"
+          ? proposeTask(context, {
+              id: ORDER,
+              price: 1_000_000n,
+              durationSeconds: 3600,
+              note: "I will build the complete public API.",
+              unlock,
+            })
+          : submitTask(context, {
+              id: ORDER,
+              proof: [{ kind: "url", value: "https://example.com/proof" }],
+              files: [],
+              unlock,
+            }),
+      ).rejects.toMatchObject({
+        code: "not_available",
+        message: `vAPI reports Tasks as unavailable on Base right now. No ${kind === "propose" ? "proposal" : "entry"} was signed or sent. Try again later.`,
+      });
+      expect(unlock).not.toHaveBeenCalled();
     },
   );
 });
@@ -432,6 +627,50 @@ describe("taskPolicyForWallet", () => {
       autoReleaseBelowUsd: 2,
       source: "agent-profile",
     });
+  });
+
+  it("uses the limits an owner stored on an account without a profile", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "vapi-task-policy-"));
+    directories.push(directory);
+    const registry = (taskPolicy: unknown) =>
+      writeFile(
+        join(directory, "wallets.json"),
+        JSON.stringify({ version: 1, wallets: { main: { taskPolicy }, other: {} } }),
+      );
+    await registry({ maxPerTaskUsd: 600, approveAboveUsd: 550 });
+    await expect(taskPolicyForWallet({ directory, wallet: "main", schema })).resolves.toEqual({
+      maxPerTaskUsd: 600,
+      approveAboveUsd: 550,
+      autoReleaseBelowUsd: 25,
+      source: "account",
+    });
+    // One stored limit leaves the other at its default; another account is untouched.
+    await registry({ maxPerTaskUsd: 600 });
+    await expect(taskPolicyForWallet({ directory, wallet: "main", schema })).resolves.toMatchObject(
+      { maxPerTaskUsd: 600, approveAboveUsd: 0.5, source: "account" },
+    );
+    await expect(
+      taskPolicyForWallet({ directory, wallet: "other", schema }),
+    ).resolves.toMatchObject({ maxPerTaskUsd: 100, approveAboveUsd: 0.5, source: "defaults" });
+    await expect(
+      taskPolicyForWallet({ directory, wallet: "__proto__", schema }),
+    ).resolves.toMatchObject({ source: "defaults" });
+    // An unreadable value never raises a limit.
+    const warn = vi.fn();
+    await registry({ maxPerTaskUsd: "600" });
+    await expect(
+      taskPolicyForWallet({ directory, wallet: "main", schema, warn }),
+    ).resolves.toMatchObject({ maxPerTaskUsd: 100, approveAboveUsd: 0.5, source: "defaults" });
+    expect(warn).toHaveBeenCalledWith(
+      "The task limits stored for account main are unreadable; using the defaults.",
+    );
+    // An agent profile on the wallet keeps deciding.
+    await registry({ maxPerTaskUsd: 600, approveAboveUsd: 550 });
+    await mkdir(join(directory, "agents"));
+    await writeFile(join(directory, "agents", "worker.json"), JSON.stringify({}));
+    await expect(taskPolicyForWallet({ directory, wallet: "main", schema })).resolves.toMatchObject(
+      { maxPerTaskUsd: 7, approveAboveUsd: 3, source: "agent-profile" },
+    );
   });
 
   it("rejects ambiguity and invalid profiles", async () => {

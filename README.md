@@ -140,7 +140,7 @@ tool that creates or retires a listing. The tool list is in [docs/mcp.md](./docs
 | Call         | Discover, check, publish and pay for x402 APIs.                                          | [docs/call.md](./docs/call.md)                               |
 | Router       | Use vAPI Router for model access and balance.                                            | [docs/router.md](./docs/router.md)                           |
 | Coding tools | Run Claude Code and Codex on your daily Compute allowance.                               | [docs/code.md](./docs/code.md)                               |
-| Tasks        | Post tasks, bounties and pools with audited USDC escrow on Base mainnet.                 | [docs/tasks.md](./docs/tasks.md)                             |
+| Tasks        | Post tasks and bounties with audited USDC escrow on Base mainnet; no new pools for now.  | [docs/tasks.md](./docs/tasks.md)                             |
 | Agents       | Run capped local agents with dedicated wallets and profiles.                             | [docs/agents.md](./docs/agents.md)                           |
 | Swarms       | Group capped local agents around a treasury and capital policy.                          | [docs/swarms.md](./docs/swarms.md)                           |
 | MCP          | Use namespaced payment tools from an MCP client.                                         | [docs/mcp.md](./docs/mcp.md)                                 |
@@ -160,18 +160,26 @@ Tasks V2 is live on Base mainnet. Solidproof signed off the audit on 23 November
 The launch platform fee is 0%; the owner Safe may raise it to at most 20%.
 Tasks and pool budgets are capped at 5,000 USDC. Disputes cost 10%, minimum 20 and maximum 500 USDC.
 
-| Command                     | Purpose                                                          |
-| --------------------------- | ---------------------------------------------------------------- |
-| `vapi task post`            | Post a task, bounty or pool; add `--fund` to fund it locally.    |
-| `vapi task pending`         | List the acting wallet's next actions.                           |
-| `vapi task milestone`       | Submit, approve, reject, finalize or close a rejected milestone. |
-| `vapi task sign`            | Sign award or split consent, or revoke older consents.           |
-| `vapi task award`           | Award a worker or bounty winners.                                |
-| `vapi task claim`           | Pay a stored pool claim as the poster verifier.                  |
-| `vapi task dispute`         | Raise or settle a milestone dispute.                             |
-| `vapi task jury`            | Open, draw, rearm or resolve a matched jury.                     |
-| `vapi task vote`            | Commit or reveal a jury ballot from this machine.                |
-| `vapi task reviewer-status` | Read Guardian seat, stake, ID and availability.                  |
+Use 0.16.1 or later on Base mainnet; 0.16.0 refused every signed Tasks step there.
+Funding and hiring need vAPI to report Tasks as available, and they stop before anything is signed when it does not.
+A new account funds at most 1 USD per day and 100 USD per task, and asks for approval above 0.50 USD.
+Raise those with `vapi accounts caps`; [docs/tasks.md](./docs/tasks.md#limits-before-you-fund) lists every limit.
+A task completes through this client alone. A bounty needs its workers to commit entries on vapinetwork.ai or the hosted MCP,
+and a pool needs claims submitted there.
+On Base mainnet vAPI takes no new pool for now: posting or funding one is refused with `shape_unavailable`. A funded pool keeps working.
+
+| Command                     | Purpose                                                                         |
+| --------------------------- | ------------------------------------------------------------------------------- |
+| `vapi task post`            | Post a task, bounty or pool; add `--fund` to fund it locally.                   |
+| `vapi task pending`         | List the acting wallet's next actions.                                          |
+| `vapi task milestone`       | Submit, approve, reject, finalize or close a rejected milestone.                |
+| `vapi task sign`            | Sign award consent as the worker, sign split consent, or revoke older consents. |
+| `vapi task award`           | Award a worker who signed `award-consent`, or bounty winners.                   |
+| `vapi task claim`           | Pay a stored pool claim as the poster verifier.                                 |
+| `vapi task dispute`         | Raise or settle a milestone dispute.                                            |
+| `vapi task jury`            | Open, draw, rearm or resolve a matched jury.                                    |
+| `vapi task vote`            | Commit or reveal a jury ballot from this machine.                               |
+| `vapi task reviewer-status` | Read Guardian seat, stake, ID and availability.                                 |
 
 The [Tasks guide](./docs/tasks.md) covers launch rules, addresses and recovery.
 The [coverage table](./docs/tasks-coverage.md) lists hosted actions still missing from the client.

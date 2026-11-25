@@ -66,6 +66,10 @@ export * from "./v2-public.js";
 
 export * from "./v2-trust.js";
 
+export * from "./availability.js";
+
+export * from "./v2-limits.js";
+
 export * from "./ballots.js";
 
 export * from "./v2-jury.js";

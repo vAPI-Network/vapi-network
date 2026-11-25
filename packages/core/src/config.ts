@@ -50,6 +50,17 @@ export const DEFAULT_MAX_PER_TASK_USD = 100;
 /** Task amounts strictly below this USD threshold may be released automatically. */
 export const DEFAULT_AUTO_RELEASE_BELOW_USD = 25;
 
+/**
+ * Task limits an owner set for an account that has no agent profile, stored on its entry in
+ * `wallets.json` by `vapi accounts caps`. An absent field keeps the default: 100 USD per task,
+ * approval above 0.50 USD. An account with an agent profile keeps its limits in the profile.
+ */
+export const walletTaskPolicySchema = z.object({
+  maxPerTaskUsd: z.number().min(0).optional(),
+  approveAboveUsd: z.number().min(0).optional(),
+});
+export type WalletTaskPolicy = z.infer<typeof walletTaskPolicySchema>;
+
 /** The per-wallet balance retained before an automatic ceiling sweep. */
 export const DEFAULT_CEILING_ATOMIC = 5_000_000n;
 

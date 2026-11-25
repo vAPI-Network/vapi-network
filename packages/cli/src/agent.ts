@@ -7,6 +7,8 @@ import {
   DEFAULT_AUTO_RELEASE_BELOW_USD,
   DEFAULT_MAX_PER_TASK_USD,
   SWARM_NAME_PATTERN,
+  accountTaskLimitsUnderProfile,
+  activeAgentMarker,
   assertWalletName,
   createRunBudget,
   createRunId,
@@ -48,7 +50,12 @@ import {
 } from "@vapi-network/mcp";
 
 import { UsageError, parseArguments } from "./args.js";
-import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
+import {
+  getEnvironment,
+  isStdinInteractive,
+  type CliDependencies,
+  type CliIo,
+} from "./cli-context.js";
 import { walletCapsCommand, walletCreateCommand } from "./cli.js";
 import { runHeadlessAgent } from "./headless.js";
 import { runLoginFlow } from "./login.js";
@@ -166,7 +173,16 @@ async function createCommand(
   const callBudget = usdOption(parsed.one("--call-budget") ?? "1", "--call-budget", true);
   const maxPerCall = usdOption(parsed.one("--max-per-call") ?? "0.05", "--max-per-call");
   const routerBudget = usdOption(parsed.one("--router-budget") ?? "1", "--router-budget", true);
-  const approveAbove = usdOption(parsed.one("--approve-above") ?? "0.5", "--approve-above");
+  // An account that already exists keeps what its owner set. A task limit set below the
+  // default goes into the profile unless an option names another value.
+  const initialStore = await openWalletStore(dependencies);
+  const owned = initialStore.entry(name);
+  const stricter = accountTaskLimitsUnderProfile(owned?.taskPolicy);
+  const defaultMaxPerTask = stricter?.maxPerTaskUsd ?? DEFAULT_MAX_PER_TASK_USD;
+  const approveAbove = usdOption(
+    parsed.one("--approve-above") ?? String(stricter?.approveAboveUsd ?? 0.5),
+    "--approve-above",
+  );
   const maxSteps = boundedInteger(parsed.one("--max-steps") ?? "12", "--max-steps", 1, 50);
   const interactive =
     !json && (dependencies.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY));
@@ -174,9 +190,9 @@ async function createCommand(
   const maxPerTask = usdOption(
     parsed.one("--max-per-task") ??
       ((promptForTaskPolicy
-        ? await visibleLine(`Max per task in USD [${DEFAULT_MAX_PER_TASK_USD}]: `, dependencies)
+        ? await visibleLine(`Max per task in USD [${defaultMaxPerTask}]: `, dependencies)
         : "") ||
-        String(DEFAULT_MAX_PER_TASK_USD)),
+        String(defaultMaxPerTask)),
     "--max-per-task",
   );
   const autoReleaseBelow = usdOption(
@@ -190,9 +206,28 @@ async function createCommand(
         String(DEFAULT_AUTO_RELEASE_BELOW_USD)),
     "--auto-release-below",
   );
+  // Raising a task limit or the per-day cap of an account that already exists is a decision
+  // for a person, as it is in `vapi accounts caps`. `--yes` does not stand in for the person.
+  if (owned !== undefined) {
+    const raised = [
+      ...(maxPerTask.number > (owned.taskPolicy?.maxPerTaskUsd ?? DEFAULT_MAX_PER_TASK_USD)
+        ? [`--max-per-task ${maxPerTask.text}`]
+        : []),
+      ...(approveAbove.number > (owned.taskPolicy?.approveAboveUsd ?? 0.5)
+        ? [`--approve-above ${approveAbove.text}`]
+        : []),
+      ...(BigInt(callBudget.atomic) > BigInt(owned.spendCaps.perDayAtomic)
+        ? [`--call-budget ${callBudget.text}`]
+        : []),
+    ];
+    const marker = activeAgentMarker(getEnvironment(dependencies));
+    if (raised.length > 0 && (marker !== undefined || !isStdinInteractive(dependencies)))
+      throw new UsageError(
+        `Account ${name} already exists, and ${raised.join(", ")} would raise what it has now: ${owned.taskPolicy?.maxPerTaskUsd ?? DEFAULT_MAX_PER_TASK_USD} USD per task, approval above ${owned.taskPolicy?.approveAboveUsd ?? 0.5} USD, ${formatUsdc(BigInt(owned.spendCaps.perDayAtomic))} USD per day. Raising a limit is a decision for a person. Nothing was changed. ${marker === undefined ? "Standard input is not a terminal." : `${marker} is set, so this is an agent session.`} Run the command yourself in a terminal, or leave these values at or below the account's.`,
+      );
+  }
   const commandIo = json ? { stdout: () => undefined, stderr: io.stderr } : io;
-  const initialStore = await openWalletStore(dependencies);
-  if (!initialStore.has(name)) {
+  if (owned === undefined) {
     await walletCreateCommand([name, "--label", name], json, commandIo, dependencies);
   }
   await walletCapsCommand(
@@ -218,6 +253,26 @@ async function createCommand(
     paused: false,
     createdAt: (dependencies.now?.() ?? new Date()).toISOString(),
   };
+  // From here the profile holds this wallet's task limits. A limit raised earlier on the
+  // account itself is cleared first: left in place, it would apply again, unnoticed, the day
+  // the profile is removed. A limit the owner set below the default stays, so that day never
+  // leaves the account with a laxer limit than its owner chose.
+  let clearedAccountTaskLimits = false;
+  const keptAccountTaskLimits = (
+    await initialStore.updateTaskPolicy(name, (current) => {
+      const kept = accountTaskLimitsUnderProfile(current);
+      clearedAccountTaskLimits = JSON.stringify(kept) !== JSON.stringify(current);
+      return kept;
+    })
+  ).taskPolicy;
+  if (keptAccountTaskLimits)
+    io.stderr(
+      `Account ${name} keeps the task limits its owner set below the defaults. When the agent profile is removed it returns to ${keptAccountTaskLimits.maxPerTaskUsd ?? DEFAULT_MAX_PER_TASK_USD} USD per task and approval above ${keptAccountTaskLimits.approveAboveUsd ?? 0.5} USD. The agent profile holds the limits now: ${profile.maxPerTaskUsd} USD per task, approval above ${profile.approveAboveUsd} USD.`,
+    );
+  else if (clearedAccountTaskLimits)
+    io.stderr(
+      `The task limits set for account ${name} with vapi accounts caps were cleared. The agent profile holds them now: ${profile.maxPerTaskUsd} USD per task, approval above ${profile.approveAboveUsd} USD.`,
+    );
   const writeProfile = dependencies.agent?.writeAgentProfile ?? writeAgentProfile;
   await writeProfile(paths.directory, profile, agentProfileOptions);
   await runLoginFlow(["--account", name, "--label", name], json, commandIo, dependencies, {
@@ -246,6 +301,7 @@ async function createCommand(
           perDayAtomic: callBudget.atomic,
         },
         routerAllowanceUsd: routerBudget.number,
+        ...(clearedAccountTaskLimits ? { clearedAccountTaskLimits: true } : {}),
         fundingHint,
       }),
     );

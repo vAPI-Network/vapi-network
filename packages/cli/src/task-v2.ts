@@ -200,6 +200,7 @@ export async function taskV2Command(
     directory: getVapiPaths().directory,
     wallet: target.name,
     schema: registeredAgentProfileSchema,
+    warn: io.stderr,
   });
   try {
     const result = await executeTaskV2(context, {

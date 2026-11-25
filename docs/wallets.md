@@ -153,7 +153,7 @@ vapi accounts rename <old> <new>
 vapi accounts use <name>
 vapi accounts remove <name> [--force]
 vapi accounts restore <name>
-vapi accounts caps <name> [--per-call <usd>] [--per-day <usd>] [--ceiling <usd|off>]
+vapi accounts caps <name> [--per-call <usd>] [--per-day <usd>] [--ceiling <usd|off>] [--max-per-task <usd>] [--approve-above <usd>] [--yes]
 vapi accounts distribute <amount> --from <account> [--to <a,b,c>] [--network base|arc]
 vapi accounts distribute --resume <movement-id> [--replace-expired-restored] [--bind-legacy-addresses]
 vapi accounts distribute --cancel <movement-id> [--replace-expired-restored]
@@ -168,6 +168,21 @@ plus the attempted amount:
 vapi accounts caps <name> --per-call <usd>
 vapi accounts caps <name> --per-day <usd>
 ```
+
+Tasks add two limits per account. `--max-per-task` caps the funding plus dispute fees of one task and defaults to 100 USD. `--approve-above` is the amount above which a person has to approve a funding or a fee, and defaults to 0.50 USD. Task funding also counts toward the per-day cap; the per-call cap does not apply to it.
+
+```sh
+vapi accounts caps <name>
+vapi accounts caps <name> --max-per-task <usd> --approve-above <usd> --yes
+```
+
+The first command prints the current values and where they come from. Raising either value is a decision for a person at a terminal: the command asks you to type `yes`, or takes `--yes`. `--yes` only answers that question. A raise is refused, even with `--yes`, when standard input is not a terminal or when the command runs inside an agent session, which the client detects through a variable such as `CLAUDECODE`. The message names the reason and the command to run yourself, and nothing changes. Lowering needs no confirmation and works everywhere, including from an agent's shell.
+
+Every option of one command is checked before anything is stored, so a command with one invalid option changes nothing, and every stored change is written to `audit.log`. A limit above 1,000,000 USD is refused. A `--max-per-task` above the live size limit of the Tasks contract on Base (5,000 USDC today) is stored, with a note that it has no effect above that limit; the note is skipped when the limit cannot be read.
+
+An account with an agent profile keeps both values in that profile. Any other account keeps them on its entry in `wallets.json`; they are not part of a backup. `vapi agent create` says what it does with the values stored on the account, because the profile holds the limits from then on. A stored value above the default is cleared. A stored value below the default stays on the account, and the profile takes it unless an option names another value. Removing the profile later, for example with `vapi agent revoke`, therefore returns each limit to the default of 100 USD or 0.50 USD, or to the stricter value the owner had set. It never returns to an older, higher value, and it never leaves the account laxer than its owner set it. `vapi swarm` setup does the same for a member account it profiles.
+
+`vapi agent create <name>` for an account that already exists follows the rule above for a raise. When `--max-per-task`, `--approve-above` or `--call-budget` is above what the account has now, the command is refused, even with `--yes`, from an agent session or when standard input is not a terminal. It names the options and the current values, and nothing changes. A person at a terminal can raise them. An account the command creates has nothing to raise. Like every check in a local tool, this stops an agent that uses the documented command; it does not stop a process of the same user that hides the agent session, wraps the command in a terminal or edits the files in `VAPI_HOME`. Local MCP cannot grant approval, so the approval threshold is the most an agent funds through MCP in one step.
 
 Without `--to`, distribute selects every other linked, active account on this device. It splits whole cents in account order and puts remainder cents in the first account. The sender's balance, largest-leg per-call cap, and remaining per-day cap are checked before the first signature. Each leg is signed and relayed in order.
 

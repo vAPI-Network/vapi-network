@@ -25,7 +25,9 @@ import {
   getVapiPaths,
   isMissingFile,
   spendCapsSchema,
+  walletTaskPolicySchema,
   type SpendCaps,
+  type WalletTaskPolicy,
 } from "./config.js";
 import { deriveEvmPrivateKey, phraseToSeed } from "./hd.js";
 import { KeystoreError, unlockKeystore, type VapiPaymentAccount } from "./keystore.js";
@@ -159,6 +161,8 @@ export const walletEntrySchema = z.object({
   ceilingAtomic: z.string().regex(/^\d+$/).nullable().optional(),
   ceilingSweepAttemptedAt: z.iso.datetime().optional(),
   ceilingSweepPending: ceilingSweepPendingSchema.optional(),
+  // Task limits for an account without an agent profile; absent means the defaults.
+  taskPolicy: walletTaskPolicySchema.optional(),
   routerRefill: routerRefillSchema.optional(),
   routerPendingPurchase: routerPendingPurchaseSchema.optional(),
   link: agentLinkSchema.optional(),
@@ -681,6 +685,34 @@ export class WalletStore {
       const stored = ceilingAtomic === null ? null : ceilingAtomic.toString();
       if (entry.ceilingAtomic !== stored) {
         entry.ceilingAtomic = stored;
+        await this.writeRegistry(registry);
+      } else {
+        this.registry = registry;
+      }
+      return structuredClone(entry);
+    });
+  }
+
+  /**
+   * Stores task limits for an account without an agent profile, from the latest registry value
+   * while holding its write lock. Returning undefined removes them, so the defaults apply.
+   */
+  async updateTaskPolicy(
+    name: string,
+    update: (current: Readonly<WalletTaskPolicy> | undefined) => WalletTaskPolicy | undefined,
+  ): Promise<WalletEntry> {
+    const walletName = assertWalletName(name);
+    return await withRegistryLock(this.registryPath, async () => {
+      const registry = await this.readRegistry();
+      const entry = ownWalletEntry(registry.wallets, walletName);
+      if (!entry) {
+        throw new KeystoreError(unknownWalletMessage(walletName, Object.keys(registry.wallets)));
+      }
+      const next = update(entry.taskPolicy === undefined ? undefined : { ...entry.taskPolicy });
+      const parsed = next === undefined ? undefined : walletTaskPolicySchema.parse(next);
+      if (JSON.stringify(parsed) !== JSON.stringify(entry.taskPolicy)) {
+        if (parsed === undefined) delete entry.taskPolicy;
+        else entry.taskPolicy = parsed;
         await this.writeRegistry(registry);
       } else {
         this.registry = registry;

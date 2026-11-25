@@ -48,6 +48,8 @@ import {
   type TaskDeliveryFile,
   type TaskFundingApproval,
 } from "./actions.js";
+import { requireTasksAvailable, tasksUnavailableError } from "./availability.js";
+import { assertWithinTaskV2Limit, type TaskV2Shape } from "./v2-limits.js";
 import { canonicalJson } from "./canonical-json.js";
 import { TasksChainUnavailableError, type TasksChain } from "./chain-port.js";
 import { TasksClientError, type TasksClient } from "./client.js";
@@ -139,7 +141,23 @@ export async function postTask(
       "The Tasks deployment is unavailable, so the market network cannot be selected.",
     );
   }
-  const feeBp = parseFeeBp(deployment);
+  // Funding is the step that puts money into Tasks, so a post that asks for it stops here,
+  // before the order exists, when vAPI reports Tasks as unavailable.
+  if (input.fund)
+    requireTasksAvailable("fund", deployment, "Nothing was posted or signed and no money moved.");
+  // The fee and the size limit come from the pinned factory where this machine can read it;
+  // the hosted fee is the fallback. `amount` is per winner for a bounty.
+  const declared = input.order as { shape?: TaskV2Shape; bounty?: { winners?: number } };
+  const shape = declared.shape ?? (input.intake === "submissions" ? "bounty" : "task");
+  const total =
+    input.amount *
+    BigInt(shape === "bounty" ? (declared.bounty?.winners ?? input.maxAwards ?? 1) : 1);
+  const limits =
+    typeof deployment.chainId === "number"
+      ? await context.limitsV2?.(deployment.chainId, shape).catch(() => undefined)
+      : undefined;
+  if (limits) assertWithinTaskV2Limit(total, limits, "Nothing was posted and no money moved.");
+  const feeBp = limits?.feeBp ?? parseFeeBp(deployment);
   const feeUnavailable = feeBp === null;
   if (feeUnavailable) input.onFeeUnavailable?.();
   const money = taskMoney(input.amount, feeBp);
@@ -230,7 +248,11 @@ export async function proposeTask(
     context,
   );
   if (!deployment.configured)
-    throw new TaskOperationError("not_available", "Task escrow deployment is unavailable.");
+    throw tasksUnavailableError(
+      deployment.chainId,
+      "No proposal was signed or sent.",
+      "not_available",
+    );
   const account = await input.unlock();
   const terms = {
     title: workOrder.title,
@@ -333,7 +355,11 @@ export async function submitTask(
     context,
   );
   if (!deployment.configured)
-    throw new TaskOperationError("not_available", "Task escrow deployment is unavailable.");
+    throw tasksUnavailableError(
+      deployment.chainId,
+      "No entry was signed or sent.",
+      "not_available",
+    );
   if (task.amount === null) {
     throw new TaskInputError("Task amount is unavailable.");
   }

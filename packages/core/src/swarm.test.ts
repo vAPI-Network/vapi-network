@@ -588,6 +588,44 @@ describe("swarm setup", () => {
     });
   });
 
+  it("keeps task limits an owner set below the defaults when it profiles a member", async () => {
+    const opts = await fixture();
+    const originalCreate = opts.store.create.bind(opts.store);
+    // Before the profiles are written, the owner tightens one member and raises another.
+    vi.spyOn(opts.store, "create").mockImplementation(async (...args) => {
+      const created = await originalCreate(...args);
+      if (args[0] === "team-lead-1")
+        await opts.store.updateTaskPolicy("team-lead-1", () => ({
+          maxPerTaskUsd: 10,
+          approveAboveUsd: 0,
+        }));
+      if (args[0] === "team-helper-1")
+        await opts.store.updateTaskPolicy("team-helper-1", () => ({
+          maxPerTaskUsd: 5000,
+          approveAboveUsd: 0.25,
+        }));
+      return created;
+    });
+
+    await setupSwarm(opts);
+
+    // The stricter values are in the profile and stay on the account for the day it is removed.
+    await expect(readAgentProfile(opts.home, "team-lead-1")).resolves.toMatchObject({
+      maxPerTaskUsd: 10,
+      approveAboveUsd: 0,
+    });
+    expect(opts.store.entry("team-lead-1")?.taskPolicy).toEqual({
+      maxPerTaskUsd: 10,
+      approveAboveUsd: 0,
+    });
+    // A raised value is dropped; the default applies in the profile and afterwards.
+    await expect(readAgentProfile(opts.home, "team-helper-1")).resolves.toMatchObject({
+      maxPerTaskUsd: 100,
+      approveAboveUsd: 0.25,
+    });
+    expect(opts.store.entry("team-helper-1")?.taskPolicy).toEqual({ approveAboveUsd: 0.25 });
+  });
+
   it("does not rewrite an existing member profile to add role grants", async () => {
     const opts = await fixture();
     await writeAgentProfile(opts.home, {

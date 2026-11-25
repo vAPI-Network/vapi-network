@@ -35,6 +35,8 @@ import {
   createTasksChain,
   createScopeBindings,
   createTasksRpcFor,
+  readTaskV2Limits,
+  type TaskV2LimitsReader,
   deliverTaskOperation,
   disputeTaskOperation,
   counterEvidenceTaskOperation,
@@ -563,6 +565,14 @@ export function createTasksTools(options: TasksToolsOptions) {
         : (injected ?? createHostedTasksClient(clientOptions));
     return {
       client,
+      limitsV2: (async (chainId, shape) =>
+        readTaskV2Limits({
+          chainId,
+          shape,
+          rpcFor:
+            options.rpcFor ??
+            createTasksRpcFor(await loadConfig(getVapiPaths(home).config), { fetch: guardedFetch }),
+        })) satisfies TaskV2LimitsReader,
       chain:
         options.chain ??
         (selected === undefined

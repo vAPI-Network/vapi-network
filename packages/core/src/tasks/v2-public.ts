@@ -30,11 +30,12 @@ export function isTaskV2SecretAction(action: Pick<TaskV2Action | TaskV2Consent, 
  * selector, so a hosted operation that names another step still never shows a ballot.
  */
 export function publicTaskV2Operation(op: TaskV2Operation, secret = false): TaskV2Operation {
+  const plan = op.plan;
   const reveal =
     secret ||
     op.step === "v2-reveal-vote" ||
-    op.plan.step === "v2-reveal-vote" ||
-    op.plan.data.toLowerCase().startsWith(REVEAL_SELECTOR);
+    plan?.step === "v2-reveal-vote" ||
+    plan?.data.toLowerCase().startsWith(REVEAL_SELECTOR) === true;
   return {
     id: op.id,
     kind: op.kind,
@@ -42,16 +43,17 @@ export function publicTaskV2Operation(op: TaskV2Operation, secret = false): Task
     step: op.step,
     expectedActor: op.expectedActor,
     transactionHash: op.transactionHash,
-    plan: {
-      version: op.plan.version,
-      operationId: op.plan.operationId,
-      step: op.plan.step,
-      chainId: op.plan.chainId,
-      network: op.plan.network,
-      from: op.plan.from,
-      to: op.plan.to,
-      data: reveal ? (TASK_V2_REDACTED_CALLDATA as `0x${string}`) : op.plan.data,
-      value: op.plan.value,
+    // Null once the transaction is submitted or confirmed: the API no longer returns the plan.
+    plan: plan && {
+      version: plan.version,
+      operationId: plan.operationId,
+      step: plan.step,
+      chainId: plan.chainId,
+      network: plan.network,
+      from: plan.from,
+      to: plan.to,
+      data: reveal ? (TASK_V2_REDACTED_CALLDATA as `0x${string}`) : plan.data,
+      value: plan.value,
     },
   };
 }
@@ -64,17 +66,19 @@ const shownOperationSchema = z.object({
   step: z.string(),
   expectedActor: z.string(),
   transactionHash: z.string().nullable(),
-  plan: z.object({
-    version: z.literal("work-transaction-plan-v2"),
-    operationId: z.string(),
-    step: z.string(),
-    chainId: z.number(),
-    network: z.string(),
-    from: z.string(),
-    to: z.string(),
-    data: z.string(),
-    value: z.literal("0"),
-  }),
+  plan: z
+    .object({
+      version: z.literal("work-transaction-plan-v2"),
+      operationId: z.string(),
+      step: z.string(),
+      chainId: z.number(),
+      network: z.string(),
+      from: z.string(),
+      to: z.string(),
+      data: z.string(),
+      value: z.literal("0"),
+    })
+    .nullable(),
 });
 /** The public projection of an operation-shaped value, or undefined when it is not one. */
 export function publicTaskV2OperationOf(value: unknown, secret = false) {

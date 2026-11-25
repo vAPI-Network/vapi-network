@@ -344,6 +344,8 @@ async function fixture(options: { worker?: string; workerBondBp?: number } = {})
             ...prepared.operation,
             state: mode === "transaction" ? "submitted" : "confirmed",
             transactionHash: body.transactionHash,
+            // The API returns no plan after broadcast.
+            plan: null,
           },
         };
       },
@@ -636,6 +638,40 @@ describe("V2 vote commit and reveal", () => {
     expect(stored).toMatchObject({ outcome: 2, toWorker: "40000000", salt: SALT });
   });
 
+  it("seals and commits a vote when vAPI reports Tasks as unavailable: only the chain ID is read", async () => {
+    // 0.16.0 refused here with "Hosted Tasks V2 is not configured." A vote has a deadline and
+    // moves no USDC from the juror; the pin for the hosted chain ID decides trust.
+    const f = await fixture();
+    f.client.deployment.mockResolvedValue({
+      configured: false,
+      chainId: 84532,
+      network: "eip155:84532",
+    } as never);
+    const result = await runTaskV2Vote(f.context, {
+      ...f.base,
+      i: 0,
+      action: "commit",
+      outcome: "worker",
+    });
+    expect(result).toMatchObject({ ok: true, ballot: { caseId: CASE_ID } });
+    expect(f.writes[0]).toEqual({
+      action: "commit-vote",
+      i: 0,
+      commitment: result.ballot.commitment,
+    });
+  });
+  it("names the missing chain when readiness cannot be read and nothing was accepted locally", async () => {
+    const f = await fixture();
+    f.client.deployment.mockRejectedValue(new Error("offline"));
+    await expect(
+      runTaskV2Vote(f.context, { ...f.base, i: 0, action: "commit", outcome: "worker" }),
+    ).rejects.toMatchObject({
+      code: "v2_resolver_unavailable",
+      message: expect.stringContaining("vAPI's Tasks status could not be read"),
+    });
+    expect(f.client.prepareV2).not.toHaveBeenCalled();
+  });
+
   it("keeps a revealable ballot after a crash between the write and the plan", async () => {
     const f = await fixture();
     f.client.prepareV2.mockRejectedValueOnce(new Error("network down"));
@@ -900,7 +936,7 @@ describe("hosted echoes on vote paths", () => {
           step,
           abandon,
         });
-        expect(result.operation?.plan.data, `${step} ${abandon}`).toBe(
+        expect(result.operation?.plan?.data, `${step} ${abandon}`).toBe(
           "[redacted: reveal calldata]",
         );
         expect(leaks(result), `${step} ${abandon}`).toBe(false);
