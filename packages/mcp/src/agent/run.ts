@@ -3,6 +3,7 @@ import {
   RouterClientError,
   routerPurchaseView,
   ROUTER_KEY_REVOKED_MESSAGE,
+  ROUTER_NO_COMPUTE_MESSAGE,
 } from "@vapi-network/core/router-client";
 import {
   appendAudit,
@@ -912,6 +913,7 @@ function runBudgetDetail(budget: RunBudget | undefined): string {
 
 function routerBudgetDetail(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
+  if (message === ROUTER_NO_COMPUTE_MESSAGE) return message;
   if (
     /^Today's Router allowance is used up\. It resets at (?:\d{2}:\d{2} UTC|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\.$/u.test(
       message,

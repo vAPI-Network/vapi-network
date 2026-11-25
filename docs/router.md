@@ -22,6 +22,24 @@ Bought vAPI Router balance never expires and is used after the daily Compute
 allowance runs out. Your wallet's client spend caps apply to every purchase,
 including automatic refill.
 
+## Reading `vapi router usage`
+
+Compute belongs to the owner account and comes from its staked vAPI, counted at 00:00 UTC.
+An account with no stake has no Compute, and a linked agent cannot spend any.
+
+| JSON field                  | Meaning                                                                |
+| --------------------------- | ---------------------------------------------------------------------- |
+| `compute.ownerLimitUsd`     | The owner account's Compute today. `0` means no stake was counted      |
+| `compute.ownerSpentUsd`     | Compute all of the owner's agents used today                           |
+| `compute.allowanceUsd`      | Cap on this agent's share of the owner's Compute. It grants no Compute |
+| `compute.spentTodayUsd`     | Compute this agent used today                                          |
+| `compute.remainingTodayUsd` | The smaller of the agent's cap left and the owner's Compute left       |
+| `compute.resetsAt`          | Next 00:00 UTC snapshot                                                |
+| `balance`                   | Bought Router balance, or `null` when none was bought                  |
+
+`allowanceUsd: 1` with `ownerLimitUsd: 0` therefore gives `remainingTodayUsd: 0`. Stake vAPI
+on the owner account with `vapi stake open`, or buy Router balance with `vapi router buy 1`.
+
 ## Purchase recovery
 
 A payment authorization can be sent before settlement is confirmed. The CLI reports this state without claiming payment succeeded.

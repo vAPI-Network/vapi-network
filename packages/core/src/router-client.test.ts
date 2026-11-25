@@ -23,6 +23,7 @@ import { createRunBudget, type RunBudget } from "./run-budget.js";
 import {
   DEFAULT_ROUTER_BASE_URL,
   ROUTER_KEY_REVOKED_MESSAGE,
+  ROUTER_NO_COMPUTE_MESSAGE,
   RouterClientError,
   buyRouterBalance,
   ensureRouterPurchaseReceipt,
@@ -1455,6 +1456,51 @@ describe("routerChat", () => {
     expect(exposed).not.toContain(ROUTER_KEY);
     expect(exposed).not.toContain(BALANCE_KEY);
     expect(exposed).not.toContain(ACCESS_TOKEN);
+  });
+
+  it("says the owner has no Compute instead of calling an unused allowance used up", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.host === "router.example") {
+        return new Response("Budget has been exceeded", { status: 429 });
+      }
+      return Response.json({
+        compute: {
+          allowanceUsd: 1,
+          spentTodayUsd: 0,
+          remainingTodayUsd: 0,
+          resetsAt: RESET_AT,
+          ownerLimitUsd: 0,
+          ownerSpentUsd: 0,
+        },
+        balance: null,
+      });
+    });
+
+    await expect(
+      routerChat(await linkedDeps(fetchImpl), { model: "provider/model", messages: [] }),
+    ).rejects.toMatchObject({
+      code: "budget_exhausted",
+      status: 429,
+      message: ROUTER_NO_COMPUTE_MESSAGE,
+    });
+  });
+
+  it("keeps the used-up message when the owner's Compute was spent", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.host === "router.example") {
+        return new Response("Budget has been exceeded", { status: 429 });
+      }
+      return Response.json({ ...usageResponse(), balance: null });
+    });
+
+    await expect(
+      routerChat(await linkedDeps(fetchImpl), { model: "provider/model", messages: [] }),
+    ).rejects.toMatchObject({
+      code: "budget_exhausted",
+      message: `Today's Router allowance is used up. It resets at ${RESET_AT}. Buy Router balance with vapi router buy 5.`,
+    });
   });
 
   it("maps an ExceededBudget response with another status to budget_exhausted", async () => {
