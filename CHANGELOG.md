@@ -12,6 +12,10 @@ sentence under it is the summary shown on the
 
 ## Unreleased
 
+### Added
+
+- `vapi claim <origin> --well-known` claims indexed listings by control of the origin, for a payee that cannot sign such as a payment processor's deposit address. The origin serves `/.well-known/vapi.json` naming the vAPI account's wallet address; nothing is signed and the wallet stays locked. A missing or mismatched file prints the URL and the JSON to serve, and `--json` returns them as `code` and `file`. The payee refusal of a signed claim now names this option.
+
 ## 0.16.0 - 2026-11-24
 
 Tasks V2 runs on Base mainnet from the CLI, the SDK and local MCP, against the audited contracts pinned in the client.

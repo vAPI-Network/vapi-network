@@ -1237,6 +1237,233 @@ describe("vapi claim <origin>", () => {
   });
 });
 
+describe("vapi claim <origin> --well-known", () => {
+  const ORIGIN = "https://weather.example";
+  const ACCOUNT = "0x1111111111111111111111111111111111111111";
+  const FILE = {
+    url: `${ORIGIN}/.well-known/vapi.json`,
+    content: { version: 1, account: ACCOUNT },
+  };
+
+  /** A home with no wallet at all: the origin path must not need one. */
+  async function walletlessHome(prefix: string): Promise<string> {
+    const home = await mkdtemp(join(tmpdir(), prefix));
+    homes.push(home);
+    process.env.VAPI_HOME = home;
+    delete process.env.VAPI_KEYSTORE_PASSWORD;
+    process.env.VAPI_API_KEY = KEY;
+    secretStoreStub();
+    return home;
+  }
+
+  function originRegistry(claim: Reply) {
+    return registryFetch({ "POST /api/call/listings/claim": claim });
+  }
+
+  it("claims with the origin proof, without a nonce, a wallet or a prompt", async () => {
+    const home = await walletlessHome("vapi-claim-wk-");
+    const registry = originRegistry({ body: { claimed: ["weather-forecast", "weather-alerts"] } });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["claim", ORIGIN, "--well-known"], captured.io, {
+        ...HUMAN,
+        fetchImpl: registry.fetchImpl,
+        prompts: refusingPrompts(),
+      }),
+    ).toBe(0);
+
+    expect(registry.paths()).toEqual(["POST /api/call/listings/claim"]);
+    expect(registry.calls[0]?.headers.get("authorization")).toBe(`Bearer ${KEY}`);
+    expect(registry.calls[0]?.body).toEqual({ origin: ORIGIN, proof: "well-known" });
+    const text = captured.stdout.join("\n");
+    expect(text).toContain("Claimed 2 listings served from https://weather.example:");
+    expect(text).toContain("  weather-forecast\n  weather-alerts");
+    expect(text).not.toMatch(/^Wallet: /mu);
+    expect((await readAuditLog(home)).at(-1)).toMatchObject({
+      event: "listing.claim",
+      detail: "https://weather.example well-known weather-forecast,weather-alerts",
+    });
+  });
+
+  it("answers --json with the origin, the proof kind and the claimed slugs", async () => {
+    await walletlessHome("vapi-claim-wk-json-");
+    const registry = originRegistry({ body: { claimed: ["weather-forecast"] } });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["claim", `${ORIGIN}/`, "--well-known", "--json"], captured.io, {
+        ...AGENT,
+        fetchImpl: registry.fetchImpl,
+      }),
+    ).toBe(0);
+    expect(JSON.parse(captured.stdout[0]!)).toEqual({
+      origin: ORIGIN,
+      proof: "well-known",
+      claimed: ["weather-forecast"],
+    });
+  });
+
+  it.each([
+    ["origin_proof_unreadable", 422, "vAPI could not read the proof file"],
+    ["origin_proof_mismatch", 403, "names another vAPI account"],
+  ])("prints the URL and the JSON to serve on %s", async (code, status, sentence) => {
+    await walletlessHome(`vapi-claim-wk-${code}-`);
+    const registry = originRegistry({ status, body: { error: code, message: "m", file: FILE } });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["claim", ORIGIN, "--well-known"], captured.io, {
+        ...AGENT,
+        fetchImpl: registry.fetchImpl,
+      }),
+    ).toBe(1);
+    const text = captured.stderr.join("\n");
+    expect(text).toContain(sentence);
+    expect(text).toContain(FILE.url);
+    expect(text).toContain(JSON.stringify(FILE.content, null, 2));
+    expect(text).toContain("then run the same command again");
+  });
+
+  it.each([
+    ["origin_proof_unreadable", 422],
+    ["origin_proof_mismatch", 403],
+  ])("hands a script the %s code and file under --json", async (code, status) => {
+    await walletlessHome(`vapi-claim-wk-json-${code}-`);
+    const registry = originRegistry({ status, body: { error: code, message: "m", file: FILE } });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["claim", ORIGIN, "--well-known", "--json"], captured.io, {
+        ...AGENT,
+        fetchImpl: registry.fetchImpl,
+      }),
+    ).toBe(1);
+    const answer = JSON.parse(captured.stdout[0]!) as Record<string, unknown>;
+    expect(answer).toMatchObject({ exitCode: 1, code, file: FILE });
+    expect(answer.error).toEqual(expect.stringContaining(FILE.url));
+  });
+
+  it("does not print a file whose URL is for another host", async () => {
+    await walletlessHome("vapi-claim-wk-other-host-");
+    const file = { ...FILE, url: "https://evil.example/.well-known/vapi.json" };
+    const registry = originRegistry({
+      status: 422,
+      body: { error: "origin_proof_unreadable", message: "m", file },
+    });
+
+    const human = captureIo();
+    expect(
+      await runCli(["claim", ORIGIN, "--well-known"], human.io, {
+        ...AGENT,
+        fetchImpl: registry.fetchImpl,
+      }),
+    ).toBe(1);
+    expect(human.stderr.join("\n")).toContain("vAPI could not read the proof file");
+    expect(human.stderr.join("\n")).not.toContain("evil.example");
+    expect(human.stderr.join("\n")).not.toContain(ACCOUNT);
+
+    const json = captureIo();
+    expect(
+      await runCli(["claim", ORIGIN, "--well-known", "--json"], json.io, {
+        ...AGENT,
+        fetchImpl: registry.fetchImpl,
+      }),
+    ).toBe(1);
+    const answer = JSON.parse(json.stdout[0]!) as Record<string, unknown>;
+    expect(answer).toMatchObject({ exitCode: 1, code: "origin_proof_unreadable" });
+    expect(answer).not.toHaveProperty("file");
+  });
+
+  it.each([
+    [422, "account_wallet_required", "This vAPI account has no wallet address"],
+    [404, "no_listings", "vAPI has no unclaimed listing served from https://weather.example."],
+    [
+      409,
+      "already_owned",
+      "The listings served from https://weather.example already have an owner.",
+    ],
+    [422, "no_evm_payee", "do not pay one EVM address"],
+  ])("turns a %s %s into a sentence", async (status, code, sentence) => {
+    await walletlessHome(`vapi-claim-wk-${code}-`);
+    const registry = originRegistry({ status, body: { error: code, message: "registry detail" } });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["claim", ORIGIN, "--well-known"], captured.io, {
+        ...AGENT,
+        fetchImpl: registry.fetchImpl,
+      }),
+    ).toBe(1);
+    expect(captured.stderr.join("\n")).toContain(sentence);
+  });
+
+  it("says an older registry does not support origin claims yet", async () => {
+    await walletlessHome("vapi-claim-wk-400-");
+    const registry = originRegistry({
+      status: 400,
+      body: {
+        error: "invalid_request",
+        issues: [{ path: [], message: "Unrecognized key: proof" }],
+      },
+    });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["claim", ORIGIN, "--well-known"], captured.io, {
+        ...AGENT,
+        fetchImpl: registry.fetchImpl,
+      }),
+    ).toBe(1);
+    expect(captured.stderr.join("\n")).toContain("does not support origin claims yet");
+    expect(captured.stderr.join("\n")).not.toContain("Unrecognized key");
+  });
+
+  it("names the origin proof when a signed claim meets a wallet that is not the payee", async () => {
+    await initializedHome("vapi-claim-not-payee-");
+    process.env.VAPI_API_KEY = KEY;
+    const registry = registryFetch({
+      "GET /api/call/listings/claim-nonce": (call) => ({
+        body: {
+          message: [
+            "api.vapinetwork.ai wants you to sign in with your Ethereum account:",
+            new URLSearchParams(call.query).get("wallet") ?? "",
+            "",
+            `Claim the vAPI Call listings served from ${ORIGIN}`,
+            "",
+            "Chain ID: 8453",
+          ].join("\n"),
+        },
+      }),
+      "POST /api/call/listings/claim": { status: 403, body: { error: "not_payee" } },
+    });
+    const captured = captureIo();
+
+    expect(
+      await runCli(["claim", ORIGIN], captured.io, { ...AGENT, fetchImpl: registry.fetchImpl }),
+    ).toBe(1);
+    expect(captured.stderr.join("\n")).toContain(
+      "If the payee is a payment processor's address, run vapi claim https://weather.example --well-known.",
+    );
+  });
+
+  it("takes an https origin and nothing else, before it calls anyone", async () => {
+    await walletlessHome("vapi-claim-wk-usage-");
+    const registry = registryFetch({});
+
+    for (const value of ["http://weather.example", "https://weather.example/api", "weather"]) {
+      const captured = captureIo();
+      expect(
+        await runCli(["claim", value, "--well-known"], captured.io, {
+          ...AGENT,
+          fetchImpl: registry.fetchImpl,
+        }),
+      ).toBe(2);
+    }
+    expect(registry.calls).toEqual([]);
+  });
+});
+
 describe("vapi auth", () => {
   it("never takes the key from the command line", async () => {
     await initializedHome("vapi-auth-argv-");

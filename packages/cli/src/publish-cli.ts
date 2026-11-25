@@ -840,7 +840,9 @@ function formatMyListings(result: { listings?: readonly unknown[] }): string {
   ].join("\n");
 }
 
-const CLAIM_USAGE = "Usage: vapi claim <origin> [--account <name>]";
+const WELL_KNOWN_OPTION = "--well-known";
+
+const CLAIM_USAGE = "Usage: vapi claim <origin> [--well-known] [--account <name>]";
 
 /**
  * `vapi claim <origin>`: the owner of an API vAPI indexed from a public
@@ -849,6 +851,11 @@ const CLAIM_USAGE = "Usage: vapi claim <origin> [--account <name>]";
  * signs its payout line, and the registry recovers the signer to match it
  * against their payTo. Nothing is paid and the payout path does not change. A
  * human act, like publishing: there is no MCP tool for it.
+ *
+ * `--well-known` proves control of the origin instead, for a payee that cannot
+ * sign, such as a payment processor's deposit address: the registry reads
+ * `/.well-known/vapi.json` from the origin. Nothing is signed, so the wallet is
+ * never unlocked; `--account` only picks a linked agent's credential.
  */
 export async function claimCommand(
   argv: string[],
@@ -858,10 +865,25 @@ export async function claimCommand(
 ): Promise<void> {
   const parsed = parseArguments(argv, {
     valueOptions: new Set([WALLET_OPTION]),
+    booleanOptions: new Set([WELL_KNOWN_OPTION]),
     maximumPositionals: 1,
   });
   const origin = claimOrigin(requiredPositional(parsed.positionals[0], "<origin>", CLAIM_USAGE));
   const { client, baseUrl } = await listingsClient(io, dependencies, parsed);
+  if (parsed.has(WELL_KNOWN_OPTION)) {
+    const result = await client.claimByOrigin(origin);
+    const claimed = claimedSlugs(result);
+    await recordAudit(dependencies, "listing.claim", {
+      detail: `${origin} well-known ${claimed.join(",")}`.trim(),
+    });
+    output(
+      io,
+      json,
+      { origin, proof: "well-known", claimed },
+      formatClaimed(origin, claimed, "their payTo"),
+    );
+    return;
+  }
   const wallet = await targetWallet(parsed, dependencies);
   const { account } = await unlockTarget(wallet, dependencies);
   const address = requireEvmAddress(
@@ -874,9 +896,7 @@ export async function claimCommand(
   assertClaimMessage(message, { baseUrl, origin, address });
   const signature = await account.signMessage({ message });
   const result = await client.claim({ origin, message, signature });
-  const claimed = (Array.isArray(result.claimed) ? result.claimed : []).filter(
-    (slug): slug is string => typeof slug === "string",
-  );
+  const claimed = claimedSlugs(result);
   await recordAudit(dependencies, "listing.claim", {
     wallet: wallet.name,
     detail: `${origin} ${claimed.join(",")}`.trim(),
@@ -900,11 +920,17 @@ function claimOrigin(value: string): string {
   return url.origin;
 }
 
-function formatClaimed(origin: string, claimed: readonly string[]): string {
+function claimedSlugs(result: { claimed?: readonly unknown[] }): string[] {
+  return (Array.isArray(result.claimed) ? result.claimed : []).filter(
+    (slug): slug is string => typeof slug === "string",
+  );
+}
+
+function formatClaimed(origin: string, claimed: readonly string[], payee = "this wallet"): string {
   if (claimed.length === 0) return `Nothing was claimed from ${origin}.`;
   return [
     `Claimed ${claimed.length} listing${claimed.length === 1 ? "" : "s"} served from ${origin}:`,
     ...claimed.map((slug) => `  ${slug}`),
-    "They are still paid directly to this wallet, with no vAPI fee. vapi publish list shows them; vapi publish verify-request <slug> asks for review.",
+    `They are still paid directly to ${payee}, with no vAPI fee. vapi publish list shows them; vapi publish verify-request <slug> asks for review.`,
   ].join("\n");
 }

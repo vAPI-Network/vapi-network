@@ -117,6 +117,7 @@ import { loginCommand, logoutCommand, whoamiCommand } from "./login.js";
 import { mcpInstallCommand } from "./mcp-install.js";
 import { routerCommand } from "./router.js";
 import { resolveRuntime } from "./runtime-local.js";
+import { OriginClaimError } from "./publish-client.js";
 import { RemoteKeyRefusedError } from "./runtime-railway.js";
 import { sendCommand } from "./send.js";
 import { setupCommand } from "./setup.js";
@@ -327,7 +328,7 @@ Usage:
   vapi publish activate <slug> [--json]
   vapi publish verify-request <slug> [--json]
   vapi publish list [--json]
-  vapi claim <origin> [--account <name>] [--json]
+  vapi claim <origin> [--well-known] [--account <name>] [--json]
   vapi mcp [--account <name>] [--json]
   vapi mcp install <claude-code|claude-desktop|cursor|codex> [--home <dir>] [--registry <url>] [--no-link] [--json]
   vapi serve [--json]
@@ -358,7 +359,7 @@ Solana listings remain searchable; inspect and pay return \`unsupported_network\
 
 \`vapi publish <url>\` lists an API you own. vAPI probes the URL — an origin, one endpoint, or an OpenAPI document — you choose which endpoints to list, and your wallet signs one line naming where the payouts go. Listing is permissionless: a listing that passed the probe goes live with \`vapi publish activate <slug>\`, and \`vapi publish verify-request <slug>\` asks for the review that puts it in the default search. Set each endpoint's x402 payTo to the payout wallet you signed with before activation. vAPI Call takes no fee. Providers are paid directly. A catalog of more than 20 endpoints is listed as several listings of up to 20, with one result line per endpoint; \`--resume\` skips every endpoint this key already lists.
 
-\`vapi claim <origin>\` takes ownership of the listings vAPI indexed from your API. The wallet their payments go to signs one line, \`Claim the vAPI Call listings served from <origin>\`; the listings stay paid directly to that wallet, and \`vapi publish list\` shows them.
+\`vapi claim <origin>\` takes ownership of the listings vAPI indexed from your API. The wallet their payments go to signs one line, \`Claim the vAPI Call listings served from <origin>\`; the listings stay paid directly to that wallet, and \`vapi publish list\` shows them. When the payee is a payment processor's address, \`vapi claim <origin> --well-known\` proves control of the origin instead: serve \`{ "version": 1, "account": "<your vAPI account's wallet address>" }\` at \`https://<origin>/.well-known/vapi.json\`. Nothing is signed. vAPI re-reads the file about once a day and releases the listings after three failed days.
 
 \`vapi auth set-key\` types the registry API key once, on a terminal, into the same OS secret store as the passphrase. A key is a secret: it is never an argument, \`VAPI_API_KEY\` is the route for CI, and no agent or MCP tool can reach it.
 
@@ -654,6 +655,9 @@ export async function runCli(
             ...(error instanceof VapiCallError ? { code: error.code } : {}),
             ...(error instanceof DocsError ? { code: error.code } : {}),
             ...(error instanceof RemoteKeyRefusedError ? { code: error.code } : {}),
+            ...(error instanceof OriginClaimError && error.code !== ""
+              ? { code: error.code, ...(error.file === undefined ? {} : { file: error.file }) }
+              : {}),
             ...(error instanceof TransferError
               ? { code: error.code, moneyMoved: error.moneyMoved }
               : {}),
