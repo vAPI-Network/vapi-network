@@ -13,7 +13,7 @@ import {
   type VapiConfig,
 } from "@vapi-network/core";
 import { AGENT_LINK_REVOKED_MESSAGE } from "@vapi-network/core/agent-link";
-import { RouterClientError } from "@vapi-network/core/router-client";
+import { RouterClientError, ROUTER_NO_COMPUTE_MESSAGE } from "@vapi-network/core/router-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { UNTRUSTED_NOTICE } from "./guards.js";
@@ -402,6 +402,24 @@ describe("runAgent", () => {
       "agent.run.step",
       "agent.run.end",
     ]);
+  });
+
+  it("tells the owner there is no Compute when the Router refuses an unused allowance", async () => {
+    const deps = await agentDeps([]);
+    deps.chat = vi.fn().mockRejectedValue(
+      Object.assign(new Error(ROUTER_NO_COMPUTE_MESSAGE), {
+        name: "RouterClientError",
+        code: "budget_exhausted",
+      }),
+    );
+
+    const result = await runAgent("Do work", deps);
+
+    expect(result.stoppedBecause).toMatchObject({
+      type: "stopped",
+      reason: "router_budget",
+      detail: ROUTER_NO_COMPUTE_MESSAGE,
+    });
   });
 
   it("stops after settlement becomes uncertain and does not attempt the payment again", async () => {

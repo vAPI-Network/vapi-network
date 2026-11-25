@@ -12,6 +12,10 @@ sentence under it is the summary shown on the
 
 ## Unreleased
 
+### Fixed
+
+- `vapi router usage` no longer reads as a free daily allowance when the owner account has no Compute. It shows the Compute left today, names the agent's figure as a cap, and says to stake or buy Router balance when neither exists. A chat refused in that state says the same instead of "used up". `docs/router.md` explains each usage field.
+
 ## 0.16.0 - 2026-11-24
 
 Tasks V2 runs on Base mainnet from the CLI, the SDK and local MCP, against the audited contracts pinned in the client.

@@ -30,12 +30,22 @@ const usageSchema = z.object({
 
 const routerUsageSchema = {
   compute: z.object({
-    allowanceUsd: z.number(),
-    spentTodayUsd: z.number(),
-    remainingTodayUsd: z.number(),
+    allowanceUsd: z
+      .number()
+      .describe("Cap on this agent's share of the owner's Compute per day. Not Compute itself."),
+    spentTodayUsd: z.number().describe("Compute this agent used today."),
+    remainingTodayUsd: z
+      .number()
+      .describe(
+        "Compute this agent can still use today: the smaller of its cap and the owner's Compute left.",
+      ),
     resetsAt: z.string(),
-    ownerLimitUsd: z.number(),
-    ownerSpentUsd: z.number(),
+    ownerLimitUsd: z
+      .number()
+      .describe(
+        "The owner account's Compute today, from staked vAPI at the 00:00 UTC snapshot. 0 means no stake was counted.",
+      ),
+    ownerSpentUsd: z.number().describe("Compute all of the owner's agents used today."),
   }),
   balance: z
     .object({

@@ -228,15 +228,24 @@ async function usageCommand(
     io.stdout(JSON.stringify(usage));
     return;
   }
+  // `allowanceUsd` caps this agent's share of the owner's Compute; it is not Compute of its own.
+  const ownerHasCompute = usage.compute.ownerLimitUsd > 0;
   io.stdout(
-    `Compute today: $${money(usage.compute.spentTodayUsd)} of $${money(
-      usage.compute.allowanceUsd,
-    )} (resets ${utcTime(usage.compute.resetsAt)} UTC)`,
+    `Compute left today: $${money(usage.compute.remainingTodayUsd)} (resets ${utcTime(
+      usage.compute.resetsAt,
+    )} UTC)`,
   );
   io.stdout(
-    `Owner's Compute: $${money(usage.compute.ownerSpentUsd)} of $${money(
-      usage.compute.ownerLimitUsd,
-    )}`,
+    `This agent: $${money(usage.compute.spentTodayUsd)} used of its $${money(
+      usage.compute.allowanceUsd,
+    )} daily cap`,
+  );
+  io.stdout(
+    ownerHasCompute
+      ? `Owner's Compute: $${money(usage.compute.ownerSpentUsd)} used of $${money(
+          usage.compute.ownerLimitUsd,
+        )}`
+      : "Owner's Compute: none today",
   );
   io.stdout(
     usage.balance === null
@@ -245,6 +254,11 @@ async function usageCommand(
           usage.balance.purchasedUsd,
         )}, used $${money(usage.balance.spentUsd)})`,
   );
+  if (!ownerHasCompute && (usage.balance?.remainingUsd ?? 0) <= 0) {
+    io.stdout(
+      "No Router request can run yet. Compute comes from vAPI staked on the owner account (vapi stake open). Without stake, buy Router balance with vapi router buy 1.",
+    );
+  }
 }
 
 async function chatCommand(

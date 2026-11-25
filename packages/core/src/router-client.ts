@@ -116,6 +116,13 @@ export class RouterClientError extends Error {
 export const ROUTER_KEY_REVOKED_MESSAGE =
   "The Router key was revoked. Run vapi login to link again, or vapi router key --rotate if the link is still active.";
 
+/** Sent when the Router refuses a request and the owner account has no Compute today.
+ * Compute follows the owner's stake at the 00:00 UTC snapshot; the agent's own
+ * `allowanceUsd` is only a cap on that Compute.
+ */
+export const ROUTER_NO_COMPUTE_MESSAGE =
+  "The owner account has no Compute today and no Router balance is left. Compute comes from vAPI staked on the owner account (vapi stake open). Without stake, buy Router balance with vapi router buy 1.";
+
 export type RouterClientDeps = {
   secrets: SecretStore;
   wallets: WalletStore;
@@ -1186,7 +1193,7 @@ export async function routerChat(
               balanceError instanceof RouterClientError &&
               balanceError.code === "budget_exhausted"
             ) {
-              throw budgetExhaustedError(resetsAt, error.status);
+              throw budgetExhaustedError(resetsAt, error.status, usage);
             }
             if (
               balanceError instanceof RouterClientError &&
@@ -1199,7 +1206,7 @@ export async function routerChat(
           }
         }
       }
-      throw budgetExhaustedError(resetsAt, error.status);
+      throw budgetExhaustedError(resetsAt, error.status, usage);
     } catch (followupError) {
       if (purchase === undefined) throw followupError;
       throw pendingPurchaseError(purchase, balanceKeyAvailable, followupError);
@@ -1468,10 +1475,16 @@ async function resolveRefillValue<T>(value: T | (() => Promise<T>)): Promise<T> 
   return typeof value === "function" ? await (value as () => Promise<T>)() : value;
 }
 
-function budgetExhaustedError(resetsAt: string, status?: number): RouterClientError {
+function budgetExhaustedError(
+  resetsAt: string,
+  status?: number,
+  usage?: AgentRouterUsage,
+): RouterClientError {
   return new RouterClientError(
     "budget_exhausted",
-    `Today's Router allowance is used up. It resets at ${resetsAt}. Buy Router balance with vapi router buy 5.`,
+    usage !== undefined && usage.compute.ownerLimitUsd <= 0
+      ? ROUTER_NO_COMPUTE_MESSAGE
+      : `Today's Router allowance is used up. It resets at ${resetsAt}. Buy Router balance with vapi router buy 5.`,
     status,
   );
 }

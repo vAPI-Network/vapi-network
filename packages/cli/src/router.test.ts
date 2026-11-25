@@ -635,8 +635,9 @@ describe("vapi router usage", () => {
 
     expect(await runCli(["router", "usage", "--wallet", WALLET], human.io, dependencies)).toBe(0);
     expect(human.stdout).toEqual([
-      "Compute today: $0.42 of $2.00 (resets 03:07 UTC)",
-      "Owner's Compute: $0.90 of $5.00",
+      "Compute left today: $1.58 (resets 03:07 UTC)",
+      "This agent: $0.42 used of its $2.00 daily cap",
+      "Owner's Compute: $0.90 used of $5.00",
       "Router balance: none bought yet",
     ]);
 
@@ -645,6 +646,67 @@ describe("vapi router usage", () => {
       await runCli(["router", "usage", "--wallet", WALLET, "--json"], json.io, dependencies),
     ).toBe(0);
     expect(JSON.parse(json.stdout[0]!)).toEqual(usage);
+  });
+
+  it("says why nothing is left when the owner has no Compute and no balance is bought", async () => {
+    await initializedHome();
+    const dependencies = commandDependencies({
+      router: {
+        routerUsage: async () => ({
+          compute: {
+            allowanceUsd: 1,
+            spentTodayUsd: 0,
+            remainingTodayUsd: 0,
+            resetsAt: "2026-11-26T00:00:00.000Z",
+            ownerLimitUsd: 0,
+            ownerSpentUsd: 0,
+          },
+          balance: null,
+        }),
+      },
+    });
+    const captured = captureIo();
+
+    expect(await runCli(["router", "usage", "--wallet", WALLET], captured.io, dependencies)).toBe(
+      0,
+    );
+    expect(captured.stdout).toEqual([
+      "Compute left today: $0.00 (resets 00:00 UTC)",
+      "This agent: $0.00 used of its $1.00 daily cap",
+      "Owner's Compute: none today",
+      "Router balance: none bought yet",
+      "No Router request can run yet. Compute comes from vAPI staked on the owner account (vapi stake open). Without stake, buy Router balance with vapi router buy 1.",
+    ]);
+  });
+
+  it("keeps the no-Compute hint away from an agent that still has Router balance", async () => {
+    await initializedHome();
+    const dependencies = commandDependencies({
+      router: {
+        routerUsage: async () => ({
+          compute: {
+            allowanceUsd: 1,
+            spentTodayUsd: 0,
+            remainingTodayUsd: 0,
+            resetsAt: "2026-11-26T00:00:00.000Z",
+            ownerLimitUsd: 0,
+            ownerSpentUsd: 0,
+          },
+          balance: { purchasedUsd: 5, spentUsd: 1, remainingUsd: 4 },
+        }),
+      },
+    });
+    const captured = captureIo();
+
+    expect(await runCli(["router", "usage", "--wallet", WALLET], captured.io, dependencies)).toBe(
+      0,
+    );
+    expect(captured.stdout).toEqual([
+      "Compute left today: $0.00 (resets 00:00 UTC)",
+      "This agent: $0.00 used of its $1.00 daily cap",
+      "Owner's Compute: none today",
+      "Router balance: $4.00 (bought $5.00, used $1.00)",
+    ]);
   });
 
   it("formats a purchased Router balance", async () => {
