@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   SpendCapError,
   SpendCapExceededError,
+  createPublicFetch,
   getDefaultConfig,
   appendReceipt,
   __setReceiptTestHooks,
@@ -31,6 +32,12 @@ import {
 
 import { runCli, type CliDependencies, type CliIo } from "./cli.js";
 import { purchaseTransport } from "../../../test-fixtures/router-purchase.js";
+
+// A pass-through spy: tests read the options a command gives the address guard.
+vi.mock("@vapi-network/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@vapi-network/core")>();
+  return { ...actual, createPublicFetch: vi.fn(actual.createPublicFetch) };
+});
 
 const PASSPHRASE = "test-only-passphrase";
 const WALLET = "researcher";
@@ -61,13 +68,144 @@ describe("vapi router models", () => {
 
     expect(await runCli(["router", "models", "--wallet", WALLET], human.io, dependencies)).toBe(0);
     expect(human.stdout).toEqual(["model-a", "model-b"]);
-    expect(listRouterModels).toHaveBeenCalledWith({ apiBase: "https://api.vapinetwork.ai/" });
+    expect(listRouterModels).toHaveBeenCalledWith({
+      apiBase: "https://api.vapinetwork.ai/",
+      fetchImpl: expect.any(Function),
+    });
 
     const json = captureIo();
     expect(
       await runCli(["router", "models", "--wallet", WALLET, "--json"], json.io, dependencies),
     ).toBe(0);
     expect(JSON.parse(json.stdout[0]!)).toEqual(["model-a", "model-b"]);
+  });
+});
+
+describe("vapi router and allowPrivateNetwork", () => {
+  // DNS that answers like a local proxy's fake-IP range, so no request leaves the machine.
+  const fakeIpLookup = async () => ["198.18.0.1"];
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  async function writeConfig(home: string, allowPrivateNetwork?: boolean): Promise<void> {
+    await writeFile(
+      join(home, "config.json"),
+      JSON.stringify({
+        ...getDefaultConfig({}),
+        ...(allowPrivateNetwork === undefined ? {} : { allowPrivateNetwork }),
+      }),
+    );
+  }
+
+  function lastTransport(): { options: unknown; fetchImpl: unknown } {
+    const spy = vi.mocked(createPublicFetch);
+    expect(spy).toHaveBeenCalled();
+    return { options: spy.mock.calls.at(-1)![0], fetchImpl: spy.mock.results.at(-1)!.value };
+  }
+
+  it.each([
+    [true, true],
+    [false, false],
+    [undefined, false],
+  ])(
+    "router usage with allowPrivateNetwork %s builds its transport with the flag %s",
+    async (flag, expected) => {
+      await writeConfig(await initializedHome(), flag);
+      const routerUsage = vi.fn(async (_deps: RouterClientDeps) => usageResult());
+      vi.mocked(createPublicFetch).mockClear();
+
+      expect(
+        await runCli(
+          ["router", "usage", "--wallet", WALLET, "--json"],
+          captureIo().io,
+          commandDependencies({ router: { routerUsage } }),
+        ),
+      ).toBe(0);
+
+      const transport = lastTransport();
+      expect(transport.options).toEqual({ allowPrivateNetwork: expected });
+      expect(routerUsage.mock.calls[0]![0].fetchImpl).toBe(transport.fetchImpl);
+    },
+  );
+
+  it.each([
+    [true, true],
+    [undefined, false],
+  ])(
+    "router models with allowPrivateNetwork %s builds its transport with the flag %s",
+    async (flag, expected) => {
+      await writeConfig(await initializedHome(), flag);
+      const listRouterModels = vi.fn(
+        async (_deps: { apiBase: string; fetchImpl?: typeof fetch }) => [{ id: "model-a" }],
+      );
+      vi.mocked(createPublicFetch).mockClear();
+
+      expect(
+        await runCli(
+          ["router", "models", "--wallet", WALLET],
+          captureIo().io,
+          commandDependencies({ router: { listRouterModels } }),
+        ),
+      ).toBe(0);
+
+      const transport = lastTransport();
+      expect(transport.options).toEqual({ allowPrivateNetwork: expected });
+      expect(listRouterModels.mock.calls[0]![0].fetchImpl).toBe(transport.fetchImpl);
+    },
+  );
+
+  it("keeps an injected fetchImpl ahead of the config flag", async () => {
+    await writeConfig(await initializedHome(), true);
+    const fetchImpl = vi.fn<typeof fetch>();
+    const routerUsage = vi.fn(async (_deps: RouterClientDeps) => usageResult());
+    vi.mocked(createPublicFetch).mockClear();
+
+    expect(
+      await runCli(
+        ["router", "usage", "--wallet", WALLET, "--json"],
+        captureIo().io,
+        commandDependencies({ fetchImpl, router: { routerUsage } }),
+      ),
+    ).toBe(0);
+
+    expect(createPublicFetch).not.toHaveBeenCalled();
+    expect(routerUsage.mock.calls[0]![0].fetchImpl).toBe(fetchImpl);
+  });
+
+  it("says why router usage never reached vAPI", async () => {
+    for (const name of ["HTTPS_PROXY", "https_proxy"]) vi.stubEnv(name, "");
+    const dependencies = await linkedRouterDependencies(
+      createPublicFetch({ allowPrivateNetwork: false, lookup: fakeIpLookup }),
+    );
+    const captured = captureIo();
+
+    expect(await runCli(["router", "usage", "--wallet", WALLET], captured.io, dependencies)).toBe(
+      1,
+    );
+    expect(captured.stderr).toContain(
+      "The vAPI Router usage request failed: console.example is not a public address.",
+    );
+  });
+
+  it("says why router models never reached vAPI", async () => {
+    for (const name of ["HTTPS_PROXY", "https_proxy"]) vi.stubEnv(name, "");
+    await initializedHome();
+    const captured = captureIo();
+
+    expect(
+      await runCli(
+        ["router", "models", "--wallet", WALLET],
+        captured.io,
+        commandDependencies({
+          fetchImpl: createPublicFetch({ allowPrivateNetwork: false, lookup: fakeIpLookup }),
+        }),
+      ),
+    ).toBe(1);
+    expect(captured.stderr).toContain(
+      "The vAPI Router model request failed: api.vapinetwork.ai is not a public address.",
+    );
   });
 });
 

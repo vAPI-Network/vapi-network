@@ -17,6 +17,7 @@ import {
 import { readAuditLog } from "./audit.js";
 import { drainCeilingSweeps } from "./ceiling.js";
 import { DEFAULT_SPEND_CAPS, getDefaultConfig } from "./config.js";
+import { createPublicFetch, type LookupFn } from "./net-guard.js";
 import { NETWORKS } from "./networks.js";
 import { __setReceiptTestHooks, appendReceipt, readReceipts, type Receipt } from "./receipts.js";
 import { createRunBudget, type RunBudget } from "./run-budget.js";
@@ -2488,6 +2489,77 @@ describe("listRouterModels", () => {
     await expect(listRouterModels({ apiBase: `${API_BASE}/`, fetchImpl })).resolves.toEqual([
       { id: "provider/model", context_window: 128_000 },
     ]);
+  });
+});
+
+describe("Router transport failures", () => {
+  // A guarded transport whose DNS answers with a proxy fake-IP, as on a machine
+  // behind a local proxy or container egress gateway.
+  const fakeIpFetch = () =>
+    createPublicFetch({
+      allowPrivateNetwork: false,
+      lookup: vi.fn<LookupFn>().mockResolvedValue(["198.18.0.1"]),
+    });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  function withoutProxy(): void {
+    for (const name of ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]) {
+      vi.stubEnv(name, "");
+    }
+  }
+
+  it("says why the model request never reached vAPI", async () => {
+    withoutProxy();
+    await expect(
+      listRouterModels({ apiBase: `${API_BASE}/`, fetchImpl: fakeIpFetch() }),
+    ).rejects.toMatchObject({
+      name: "RouterClientError",
+      code: "http",
+      message: "The vAPI Router model request failed: console.example is not a public address.",
+    });
+  });
+
+  it("says why the usage request never reached vAPI", async () => {
+    withoutProxy();
+    const deps = await linkedDeps(fakeIpFetch());
+
+    await expect(routerUsage(deps)).rejects.toMatchObject({
+      name: "RouterClientError",
+      code: "http",
+      message: "The vAPI Router usage request failed: console.example is not a public address.",
+    });
+  });
+
+  it("says why the chat request never reached the Router", async () => {
+    withoutProxy();
+    const deps = await linkedDeps(fakeIpFetch());
+
+    await expect(routerChat(deps, { model: "model", messages: [] })).rejects.toMatchObject({
+      name: "RouterClientError",
+      code: "http",
+      message: "The vAPI Router request failed: router.example is not a public address.",
+    });
+  });
+
+  it("names the host only, never the path or query", async () => {
+    withoutProxy();
+    const fetchImpl = vi.fn<typeof fetch>(async () => {
+      throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+    });
+
+    const error = await listRouterModels({
+      apiBase: "https://console.example/base?token=secret",
+      fetchImpl,
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      message:
+        "The vAPI Router model request failed: could not connect to console.example (ECONNREFUSED).",
+    });
+    expect(String((error as Error).message)).not.toContain("secret");
   });
 });
 

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { constants, homedir } from "node:os";
 
-import { createPublicFetch, isMissingFile } from "@vapi-network/core";
+import { isMissingFile } from "@vapi-network/core";
 import {
   RouterClientError,
   routerCredentials,
@@ -24,7 +24,7 @@ import {
   resolveBinary,
   type CodeChild,
 } from "./code.js";
-import { routerDeps } from "./router.js";
+import { routerDeps, type CommandRouterDeps } from "./router.js";
 
 export type CodeProcessSignals = {
   on(signal: NodeJS.Signals, listener: () => void): unknown;
@@ -120,8 +120,8 @@ async function bounded<T>(
 }
 
 // Abort real requests too; a promise race alone leaves sockets active after fallback.
-function abortableDeps(deps: RouterClientDeps, signal: AbortSignal): RouterClientDeps {
-  const fetchImpl = deps.fetchImpl ?? createPublicFetch({ allowPrivateNetwork: false });
+function abortableDeps(deps: CommandRouterDeps, signal: AbortSignal): RouterClientDeps {
+  const { fetchImpl } = deps;
   return {
     ...deps,
     fetchImpl: (input, init) =>
@@ -157,7 +157,7 @@ async function chooseRoute(
   if (options.own) return { kind: "own" };
   const timeout = dependencies.code?.usageTimeoutMs ?? 4_000;
   let credentials: Credentials | undefined;
-  let deps: RouterClientDeps | undefined;
+  let deps: CommandRouterDeps | undefined;
   let balanceKeyRequired = false;
   try {
     credentials = await bounded(async (signal) => {
@@ -167,7 +167,7 @@ async function chooseRoute(
         env.VAPI_HOME,
       );
       signal.throwIfAborted();
-      deps = routerDeps(target, dependencies);
+      deps = await routerDeps(target, dependencies);
       return await (dependencies.router?.routerCredentials ?? routerCredentials)(
         abortableDeps(deps, signal),
       );

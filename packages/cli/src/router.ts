@@ -6,6 +6,7 @@ import {
   loadConfig,
   spendCapsForWallet,
   syncReceipts,
+  type VapiConfig,
 } from "@vapi-network/core";
 import {
   ROUTER_TOPUP_TIERS,
@@ -35,7 +36,7 @@ import {
   unlockTarget,
   type WalletTarget,
 } from "./wallet-session.js";
-import { type CliDependencies, type CliIo } from "./cli-context.js";
+import { commandFetch, loadCommandFetch, type CliDependencies, type CliIo } from "./cli-context.js";
 import { UsageError, parseArguments } from "./args.js";
 
 const WALLET_OPTION = "--wallet";
@@ -101,7 +102,7 @@ async function clearPendingCommand(
         );
       }
       const { receipt, appended } = await ensureRouterPurchaseReceipt(
-        routerDeps(target, dependencies),
+        await routerDeps(target, dependencies),
         pending,
       );
       const payment = {
@@ -144,7 +145,7 @@ async function clearPendingCommand(
     let confirmation: string | undefined;
     if (confirmed && pending !== undefined) {
       const resolution = await resolveRouterPendingPurchase(
-        routerDeps(target, dependencies),
+        await routerDeps(target, dependencies),
         pending,
         {
           ...(dependencies.now === undefined ? {} : { now: dependencies.now() }),
@@ -201,7 +202,7 @@ async function modelsCommand(
   const models = await withRouterError(() =>
     list({
       apiBase: registryBaseUrl(config),
-      ...(dependencies.fetchImpl === undefined ? {} : { fetchImpl: dependencies.fetchImpl }),
+      fetchImpl: commandFetch(dependencies, config),
     }),
   );
   if (json) {
@@ -223,7 +224,9 @@ async function usageCommand(
   });
   const target = await targetWallet(parsed, dependencies);
   const readUsage = dependencies.router?.routerUsage ?? routerUsage;
-  const usage = await withRouterError(() => readUsage(routerDeps(target, dependencies)));
+  const usage = await withRouterError(async () =>
+    readUsage(await routerDeps(target, dependencies)),
+  );
   if (json) {
     io.stdout(JSON.stringify(usage));
     return;
@@ -277,10 +280,10 @@ async function chatCommand(
   const chat = dependencies.router?.routerChat ?? routerChat;
   const refill = await configuredRefill(target, io, dependencies);
   const result = await withRouterError(
-    () =>
+    async () =>
       chat(
         {
-          ...routerDeps(target, dependencies),
+          ...(await routerDeps(target, dependencies, refill?.config)),
           ...(refill === undefined ? {} : { refill }),
         },
         request,
@@ -357,10 +360,10 @@ async function buyCommand(
   let result: Awaited<ReturnType<typeof buyRouterBalance>>;
   try {
     result = await withRouterError(
-      () =>
+      async () =>
         buy(
           {
-            ...routerDeps(target, dependencies),
+            ...(await routerDeps(target, dependencies, config)),
             account,
             config,
             caps,
@@ -421,7 +424,7 @@ async function keyCommand(
     maximumPositionals: 0,
   });
   const target = await targetWallet(parsed, dependencies);
-  const deps = routerDeps(target, dependencies);
+  const deps = await routerDeps(target, dependencies);
   if (parsed.has("--rotate")) {
     const rotate = dependencies.router?.rotateRouterKey ?? rotateRouterKey;
     await withRouterError(() => rotate(deps));
@@ -446,12 +449,25 @@ async function keyCommand(
   io.stdout(result.apiKey);
 }
 
-export function routerDeps(target: WalletTarget, dependencies: CliDependencies): RouterClientDeps {
+/**
+ * Router client inputs for one account. The transport follows the account's
+ * config unless the caller passes the config it already loaded.
+ */
+export type CommandRouterDeps = RouterClientDeps & { fetchImpl: typeof fetch };
+
+export async function routerDeps(
+  target: WalletTarget,
+  dependencies: CliDependencies,
+  config?: VapiConfig,
+): Promise<CommandRouterDeps> {
   return {
     secrets: getSecretStore(dependencies),
     wallets: target.store,
     wallet: target.name,
-    ...(dependencies.fetchImpl === undefined ? {} : { fetchImpl: dependencies.fetchImpl }),
+    fetchImpl:
+      config === undefined
+        ? await loadCommandFetch(dependencies, getVapiPaths(target.store.home).config)
+        : commandFetch(dependencies, config),
   };
 }
 

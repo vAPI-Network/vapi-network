@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { runCli, type CliIo } from "./cli.js";
 
@@ -130,6 +134,37 @@ describe("vapi docs", () => {
       ]);
     },
   );
+
+  describe("with a config that cannot be read", () => {
+    let home: string | undefined;
+
+    afterEach(async () => {
+      vi.unstubAllEnvs();
+      if (home !== undefined) await rm(home, { recursive: true, force: true });
+      home = undefined;
+    });
+
+    it("runs the request instead of failing on the config", async () => {
+      home = await mkdtemp(join(tmpdir(), "vapi-docs-config-"));
+      await writeFile(join(home, "config.json"), '{"allowPrivateNetwork": true}');
+      vi.stubEnv("VAPI_HOME", home);
+      const io = capturedIo();
+
+      // No injected transport: the command builds its own. A private address is
+      // refused before any connection, so no request leaves the machine.
+      expect(
+        await runCli(["docs", "search", "setup", "--json"], io.io, {
+          env: { VAPI_DOCS_URL: "https://127.0.0.1:9" },
+        }),
+      ).toBe(1);
+      // The docs request's own failure, as before this command read the config.
+      expect(JSON.parse(io.stdout[0]!)).toEqual({
+        error: "The documentation search request failed.",
+        exitCode: 1,
+        code: "bad_response",
+      });
+    });
+  });
 });
 
 function capturedIo(): { io: CliIo; stdout: string[]; stderr: string[] } {

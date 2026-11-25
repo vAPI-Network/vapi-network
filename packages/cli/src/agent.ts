@@ -48,7 +48,13 @@ import {
 } from "@vapi-network/mcp";
 
 import { UsageError, parseArguments } from "./args.js";
-import { getEnvironment, type CliDependencies, type CliIo } from "./cli-context.js";
+import {
+  commandFetch,
+  getEnvironment,
+  loadCommandFetch,
+  type CliDependencies,
+  type CliIo,
+} from "./cli-context.js";
 import { walletCapsCommand, walletCreateCommand } from "./cli.js";
 import { runHeadlessAgent } from "./headless.js";
 import { runLoginFlow } from "./login.js";
@@ -533,7 +539,7 @@ export async function buildAgentRunDeps(input: {
   const chat = async (request: Parameters<typeof routerChat>[1]) => {
     const result = await chatRequest(
       {
-        ...routerDependencies(target, dependencies),
+        ...routerDependencies(target, dependencies, config),
         refill: {
           account,
           config,
@@ -657,6 +663,10 @@ async function listCommand(
   const now = dependencies.now?.() ?? new Date();
   const ledger = await readLedger(paths.ledger, now);
   const readUsage = dependencies.router?.routerUsage ?? routerUsage;
+  // An unreadable config must not hide the local profiles either.
+  const fetchImpl = await loadCommandFetch(dependencies, paths.config).catch(() =>
+    commandFetch(dependencies, {}),
+  );
   const rows = await Promise.all(
     profiles.map(async (profile) => {
       const address = await store.readAddress(profile.wallet);
@@ -669,7 +679,7 @@ async function listCommand(
           secrets: getSecretStore(dependencies),
           wallets: store,
           wallet: assertWalletName(profile.wallet),
-          ...(dependencies.fetchImpl === undefined ? {} : { fetchImpl: dependencies.fetchImpl }),
+          fetchImpl,
         });
         routerRemainingTodayUsd = usage.compute.remainingTodayUsd;
       } catch {
@@ -802,8 +812,9 @@ async function revokeCommand(
   const target = await targetWallet(explicitWallet(profile.wallet), dependencies);
   const owner = target.entry.link?.owner;
   let balance: string | undefined;
+  let config: Awaited<ReturnType<typeof loadConfig>> | undefined;
   try {
-    const config = await loadConfig(paths.config, process.env, { notice: io.stderr });
+    config = await loadConfig(paths.config, process.env, { notice: io.stderr });
     balance = await baseBalance(target.address, config, dependencies);
   } catch {
     // Revocation and local credential removal must not depend on a balance read.
@@ -814,7 +825,8 @@ async function revokeCommand(
       secrets: getSecretStore(dependencies),
       wallets: target.store,
       wallet: target.name,
-      ...(dependencies.fetchImpl === undefined ? {} : { fetchImpl: dependencies.fetchImpl }),
+      // An unreadable config keeps the address check on rather than block revocation.
+      fetchImpl: commandFetch(dependencies, config ?? {}),
       home: paths.directory,
     });
   } finally {
@@ -862,12 +874,13 @@ async function baseBalance(
 function routerDependencies(
   target: Awaited<ReturnType<typeof targetWallet>>,
   dependencies: CliDependencies,
+  config: Awaited<ReturnType<typeof loadConfig>>,
 ) {
   return {
     secrets: getSecretStore(dependencies),
     wallets: target.store,
     wallet: target.name,
-    ...(dependencies.fetchImpl === undefined ? {} : { fetchImpl: dependencies.fetchImpl }),
+    fetchImpl: commandFetch(dependencies, config),
   };
 }
 

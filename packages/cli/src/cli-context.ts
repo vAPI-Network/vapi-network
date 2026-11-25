@@ -1,6 +1,8 @@
 import { createInterface } from "node:readline/promises";
 
 import {
+  createPublicFetch,
+  getVapiPaths,
   loadConfig,
   promptForSecret,
   type CeilingBalanceReader,
@@ -208,6 +210,32 @@ export async function promptForLine(prompt: string): Promise<string> {
 
 export function getLinePrompt(dependencies: CliDependencies): (prompt: string) => Promise<string> {
   return getPrompts(dependencies).line ?? promptForLine;
+}
+
+/**
+ * The transport for a command's requests to vAPI. An injected `fetchImpl`
+ * wins; otherwise the address check follows `allowPrivateNetwork` in the config.
+ */
+export function commandFetch(
+  dependencies: Pick<CliDependencies, "fetchImpl">,
+  config: Pick<VapiConfig, "allowPrivateNetwork">,
+): typeof fetch {
+  return (
+    dependencies.fetchImpl ??
+    createPublicFetch({ allowPrivateNetwork: config.allowPrivateNetwork ?? false })
+  );
+}
+
+/**
+ * `commandFetch` for a command that has not loaded the config yet. A missing
+ * config file means the defaults, so the address check stays on.
+ */
+export async function loadCommandFetch(
+  dependencies: Pick<CliDependencies, "fetchImpl">,
+  configPath: string = getVapiPaths().config,
+): Promise<typeof fetch> {
+  if (dependencies.fetchImpl !== undefined) return dependencies.fetchImpl;
+  return commandFetch(dependencies, await loadConfig(configPath, process.env));
 }
 
 /** Loads the config and reports any retired registry URL it had to repair. */

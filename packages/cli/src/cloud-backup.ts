@@ -2,7 +2,6 @@ import { join } from "node:path";
 
 import {
   activeAgentMarker,
-  createPublicFetch,
   deviceName,
   ensureDeviceName,
   fetchSiblings,
@@ -27,6 +26,7 @@ import { registeredAgentProfileSchema } from "@vapi-network/mcp";
 import { UsageError, parseArguments } from "./args.js";
 import { detectColorLevel } from "./brand.js";
 import {
+  commandFetch,
   getEnvironment,
   getLinePrompt,
   getPrompts,
@@ -426,7 +426,7 @@ async function attemptAutoUploadBackup(
   if (signal.aborted) return { status: "skipped", reason: "timeout" };
   if (!state.enabled) return undefined;
 
-  const fetchImpl = dependencies.fetchImpl ?? createPublicFetch({ allowPrivateNetwork: false });
+  const fetchImpl = commandFetch(dependencies, config);
   return await (dependencies.cloudBackup?.uploadBackup ?? uploadBackup)({
     store: await openWalletStore(dependencies),
     secrets,
@@ -480,7 +480,7 @@ async function cloudRestoreContext(io: CliIo, dependencies: CliDependencies) {
   return {
     apiBase: registryBaseUrl(config),
     device: await currentDevice(dependencies),
-    fetchImpl: dependencies.fetchImpl ?? createPublicFetch({ allowPrivateNetwork: false }),
+    fetchImpl: commandFetch(dependencies, config),
     networks: Object.keys(config.networks),
     secrets: getSecretStore(dependencies),
   };
