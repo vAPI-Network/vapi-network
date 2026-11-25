@@ -264,7 +264,26 @@ directly to it with no vAPI fee, `vapi publish list` shows them, and `vapi
 publish verify-request <slug>` asks for review. A wallet that is not the payee,
 an origin with nothing to claim, and listings that already have an owner each
 get their own sentence and exit `1`. Like publishing, claiming needs `vapi auth
-set-key` and has no MCP tool.
+set-key` and has no MCP tool. The payee refusal names `--well-known` for a payee
+that cannot sign.
+
+A payment processor's deposit address cannot sign, so prove control of the
+origin instead:
+
+```bash
+vapi claim https://weather.example --well-known
+```
+
+The origin serves `https://weather.example/.well-known/vapi.json` with the
+content `{"version": 1, "account": "0x…"}`, where `account` is the wallet
+address of your vAPI account. The registry reads that file and asks for no
+signature, so vapi never unlocks the wallet. If the file is missing,
+unreadable or names another account, the command prints the URL and the exact
+JSON to serve; `--json` returns them as `code` and `file`. Serve it and run the
+same command again. The unowned listings must pay one EVM address. The
+registry re-reads the file about once a day and releases the listings after
+three failed days. A later claim signed by the payee wallet takes a listing
+over. A registry that does not support origin claims yet says so.
 
 The API key is a secret like any other here. `vapi auth set-key` reads it from
 a prompt, never from an argument, and keeps it in the same OS secret store as

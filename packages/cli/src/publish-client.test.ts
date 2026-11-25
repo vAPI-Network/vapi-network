@@ -9,6 +9,7 @@ import {
   createListingsClient,
   formatProbeSteps,
   listingsUrl,
+  OriginClaimError,
   PAYOUT_STATEMENT,
   readProbeOperations,
   readProbeRejection,
@@ -183,6 +184,114 @@ describe("registry errors", () => {
     const { client: listings } = client({ status: 503, body: { error: "upstream down" } });
     await expect(listings.mine()).rejects.toThrow(
       "vAPI listings API returned HTTP 503. upstream down",
+    );
+  });
+});
+
+describe("an origin claim", () => {
+  const ORIGIN = "https://weather.example";
+  const ACCOUNT = "0x1111111111111111111111111111111111111111";
+  const FILE = {
+    url: `${ORIGIN}/.well-known/vapi.json`,
+    content: { version: 1, account: ACCOUNT },
+  };
+
+  async function refusal(reply: Reply): Promise<OriginClaimError> {
+    const { client: listings } = client(reply);
+    const error = await listings.claimByOrigin(ORIGIN).catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(OriginClaimError);
+    return error as OriginClaimError;
+  }
+
+  it("posts the origin and the proof kind, with no nonce and no signature", async () => {
+    const { client: listings, requests } = client({ body: { claimed: ["weather-forecast"] } });
+
+    expect(await listings.claimByOrigin(ORIGIN)).toEqual({ claimed: ["weather-forecast"] });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.method).toBe("POST");
+    expect(requests[0]?.url.href).toBe(`${BASE}/api/call/listings/claim`);
+    expect(requests[0]?.headers.get("authorization")).toBe(`Bearer ${KEY}`);
+    expect(requests[0]?.body).toEqual({ origin: ORIGIN, proof: "well-known" });
+  });
+
+  it.each([
+    ["origin_proof_unreadable", 422, "vAPI could not read the proof file"],
+    ["origin_proof_mismatch", 403, "names another vAPI account"],
+  ])("carries a valid %s file with the code", async (code, status, sentence) => {
+    const error = await refusal({ status, body: { error: code, message: "m", file: FILE } });
+
+    expect(error.code).toBe(code);
+    expect(error.file).toEqual(FILE);
+    expect(error.message).toContain(sentence);
+    expect(error.message).toContain(FILE.url);
+    expect(error.message).toContain(JSON.stringify(FILE.content, null, 2));
+    expect(error.message).toContain("then run the same command again");
+  });
+
+  it.each([
+    ["a URL for another host", { ...FILE, url: "https://evil.example/.well-known/vapi.json" }],
+    ["a URL with another path", { ...FILE, url: `${ORIGIN}/vapi.json` }],
+    ["an http URL", { ...FILE, url: "http://weather.example/.well-known/vapi.json" }],
+    ["a URL with a query", { ...FILE, url: `${FILE.url}?x=1` }],
+    ["another version", { ...FILE, content: { version: 2, account: ACCOUNT } }],
+    ["an account that is not an address", { ...FILE, content: { version: 1, account: "acct" } }],
+    ["no content", { url: FILE.url }],
+  ])("drops a file with %s", async (_label, file) => {
+    const error = await refusal({
+      status: 422,
+      body: { error: "origin_proof_unreadable", message: "m", file },
+    });
+
+    expect(error.code).toBe("origin_proof_unreadable");
+    expect(error.file).toBeUndefined();
+    expect(error.message).toContain("vAPI could not read the proof file");
+    expect(error.message).not.toContain("evil.example");
+    expect(error.message).not.toContain('"version"');
+  });
+
+  it.each([
+    [422, "account_wallet_required", "This vAPI account has no wallet address"],
+    [404, "no_listings", "vAPI has no unclaimed listing served from https://weather.example."],
+    [
+      409,
+      "already_owned",
+      "The listings served from https://weather.example already have an owner.",
+    ],
+    [422, "no_evm_payee", "do not pay one EVM address"],
+  ])("turns a %s %s into a sentence", async (status, code, sentence) => {
+    const error = await refusal({ status, body: { error: code, message: "registry detail" } });
+
+    expect(error.code).toBe(code);
+    expect(error.status).toBe(status);
+    expect(error.message).toContain(sentence);
+    expect(error.message).not.toContain("rejected the listing as invalid");
+  });
+
+  it("says an older registry does not support origin claims", async () => {
+    const { client: listings } = client({
+      status: 400,
+      body: {
+        error: "invalid_request",
+        issues: [{ path: ["proof"], message: "Unrecognized key" }],
+      },
+    });
+    const error = await listings.claimByOrigin(ORIGIN).catch((reason: unknown) => reason as Error);
+
+    expect(error.message).toContain("does not support origin claims yet");
+    expect(error.message).not.toContain("Unrecognized key");
+  });
+
+  it("adds the origin claim to the payee refusal of a signed claim", async () => {
+    const { client: listings } = client({ status: 403, body: { error: "not_payee" } });
+    const error = await listings
+      .claim({ origin: ORIGIN, message: "m", signature: "0xs" })
+      .catch((reason: unknown) => reason as Error);
+
+    expect(error.message).toContain(
+      "This wallet is not the payee of the listings served from https://weather.example.",
+    );
+    expect(error.message).toContain(
+      "If the payee is a payment processor's address, run vapi claim https://weather.example --well-known.",
     );
   });
 });

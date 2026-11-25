@@ -134,6 +134,15 @@ export type ClaimInput = { origin: string; message: string; signature: string };
 export type ClaimResult = Readonly<{ claimed?: readonly unknown[] }> &
   Readonly<Record<string, unknown>>;
 
+/** Where an origin claim's proof lives on the origin being claimed. */
+export const ORIGIN_PROOF_PATH = "/.well-known/vapi.json";
+
+/** The proof file the provider serves, exactly as the registry asks for it. */
+export type OriginProofFile = {
+  url: string;
+  content: { version: 1; account: Address };
+};
+
 /**
  * A refusal from the registry, already turned into the sentence a person
  * should read. The status is kept so a caller can tell a rejection from an
@@ -147,6 +156,24 @@ export class RegistryApiError extends Error {
   ) {
     super(message);
     this.name = "RegistryApiError";
+  }
+}
+
+/**
+ * An origin claim the registry refused, by the code in its body. `file` is the
+ * proof file to serve, present only when the registry sent one that names this
+ * origin's well-known URL and a wallet address, so `--json` can hand it on.
+ */
+export class OriginClaimError extends RegistryApiError {
+  constructor(
+    status: number,
+    readonly code: string,
+    message: string,
+    body?: unknown,
+    readonly file?: OriginProofFile,
+  ) {
+    super(status, message, body);
+    this.name = "OriginClaimError";
   }
 }
 
@@ -170,6 +197,8 @@ export type ListingsClient = {
   mine(): Promise<MyListings>;
   claimNonce(origin: string, wallet: string): Promise<ClaimNonce>;
   claim(input: ClaimInput): Promise<ClaimResult>;
+  /** Claims by control of the origin: the registry reads its `/.well-known/vapi.json`. */
+  claimByOrigin(origin: string): Promise<ClaimResult>;
 };
 
 /** Appends one absolute path to the registry base, keeping any mount prefix. */
@@ -258,6 +287,16 @@ export function createListingsClient(options: ListingsClientOptions): ListingsCl
         throw claimRefusal(error, input.origin);
       }
     },
+    async claimByOrigin(origin) {
+      try {
+        return (await call("/api/call/listings/claim", {
+          method: "POST",
+          body: { origin, proof: "well-known" },
+        })) as ClaimResult;
+      } catch (error) {
+        throw originClaimRefusal(error, origin);
+      }
+    },
   };
 }
 
@@ -265,12 +304,108 @@ export function createListingsClient(options: ListingsClientOptions): ListingsCl
 function claimRefusal(error: unknown, origin: string): unknown {
   if (!(error instanceof RegistryApiError)) return error;
   const sentences: Partial<Record<number, string>> = {
-    403: `This wallet is not the payee of the listings served from ${origin}. Sign with the wallet their payments go to: vapi claim ${origin} --wallet <name>.`,
+    403: `This wallet is not the payee of the listings served from ${origin}. Sign with the wallet their payments go to: vapi claim ${origin} --wallet <name>. If the payee is a payment processor's address, run vapi claim ${origin} --well-known.`,
     404: `vAPI has no unclaimed listing served from ${origin}. To list it yourself, run vapi publish ${origin}.`,
     409: `The listings served from ${origin} already have an owner. vapi publish list shows the ones this key owns.`,
   };
   const sentence = sentences[error.status];
   return sentence === undefined ? error : new RegistryApiError(error.status, sentence, error.body);
+}
+
+/**
+ * The refusals an origin claim can meet, mapped by the code in the body:
+ * 422 and 403 each carry more than one meaning here. A proof refusal names the
+ * file to serve when the registry sent a valid one; an older registry that does
+ * not know `proof` answers 400 to the strict schema.
+ */
+function originClaimRefusal(error: unknown, origin: string): unknown {
+  if (!(error instanceof RegistryApiError)) return error;
+  const body = isRecord(error.body) ? error.body : {};
+  const code = asString(body.error);
+  const detail = asString(body.message);
+  const again = `vapi claim ${origin} --well-known`;
+  const refuse = (sentence: string, file?: OriginProofFile) =>
+    new OriginClaimError(error.status, code ?? "", sentence, error.body, file);
+  switch (code) {
+    case "account_wallet_required":
+      return refuse(
+        withDetail(
+          "This vAPI account has no wallet address, so there is no account for the proof file to name.",
+          detail,
+        ),
+      );
+    case "no_listings":
+      return refuse(
+        `vAPI has no unclaimed listing served from ${origin}. To list it yourself, run vapi publish ${origin}.`,
+      );
+    case "already_owned":
+      return refuse(
+        `The listings served from ${origin} already have an owner. vapi publish list shows the ones this key owns.`,
+      );
+    case "no_evm_payee":
+      return refuse(
+        withDetail(
+          `The unowned listings served from ${origin} do not pay one EVM address, so an origin claim cannot take them over.`,
+          detail,
+        ),
+      );
+    case "origin_proof_unreadable":
+    case "origin_proof_mismatch": {
+      const file = readOriginProofFile(body.file, origin);
+      const fileUrl = `${origin}${ORIGIN_PROOF_PATH}`;
+      const refusal =
+        code === "origin_proof_mismatch"
+          ? `The file at ${fileUrl} names another vAPI account.`
+          : withDetail(`vAPI could not read the proof file at ${fileUrl}.`, detail);
+      if (file === undefined) return refuse(refusal);
+      return refuse(
+        [
+          refusal,
+          `Serve this JSON at ${file.url}:`,
+          JSON.stringify(file.content, null, 2),
+          `then run the same command again: ${again}.`,
+        ].join("\n"),
+        file,
+      );
+    }
+    default:
+      if (error.status === 400) {
+        return new RegistryApiError(
+          400,
+          `This vAPI registry does not support origin claims yet. Claim with the payee wallet instead: vapi claim ${origin} --account <name>.`,
+          error.body,
+        );
+      }
+      return error;
+  }
+}
+
+function withDetail(sentence: string, detail: string | undefined): string {
+  return detail === undefined ? sentence : `${sentence} ${detail}`;
+}
+
+/**
+ * The proof file the registry asked for, or undefined unless it is exactly the
+ * contract: this origin's well-known URL, version 1 and a 0x wallet address.
+ * The body is server input, so nothing else is printed as an instruction.
+ */
+function readOriginProofFile(value: unknown, origin: string): OriginProofFile | undefined {
+  if (!isRecord(value) || typeof value.url !== "string" || !isRecord(value.content)) {
+    return undefined;
+  }
+  const expected = `${origin}${ORIGIN_PROOF_PATH}`;
+  let url: URL;
+  try {
+    url = new URL(value.url);
+  } catch {
+    return undefined;
+  }
+  if (url.href !== new URL(expected).href || value.url !== url.href) return undefined;
+  const { version, account } = value.content;
+  if (version !== 1 || typeof account !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(account)) {
+    return undefined;
+  }
+  return { url: url.href, content: { version: 1, account: account as Address } };
 }
 
 /**
