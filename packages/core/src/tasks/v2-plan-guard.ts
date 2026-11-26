@@ -492,11 +492,18 @@ export async function verifyV2Target(
   view: GetOrderResponse,
   action: TaskV2Action | TaskV2Consent,
   knownTarget?: Address,
+  /** The funding is already mined, so no deadline can make it unsafe to sign: nothing is signed. */
+  fundingMined = false,
 ): Promise<VerifiedV2Target> {
   const operation = taskV2OperationResponseSchema.safeParse(current);
   const intent = taskV2IntentSchema.safeParse(current);
-  const chainId = operation.success
-    ? operation.data.operation.plan.chainId
+  // The API returns no plan once a step is submitted or confirmed, and while a recovery scan
+  // runs. Such a response carries nothing to sign; its caller names the chain instead.
+  const plan = operation.success ? operation.data.operation.plan : null;
+  if (operation.success && !plan)
+    return v2GuardFailure("The hosted operation carries no plan to verify.");
+  const chainId = plan
+    ? plan.chainId
     : intent.success
       ? intent.data.typedData.domain.chainId
       : z.object({ chainId: z.number().int().positive() }).parse(current).chainId;
@@ -538,15 +545,8 @@ export async function verifyV2Target(
       : undefined);
   let creationArgs: readonly unknown[] | undefined;
   let fresh: CreationPolicy | undefined;
-  if (
-    action.action === "fund" &&
-    operation.success &&
-    same(operation.data.operation.plan.to, factory)
-  ) {
-    const decoded = decodeFunctionData({
-      abi: factoryAbi,
-      data: operation.data.operation.plan.data,
-    });
+  if (action.action === "fund" && plan && same(plan.to, factory)) {
+    const decoded = decodeFunctionData({ abi: factoryAbi, data: plan.data });
     const names = pool ? ["createPool"] : ["createEscrow", "createAndFundWithAuthorization"];
     if (!names.includes(decoded.functionName))
       return v2GuardFailure("Unexpected V2 factory funding selector.");
@@ -559,8 +559,7 @@ export async function verifyV2Target(
   }
   if (
     action.action === "fund" &&
-    operation.success &&
-    operation.data.operation.plan.step === "v2-approve-usdc" &&
+    plan?.step === "v2-approve-usdc" &&
     (!candidate || !(await isRegistered(candidate)))
   ) {
     fresh = await creationPolicy(rpc, pin, pool);
@@ -580,7 +579,7 @@ export async function verifyV2Target(
   if (!(await isRegistered(candidate))) {
     // The hosted signature intent has no frozen creation arguments: never sign
     // a redeemable authorization to its unverified predicted address.
-    if (action.action !== "fund" || !operation.success || !creationArgs || !fresh)
+    if (action.action !== "fund" || !plan || !creationArgs || !fresh)
       return v2GuardFailure("The V2 target is not registered by the locally pinned factory.");
     const expectedCreation = acceptedCreationArgs(options, view, pin, chainId, fresh);
     if (canon(creationArgs) !== canon(expectedCreation))
@@ -709,7 +708,7 @@ export async function verifyV2Target(
       "The V2 target differs from the pinned factory's prediction for the requested order.",
     );
   verifyBinding(candidate, termsHash);
-  if (action.action === "fund" && !pool && !bounty)
+  if (action.action === "fund" && !pool && !bounty && !fundingMined)
     await verifyFundingDeadlines(
       rpc,
       candidate,
@@ -898,6 +897,7 @@ export async function verifyV2Plan(
   fundingAuthorization?: { message: Record<string, unknown>; signature: Hex },
 ) {
   const plan = op.plan;
+  if (!plan) return v2GuardFailure("The hosted operation carries no plan to verify.");
   if (plan.value !== "0" || plan.chainId !== target.chainId)
     return v2GuardFailure("V2 plan value or chain mismatch.");
   const authorizationArgs = fundingAuthorization

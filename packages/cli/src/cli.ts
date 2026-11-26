@@ -217,7 +217,7 @@ Usage:
   vapi accounts use <name> [--json]
   vapi accounts remove <name> [--force] [--json]
   vapi accounts restore <name> [--json]
-  vapi accounts caps <name> [--per-call <usd>] [--per-day <usd>] [--ceiling <usd|off>] [--json]
+  vapi accounts caps <name> [--per-call <usd>] [--per-day <usd>] [--ceiling <usd|off>] [--max-per-task <usd>] [--approve-above <usd>] [--yes] [--json]
   vapi accounts distribute <amount> --from <account> [--to <a,b,c>] [--network base|arc] [--json]
   vapi accounts distribute --resume <id> [--replace-expired-restored] [--bind-legacy-addresses] [--json]
   vapi accounts distribute --cancel <id> [--replace-expired-restored] [--json]

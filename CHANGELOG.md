@@ -12,6 +12,33 @@ sentence under it is the summary shown on the
 
 ## Unreleased
 
+### Fixed
+
+- Tasks on Base mainnet: every signed step was refused with "Hosted plan deployment mismatch" because the client required `configured: true` in vAPI's readiness answer, which mainnet did not send. Payouts, refunds, cancellations, bounty awards, disputes, jury steps and votes no longer depend on that flag. They rely on the contract addresses pinned in the client and on the checks it runs on chain, as before.
+- `vapi task fund`, `vapi task post --fund` and `vapi task approve-bond` stop with "vAPI reports Tasks as unavailable on Base right now" when vAPI says so. So do the two hiring steps, `vapi task sign --action award-consent` and `vapi task award --worker`. They stop before anything is prepared, signed, sent or counted against the daily cap. `post --fund` also stops before the task is posted. The error code is `tasks_unavailable`.
+- Running one of those commands again after it signed something resumes the saved operation, and does not ask about availability, the size limit or the wallet balance, because the money may already have moved. When the node reports the saved money transaction as mined, the rerun signs and sends nothing: it reports the transaction to vAPI and finishes, is not asked about limits, approval, the authorization window or the deadline again, and the amount stays counted once, on the day it was reserved. A saved transaction that is not mined is sent again after the same checks as a first run, and on a later day it counts against that day's cap as well. A step or a funding authorization that was never signed still waits while Tasks is unavailable.
+- `vapi task fund` failed with `v2_plan_mismatch` on every retry once a prepared funding authorization was older than 30 minutes, for example after a refusal for an empty wallet or a missing approval. An authorization that ran out before anything was signed is now dropped and a new one is prepared. One that was signed is kept.
+- `vapi task sign --action award-consent`, run again while Tasks is unavailable, said "Nothing was signed" although the first run may have signed and uploaded the consent. It now says that this run signed nothing, that an earlier consent may still be valid until it expires, and how to revoke it.
+- A transaction that was sent and mined was reported as failed, because vAPI answers without a plan once a step is submitted. The client now reads that answer, so a sequence such as create, approve and fund runs through in one command.
+- Funding checked several things only after the USDC authorization had been signed and uploaded. The wallet's USDC and ETH, the chain of the prepared step and the contract's size limit are now checked first. The daily cap is counted right before the first signature, and for a transaction only after the node has estimated it.
+- `vapi task post` accepted a task deadline one hour ahead, which vAPI then refused. A task and each of its milestones need 3 hours when the post arrives; use `181m` or more. Bounties and pools keep the 10-minute minimum. A legacy `--intake submissions` post keeps it too, unless `--proof`, `--checkin` or `--milestone` makes it a task.
+- `vapi task post` printed "fee unavailable" on Base mainnet and accepted any amount. It now reads the fee and the size limit (5,000 USDC today) from the Tasks contract, and refuses a larger total before posting. `vapi task fund` checks the same limit.
+- `vapi task propose` and `vapi task submit` say "vAPI reports Tasks as unavailable" where they said "Task escrow deployment is unavailable".
+
+### Added
+
+- `vapi accounts caps <name> --max-per-task <usd> --approve-above <usd>` shows and sets the task limits of any account. Until now only `vapi agent create` could set them, so an existing account stayed at 100 USD per task and approval above 0.50 USD. Raising a limit is for a person at a terminal: it asks for a typed `yes` or takes `--yes`, and is refused in an agent session or when standard input is not a terminal. Lowering works everywhere. A limit above 1,000,000 USD is refused. The defaults are unchanged.
+- `vapi agent create` says what it does with task limits stored on the account with `vapi accounts caps`. A value above the default is cleared; a value below it stays on the account and goes into the profile. Removing the profile returns the account to the default or to the owner's stricter value, never to an old raise. For an account that already exists, raising `--max-per-task`, `--approve-above` or `--call-budget` above what it has is refused from an agent session or without a terminal, as in `vapi accounts caps`.
+- SDK: `readTaskV2Limits`, `requireTasksAvailable`, `readTasksReadiness`, `WalletStore.updateTaskPolicy` and `accountTaskLimitsUnderProfile`.
+
+### Breaking
+
+- SDK: `operation.plan` in a hosted V2 operation response is `null` after the step is submitted, so the type `TaskV2Operation["plan"]` is nullable and code that reads `operation.plan` has to handle `null`. `TaskPolicy["source"]` gains the member `"account"`, which `taskPolicyForWallet` returns for limits set with `vapi accounts caps`. Both ship in a patch release because 0.16.0 could not complete a signed step on Base mainnet, and the old `plan` type could not be satisfied after a broadcast.
+
+### Changed
+
+- Guides: the Tasks command reference matches `vapi task --help`. `task propose` sends an offer the poster can read. `task award <id> <proposalId>` is marked as V1 only; on Base mainnet the worker runs `task sign --action award-consent` and the poster runs `task award --worker`. The guides now say that a bounty and a pool cannot be completed through this client alone, and list every limit that applies before funding.
+
 ## 0.16.0 - 2026-11-24
 
 Tasks V2 runs on Base mainnet from the CLI, the SDK and local MCP, against the audited contracts pinned in the client.

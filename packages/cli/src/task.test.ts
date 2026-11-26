@@ -868,7 +868,46 @@ describe("vapi task", () => {
     },
   );
 
-  it("reads a brief file and accepts the exact injected one-hour deadline", async () => {
+  it("reads the fee and the limit from the pinned factory when vAPI sends no fee", async () => {
+    const { client, dependencies } = await fixture();
+    dependencies.readStdin = async () => BRIEF;
+    // The production readiness body of 2026-11-25 carried feeBp: null.
+    vi.mocked(client.deployment).mockResolvedValue({
+      configured: false,
+      chainId: 8453,
+      network: "eip155:8453",
+      feeBp: null,
+      explorerUrl: null,
+      capabilities: { erc3009Funding: false, vapiVerify: false },
+      eip3009Domain: null,
+    });
+    const readContract = vi.fn(async (call: { functionName: string }) =>
+      call.functionName === "feeBp" ? 0 : 5_000_000_000n,
+    );
+    dependencies.tasks!.rpcFor = () =>
+      ({ getChainId: async () => 8453, readContract }) as unknown as import("viem").PublicClient;
+    const posted = await invoke(postArgs, dependencies);
+    expect(posted.code).toBe(0);
+    expect(posted.stdout.join("\n")).toContain("$100.00 gross · $0.00 fee · $100.00 net");
+    expect(posted.stderr.join("\n")).not.toContain("fee");
+    expect(readContract).toHaveBeenCalledWith(
+      expect.objectContaining({
+        address: "0x3586A4C92b55a83175D911aBA9B50329319E34BD",
+        functionName: "maxEscrowAmount",
+      }),
+    );
+    vi.mocked(client.createOrder).mockClear();
+    const tooLarge = await invoke(
+      postArgs.map((value) => (value === "100" ? "6000" : value)),
+      dependencies,
+    );
+    expect(tooLarge.code).toBe(1);
+    expect([...tooLarge.stdout, ...tooLarge.stderr].join("\n")).toContain(
+      "The total of $6000.00 USDC is above the live limit of $5000.00 USDC per task on Base. Nothing was posted and no money moved.",
+    );
+    expect(client.createOrder).not.toHaveBeenCalled();
+  });
+  it("reads a brief file and accepts the shortest task deadline, three hours and a minute", async () => {
     const { home, client, dependencies } = await fixture();
     const path = join(home, "brief.md");
     await writeFile(path, BRIEF);
@@ -882,7 +921,7 @@ describe("vapi task", () => {
         "--amount",
         "0.000001",
         "--deadline",
-        "2026-10-08T13:00:00.000Z",
+        "2026-10-08T15:01:00.000Z",
       ],
       dependencies,
     );
@@ -891,6 +930,27 @@ describe("vapi task", () => {
       expect.objectContaining({ description: BRIEF }),
       { idempotencyKey: KEY },
     );
+    // Exactly three hours would be refused by the API a moment later, so it stops here.
+    vi.mocked(client.createOrder).mockClear();
+    const early = await invoke(
+      [
+        "post",
+        "--title",
+        "Build a page",
+        "--brief",
+        path,
+        "--amount",
+        "0.000001",
+        "--deadline",
+        "2026-10-08T15:00:00.000Z",
+      ],
+      dependencies,
+    );
+    expect(early.code).toBe(1);
+    expect([...early.stdout, ...early.stderr].join("\n")).toContain(
+      "Task deadlines must be at least 3 hours from now",
+    );
+    expect(client.createOrder).not.toHaveBeenCalled();
   });
 
   it.each(["post", "propose", "submit", "award", "message", "thread"])(
@@ -1029,6 +1089,55 @@ describe("vapi task", () => {
         code: "invalid_signature",
         message: "signature does not match providerAddress",
       },
+    });
+  });
+
+  it("prints vAPI's own sentence when it does not accept a shape on this network", async () => {
+    const { dependencies } = await fixture(true);
+    delete dependencies.tasks!.client;
+    dependencies.readStdin = async () => BRIEF;
+    const deployment = await fakeClient().deployment();
+    const posts: string[] = [];
+    dependencies.fetchImpl = vi.fn(async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (url.pathname === "/api/tasks/readiness") return Response.json(deployment);
+      if (url.pathname === "/v1/work-orders" && request.method === "POST") {
+        posts.push(((await request.json()) as { shape: string }).shape);
+        return Response.json(
+          { error: { code: "shape_unavailable", message: "Pools are not available yet." } },
+          { status: 400 },
+        );
+      }
+      throw new Error(`Unexpected Tasks route ${url.pathname}`);
+    });
+    const pool = [
+      "post",
+      "--title",
+      "Try the demo",
+      "--brief",
+      "-",
+      "--deadline",
+      "7d",
+      "--shape",
+      "pool",
+      "--reward-per-claim",
+      "5",
+      "--budget",
+      "100",
+      "--gate",
+      "proven",
+      "--verifier",
+      "poster",
+    ];
+    const result = await invoke(pool, dependencies, false);
+    expect(result.code).toBe(1);
+    expect(result.stdout).toEqual([]);
+    expect(result.stderr).toEqual(["shape_unavailable: Pools are not available yet."]);
+    expect(posts).toEqual(["pool"]);
+    expect((await invoke(pool, dependencies)).value).toEqual({
+      ok: false,
+      error: { code: "shape_unavailable", message: "Pools are not available yet." },
     });
   });
 

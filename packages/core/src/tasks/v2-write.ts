@@ -178,10 +178,14 @@ export const taskV2OperationSchema = z
     step: taskV2StepSchema,
     expectedActor: address,
     transactionHash: hash.nullable(),
-    plan: taskV2PlanSchema,
+    // The API returns the plan only while the step is prepared and re-validated; once the
+    // transaction is submitted or confirmed, and while a recovery scan runs, it sends null.
+    plan: taskV2PlanSchema.nullable(),
   })
   .refine(
-    (v) => v.plan.operationId === v.id && v.plan.step === v.step && v.plan.from === v.expectedActor,
+    (v) =>
+      v.plan === null ||
+      (v.plan.operationId === v.id && v.plan.step === v.step && v.plan.from === v.expectedActor),
     "Operation plan binding mismatch",
   )
   .refine(
@@ -237,6 +241,7 @@ export const taskV2SignatureResponseSchema = z.union([
 export type TaskV2Action = z.infer<typeof taskV2ActionSchema>;
 export type TaskV2Consent = z.infer<typeof taskV2ConsentSchema>;
 export type TaskV2Operation = z.infer<typeof taskV2OperationSchema>;
+export type TaskV2Plan = z.infer<typeof taskV2PlanSchema>;
 export type TaskV2OperationResponse = z.infer<typeof taskV2OperationResponseSchema>;
 export type TaskV2Prepared = z.infer<typeof taskV2PreparedSchema>;
 export type TaskV2ConsentResponse = z.infer<typeof taskV2ConsentResponseSchema>;

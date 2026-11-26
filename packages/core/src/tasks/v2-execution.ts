@@ -1,4 +1,10 @@
-import { bountyPoolV1Abi, escrowV2Abi } from "./v2-abi.js";
+import {
+  bountyPoolFactoryV1Abi,
+  bountyPoolV1Abi,
+  escrowFactoryV2Abi,
+  escrowV2Abi,
+} from "./v2-abi.js";
+import { assertWithinTaskV2Limit } from "./v2-limits.js";
 import {
   acceptedV2WorkerBond,
   isV2ResolverAction,
@@ -13,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import {
   isAddressEqual,
   keccak256,
+  parseAbi,
   parseTransaction,
   recoverTransactionAddress,
   type TransactionSerializable,
@@ -46,6 +53,7 @@ import {
   type TaskV2Prepared,
 } from "./v2-write.js";
 import { canonicalJson } from "./canonical-json.js";
+import { readTasksReadiness, requireTasksAvailable, taskNetworkName } from "./availability.js";
 import {
   isTaskV2SecretAction,
   publicTaskV2Operation,
@@ -97,6 +105,11 @@ export function bufferedV2Gas(estimate: bigint) {
 const fail = (message: string): never => {
   throw new TaskOperationError("invalid_response", message);
 };
+const balanceAbi = parseAbi(["function balanceOf(address account) view returns (uint256)"]);
+/** Steps whose USDC leaves this wallet within the same sequence, so the balance must cover it. */
+const PAID_NOW_ACTIONS: readonly string[] = ["fund", "raise-dispute", "counter-evidence"];
+/** Steps that reserve their spend in the ledger right before their first signature. */
+const RESERVING_ACTIONS: readonly string[] = [...PAID_NOW_ACTIONS, "approve-bond"];
 
 /** The API chooses V2, never a local calldata builder. Old adapters keep the V1 path. */
 export async function taskUsesV2(context: Pick<TaskOperationContext, "client">, id: string) {
@@ -134,6 +147,9 @@ export async function executeTaskV2(context: TaskOperationContext, input: TaskV2
         }
         const saved = journal.preparedV2;
         if (saved) return saved;
+        // A step that starts new work stops here when vAPI reports Tasks as unavailable:
+        // before the API prepares anything and before the vault opens.
+        requireTasksAvailable(action.action, await readTasksReadiness(context.client));
         const result = await (input.consent
           ? context.client.signV2!(input.id, input.consent, journal)
           : context.client.prepareV2!(input.id, input.write!, journal));
@@ -180,23 +196,137 @@ export function createTaskV2Executor(options: TasksChainOptions) {
           journal = { idempotencyKey: input.preparationKey ?? randomUUID(), inputs: action };
           await pending.putPreparation(input.id, verb, journal);
         }
-        let current = taskV2PreparedSchema.parse(
-          input.prepared ??
-            journal.preparedV2 ??
-            (await (input.consent
-              ? sign(input.id, input.consent, journal)
-              : prepare(input.id, input.write!, journal))),
-        );
+        if (!pending.bindPreparedV2) fail("Durable V2 preparation storage is unavailable.");
         // Retain the supplied hosted operation/intent before any refusal. A later
         // fund command resumes it instead of preparing a conflicting operation.
-        if (!pending.bindPreparedV2) fail("Durable V2 preparation storage is unavailable.");
-        await pending.bindPreparedV2!(input.id, verb, current);
+        const supplied = input.prepared ?? journal.preparedV2;
+        let current = supplied === undefined ? undefined : taskV2PreparedSchema.parse(supplied);
+        if (current) await pending.bindPreparedV2!(input.id, verb, current);
+        // A worker bond is only a USDC approval of the verified clone.
+        const finalStep =
+          action.action === "approve-bond" ? "v2-approve-usdc" : `v2-${action.action}`;
+        const allowedSteps =
+          action.action === "fund"
+            ? ["v2-create-escrow", "v2-create-pool", "v2-approve-usdc", "v2-fund"]
+            : action.action === "raise-dispute" || action.action === "counter-evidence"
+              ? ["v2-approve-usdc", finalStep]
+              : [finalStep];
+        // A rerun of an operation that already signed something: a signed transaction is saved
+        // for one of its steps, or its spend is reserved (the reservation is written right
+        // before the first signature, and a signed authorization can be redeemed without this
+        // machine). Its money may have moved, so it goes to the recover and reconcile loop
+        // below. The refusals that promise "nothing was signed" are for a first run only.
+        const reservedForTask = (excludeReservationId?: string) =>
+          taskReservedAtomic({
+            ledgerPath: input.ledgerPath,
+            wallet: input.wallet,
+            taskKey: input.id,
+            now: now(),
+            ...(excludeReservationId === undefined ? {} : { excludeReservationId }),
+          });
+        const savedOperation = journal.operationId;
+        const savedTransaction =
+          savedOperation !== undefined &&
+          (await Promise.all(allowedSteps.map((step) => pending.get(savedOperation, step)))).some(
+            (entry) => entry !== undefined,
+          );
+        // A typed signature is recorded in the journal the moment it is made.
+        const signedBefore = journal.signed === true;
+        const started =
+          savedTransaction ||
+          (RESERVING_ACTIONS.includes(action.action) &&
+            (signedBefore ||
+              (await reservedForTask()) !== (await reservedForTask(journal.idempotencyKey))));
+        // The transaction of the last step is saved and the node holds it as mined. Such a
+        // rerun signs nothing and sends nothing: it reports the transaction and waits for the
+        // API. Limits, approval and the funding time checks guard a new signature, so a mined
+        // step is not asked about them again, and its amount stays on the day it was reserved.
+        const savedFinal =
+          savedOperation === undefined ? undefined : await pending.get(savedOperation, finalStep);
+        const mined =
+          savedFinal &&
+          isAddressEqual(savedFinal.signer, account.address) &&
+          (
+            await Promise.resolve()
+              .then(() =>
+                rpcFor(savedFinal.chainId).getTransactionReceipt({ hash: savedFinal.txHash }),
+              )
+              .catch(() => undefined)
+          )?.status === "success"
+            ? savedFinal
+            : undefined;
+        // A funding authorization nobody signed is only an offer with an end time. Once that
+        // time has passed it can never be signed, so this run asks for a new one under a new
+        // key. An intent that was signed, reserved or followed by a signed transaction stays.
+        if (
+          current &&
+          !started &&
+          action.action === "fund" &&
+          "kind" in current &&
+          current.kind === "eip712"
+        ) {
+          const end = z
+            .object({ validBefore: uint })
+            .safeParse(taskV2IntentSchema.parse(current).typedData.message);
+          if (end.success && BigInt(end.data.validBefore) * 1000n <= BigInt(now().getTime())) {
+            await pending.completePreparation(input.id, verb);
+            journal = { idempotencyKey: randomUUID(), inputs: action };
+            await pending.putPreparation(input.id, verb, journal);
+            current = undefined;
+          }
+        }
+        // The readiness document is an availability statement and names the hosted chain; it
+        // is never a trust anchor (see availability.ts). Read it before anything is prepared,
+        // signed, sent or counted against a cap, and gate only new work on it.
+        const readiness = await readTasksReadiness(client);
+        // A consent leaves only its preparation on this machine, so a rerun cannot know whether
+        // the first run signed and uploaded it. Its refusal does not claim that nothing was signed.
+        if (!started)
+          requireTasksAvailable(
+            action.action,
+            readiness,
+            input.consent && journal.preparedV2
+              ? `This run signed nothing and moved no money. A consent this wallet signed earlier for this task may still be valid until it expires; vapi task bump-consent-nonce ${input.id} --new-nonce <n> revokes it.`
+              : undefined,
+          );
+        if (!current) {
+          current = taskV2PreparedSchema.parse(
+            await (input.consent
+              ? sign(input.id, input.consent, journal)
+              : prepare(input.id, input.write!, journal)),
+          );
+          await pending.bindPreparedV2!(input.id, verb, current);
+        }
         const view = await client.getOrder(input.id);
         if (view.workOrder.id !== input.id) fail("The money view belongs to another task.");
         const terms = view.workOrder.terms;
         const state = stateSchema.safeParse(view.workOrder.v2State);
-        const deployment = await client.deployment();
-        const target = await verifyV2Target(options, current, view, action);
+        // An operation the API already holds as submitted or confirmed comes back without a
+        // plan. Nothing is signed from such a response, so the chain is the one this machine
+        // accepted for the task, or the hosted chain ID; the local pin for it decides trust.
+        const resumed = taskV2OperationResponseSchema.safeParse(current);
+        let resumedChainId: number | undefined;
+        if (resumed.success && !resumed.data.operation.plan) {
+          resumedChainId = (await pending.v2Target?.(input.id))?.chainId ?? readiness?.chainId;
+          if (resumedChainId === undefined)
+            fail("The hosted operation carries no plan and its chain cannot be read.");
+        }
+        const target = await verifyV2Target(
+          options,
+          resumedChainId === undefined ? current : { chainId: resumedChainId },
+          view,
+          action,
+          undefined,
+          mined !== undefined,
+        );
+        if (mined && mined.chainId !== target.chainId)
+          fail("The saved transaction is for another chain than the verified task.");
+        // The step must be for the chain vAPI serves Tasks on. Checked here, before any
+        // signature; the pinned addresses and on-chain reads above already bound the target.
+        if (readiness && target.chainId !== readiness.chainId)
+          fail(
+            `The prepared step is for ${taskNetworkName(target.chainId)}, but vAPI serves Tasks on ${taskNetworkName(readiness.chainId)}. ${started ? "No new step was signed." : "Nothing was signed."}`,
+          );
         if (
           state.success &&
           (BigInt(state.data.totalBaseUnits) !== target.total || state.data.feeBp !== target.feeBp)
@@ -263,8 +393,9 @@ export function createTaskV2Executor(options: TasksChainOptions) {
           else gross = total ?? 0n;
           feeBp = 0;
         } else if (action.action === "raise-dispute" || action.action === "counter-evidence") {
-          if (!state.success || !deployment.configured)
-            fail("Hosted dispute binding is unavailable.");
+          // The fee is read from the verified escrow below. A dispute and its answer have an
+          // on-chain deadline, so hosted availability never holds them back.
+          if (!state.success) fail("Hosted dispute binding is unavailable.");
           pays = gross = await target.rpc.readContract({
             address: target.escrow,
             abi: escrowV2Abi,
@@ -331,6 +462,54 @@ export function createTaskV2Executor(options: TasksChainOptions) {
               }),
         };
         await input.onMoney?.(money);
+        // The factory refuses a total above its live limit. Say so before any signature; a
+        // failed read leaves the decision to the API and the contract.
+        if (action.action === "fund" && !started) {
+          const cap = await v2Read(
+            target.rpc,
+            target.factory,
+            target.pool ? bountyPoolFactoryV1Abi : escrowFactoryV2Abi,
+            target.pool ? "maxPoolBudget" : "maxEscrowAmount",
+          ).catch(() => undefined);
+          if (typeof cap === "bigint" && cap > 0n)
+            assertWithinTaskV2Limit(gross, {
+              chainId: target.chainId,
+              shape: target.pool ? "pool" : target.bounty ? "bounty" : "task",
+              feeBp: target.feeBp,
+              maxBaseUnits: cap,
+            });
+        }
+        // A step this wallet cannot pay stops before the approval question, the cap
+        // reservation and any signature. A failed read leaves the decision to the chain.
+        // A started operation may already have paid, so its balance says nothing here.
+        if (pays > 0n && PAID_NOW_ACTIONS.includes(action.action) && !started) {
+          const balance = await target.rpc
+            .readContract({
+              address: target.pin.usdc,
+              abi: balanceAbi,
+              functionName: "balanceOf",
+              args: [account.address],
+            })
+            .catch(() => undefined);
+          if (typeof balance === "bigint" && balance < pays)
+            throw new TaskOperationError(
+              "insufficient_usdc",
+              `This step pays $${formatBaseUnitsUsd(pays)} USDC, but the wallet holds $${formatBaseUnitsUsd(balance)} on ${taskNetworkName(target.chainId)}. Nothing was signed and no money moved.`,
+              undefined,
+              progress,
+            );
+          // Every paying step ends in a transaction from this wallet, so it needs gas.
+          const gas = await Promise.resolve()
+            .then(() => target.rpc.getBalance({ address: account.address }))
+            .catch(() => undefined);
+          if (gas === 0n)
+            throw new TaskOperationError(
+              "insufficient_gas",
+              `The wallet holds no ETH on ${taskNetworkName(target.chainId)} to pay for the transaction. Nothing was signed and no money moved.`,
+              undefined,
+              progress,
+            );
+        }
         const reservationKey = journal.idempotencyKey;
         const remaining =
           pays > 0n
@@ -352,11 +531,11 @@ export function createTaskV2Executor(options: TasksChainOptions) {
                 excludeReservationId: reservationKey,
               })
             : 0n;
-        if (pays + alreadyReserved > taskPolicyAtomic(input.policy.maxPerTaskUsd))
+        if (!mined && pays + alreadyReserved > taskPolicyAtomic(input.policy.maxPerTaskUsd))
           return { ok: false as const, reason: "policy.perTask", money, ...progress };
-        if (pays > remaining)
+        if (!mined && pays > remaining)
           return { ok: false as const, reason: "policy.perDay", money, ...progress };
-        if (pays > taskPolicyAtomic(input.policy.approveAboveUsd)) {
+        if (!mined && pays > taskPolicyAtomic(input.policy.approveAboveUsd)) {
           if (input.approval && "ask" in input.approval) {
             if (
               !(await input.approval.ask({
@@ -401,13 +580,27 @@ export function createTaskV2Executor(options: TasksChainOptions) {
         let fundingAuthorization:
           { message: Record<string, unknown>; signature: `0x${string}` } | undefined;
         try {
+          // A mined funding needs no authorization again: its operation is read from the API.
+          if (mined && "kind" in current)
+            current = taskV2OperationResponseSchema.parse(
+              await operationCall(savedOperation!, "recover", { step: finalStep }, key()),
+            );
           if ("kind" in current && current.kind === "eip712") {
             const intent = taskV2IntentSchema.parse(current);
             const typed = intent.typedData;
+            // A resumed operation was not asked about availability above. Its authorization is
+            // new money unless this machine already signed it or a transaction that carries it.
+            if (started && !savedTransaction && !signedBefore)
+              requireTasksAvailable(
+                action.action,
+                readiness,
+                "No new signature was made. An authorization signed earlier stays valid until it expires.",
+              );
             await verifyV2TypedData(target, intent, action, account.address, pays);
             await bindTarget();
             await beforeSign();
             const signature = await account.signTypedData(typed);
+            await pending.markPreparationSigned?.(input.id, verb);
             if (action.action === "fund")
               fundingAuthorization = { message: typed.message, signature };
             const response = await confirmSignature(input.id, intent.operationId, signature, key());
@@ -436,15 +629,6 @@ export function createTaskV2Executor(options: TasksChainOptions) {
           }
           let result = taskV2OperationResponseSchema.parse(current);
           const operationId = result.operation.id;
-          // A worker bond is only a USDC approval of the verified clone.
-          const finalStep =
-            action.action === "approve-bond" ? "v2-approve-usdc" : `v2-${action.action}`;
-          const allowedSteps =
-            action.action === "fund"
-              ? ["v2-create-escrow", "v2-create-pool", "v2-approve-usdc", "v2-fund"]
-              : action.action === "raise-dispute" || action.action === "counter-evidence"
-                ? ["v2-approve-usdc", finalStep]
-                : [finalStep];
           const validate = (value: TaskV2OperationResponse) => {
             if (
               value.orderId !== input.id ||
@@ -472,10 +656,19 @@ export function createTaskV2Executor(options: TasksChainOptions) {
               fail("Hosted sequence moved backwards.");
             return { parsed, complete: !("scanComplete" in response) || response.scanComplete };
           };
+          // The last plan the API returned for the step that is waiting to be signed. A
+          // recovery scan answers without a plan, so the comparison has to span those answers.
+          let waiting: { step: string; plan: string } | undefined;
           for (let poll = 0; poll < 256; poll++) {
             validate(result);
             progress = { ...progress, operation: publicTaskV2Operation(result.operation, secret) };
             const op = result.operation;
+            if (op.state !== "prepared" || waiting?.step !== op.step) waiting = undefined;
+            if (op.state === "prepared" && op.plan) {
+              const shown = canonicalJson(op.plan);
+              if (waiting && waiting.plan !== shown) fail("Recovery changed the prepared plan.");
+              waiting = { step: op.step, plan: shown };
+            }
             if (op.state === "confirmed") {
               if (op.step !== finalStep)
                 fail("An approval alone cannot complete the requested action.");
@@ -508,14 +701,30 @@ export function createTaskV2Executor(options: TasksChainOptions) {
               result = recovered.parsed;
               continue;
             }
-            if (canonicalJson(recovered.parsed.operation.plan) !== canonicalJson(op.plan))
+            // The node already holds the last step's saved transaction as mined: it is reported
+            // to the API, and neither signed nor sent again. Such a rerun was not asked about
+            // limits or approval, so it never signs or sends anything else either.
+            if (mined) {
+              if (op.step !== finalStep)
+                fail(
+                  "vAPI asks for an earlier step although the last step of this operation is mined. Nothing was signed.",
+                );
+              result = (await call("transaction", op.step, mined.txHash)).parsed;
+              if (result.operation.state === "prepared") await sleep(1000);
+              continue;
+            }
+            // Only a plan the API has just re-validated is signed.
+            const plan = recovered.parsed.operation.plan;
+            if (!plan) return fail("The hosted operation is prepared but carries no plan to sign.");
+            if (waiting && waiting.plan !== canonicalJson(plan))
               fail("Recovery changed the prepared plan.");
-            const plan = op.plan;
-            if (!deployment.configured || plan.chainId !== deployment.chainId)
-              fail("Hosted plan deployment mismatch.");
+            waiting = undefined;
+            const step = { ...op, plan };
+            if (plan.chainId !== target.chainId)
+              fail("The hosted plan names another chain than the verified task.");
             const refreshed = await verifyV2Target(
               options,
-              { orderId: input.id, operation: op },
+              { orderId: input.id, operation: step },
               view,
               action,
               target.escrow,
@@ -523,7 +732,7 @@ export function createTaskV2Executor(options: TasksChainOptions) {
             if (!isAddressEqual(refreshed.escrow, target.escrow))
               v2GuardFailure("The continuation changed the verified V2 target.");
             try {
-              await verifyV2Plan(refreshed, op, action, pays, fundingAuthorization);
+              await verifyV2Plan(refreshed, step, action, pays, fundingAuthorization);
             } catch (error) {
               if (error instanceof TaskOperationError) throw error;
               v2GuardFailure("Unknown V2 selector or malformed ABI arguments.");
@@ -532,7 +741,6 @@ export function createTaskV2Executor(options: TasksChainOptions) {
             if ((await rpc.getChainId()) !== plan.chainId) fail("Transaction chain mismatch.");
             await input.beforeSigning?.();
             await bindTarget();
-            await beforeSign();
             const saved = await pending.withStepLock(op.id, op.step, () =>
               pending.withSignerLock(plan.chainId, account.address, async () => {
                 const existing = await pending.get(op.id, op.step);
@@ -552,8 +760,17 @@ export function createTaskV2Executor(options: TasksChainOptions) {
                     )
                   )
                     fail("Saved transaction differs from the hosted plan.");
+                  await beforeSign();
                   return existing;
                 }
+                // A resumed sequence was not asked about availability above. A step of it
+                // that still needs a new signature waits like a first run would.
+                if (started)
+                  requireTasksAvailable(
+                    action.action,
+                    readiness,
+                    "This step was not signed. Anything this operation signed earlier stands.",
+                  );
                 const nonce = Math.max(
                   await rpc.getTransactionCount({ address: account.address, blockTag: "pending" }),
                   await pending.nextNonce(plan.chainId, account.address),
@@ -568,6 +785,9 @@ export function createTaskV2Executor(options: TasksChainOptions) {
                   nonce,
                 });
                 if (request.gas === undefined) fail("The V2 transaction has no gas estimate.");
+                // Reserve only now: a step the node refuses to estimate (it would revert) is
+                // never signed, so it must not count against the daily cap either.
+                await beforeSign();
                 const raw = await account.signTransaction({
                   ...request,
                   gas: bufferedV2Gas(request.gas!),

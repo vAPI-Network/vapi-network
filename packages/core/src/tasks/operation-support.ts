@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import { basename, extname } from "node:path";
+import { basename, extname, join } from "node:path";
 
 import { agentAccessToken, AgentLinkError } from "../agent-link.js";
 import {
@@ -7,7 +7,12 @@ import {
   listAgentProfiles,
   type AgentProfileParser,
 } from "../agent-profile.js";
-import { DEFAULT_AUTO_RELEASE_BELOW_USD, DEFAULT_MAX_PER_TASK_USD } from "../config.js";
+import {
+  DEFAULT_AUTO_RELEASE_BELOW_USD,
+  DEFAULT_MAX_PER_TASK_USD,
+  walletTaskPolicySchema,
+  type WalletTaskPolicy,
+} from "../config.js";
 import type { SecretStore } from "../secret-store.js";
 import { SpendCapError } from "../spend-policy.js";
 import type { WalletName } from "../wallet-name.js";
@@ -413,8 +418,38 @@ export type TaskPolicy = {
   maxPerTaskUsd: number;
   approveAboveUsd: number;
   autoReleaseBelowUsd: number;
-  source: "agent-profile" | "defaults";
+  /**
+   * Where the limits come from: the wallet's agent profile, the limits its owner set with
+   * `vapi accounts caps` (an account without a profile), or the built-in defaults.
+   */
+  source: "agent-profile" | "account" | "defaults";
 };
+/**
+ * The task limits on a wallet's own entry in `wallets.json`. Read without the wallet store so
+ * the Tasks entry point stays free of key handling. Anything unreadable keeps the defaults.
+ */
+async function accountTaskPolicy(
+  directory: string,
+  wallet: string,
+  warn?: (message: string) => void,
+): Promise<WalletTaskPolicy | undefined> {
+  let raw: string;
+  try {
+    raw = await readFile(join(directory, "wallets.json"), "utf8");
+  } catch {
+    return undefined;
+  }
+  try {
+    const wallets = (JSON.parse(raw) as { wallets?: Record<string, { taskPolicy?: unknown }> })
+      .wallets;
+    const stored =
+      wallets && Object.hasOwn(wallets, wallet) ? wallets[wallet]?.taskPolicy : undefined;
+    return stored === undefined ? undefined : walletTaskPolicySchema.parse(stored);
+  } catch {
+    warn?.(`The task limits stored for account ${wallet} are unreadable; using the defaults.`);
+    return undefined;
+  }
+}
 export async function taskPolicyForWallet(args: {
   directory: string;
   wallet: string;
@@ -436,19 +471,22 @@ export async function taskPolicyForWallet(args: {
       `More than one agent profile uses wallet ${args.wallet}; task policy is ambiguous.`,
     );
   const profile = matches[0];
-  return profile
-    ? {
-        maxPerTaskUsd: profile.maxPerTaskUsd,
-        approveAboveUsd: profile.approveAboveUsd,
-        autoReleaseBelowUsd: profile.autoReleaseBelowUsd,
-        source: "agent-profile",
-      }
-    : {
-        maxPerTaskUsd: DEFAULT_MAX_PER_TASK_USD,
-        approveAboveUsd: agentProfileSchema.shape.approveAboveUsd.parse(undefined),
-        autoReleaseBelowUsd: DEFAULT_AUTO_RELEASE_BELOW_USD,
-        source: "defaults",
-      };
+  if (profile)
+    return {
+      maxPerTaskUsd: profile.maxPerTaskUsd,
+      approveAboveUsd: profile.approveAboveUsd,
+      autoReleaseBelowUsd: profile.autoReleaseBelowUsd,
+      source: "agent-profile",
+    };
+  const account = await accountTaskPolicy(args.directory, args.wallet, args.warn);
+  const stored = account?.maxPerTaskUsd !== undefined || account?.approveAboveUsd !== undefined;
+  return {
+    maxPerTaskUsd: account?.maxPerTaskUsd ?? DEFAULT_MAX_PER_TASK_USD,
+    approveAboveUsd:
+      account?.approveAboveUsd ?? agentProfileSchema.shape.approveAboveUsd.parse(undefined),
+    autoReleaseBelowUsd: DEFAULT_AUTO_RELEASE_BELOW_USD,
+    source: stored ? "account" : "defaults",
+  };
 }
 
 export type MoneySnapshot = {
@@ -541,6 +579,12 @@ export function fundingRefusalReason(
 }
 
 export type TaskOperationContext = {
+  /**
+   * Reads the live Tasks V2 fee and size limit from the pinned factory (`readTaskV2Limits`).
+   * Optional: without it, or when it returns undefined, the hosted fee is shown and the API
+   * and the contract enforce the limit.
+   */
+  limitsV2?: import("./v2-limits.js").TaskV2LimitsReader;
   pending?: PendingTransactions;
   client: TasksClient;
   chain: TasksChain;

@@ -110,6 +110,7 @@ export async function taskJuryCommand(
       directory: getVapiPaths().directory,
       wallet: target.name,
       schema: registeredAgentProfileSchema,
+      warn: io.stderr,
     }),
     caps: await spendCapsForWallet(target.store, target.name),
     wallet: target.name,

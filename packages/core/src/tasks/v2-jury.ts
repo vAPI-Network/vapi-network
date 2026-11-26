@@ -42,6 +42,7 @@ import {
   TASK_V2_CASE_STATE,
   reviewerRegistryV2Abi,
 } from "./v2-abi.js";
+import { readTasksReadiness } from "./availability.js";
 import { TASK_V2_REVIEWER_GUIDANCE } from "./v2-events.js";
 import { executeTaskV2, type TaskV2ExecutionInput } from "./v2-execution.js";
 import { v2Read, verifiedV2Case, verifiedV2Resolver, verifyV2Target } from "./v2-plan-guard.js";
@@ -153,13 +154,21 @@ export function createTaskV2Jury(options: TasksChainOptions) {
    */
   async function voteCase(id: string, i: number) {
     taskV2IndexSchema.parse(i);
-    const deployment = await client.deployment();
-    if (!deployment.configured)
-      throw new TaskOperationError("v2_resolver_unavailable", "Hosted Tasks V2 is not configured.");
+    // Only the hosted chain ID is taken from readiness; the local pin for that chain and the
+    // on-chain reads decide trust. A vote has a deadline, so hosted availability (`configured`)
+    // never holds it back. A chain this machine already accepted for the task also serves.
+    const chainId =
+      (await readTasksReadiness(client))?.chainId ??
+      (await options.pending.v2Target?.(id))?.chainId;
+    if (chainId === undefined)
+      throw new TaskOperationError(
+        "v2_resolver_unavailable",
+        "vAPI's Tasks status could not be read, so the chain of this dispute is unknown. Nothing was signed. Try again later.",
+      );
     const view = await client.getOrder(id);
     if (view.workOrder.id !== id)
       throw new TaskOperationError("invalid_response", "The order view belongs to another task.");
-    const target = await verifyV2Target(options, { chainId: deployment.chainId }, view, {
+    const target = await verifyV2Target(options, { chainId }, view, {
       action: "open-jury",
       i,
     });

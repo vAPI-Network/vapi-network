@@ -1,7 +1,9 @@
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { createInterface } from "node:readline/promises";
 
 import {
+  activeAgentMarker,
   assertWalletName,
   cancelMovement,
   ceilingCapsJson,
@@ -18,11 +20,13 @@ import {
   isMissingFile,
   KeystoreError,
   listAccounts,
+  listAgentProfiles,
   loadConfig,
   promptForSecret,
   readMovement,
   usdToAtomic,
   validatePrivateKey,
+  writeAgentProfile,
   type AccountInfo,
   type DistributeResult,
   type Movement,
@@ -33,9 +37,24 @@ import {
 import { renameAgentLinkWallet } from "@vapi-network/core/agent-link";
 import { exportKeystoreKeys } from "@vapi-network/core/secrets";
 
+import { registeredAgentProfileSchema } from "@vapi-network/mcp";
+import {
+  createTasksRpcFor,
+  readTaskV2Limits,
+  taskPolicyForWallet,
+  type TaskPolicy,
+} from "@vapi-network/core/tasks";
+
 import { parseArguments, requiredPositional, UsageError } from "./args.js";
 import { baseUsdcBalanceReader } from "./balance-reader.js";
-import { getEnvironment, isInteractive, type CliDependencies, type CliIo } from "./cli-context.js";
+import {
+  getEnvironment,
+  getPrompts,
+  isInteractive,
+  isStdinInteractive,
+  type CliDependencies,
+  type CliIo,
+} from "./cli-context.js";
 import { offerDashboardLink } from "./dashboard.js";
 import { runLoginFlow } from "./login.js";
 import { registryBaseUrl } from "./publish-cli.js";
@@ -576,21 +595,38 @@ export async function accountsCapsCommand(
   dependencies: CliDependencies,
 ): Promise<void> {
   const parsed = parseArguments(argv, {
-    valueOptions: new Set(["--per-call", "--per-day", "--ceiling"]),
+    valueOptions: new Set([
+      "--per-call",
+      "--per-day",
+      "--ceiling",
+      "--max-per-task",
+      "--approve-above",
+    ]),
+    booleanOptions: new Set(["--yes"]),
     maximumPositionals: 1,
   });
-  const name = requiredPositional(
-    parsed.positionals[0],
-    "<name>",
-    "Usage: vapi accounts caps <name> [--per-call <usd>] [--per-day <usd>] [--ceiling <usd|off>] [--json]",
-  );
+  const name = requiredPositional(parsed.positionals[0], "<name>", CAPS_USAGE);
   const perCall = parsed.one("--per-call");
   const perDay = parsed.one("--per-day");
   const ceiling = parsed.one("--ceiling");
+  const maxPerTask = parsed.one("--max-per-task");
+  const approveAbove = parsed.one("--approve-above");
   const store = await openWalletStore(dependencies);
   const account = store.resolve({ name, env: {} });
   const address = await store.readAddress(account.name);
-  if (perCall === undefined && perDay === undefined && ceiling === undefined) {
+  let taskPolicy = await taskPolicyForWallet({
+    directory: store.home,
+    wallet: account.name,
+    schema: registeredAgentProfileSchema,
+    warn: io.stderr,
+  });
+  if (
+    perCall === undefined &&
+    perDay === undefined &&
+    ceiling === undefined &&
+    maxPerTask === undefined &&
+    approveAbove === undefined
+  ) {
     const caps = capsOutput(account.entry.spendCaps, store.ceilingCaps(account.name));
     outputForWallet(
       io,
@@ -600,17 +636,21 @@ export async function accountsCapsCommand(
         ...(address === undefined ? {} : { address }),
         spendCaps: account.entry.spendCaps,
         ...caps,
+        taskLimits: taskLimitsJson(taskPolicy),
       },
       [
         walletHeader({ name: account.name, ...(address === undefined ? {} : { address }) }),
         `Spend caps: ${formatCaps(account.entry.spendCaps)}`,
         `Ceiling: ${caps.ceilingUsd === "off" ? "off" : `${caps.ceilingUsd} USDC`}`,
-        "Change them with --per-call <usd>, --per-day <usd>, or --ceiling <usd|off>.",
+        `Task limits: ${formatTaskLimits(taskPolicy)}`,
+        "Change them with --per-call <usd>, --per-day <usd>, --ceiling <usd|off>, --max-per-task <usd>, or --approve-above <usd>.",
       ].join("\n"),
     );
     return;
   }
 
+  // Every option is parsed and checked before anything is stored, so a refused command
+  // changes nothing and every stored change reaches the audit line below.
   const spendCaps: SpendCaps = {
     perCallAtomic:
       perCall === undefined
@@ -628,22 +668,107 @@ export async function accountsCapsCommand(
       : ceiling === "off"
         ? null
         : BigInt(capAtomic(ceiling, "--ceiling"));
+
+  // Task limits: how much one task may take from this account, and above which amount a
+  // person has to approve. Raising either is a decision for the person at the terminal.
+  const taskLimits =
+    maxPerTask === undefined && approveAbove === undefined
+      ? undefined
+      : {
+          maxPerTaskUsd:
+            maxPerTask === undefined
+              ? taskPolicy.maxPerTaskUsd
+              : taskLimitUsd(maxPerTask, "--max-per-task"),
+          approveAboveUsd:
+            approveAbove === undefined
+              ? taskPolicy.approveAboveUsd
+              : taskLimitUsd(approveAbove, "--approve-above"),
+        };
+  // An agent account keeps its task limits in its profile; they are updated there.
+  const profile =
+    taskLimits === undefined || taskPolicy.source !== "agent-profile"
+      ? undefined
+      : (
+          await listAgentProfiles(store.home, {
+            schema: registeredAgentProfileSchema,
+            warn: () => {},
+          })
+        ).find((candidate) => candidate.wallet === account.name);
+  if (taskLimits !== undefined && taskPolicy.source === "agent-profile" && !profile)
+    throw new Error(`The agent profile of ${account.name} is unreadable.`);
+  if (
+    taskLimits !== undefined &&
+    (taskLimits.maxPerTaskUsd > taskPolicy.maxPerTaskUsd ||
+      taskLimits.approveAboveUsd > taskPolicy.approveAboveUsd)
+  ) {
+    const command = `vapi accounts caps ${account.name}${maxPerTask === undefined ? "" : ` --max-per-task ${maxPerTask}`}${approveAbove === undefined ? "" : ` --approve-above ${approveAbove}`}`;
+    // `--yes` answers the question below; it does not stand in for the person. An agent with
+    // a shell could pass it, so a raise needs a terminal and no agent session around it.
+    const marker = activeAgentMarker(getEnvironment(dependencies));
+    if (marker !== undefined || !isStdinInteractive(dependencies))
+      throw new UsageError(
+        `Raising a task limit is a decision for a person. Nothing was changed. ${marker === undefined ? "Standard input is not a terminal." : `${marker} is set, so this is an agent session.`} Run it yourself in a terminal: ${command}`,
+      );
+    if (maxPerTask !== undefined && taskLimits.maxPerTaskUsd > taskPolicy.maxPerTaskUsd) {
+      const liveUsd = await liveTaskLimitUsd(dependencies);
+      if (liveUsd !== undefined && taskLimits.maxPerTaskUsd > liveUsd)
+        io.stderr(
+          `Note: one task on Base holds at most ${liveUsd} USDC today, so a per-task limit above that changes nothing until the contract's limit is raised.`,
+        );
+    }
+    if (!parsed.has("--yes")) {
+      const question = `Raise the task limits of ${account.name} from ${formatTaskLimits(taskPolicy, false)} to ${formatTaskLimits(taskLimits, false)}? Type yes to confirm: `;
+      if (json || !isInteractive(dependencies))
+        throw new UsageError(
+          `Raising a task limit needs your confirmation. Nothing was changed. Run it again with --yes: ${command} --yes`,
+        );
+      if ((await visibleLine(question, dependencies)).trim().toLowerCase() !== "yes")
+        throw new UsageError("Not confirmed. Nothing was changed.");
+    }
+  }
+
   let entry = account.entry;
   if (perCall !== undefined || perDay !== undefined) {
     entry = await store.setSpendCaps(account.name, spendCaps);
   }
   if (ceilingAtomic !== undefined) entry = await store.setCeiling(account.name, ceilingAtomic);
+  if (taskLimits !== undefined) {
+    if (profile) {
+      await writeAgentProfile(
+        store.home,
+        { ...profile, ...taskLimits },
+        { schema: registeredAgentProfileSchema },
+      );
+      taskPolicy = { ...taskPolicy, ...taskLimits };
+    } else {
+      entry = await store.updateTaskPolicy(account.name, (current) => ({
+        ...current,
+        ...(maxPerTask === undefined ? {} : { maxPerTaskUsd: taskLimits.maxPerTaskUsd }),
+        ...(approveAbove === undefined ? {} : { approveAboveUsd: taskLimits.approveAboveUsd }),
+      }));
+      taskPolicy = { ...taskPolicy, ...taskLimits, source: "account" };
+    }
+  }
+  const taskLimitsChanged = taskLimits !== undefined;
   const caps = capsOutput(entry.spendCaps, store.ceilingCaps(account.name));
   await recordAudit(dependencies, "wallet.caps", {
     wallet: account.name,
     detail: `${formatCaps(entry.spendCaps)}, ceiling ${
       caps.ceilingUsd === "off" ? "off" : `${caps.ceilingUsd} USDC`
-    }`,
+    }${taskLimitsChanged ? `, task limits ${formatTaskLimits(taskPolicy, false)}` : ""}`,
   });
   const message =
     perCall !== undefined || perDay !== undefined
       ? `Spend caps updated for ${account.name}.`
-      : `Ceiling updated for ${account.name}.`;
+      : ceilingAtomic !== undefined
+        ? `Ceiling updated for ${account.name}.`
+        : `Task limits updated for ${account.name}.`;
+  // Funding one task also has to fit under the per-day cap; say so when it does not.
+  const perDayUsd = Number(formatUsdc(BigInt(entry.spendCaps.perDayAtomic)));
+  const perDayHint =
+    taskLimitsChanged && taskPolicy.maxPerTaskUsd > perDayUsd
+      ? `The per-day cap of ${formatUsdc(BigInt(entry.spendCaps.perDayAtomic))} USD still applies to task funding. Raise it with: vapi accounts caps ${account.name} --per-day <usd>`
+      : undefined;
   outputForWallet(
     io,
     json,
@@ -652,14 +777,85 @@ export async function accountsCapsCommand(
       ...(address === undefined ? {} : { address }),
       spendCaps: entry.spendCaps,
       ...caps,
+      taskLimits: taskLimitsJson(taskPolicy),
       message,
+      ...(perDayHint === undefined ? {} : { hint: perDayHint }),
     },
     [
       message,
       `Spend caps: ${formatCaps(entry.spendCaps)}`,
       `Ceiling: ${caps.ceilingUsd === "off" ? "off" : `${caps.ceilingUsd} USDC`}`,
+      `Task limits: ${formatTaskLimits(taskPolicy)}`,
+      ...(perDayHint === undefined ? [] : [perDayHint]),
     ].join("\n"),
   );
+}
+
+const CAPS_USAGE =
+  "Usage: vapi accounts caps <name> [--per-call <usd>] [--per-day <usd>] [--ceiling <usd|off>] [--max-per-task <usd>] [--approve-above <usd>] [--yes] [--json]";
+
+type TaskLimits = Pick<TaskPolicy, "maxPerTaskUsd" | "approveAboveUsd"> & {
+  source?: TaskPolicy["source"];
+};
+function taskLimitsJson(policy: TaskPolicy) {
+  return {
+    maxPerTaskUsd: policy.maxPerTaskUsd,
+    approveAboveUsd: policy.approveAboveUsd,
+    source: policy.source,
+  };
+}
+function formatTaskLimits(policy: TaskLimits, withSource = true): string {
+  const source =
+    policy.source === "agent-profile"
+      ? "agent profile"
+      : policy.source === "account"
+        ? "set for this account"
+        : "defaults";
+  return `${policy.maxPerTaskUsd} USD per task, approval above ${policy.approveAboveUsd} USD${withSource && policy.source ? ` (${source})` : ""}`;
+}
+/** One visible line from the person at the terminal, for a typed confirmation. */
+async function visibleLine(prompt: string, dependencies: CliDependencies): Promise<string> {
+  const line = getPrompts(dependencies).line;
+  if (line) return await line(prompt);
+  const reader = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return await reader.question(prompt);
+  } finally {
+    reader.close();
+  }
+}
+/** No task is worth more than this; a larger limit is a typing mistake or an attack. */
+const MAX_TASK_LIMIT_USD = 1_000_000;
+function taskLimitUsd(value: string, option: string): number {
+  const usd = Number(formatUsdc(BigInt(capAtomic(value, option))));
+  if (!Number.isFinite(usd) || usd > MAX_TASK_LIMIT_USD)
+    throw new UsageError(`${option} must be at most ${MAX_TASK_LIMIT_USD} USD.`);
+  return usd;
+}
+/**
+ * The largest total one task may hold on Base today, read from the pinned Tasks contract.
+ * Only for a note to the person raising a limit: any failure or a slow node returns undefined.
+ */
+async function liveTaskLimitUsd(dependencies: CliDependencies): Promise<number | undefined> {
+  try {
+    const env = getEnvironment(dependencies);
+    const rpcFor =
+      dependencies.tasks?.rpcFor ??
+      createTasksRpcFor(await accountsConfig(dependencies), {
+        env,
+        ...(dependencies.fetchImpl === undefined ? {} : { fetch: dependencies.fetchImpl }),
+      });
+    const limits = await readTaskV2Limits({
+      chainId: 8453,
+      shape: "task",
+      rpcFor,
+      env,
+      timeoutMs: 2000,
+    });
+    return limits === undefined ? undefined : Number(formatUsdc(limits.maxBaseUnits));
+  } catch {
+    return undefined;
+  }
 }
 
 const DISTRIBUTE_USAGE =

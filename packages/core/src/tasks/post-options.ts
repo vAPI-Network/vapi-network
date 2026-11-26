@@ -20,7 +20,20 @@ export type TaskPostOptions = {
   gate?: "open" | "proven";
   verifier?: "poster" | "vapi";
   openCheck?: "allowlist" | "invite";
+  /** Legacy intake. A post sent without shape terms and with `submissions` is a bounty on the API. */
+  intake?: "proposals" | "submissions";
 };
+
+/**
+ * The lead the API requires for a Task and for each of its milestones, measured when the post
+ * arrives: the contract's minimum work time (MIN_WORK_TIME, one hour), one hour to award and
+ * one hour to fund.
+ */
+export const TASK_POST_DEADLINE_LEAD_MS = 3 * 3_600_000;
+/** Time for the post to reach the API, so a deadline this client accepts is not refused there. */
+export const TASK_POST_DEADLINE_MARGIN_MS = 60_000;
+const TASK_DEADLINE_TOO_SOON =
+  "must be at least 3 hours from now when vAPI receives the post, so the task can still be funded and awarded. Use 181m or more.";
 
 function positive(text: string | undefined, name: string): bigint {
   if (text === undefined) throw new TaskInputError(`${name} is required.`);
@@ -137,10 +150,19 @@ export function prepareTaskPost(input: TaskPostOptions, now: Date) {
         "An open pool requires --open-check allowlist|invite (configure participants separately).",
       );
   } else {
-    if (!input.milestones?.length && duration < 3_600_000)
-      throw new TaskInputError(
-        "Task deadlines must leave at least one hour for work before award.",
-      );
+    // A legacy submissions post becomes a bounty on the API (10-minute floor) only when it is
+    // sent without shape terms. The CLI and MCP send the terms, with shape `task`, as soon as a
+    // milestone, a proof requirement or a check-in is given; the API then asks for the task lead.
+    const lead =
+      input.shape === undefined &&
+      input.intake === "submissions" &&
+      !input.milestones &&
+      !input.proofSpec &&
+      !input.checkin
+        ? TASK_LIMITS.postDeadlineMinMs
+        : TASK_POST_DEADLINE_LEAD_MS + TASK_POST_DEADLINE_MARGIN_MS;
+    if (!input.milestones?.length && duration < lead)
+      throw new TaskInputError(`Task deadlines ${TASK_DEADLINE_TOO_SOON}`);
     const sum = input.milestones?.reduce((total, item) => total + BigInt(item.amountBaseUnits), 0n);
     amount =
       input.amountUsd === undefined && sum !== undefined
@@ -148,9 +170,9 @@ export function prepareTaskPost(input: TaskPostOptions, now: Date) {
         : positive(input.amountUsd, "--amount");
     if (sum !== undefined && sum !== amount)
       throw new TaskInputError("Milestone amounts must sum to --amount.");
-    if (input.milestones?.some((item) => Date.parse(item.deadlineAt) - now.getTime() < 3_600_000))
+    if (input.milestones?.some((item) => Date.parse(item.deadlineAt) - now.getTime() < lead))
       throw new TaskInputError(
-        "Milestone deadlines must leave at least one hour for work; creation and funding also check the verified MIN_WORK_TIME against the chain clock.",
+        `Milestone deadlines ${TASK_DEADLINE_TOO_SOON} Creation and funding also check the contract's MIN_WORK_TIME against the chain clock.`,
       );
   }
   if (input.amountUsd !== undefined && positive(input.amountUsd, "--amount") !== amount)

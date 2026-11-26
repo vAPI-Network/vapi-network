@@ -12,6 +12,7 @@ import {
   listUnfinishedMovements,
   sweepAboveCeiling,
   usdToAtomic,
+  writeAgentProfile,
   type DistributeArgs,
   type SecretStore,
   WalletStore,
@@ -23,6 +24,8 @@ import {
   type pollDeviceLink,
   type startDeviceLink,
 } from "@vapi-network/core/agent-link";
+import { taskPolicyForWallet } from "@vapi-network/core/tasks";
+import { registeredAgentProfileSchema } from "@vapi-network/mcp";
 import type { Hex } from "viem";
 
 import { runCli as runCliWithDependencies, type CliDependencies, type CliIo } from "./cli.js";
@@ -1162,6 +1165,261 @@ describe("vapi accounts distribute", () => {
         fixture.dependencies,
       ),
     ).toBe(2);
+  });
+});
+
+describe("vapi accounts caps task limits", () => {
+  const caps = async (args: string[], dependencies = baseDependencies()) => {
+    const captured = captureIo();
+    const code = await runCli(["accounts", "caps", "main", ...args], captured.io, dependencies);
+    return { code, ...captured };
+  };
+  const policy = (home: string) =>
+    taskPolicyForWallet({
+      directory: home,
+      wallet: "main",
+      schema: registeredAgentProfileSchema,
+    });
+  /** A person at a terminal, outside any agent session. */
+  const person: CliDependencies = { ...baseDependencies(), interactive: true };
+  const auditLines = async (home: string) =>
+    (await readFile(join(home, "audit.log"), "utf8")).trim().split("\n");
+  /** A node that answers for Base with the given size limit of the pinned Tasks factory. */
+  const baseWithTaskLimit = (maxBaseUnits: bigint) =>
+    (() => ({
+      getChainId: async () => 8453,
+      readContract: async ({ functionName }: { functionName: string }) =>
+        functionName === "feeBp" ? 0 : maxBaseUnits,
+    })) as unknown as NonNullable<NonNullable<CliDependencies["tasks"]>["rpcFor"]>;
+
+  it("shows the conservative defaults for an account without a profile", async () => {
+    const home = await initializedHome("vapi-accounts-task-limits-");
+    const shown = await caps(["--json"]);
+    expect(shown.code).toBe(0);
+    expect(JSON.parse(shown.stdout[0]!)).toMatchObject({
+      perDayUsd: "1",
+      taskLimits: { maxPerTaskUsd: 100, approveAboveUsd: 0.5, source: "defaults" },
+    });
+    const human = await caps([]);
+    expect(human.stdout.join("\n")).toContain(
+      "Task limits: 100 USD per task, approval above 0.5 USD (defaults)",
+    );
+    expect(await policy(home)).toMatchObject({ source: "defaults" });
+  });
+
+  it("refuses to raise a limit without an explicit confirmation and changes nothing", async () => {
+    const home = await initializedHome("vapi-accounts-task-limits-");
+    const refused = await caps(
+      ["--max-per-task", "600", "--approve-above", "550", "--json"],
+      person,
+    );
+    expect(refused.code).not.toBe(0);
+    expect([...refused.stdout, ...refused.stderr].join("\n")).toContain(
+      "Raising a task limit needs your confirmation. Nothing was changed. Run it again with --yes: vapi accounts caps main --max-per-task 600 --approve-above 550 --yes",
+    );
+    expect(await policy(home)).toMatchObject({ maxPerTaskUsd: 100, source: "defaults" });
+    // A person at the terminal is asked, and anything but yes changes nothing.
+    const line = vi.fn(async () => "no");
+    const declined = await caps(["--max-per-task", "600"], {
+      ...baseDependencies(),
+      interactive: true,
+      prompts: { secret: async () => "", line },
+    });
+    expect(declined.code).not.toBe(0);
+    expect(line).toHaveBeenCalledWith(
+      "Raise the task limits of main from 100 USD per task, approval above 0.5 USD to 600 USD per task, approval above 0.5 USD? Type yes to confirm: ",
+    );
+    expect(await policy(home)).toMatchObject({ maxPerTaskUsd: 100, source: "defaults" });
+  });
+
+  it("stores raised limits with --yes or a typed yes, and lowers them without asking", async () => {
+    const home = await initializedHome("vapi-accounts-task-limits-");
+    const raised = await caps(
+      ["--max-per-task", "600", "--approve-above", "550", "--yes", "--json"],
+      person,
+    );
+    expect(raised.code).toBe(0);
+    expect(JSON.parse(raised.stdout[0]!)).toMatchObject({
+      message: "Task limits updated for main.",
+      taskLimits: { maxPerTaskUsd: 600, approveAboveUsd: 550, source: "account" },
+      hint: "The per-day cap of 1 USD still applies to task funding. Raise it with: vapi accounts caps main --per-day <usd>",
+      // The spend caps and the ceiling are untouched.
+      perCallUsd: "0.1",
+      perDayUsd: "1",
+    });
+    expect(await policy(home)).toEqual({
+      maxPerTaskUsd: 600,
+      approveAboveUsd: 550,
+      autoReleaseBelowUsd: 25,
+      source: "account",
+    });
+    const typed = await caps(["--max-per-task", "700"], {
+      ...baseDependencies(),
+      interactive: true,
+      prompts: { secret: async () => "", line: async () => "yes" },
+    });
+    expect(typed.code).toBe(0);
+    expect(await policy(home)).toMatchObject({ maxPerTaskUsd: 700, approveAboveUsd: 550 });
+    const lowered = await caps(["--max-per-task", "50", "--approve-above", "0", "--json"]);
+    expect(lowered.code).toBe(0);
+    expect(await policy(home)).toMatchObject({ maxPerTaskUsd: 50, approveAboveUsd: 0 });
+  });
+
+  it("updates the profile of an agent account instead of the account entry", async () => {
+    const home = await initializedHome("vapi-accounts-task-limits-");
+    await writeAgentProfile(
+      home,
+      {
+        version: 1,
+        name: "main",
+        wallet: "main",
+        model: "model",
+        instructions: "",
+        maxPerTaskUsd: 20,
+        approveAboveUsd: 1,
+        createdAt: "2026-10-08T00:00:00.000Z",
+      },
+      { schema: registeredAgentProfileSchema },
+    );
+    expect(await policy(home)).toMatchObject({ maxPerTaskUsd: 20, source: "agent-profile" });
+    expect((await caps(["--max-per-task", "250", "--json"], person)).code).not.toBe(0);
+    const raised = await caps(["--max-per-task", "250", "--yes", "--json"], person);
+    expect(raised.code).toBe(0);
+    expect(JSON.parse(raised.stdout[0]!).taskLimits).toEqual({
+      maxPerTaskUsd: 250,
+      approveAboveUsd: 1,
+      source: "agent-profile",
+    });
+    expect(await policy(home)).toMatchObject({
+      maxPerTaskUsd: 250,
+      approveAboveUsd: 1,
+      source: "agent-profile",
+    });
+  });
+
+  it.each([
+    [
+      ["--max-per-task", "5000", "--approve-above", "5000", "--yes", "--per-day", "abc"],
+      "--per-day must be a US dollar amount such as 0.25 or 10.",
+    ],
+    [
+      ["--max-per-task", "6000", "--yes", "--per-call", "9", "--per-day", "1"],
+      "The per-call cap cannot be larger than the per-day cap.",
+    ],
+    [
+      ["--per-day", "7", "--ceiling", "9", "--max-per-task", "nine", "--yes"],
+      "--max-per-task must be a US dollar amount such as 0.25 or 10.",
+    ],
+  ])("stores nothing when a later option is invalid: %j", async (args, message) => {
+    const home = await initializedHome("vapi-accounts-task-limits-");
+    const before = await readFile(join(home, "wallets.json"), "utf8");
+    const refused = await caps(args, person);
+    expect(refused.code).toBe(2);
+    expect(refused.stderr.join("\n")).toContain(message);
+    expect(await readFile(join(home, "wallets.json"), "utf8")).toBe(before);
+    expect(await policy(home)).toMatchObject({
+      maxPerTaskUsd: 100,
+      approveAboveUsd: 0.5,
+      source: "defaults",
+    });
+    expect((await auditLines(home)).filter((line) => line.includes("wallet.caps"))).toEqual([]);
+  });
+
+  it("writes one audit line that names every change of a mixed command", async () => {
+    const home = await initializedHome("vapi-accounts-task-limits-");
+    const changed = await caps(
+      ["--per-day", "7", "--ceiling", "9", "--max-per-task", "600", "--yes", "--json"],
+      person,
+    );
+    expect(changed.code).toBe(0);
+    const lines = (await auditLines(home)).filter((line) => line.includes("wallet.caps"));
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      event: "wallet.caps",
+      wallet: "main",
+      tty: true,
+      detail:
+        "0.1 USD per call, 7 USD per day, ceiling 9 USDC, task limits 600 USD per task, approval above 0.5 USD",
+    });
+    expect(await policy(home)).toMatchObject({ maxPerTaskUsd: 600, source: "account" });
+  });
+
+  it("refuses a raise from an agent session or without a terminal, even with --yes", async () => {
+    const home = await initializedHome("vapi-accounts-task-limits-");
+    const raise = ["--max-per-task", "600", "--approve-above", "550", "--yes", "--json"];
+    // An agent's shell: a terminal may be attached, but the session marker is set.
+    const agent = await caps(raise, { ...person, env: { CLAUDECODE: "1" } });
+    expect(agent.code).toBe(2);
+    expect([...agent.stdout, ...agent.stderr].join("\n")).toContain(
+      "Raising a task limit is a decision for a person. Nothing was changed. CLAUDECODE is set, so this is an agent session. Run it yourself in a terminal: vapi accounts caps main --max-per-task 600 --approve-above 550",
+    );
+    // A script or a pipe: no marker, and no terminal on standard input.
+    const piped = await caps(raise, { ...baseDependencies(), interactive: false });
+    expect(piped.code).toBe(2);
+    expect([...piped.stdout, ...piped.stderr].join("\n")).toContain(
+      "Raising a task limit is a decision for a person. Nothing was changed. Standard input is not a terminal. Run it yourself in a terminal: vapi accounts caps main --max-per-task 600 --approve-above 550",
+    );
+    // Raising one limit while lowering the other is still a raise.
+    const mixed = await caps(["--max-per-task", "600", "--approve-above", "0", "--yes"], {
+      ...person,
+      env: { CLAUDECODE: "1" },
+    });
+    expect(mixed.code).toBe(2);
+    expect(await policy(home)).toMatchObject({
+      maxPerTaskUsd: 100,
+      approveAboveUsd: 0.5,
+      source: "defaults",
+    });
+    expect((await auditLines(home)).filter((line) => line.includes("wallet.caps"))).toEqual([]);
+    // Lowering stays possible everywhere.
+    const lowered = await caps(["--max-per-task", "50", "--approve-above", "0", "--json"], {
+      ...baseDependencies(),
+      interactive: false,
+      env: { CLAUDECODE: "1" },
+    });
+    expect(lowered.code).toBe(0);
+    expect(await policy(home)).toMatchObject({ maxPerTaskUsd: 50, approveAboveUsd: 0 });
+  });
+
+  it.each(["999999999999999999999999", "1000000.000001"])(
+    "refuses an absurd task limit: %s",
+    async (amount) => {
+      const home = await initializedHome("vapi-accounts-task-limits-");
+      for (const option of ["--max-per-task", "--approve-above"]) {
+        const refused = await caps([option, amount, "--yes"], person);
+        expect(refused.code).toBe(2);
+        expect(refused.stderr.join("\n")).toContain(`${option} must be at most 1000000 USD.`);
+      }
+      expect(await policy(home)).toMatchObject({ maxPerTaskUsd: 100, source: "defaults" });
+      expect((await caps(["--max-per-task", "1000000", "--yes"], person)).code).toBe(0);
+      expect(await policy(home)).toMatchObject({ maxPerTaskUsd: 1_000_000 });
+    },
+  );
+
+  it("notes a per-task limit above the contract's live limit, and never waits for it", async () => {
+    const home = await initializedHome("vapi-accounts-task-limits-");
+    const live = { ...person, tasks: { rpcFor: baseWithTaskLimit(5_000_000_000n) } };
+    const note =
+      "Note: one task on Base holds at most 5000 USDC today, so a per-task limit above that changes nothing until the contract's limit is raised.";
+    const within = await caps(["--max-per-task", "5000", "--yes"], live);
+    expect(within.code).toBe(0);
+    expect(within.stderr.join("\n")).not.toContain("Note:");
+    const above = await caps(["--max-per-task", "5001", "--yes"], live);
+    expect(above.code).toBe(0);
+    expect(above.stderr).toContain(note);
+    expect(await policy(home)).toMatchObject({ maxPerTaskUsd: 5001 });
+    // A node that does not answer changes nothing about the command.
+    const offline = await caps(["--max-per-task", "9000", "--yes"], {
+      ...person,
+      tasks: {
+        rpcFor: (() => {
+          throw new Error("offline");
+        }) as never,
+      },
+    });
+    expect(offline.code).toBe(0);
+    expect(offline.stderr.join("\n")).not.toContain("Note:");
+    expect(await policy(home)).toMatchObject({ maxPerTaskUsd: 9000 });
   });
 });
 

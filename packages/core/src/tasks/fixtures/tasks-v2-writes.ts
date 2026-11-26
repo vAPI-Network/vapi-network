@@ -28,11 +28,30 @@ export const v2WritePrepared = {
   },
 } as const;
 export const v2WriteHash = `0x${"33".repeat(32)}` as const;
+// The hosted journal returns the plan only for a prepared, re-validated step; submitted and
+// confirmed operations carry `plan: null`.
 export const v2WriteSubmitted = {
   ...v2WritePrepared,
-  operation: { ...v2WritePrepared.operation, state: "submitted", transactionHash: v2WriteHash },
+  operation: {
+    ...v2WritePrepared.operation,
+    state: "submitted",
+    transactionHash: v2WriteHash,
+    plan: null,
+  },
 } as const;
 export const v2WriteConfirmed = {
   ...v2WritePrepared,
-  operation: { ...v2WritePrepared.operation, state: "confirmed", transactionHash: v2WriteHash },
+  operation: {
+    ...v2WritePrepared.operation,
+    state: "confirmed",
+    transactionHash: v2WriteHash,
+    plan: null,
+  },
+} as const;
+/** A recovery scan that has not finished: still prepared, and no plan to sign yet. */
+export const v2WriteScanning = {
+  ...v2WritePrepared,
+  operation: { ...v2WritePrepared.operation, plan: null },
+  recovered: false,
+  scanComplete: false,
 } as const;

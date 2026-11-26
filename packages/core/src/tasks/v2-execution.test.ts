@@ -47,12 +47,17 @@ import {
 import {
   v2WritePrepared,
   v2WriteConfirmed,
+  v2WriteScanning,
   v2WriteSubmitted,
   V2_WRITE_ORDER,
   V2_WRITE_OPERATION,
 } from "./fixtures/tasks-v2-writes.js";
+import { publicTaskV2Operation } from "./v2-public.js";
+import { TRUSTED_TASKS_V2_DEPLOYMENTS, type TasksV2Deployment } from "./v2-trust.js";
+import { canonicalJson } from "./canonical-json.js";
+import { prepareTransactionRequest } from "viem/actions";
 import { missingTasksChain } from "./chain-port.js";
-import { readSpendLedger } from "../spend-policy.js";
+import { readSpendLedger, reserveSpend } from "../spend-policy.js";
 import type { WalletName } from "../wallet-name.js";
 
 vi.mock("viem/actions", () => ({
@@ -140,7 +145,7 @@ function fullView() {
   };
 }
 /** vapi-app v2TermsFromOrder for the fixture order: the exact EscrowFactoryV2 creation inputs. */
-function creationArgs(view = fullView()) {
+function creationArgs(view = fullView(), pin: TasksV2Deployment = PIN, feeBp = 500) {
   return [
     {
       shape: 0,
@@ -148,16 +153,16 @@ function creationArgs(view = fullView()) {
       worker: zeroAddress,
       termsHash: acceptedV2TermsHash(
         view as unknown as import("./types.js").GetOrderResponse,
-        PIN,
+        pin,
         604800n,
       ),
-      offerTtl: 86400n,
+      offerTtl: BigInt(pin.offerTtlSeconds ?? 604800),
       reviewWindow: 604800n,
       choiceWindow: 0n,
       bountyDeadline: 0n,
       objectionWindow: 604800n,
       workerBondBp: 0,
-      feeBp: 500,
+      feeBp,
       winners: 0,
       rewardPerWinner: 0n,
     },
@@ -180,6 +185,23 @@ const CREATE_DATA = () =>
   });
 const FUND_DATA = () => encodeFunctionData({ abi: escrowV2Abi, functionName: "fund" });
 const HASH_EVIDENCE = (s: string) => keccak256(toHex(JSON.stringify(s)));
+type PlannedResponse = TaskV2OperationResponse & {
+  operation: { plan: NonNullable<TaskV2OperationResponse["operation"]["plan"]> };
+};
+/**
+ * What the hosted journal really returns: the plan only for a prepared, validated step. A
+ * submitted or confirmed operation, and an unfinished recovery scan, carry `plan: null`. Every
+ * mocked answer passes through this.
+ */
+function asHosted<T>(value: T): T {
+  if (!value || typeof value !== "object" || !("operation" in value)) return value;
+  const operation = (value as { operation: unknown }).operation;
+  if (!operation || typeof operation !== "object" || !("state" in operation)) return value;
+  const scanning = "scanComplete" in value && value.scanComplete === false;
+  return operation.state !== "prepared" || scanning
+    ? { ...value, operation: { ...operation, plan: null } }
+    : value;
+}
 async function fixture(step: TaskV2OperationResponse["operation"]["step"] = "v2-approve") {
   const home = await mkdtemp(join(tmpdir(), "vapi-v2-write-"));
   homes.push(home);
@@ -208,7 +230,7 @@ async function fixture(step: TaskV2OperationResponse["operation"]["step"] = "v2-
         to: v2WritePrepared.operation.plan.to,
       },
     },
-  });
+  }) as PlannedResponse;
   const sign = vi.spyOn(account, "signTransaction");
   const typedSign = vi.spyOn(account, "signTypedData");
   type Read = { functionName: string; args?: readonly unknown[]; address?: string };
@@ -288,6 +310,8 @@ async function fixture(step: TaskV2OperationResponse["operation"]["step"] = "v2-
         }
         case "MIN_WORK_TIME":
           return 3600n;
+        case "balanceOf":
+          return 1_000_000_000_000n;
         case "disputeRounds":
           return 1;
         case "registry":
@@ -348,8 +372,17 @@ async function fixture(step: TaskV2OperationResponse["operation"]["step"] = "v2-
   const pending = createPendingTransactions(home);
   const sleep = vi.fn(async () => {});
   const notice = vi.fn();
+  const hosted = new Proxy(client, {
+    get(mock, name, receiver) {
+      const value = Reflect.get(mock, name, receiver) as unknown;
+      return name === "operationV2" || name === "confirmV2Signature"
+        ? async (...args: unknown[]) =>
+            asHosted(await (value as (...a: unknown[]) => Promise<unknown>)(...args))
+        : value;
+    },
+  });
   const options: TasksChainOptions = {
-    client: client as unknown as TasksClient,
+    client: hosted as unknown as TasksClient,
     account,
     pending,
     rpcFor: () => rpc as unknown as PublicClient,
@@ -390,10 +423,14 @@ async function fixture(step: TaskV2OperationResponse["operation"]["step"] = "v2-
  * pinned factory, then approve the clone, then fund() on the clone. The clone is unregistered
  * until the creation transaction confirms.
  */
-function freshFunding(f: Awaited<ReturnType<typeof fixture>>, createData = CREATE_DATA()) {
+function freshFunding(
+  f: Awaited<ReturnType<typeof fixture>>,
+  createData = CREATE_DATA(),
+  pin: Pick<TasksV2Deployment, "escrowFactoryV2" | "usdc"> = PIN,
+) {
   f.prepared.operation.step = "v2-create-escrow";
   f.prepared.operation.plan.step = "v2-create-escrow";
-  f.prepared.operation.plan.to = FACTORY;
+  f.prepared.operation.plan.to = pin.escrowFactoryV2.toLowerCase() as Hex;
   f.prepared.operation.plan.data = createData;
   let registered = false;
   const registrations: boolean[] = [];
@@ -431,7 +468,7 @@ function freshFunding(f: Awaited<ReturnType<typeof fixture>>, createData = CREAT
   f.client.operationV2.mockImplementation(async (_id, mode, body) => {
     if (mode === "recover") return { ...current, recovered: false, scanComplete: true };
     if (mode === "reconcile" && current.operation.step === "v2-create-escrow")
-      return advance("v2-approve-usdc", USDC, approval);
+      return advance("v2-approve-usdc", pin.usdc, approval);
     if (mode === "reconcile" && current.operation.step === "v2-approve-usdc")
       return advance("v2-fund", state.escrow, FUND_DATA());
     return {
@@ -462,6 +499,57 @@ describe("recorded T11 operation boundaries", () => {
       taskV2RecoverySchema.safeParse({ ...v2WriteConfirmed, recovered: true, scanComplete: false })
         .success,
     ).toBe(false);
+  });
+  it("parses what the API sends after broadcast: no plan once submitted or confirmed", async () => {
+    // The hosted journal answers with `plan: null` unless the step is prepared and validated.
+    // 0.16.0 required an object and reported a mined step as failed.
+    for (const sent of [v2WriteSubmitted, v2WriteConfirmed]) {
+      const parsed = taskV2OperationResponseSchema.parse(sent);
+      expect(parsed.operation.plan).toBeNull();
+      expect(publicTaskV2Operation(parsed.operation)).toMatchObject({
+        state: sent.operation.state,
+        plan: null,
+      });
+    }
+    expect(taskV2RecoverySchema.parse(v2WriteScanning).operation.plan).toBeNull();
+    expect(
+      taskV2RecoverySchema.parse({ ...v2WriteConfirmed, recovered: true, scanComplete: true })
+        .operation.plan,
+    ).toBeNull();
+    // A plan that is present must still bind to its operation, step and actor.
+    expect(
+      taskV2OperationResponseSchema.safeParse({
+        ...v2WritePrepared,
+        operation: {
+          ...v2WritePrepared.operation,
+          plan: { ...v2WritePrepared.operation.plan, from: `0x${"99".repeat(20)}` },
+        },
+      }).success,
+    ).toBe(false);
+    // A submitted step without a transaction hash stays invalid.
+    expect(
+      taskV2OperationResponseSchema.safeParse({
+        ...v2WriteSubmitted,
+        operation: { ...v2WriteSubmitted.operation, transactionHash: null },
+      }).success,
+    ).toBe(false);
+    const sent = [v2WriteSubmitted, v2WriteConfirmed, v2WriteScanning];
+    const fetch = vi.fn(async () => Response.json(sent.shift()));
+    const client = createTasksClient({ baseUrl: "https://tasks.example", fetch });
+    const call = { idempotencyKey: V2_WRITE_OPERATION };
+    const body = {
+      step: "v2-approve",
+      transactionHash: v2WriteSubmitted.operation.transactionHash,
+    };
+    expect(await client.operationV2(V2_WRITE_OPERATION, "transaction", body, call)).toMatchObject({
+      operation: { state: "submitted", plan: null },
+    });
+    expect(await client.operationV2(V2_WRITE_OPERATION, "reconcile", body, call)).toMatchObject({
+      operation: { state: "confirmed", plan: null },
+    });
+    expect(
+      await client.operationV2(V2_WRITE_OPERATION, "recover", { step: "v2-approve" }, call),
+    ).toMatchObject({ scanComplete: false, operation: { state: "prepared", plan: null } });
   });
   it.each([
     "chain_preflight_unavailable",
@@ -621,6 +709,89 @@ describe("local V2 execution", () => {
     expect(await f.execute(f.input)).toMatchObject({ ok: true });
     expect(f.sleep).toHaveBeenCalledWith(1000);
     expect(f.sign).toHaveBeenCalledTimes(1);
+  });
+  it("reports a mined step as confirmed when the API answers without a plan", async () => {
+    const f = await fixture();
+    const answers: unknown[] = [];
+    const answer = f.client.operationV2.getMockImplementation()!;
+    f.client.operationV2.mockImplementation(async (...args) => {
+      const value = asHosted(await answer(...args));
+      answers.push(value);
+      return value;
+    });
+    const result = await f.execute(f.input);
+    expect(result).toMatchObject({
+      ok: true,
+      orderId: V2_WRITE_ORDER,
+      operation: { state: "confirmed", step: "v2-approve", plan: null },
+    });
+    // recover (plan), transaction (submitted, no plan), reconcile (confirmed, no plan).
+    expect(answers).toMatchObject([
+      { operation: { state: "prepared", plan: { step: "v2-approve" } } },
+      { operation: { state: "submitted", plan: null } },
+      { operation: { state: "confirmed", plan: null } },
+    ]);
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    expect(f.rpc.sendRawTransaction).toHaveBeenCalledTimes(1);
+  });
+  it("finishes a resumed step the API already holds as submitted, without signing again", async () => {
+    const f = await fixture();
+    // A retried prepare returns the journal record as it is now: submitted, no plan.
+    f.client.prepareV2.mockResolvedValue({
+      ...f.prepared,
+      operation: {
+        ...f.prepared.operation,
+        state: "submitted",
+        transactionHash: v2WriteSubmitted.operation.transactionHash,
+        plan: null,
+      },
+    });
+    expect(await f.execute(f.input)).toMatchObject({
+      ok: true,
+      operation: { state: "confirmed", plan: null },
+    });
+    expect(f.sign).not.toHaveBeenCalled();
+    expect(f.rpc.sendRawTransaction).not.toHaveBeenCalled();
+    expect(f.client.operationV2).toHaveBeenCalledWith(
+      V2_WRITE_OPERATION,
+      "reconcile",
+      { step: "v2-approve", transactionHash: v2WriteSubmitted.operation.transactionHash },
+      expect.anything(),
+    );
+  });
+  it("refuses a plan that changed while a recovery scan answered without one", async () => {
+    const f = await fixture();
+    f.client.operationV2
+      .mockResolvedValueOnce({ ...f.prepared, recovered: false, scanComplete: false })
+      .mockResolvedValueOnce({
+        ...f.prepared,
+        operation: {
+          ...f.prepared.operation,
+          plan: {
+            ...f.prepared.operation.plan,
+            data: encodeFunctionData({
+              abi: escrowV2Abi,
+              functionName: "approveMilestone",
+              args: [1],
+            }),
+          },
+        },
+        recovered: false,
+        scanComplete: true,
+      });
+    await expect(f.execute(f.input)).rejects.toThrow("Recovery changed the prepared plan.");
+    expect(f.sign).not.toHaveBeenCalled();
+  });
+  it("refuses a prepared step that never carries a plan", async () => {
+    const f = await fixture();
+    f.client.operationV2.mockResolvedValue({
+      ...f.prepared,
+      operation: { ...f.prepared.operation, plan: null },
+      recovered: false,
+      scanComplete: true,
+    });
+    await expect(f.execute(f.input)).rejects.toThrow("carries no plan to sign");
+    expect(f.sign).not.toHaveBeenCalled();
   });
   it("polls order-only recovery/abandon and rejects a different order", async () => {
     const f = await fixture();
@@ -795,6 +966,32 @@ describe("hosted EIP-712 consent", () => {
       expect.any(Object),
     );
     expect(f.rpc.sendRawTransaction).not.toHaveBeenCalled();
+  });
+  it("does not say nothing was signed when a consent may have been signed and uploaded", async () => {
+    const f = await consentFixture();
+    const consent = { ...f.input, write: undefined, consent: { action: "award-consent" } as const };
+    // Signed and uploaded; the answer is lost.
+    f.client.confirmV2Signature.mockRejectedValueOnce(new Error("socket hang up"));
+    await expect(f.execute(consent)).rejects.toMatchObject({ code: "chain_error" });
+    expect(f.typedSign).toHaveBeenCalledTimes(1);
+    const earlier = `This run signed nothing and moved no money. A consent this wallet signed earlier for this task may still be valid until it expires; vapi task bump-consent-nonce ${V2_WRITE_ORDER} --new-nonce <n> revokes it. Try again later.`;
+    f.client.deployment.mockResolvedValue({
+      configured: false,
+      chainId: 84532,
+      network: "eip155:84532",
+    } as never);
+    await expect(f.execute(consent)).rejects.toMatchObject({
+      code: "tasks_unavailable",
+      message: `vAPI reports Tasks as unavailable on Base Sepolia right now. ${earlier}`,
+    });
+    f.client.deployment.mockRejectedValue(new TasksClientError("network", "offline"));
+    await expect(f.execute(consent)).rejects.toMatchObject({
+      code: "tasks_unavailable",
+      message: `vAPI's Tasks status could not be read. ${earlier}`,
+    });
+    // Hiring still waits: no second signature, no second upload.
+    expect(f.typedSign).toHaveBeenCalledTimes(1);
+    expect(f.client.confirmV2Signature).toHaveBeenCalledTimes(1);
   });
   it("refuses a consent naming another wallet", async () => {
     const f = await fixture();
@@ -1016,14 +1213,14 @@ describe("review: locally anchored V2 plans", () => {
   );
 });
 
-function fundingIntent() {
+function fundingIntent(chainId = 84532, usdc: `0x${string}` = USDC) {
   return {
     kind: "eip712" as const,
     operationId: `sig_${V2_WRITE_OPERATION}`,
     signer: account.address,
     escrow: state.escrow,
     typedData: {
-      domain: { name: "USD Coin", version: "2", chainId: 84532, verifyingContract: USDC },
+      domain: { name: "USD Coin", version: "2", chainId, verifyingContract: usdc },
       types: {
         ReceiveWithAuthorization: [
           { name: "from", type: "address" },
@@ -2054,4 +2251,881 @@ it("rechecks deadline headroom after approval before signing a redeemable fundin
   expect(f.client.confirmV2Signature).not.toHaveBeenCalled();
   expect(f.rpc.sendRawTransaction).not.toHaveBeenCalled();
   await expect(readFile(f.input.ledgerPath)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+/**
+ * Base mainnet (chain 8453) with the built-in pin and no local override. Every other test in
+ * this file runs on chain 84532 with `configured: true`, which is how 0.16.0 shipped an executor
+ * that refused every signed step against production.
+ */
+const BASE = TRUSTED_TASKS_V2_DEPLOYMENTS[8453]!;
+/** The production body of GET /api/tasks/readiness on 2026-11-25, byte for byte. */
+const READINESS_UNAVAILABLE =
+  '{"configured":false,"chainId":8453,"network":"eip155:8453","networkLabel":"Base","feeBp":null,"explorerUrl":null,"capabilities":{"erc3009Funding":false,"vapiVerify":false},"eip3009Domain":null}';
+/** A V2-only deployment in the existing `configured: true` response shape. */
+const READINESS_V2_ONLY = JSON.stringify({
+  configured: true,
+  chainId: 8453,
+  network: "eip155:8453",
+  networkLabel: "Base",
+  feeBp: 0,
+  explorerUrl: "https://basescan.org",
+  escrowContract: BASE.escrowFactoryV2.toLowerCase(),
+  feeRouter: `0x${"0f".repeat(20)}`,
+  usdc: BASE.usdc.toLowerCase(),
+  capabilities: { erc3009Funding: true, vapiVerify: false },
+  eip3009Domain: {
+    name: "USD Coin",
+    version: "2",
+    chainId: 8453,
+    verifyingContract: BASE.usdc.toLowerCase(),
+  },
+  maxEscrowAmountBaseUnits: "5000000000",
+  defaults: { workDurationSeconds: 604800 },
+  verifyReviewPriceBaseUnits: null,
+});
+const BASE_USDC = BASE.usdc.toLowerCase() as `0x${string}`;
+const FUND_VERB = `v2:${canonicalJson({ action: "fund" })}`;
+/** Moves a fixture to chain 8453: the built-in pin, a 0% fee, and readiness through the real schema. */
+function onBase(f: Awaited<ReturnType<typeof fixture>>, readiness: string) {
+  f.options.trustedV2Deployments = {};
+  f.rpc.getChainId.mockResolvedValue(8453);
+  f.prepared.operation.plan.chainId = 8453;
+  f.prepared.operation.plan.network = "eip155:8453";
+  f.view.workOrder.market.budget.network = "eip155:8453";
+  f.view.workOrder.v2State.feeBp = 0;
+  const read = f.rpc.readContract.getMockImplementation()!;
+  f.rpc.readContract.mockImplementation(async (call) => {
+    const pool = f.view.workOrder.terms.shape === "pool";
+    switch (call.functionName) {
+      case "paymentToken":
+      case "USDC":
+        return BASE.usdc;
+      case "FACTORY":
+        return pool ? BASE.bountyPoolFactoryV1 : BASE.escrowFactoryV2;
+      case "DISPUTE_RESOLVER":
+        return BASE.disputeResolverV3;
+      case "terms.offerTtl":
+        return 604800n;
+      case "terms.feeBp":
+      case "feeBp":
+        return 0;
+      case "terms.termsHash":
+      case "termsHash":
+        return acceptedV2TermsHash(
+          f.view as unknown as import("./types.js").GetOrderResponse,
+          BASE,
+          pool ? 0n : 604800n,
+        );
+      case "owed":
+        return 5_000_000n;
+      default:
+        return read(call);
+    }
+  });
+  // The body goes through the client's own response schema, as it does in production.
+  const served = createTasksClient({
+    baseUrl: "https://api.example",
+    fetch: async () => new Response(readiness, { headers: { "content-type": "application/json" } }),
+  });
+  f.client.deployment.mockImplementation((() => served.deployment()) as never);
+  return f;
+}
+function nothingLeftTheMachine(f: Awaited<ReturnType<typeof fixture>>) {
+  expect(f.typedSign).not.toHaveBeenCalled();
+  expect(f.sign).not.toHaveBeenCalled();
+  expect(f.client.confirmV2Signature).not.toHaveBeenCalled();
+  expect(f.rpc.sendRawTransaction).not.toHaveBeenCalled();
+}
+const noLedger = (f: Awaited<ReturnType<typeof fixture>>) =>
+  expect(readFile(f.input.ledgerPath)).rejects.toMatchObject({ code: "ENOENT" });
+/** The hosted answer to a signed funding authorization: fundWithAuthorization on the clone. */
+function authorizedFunding(
+  f: Awaited<ReturnType<typeof fixture>>,
+  chainId = 84532,
+  usdc?: `0x${string}`,
+) {
+  const intent = fundingIntent(chainId, usdc);
+  f.client.prepareV2.mockResolvedValue(intent);
+  f.client.confirmV2Signature.mockImplementation(
+    async (_id: string, _op: string, signature: `0x${string}`) => {
+      f.prepared.operation.plan.data = encodeFunctionData({
+        abi: escrowV2Abi,
+        functionName: "fundWithAuthorization",
+        args: [
+          account.address,
+          BigInt(intent.typedData.message.validAfter),
+          BigInt(intent.typedData.message.validBefore),
+          intent.typedData.message.nonce as `0x${string}`,
+          signature,
+        ],
+      });
+      return f.prepared;
+    },
+  );
+  return intent;
+}
+
+describe("Base mainnet: today's production readiness (configured: false)", () => {
+  it("parses the exact production body as unavailable on chain 8453", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_UNAVAILABLE);
+    expect(await f.client.deployment()).toMatchObject({ configured: false, chainId: 8453 });
+  });
+  it("refuses fund in plain words before the authorization is signed, sent or counted", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_UNAVAILABLE);
+    const intent = authorizedFunding(f, 8453, BASE_USDC);
+    // `task post --fund` hands the executor the intent the API returned at posting.
+    await expect(
+      f.execute({ ...f.input, write: { action: "fund" }, prepared: intent }),
+    ).rejects.toMatchObject({
+      code: "tasks_unavailable",
+      message:
+        "vAPI reports Tasks as unavailable on Base right now. Nothing was signed and no money moved. Try again later.",
+    });
+    nothingLeftTheMachine(f);
+    expect(f.rpc.readContract).not.toHaveBeenCalled();
+    await noLedger(f);
+    // The supplied intent is kept, so a later `task fund` resumes it instead of preparing again.
+    expect((await f.pending.preparation(V2_WRITE_ORDER, FUND_VERB))?.preparedV2).toMatchObject({
+      kind: "eip712",
+    });
+  });
+  it("does not ask the API to prepare a funding it will not sign", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_UNAVAILABLE);
+    await expect(f.execute({ ...f.input, write: { action: "fund" } })).rejects.toMatchObject({
+      code: "tasks_unavailable",
+    });
+    expect(f.client.prepareV2).not.toHaveBeenCalled();
+    nothingLeftTheMachine(f);
+    await noLedger(f);
+    // The SDK entry point stops at the same place, before the vault is opened.
+    const executeV2 = vi.fn();
+    await expect(
+      executeTaskV2(
+        {
+          client: f.client as unknown as TasksClient,
+          chain: { ...missingTasksChain, executeV2 },
+          pending: f.pending,
+          baseUrl: "https://api.example",
+          randomUUID: () => V2_WRITE_OPERATION,
+          signInHint: "test",
+        },
+        { ...f.input, write: { action: "fund" } },
+      ),
+    ).rejects.toMatchObject({ code: "tasks_unavailable" });
+    expect(f.client.prepareV2).not.toHaveBeenCalled();
+    expect(executeV2).not.toHaveBeenCalled();
+  });
+  it("refuses a worker bond approval the same way", async () => {
+    const f = onBase(await fixture("v2-approve-usdc"), READINESS_UNAVAILABLE);
+    await expect(
+      f.execute({ ...f.input, write: { action: "approve-bond" } }),
+    ).rejects.toMatchObject({ code: "tasks_unavailable" });
+    expect(f.client.prepareV2).not.toHaveBeenCalled();
+    nothingLeftTheMachine(f);
+  });
+  it("refuses an award and the worker's consent to it: hiring is new work", async () => {
+    const f = onBase(await fixture("v2-award"), READINESS_UNAVAILABLE);
+    const refusal = {
+      code: "tasks_unavailable",
+      message:
+        "vAPI reports Tasks as unavailable on Base right now. Nothing was signed and no money moved. Try again later.",
+    };
+    const award = { ...f.input, write: { action: "award", worker: WORKER } as const };
+    const consent = { ...f.input, write: undefined, consent: { action: "award-consent" } as const };
+    await expect(f.execute(award)).rejects.toMatchObject(refusal);
+    await expect(f.execute(consent)).rejects.toMatchObject(refusal);
+    // The SDK entry point stops both before the API prepares anything or the vault opens.
+    const executeV2 = vi.fn();
+    const context = {
+      client: f.client as unknown as TasksClient,
+      chain: { ...missingTasksChain, executeV2 },
+      pending: f.pending,
+      baseUrl: "https://api.example",
+      randomUUID: () => V2_WRITE_OPERATION,
+      signInHint: "test",
+    };
+    await expect(executeTaskV2(context, award)).rejects.toMatchObject(refusal);
+    await expect(executeTaskV2(context, consent)).rejects.toMatchObject(refusal);
+    expect(executeV2).not.toHaveBeenCalled();
+    expect(f.client.prepareV2).not.toHaveBeenCalled();
+    expect(f.client.signV2).not.toHaveBeenCalled();
+    nothingLeftTheMachine(f);
+    expect(f.rpc.readContract).not.toHaveBeenCalled();
+    // An unreadable status holds hiring back as well.
+    f.client.deployment.mockRejectedValue(new TasksClientError("network", "offline"));
+    await expect(f.execute(award)).rejects.toMatchObject({
+      code: "tasks_unavailable",
+      message: expect.stringContaining("vAPI's Tasks status could not be read."),
+    });
+    await expect(f.execute(consent)).rejects.toMatchObject({ code: "tasks_unavailable" });
+    expect(f.client.prepareV2).not.toHaveBeenCalled();
+    expect(f.client.signV2).not.toHaveBeenCalled();
+  });
+  it.each([
+    ["approve", { action: "approve", i: 0 }, "approveMilestone", [0]],
+    ["finalize", { action: "finalize", i: 0 }, "finalizeMilestone", [0]],
+    ["cancel-offer", { action: "cancel-offer" }, "cancelOffer", []],
+    [
+      "raise-dispute",
+      { action: "raise-dispute", i: 0, evidence: "Proof text" },
+      "raiseDispute",
+      [0, HASH_EVIDENCE("Proof text")],
+    ],
+    ["claim-owed", { action: "claim-owed" }, "claimOwed", [account.address]],
+  ] as const)(
+    "still signs %s: money already in an escrow is never held back by a hosted flag",
+    async (name, write, functionName, args) => {
+      const step = `v2-${name}` as TaskV2OperationResponse["operation"]["step"];
+      const f = onBase(await fixture(), READINESS_UNAVAILABLE);
+      f.prepared.operation.step = step;
+      f.prepared.operation.plan.step = step;
+      f.prepared.operation.plan.data = encodeFunctionData({
+        abi: escrowV2Abi,
+        functionName,
+        args,
+      } as never);
+      expect(await f.execute({ ...f.input, write: write as TaskV2Action })).toMatchObject({
+        ok: true,
+        operation: { state: "confirmed", step, plan: null },
+      });
+      expect(f.sign).toHaveBeenCalledTimes(1);
+      expect(f.sign.mock.calls[0]![0]).toMatchObject({ chainId: 8453, to: state.escrow });
+      // The built-in pin was used: no override notice, and the pinned factory vouched for the clone.
+      expect(f.notice).not.toHaveBeenCalled();
+      expect(f.rpc.readContract).toHaveBeenCalledWith(
+        expect.objectContaining({ address: BASE.escrowFactoryV2, functionName: "isEscrow" }),
+      );
+    },
+  );
+  it("keeps exits open when the readiness document cannot be read", async () => {
+    const f = onBase(await fixture(), READINESS_UNAVAILABLE);
+    f.client.deployment.mockRejectedValue(new TasksClientError("invalid_response", "bad body"));
+    expect(await f.execute(f.input)).toMatchObject({ ok: true });
+    expect(f.sign.mock.calls[0]![0]).toMatchObject({ chainId: 8453, to: state.escrow });
+  });
+  it("keeps funding closed when the readiness document cannot be read", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_UNAVAILABLE);
+    f.client.deployment.mockRejectedValue(new TasksClientError("network", "offline"));
+    await expect(f.execute({ ...f.input, write: { action: "fund" } })).rejects.toMatchObject({
+      code: "tasks_unavailable",
+      message: expect.stringContaining("vAPI's Tasks status could not be read."),
+    });
+    expect(f.client.prepareV2).not.toHaveBeenCalled();
+    nothingLeftTheMachine(f);
+    await noLedger(f);
+  });
+});
+
+describe("Base mainnet: a V2-only configured: true readiness body", () => {
+  it("parses in the existing response schema", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_V2_ONLY);
+    expect(await f.client.deployment()).toMatchObject({
+      configured: true,
+      chainId: 8453,
+      escrowContract: BASE.escrowFactoryV2.toLowerCase(),
+      usdc: BASE.usdc.toLowerCase(),
+    });
+  });
+  it("funds a registered escrow with one authorization and one transaction", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_V2_ONLY);
+    const intent = authorizedFunding(f, 8453, BASE_USDC);
+    expect(await f.execute({ ...f.input, write: { action: "fund" } })).toMatchObject({
+      ok: true,
+      operation: { state: "confirmed", step: "v2-fund", plan: null },
+      money: { gross: { usd: "100.00" }, fee: { usd: "0.00" }, net: { usd: "100.00" } },
+    });
+    expect(f.typedSign).toHaveBeenCalledWith(intent.typedData);
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    expect(f.sign.mock.calls[0]![0]).toMatchObject({ chainId: 8453, to: state.escrow });
+    expect(f.notice).not.toHaveBeenCalled();
+    expect(
+      (await readSpendLedger(f.input.ledgerPath, new Date("2026-10-26T12:00:00Z"), f.input.wallet))
+        .spentAtomic,
+    ).toBe("100000000");
+  });
+  it("creates the clone on the pinned factory, approves pinned USDC and funds it", async () => {
+    const f = onBase(await fixture("v2-approve-usdc"), READINESS_V2_ONLY);
+    const args = creationArgs(f.view, BASE, 0);
+    const fresh = freshFunding(
+      f,
+      encodeFunctionData({ abi: escrowFactoryV2Abi, functionName: "createEscrow", args }),
+      BASE,
+    );
+    expect(await f.execute({ ...f.input, write: { action: "fund" } })).toMatchObject({
+      ok: true,
+      operation: { step: "v2-fund", state: "confirmed", plan: null },
+    });
+    expect(fresh.registered()).toBe(true);
+    const [creation, approval, funding] = f.sign.mock.calls.map(([tx]) => tx);
+    expect(f.sign).toHaveBeenCalledTimes(3);
+    expect(creation).toMatchObject({ chainId: 8453, to: BASE.escrowFactoryV2.toLowerCase() });
+    expect(approval).toMatchObject({ chainId: 8453, to: BASE.usdc.toLowerCase() });
+    expect(funding).toMatchObject({ chainId: 8453, to: state.escrow });
+    expect(f.typedSign).not.toHaveBeenCalled();
+    expect(f.notice).not.toHaveBeenCalled();
+    expect(
+      (await readSpendLedger(f.input.ledgerPath, new Date("2026-10-26T12:00:00Z"), f.input.wallet))
+        .spentAtomic,
+    ).toBe("100000000");
+  });
+  it("refuses a step prepared for another chain before anything is signed", async () => {
+    // A local override exists for 84532, so only the hosted chain ID stands in the way.
+    const f = await fixture("v2-fund");
+    const served = createTasksClient({
+      baseUrl: "https://api.example",
+      fetch: async () => Response.json(JSON.parse(READINESS_V2_ONLY)),
+    });
+    f.client.deployment.mockImplementation((() => served.deployment()) as never);
+    const intent = authorizedFunding(f);
+    await expect(
+      f.execute({ ...f.input, write: { action: "fund" }, prepared: intent }),
+    ).rejects.toThrow(
+      "The prepared step is for Base Sepolia, but vAPI serves Tasks on Base. Nothing was signed.",
+    );
+    nothingLeftTheMachine(f);
+    await noLedger(f);
+  });
+});
+
+describe("refusals that need no signature come before any signature", () => {
+  it("refuses a funding the wallet cannot pay before signing or reserving", async () => {
+    const f = await fixture("v2-fund");
+    const intent = authorizedFunding(f);
+    const read = f.rpc.readContract.getMockImplementation()!;
+    f.rpc.readContract.mockImplementation(async (call) =>
+      call.functionName === "balanceOf" ? 99_999_999n : read(call),
+    );
+    const ask = vi.fn(async () => true);
+    await expect(
+      f.execute({
+        ...f.input,
+        write: { action: "fund" },
+        prepared: intent,
+        policy: { ...f.input.policy, approveAboveUsd: 1 },
+        approval: { ask },
+      }),
+    ).rejects.toMatchObject({
+      code: "insufficient_usdc",
+      message:
+        "This step pays $100.00 USDC, but the wallet holds $99.999999 on Base Sepolia. Nothing was signed and no money moved.",
+    });
+    expect(f.rpc.readContract).toHaveBeenCalledWith(
+      expect.objectContaining({
+        address: USDC,
+        functionName: "balanceOf",
+        args: [account.address],
+      }),
+    );
+    expect(ask).not.toHaveBeenCalled();
+    nothingLeftTheMachine(f);
+    await noLedger(f);
+  });
+  it("refuses a funding above the factory's live limit before signing or reserving", async () => {
+    const f = await fixture("v2-fund");
+    const intent = authorizedFunding(f);
+    const read = f.rpc.readContract.getMockImplementation()!;
+    f.rpc.readContract.mockImplementation(async (call) =>
+      call.functionName === "maxEscrowAmount" ? 99_999_999n : read(call),
+    );
+    await expect(
+      f.execute({ ...f.input, write: { action: "fund" }, prepared: intent }),
+    ).rejects.toMatchObject({
+      code: "invalid_input",
+      message:
+        "The total of $100.00 USDC is above the live limit of $99.999999 USDC per task on Base Sepolia. Nothing was signed and no money moved.",
+    });
+    expect(f.rpc.readContract).toHaveBeenCalledWith(
+      expect.objectContaining({ address: getAddress(FACTORY), functionName: "maxEscrowAmount" }),
+    );
+    nothingLeftTheMachine(f);
+    await noLedger(f);
+  });
+  it("refuses a funding from a wallet without gas before signing or reserving", async () => {
+    const f = await fixture("v2-fund");
+    const intent = authorizedFunding(f);
+    Object.assign(f.rpc, { getBalance: vi.fn(async () => 0n) });
+    await expect(
+      f.execute({ ...f.input, write: { action: "fund" }, prepared: intent }),
+    ).rejects.toMatchObject({
+      code: "insufficient_gas",
+      message:
+        "The wallet holds no ETH on Base Sepolia to pay for the transaction. Nothing was signed and no money moved.",
+    });
+    nothingLeftTheMachine(f);
+    await noLedger(f);
+  });
+  it("leaves the decision to the chain when the balance cannot be read", async () => {
+    const f = await fixture("v2-fund");
+    authorizedFunding(f);
+    const read = f.rpc.readContract.getMockImplementation()!;
+    f.rpc.readContract.mockImplementation(async (call) => {
+      if (call.functionName === "balanceOf") throw new Error("rate limited");
+      return read(call);
+    });
+    expect(await f.execute({ ...f.input, write: { action: "fund" } })).toMatchObject({ ok: true });
+  });
+  it("does not count a step the node refuses to estimate against the daily cap", async () => {
+    const f = await fixture("v2-fund");
+    vi.mocked(prepareTransactionRequest).mockRejectedValueOnce(new Error("execution reverted"));
+    await expect(f.execute({ ...f.input, write: { action: "fund" } })).rejects.toMatchObject({
+      code: "chain_error",
+    });
+    expect(f.sign).not.toHaveBeenCalled();
+    expect(f.rpc.sendRawTransaction).not.toHaveBeenCalled();
+    await noLedger(f);
+    // The same step still reserves once, right before its signature.
+    expect(await f.execute({ ...f.input, write: { action: "fund" } })).toMatchObject({ ok: true });
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    expect(
+      (await readSpendLedger(f.input.ledgerPath, new Date("2026-10-26T12:00:00Z"), f.input.wallet))
+        .spentAtomic,
+    ).toBe("100000000");
+  });
+  it("files a dispute when vAPI reports Tasks as unavailable: its deadline does not wait", async () => {
+    const f = await fixture("v2-raise-dispute");
+    f.client.deployment.mockResolvedValue({
+      configured: false,
+      chainId: 84532,
+      network: "eip155:84532",
+    } as never);
+    expect(
+      await f.execute({
+        ...f.input,
+        write: { action: "raise-dispute", i: 0, evidence: "Proof text" },
+      }),
+    ).toMatchObject({ ok: true, money: { gross: { usd: "20.00" } } });
+  });
+});
+
+describe("a rerun of an operation that already signed something", () => {
+  type Fixture = Awaited<ReturnType<typeof fixture>>;
+  const STILL_STANDS =
+    "This step was not signed. Anything this operation signed earlier stands. Try again later.";
+  const spent = async (f: Fixture) =>
+    (await readSpendLedger(f.input.ledgerPath, new Date("2026-10-26T12:00:00Z"), f.input.wallet))
+      .spentAtomic;
+  const serve = (f: Fixture, readiness: string) => {
+    const served = createTasksClient({
+      baseUrl: "https://api.example",
+      fetch: async () =>
+        new Response(readiness, { headers: { "content-type": "application/json" } }),
+    });
+    f.client.deployment.mockImplementation((() => served.deployment()) as never);
+  };
+  const walletHolds = (f: Fixture, balance: bigint) => {
+    const read = f.rpc.readContract.getMockImplementation()!;
+    f.rpc.readContract.mockImplementation(async (call) =>
+      call.functionName === "balanceOf" ? balance : read(call),
+    );
+  };
+  /** First run: the transaction is broadcast, then the API call that records it fails. */
+  async function sentThenDropped(f: Fixture, write: TaskV2Action, paid: string) {
+    const normal = f.client.operationV2.getMockImplementation()!;
+    f.client.operationV2.mockImplementation(async (id, mode, body) => {
+      if (mode === "transaction") throw new Error("socket hang up");
+      return normal(id, mode, body);
+    });
+    await expect(f.execute({ ...f.input, write })).rejects.toMatchObject({
+      code: "chain_error",
+      message: "The prepared V2 step did not complete. Resume the saved operation.",
+    });
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    expect(f.rpc.sendRawTransaction).toHaveBeenCalledTimes(1);
+    expect(await spent(f)).toBe(paid);
+    f.client.operationV2.mockImplementation(normal);
+  }
+  /** The API has seen the transaction on chain and holds the operation as confirmed. */
+  const minedAndKnown = (f: Fixture) =>
+    f.client.operationV2.mockImplementation(async (_id, mode) => ({
+      ...f.prepared,
+      ...(mode === "recover" ? { recovered: true, scanComplete: true } : {}),
+      operation: {
+        ...f.prepared.operation,
+        state: "confirmed",
+        transactionHash: `0x${"aa".repeat(32)}`,
+      },
+    }));
+
+  it("reconciles a mined funding although the wallet no longer holds the amount", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_V2_ONLY);
+    await sentThenDropped(f, { action: "fund" }, "100000000");
+    // The funding mined: the 100 USDC are in the escrow, and the wallet is at zero.
+    minedAndKnown(f);
+    walletHolds(f, 0n);
+    expect(await f.execute({ ...f.input, write: { action: "fund" } })).toMatchObject({
+      ok: true,
+      operation: { state: "confirmed", step: "v2-fund" },
+    });
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    expect(f.rpc.sendRawTransaction).toHaveBeenCalledTimes(1);
+    // Counted once, and the finished operation leaves no journal behind.
+    expect(await spent(f)).toBe("100000000");
+    expect(await f.pending.preparation(V2_WRITE_ORDER, FUND_VERB)).toBeUndefined();
+  });
+  it("does not count a reconciled funding against the cap of a later day", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_V2_ONLY);
+    await sentThenDropped(f, { action: "fund" }, "100000000");
+    minedAndKnown(f);
+    const nextDay = new Date("2026-10-27T12:00:00Z");
+    const later = createTaskV2Executor({ ...f.options, now: () => nextDay });
+    expect(await later({ ...f.input, write: { action: "fund" } })).toMatchObject({ ok: true });
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    expect((await readSpendLedger(f.input.ledgerPath, nextDay, f.input.wallet)).spentAtomic).toBe(
+      "0",
+    );
+    expect(await spent(f)).toBe("100000000");
+  });
+  it("reconciles a sent funding although vAPI now reports Tasks as unavailable", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_V2_ONLY);
+    await sentThenDropped(f, { action: "fund" }, "100000000");
+    serve(f, READINESS_UNAVAILABLE);
+    walletHolds(f, 0n);
+    expect(await f.execute({ ...f.input, write: { action: "fund" } })).toMatchObject({
+      ok: true,
+      operation: { state: "confirmed", step: "v2-fund" },
+    });
+    // The saved transaction is sent again unchanged; nothing new is signed or counted.
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    const [first, again] = f.rpc.sendRawTransaction.mock.calls.map(([sent]) => sent);
+    expect(f.rpc.sendRawTransaction).toHaveBeenCalledTimes(2);
+    expect(again).toEqual(first);
+    expect(await spent(f)).toBe("100000000");
+  });
+  it("reconciles a sent funding when the readiness document cannot be read", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_V2_ONLY);
+    await sentThenDropped(f, { action: "fund" }, "100000000");
+    minedAndKnown(f);
+    f.client.deployment.mockRejectedValue(new TasksClientError("network", "offline"));
+    expect(await f.execute({ ...f.input, write: { action: "fund" } })).toMatchObject({ ok: true });
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    expect(await spent(f)).toBe("100000000");
+  });
+  it("reconciles a sent dispute fee although the wallet no longer holds it", async () => {
+    const f = await fixture("v2-raise-dispute");
+    const write = { action: "raise-dispute", i: 0, evidence: "Proof text" } as const;
+    await sentThenDropped(f, write, "20000000");
+    minedAndKnown(f);
+    walletHolds(f, 0n);
+    Object.assign(f.rpc, { getBalance: vi.fn(async () => 0n) });
+    expect(await f.execute({ ...f.input, write })).toMatchObject({
+      ok: true,
+      operation: { state: "confirmed", step: "v2-raise-dispute" },
+    });
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    expect(f.rpc.sendRawTransaction).toHaveBeenCalledTimes(1);
+    expect(await spent(f)).toBe("20000000");
+  });
+  it("never says nothing was signed after a funding authorization was signed", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_V2_ONLY);
+    authorizedFunding(f, 8453, BASE_USDC);
+    // The authorization is signed and counted; its upload is never answered.
+    f.client.confirmV2Signature.mockRejectedValueOnce(new Error("socket hang up"));
+    await expect(f.execute({ ...f.input, write: { action: "fund" } })).rejects.toMatchObject({
+      code: "chain_error",
+    });
+    expect(f.typedSign).toHaveBeenCalledTimes(1);
+    expect(await spent(f)).toBe("100000000");
+    // A transaction that was never signed still waits for Tasks to be available, in true words.
+    serve(f, READINESS_UNAVAILABLE);
+    const refused = await f.execute({ ...f.input, write: { action: "fund" } }).catch((e) => e);
+    expect(refused).toMatchObject({
+      code: "tasks_unavailable",
+      message: `vAPI reports Tasks as unavailable on Base right now. ${STILL_STANDS}`,
+    });
+    // The rerun holds its signature, so it went on to the transaction step: same bytes again.
+    expect(f.typedSign).toHaveBeenCalledTimes(2);
+    expect(f.client.confirmV2Signature).toHaveBeenCalledTimes(2);
+    expect(f.client.confirmV2Signature.mock.calls[1]![2]).toBe(
+      f.client.confirmV2Signature.mock.calls[0]![2],
+    );
+    expect(f.sign).not.toHaveBeenCalled();
+    expect(f.rpc.sendRawTransaction).not.toHaveBeenCalled();
+    // The wallet's balance is not asked about either: the authorization may already be redeemed.
+    serve(f, READINESS_V2_ONLY);
+    walletHolds(f, 0n);
+    expect(await f.execute({ ...f.input, write: { action: "fund" } })).toMatchObject({ ok: true });
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    expect(await spent(f)).toBe("100000000");
+  });
+  const fund = (f: Fixture) => ({ ...f.input, write: { action: "fund" } as const });
+  const nodeHoldsItAsMined = (f: Fixture) =>
+    Object.assign(f.rpc, { getTransactionReceipt: vi.fn(async () => ({ status: "success" })) });
+  /** Two hours on: the chain clock and the local clock are past the authorization window. */
+  const twoHoursLater = (f: Fixture) => {
+    f.rpc.getBlock.mockResolvedValue({ timestamp: NOW_SECONDS + 7200n });
+    return createTaskV2Executor({ ...f.options, now: () => new Date("2026-10-26T14:00:00Z") });
+  };
+  const journalKey = async (f: Fixture) =>
+    (await f.pending.preparation(V2_WRITE_ORDER, FUND_VERB))?.idempotencyKey;
+
+  it("does not sign a reserved funding authorization for the first time while Tasks is unavailable", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_V2_ONLY);
+    authorizedFunding(f, 8453, BASE_USDC);
+    // The spend is reserved, then the vault fails: no signature exists.
+    f.typedSign.mockRejectedValueOnce(new Error("vault closed"));
+    await expect(f.execute(fund(f))).rejects.toMatchObject({ code: "chain_error" });
+    expect(await spent(f)).toBe("100000000");
+    serve(f, READINESS_UNAVAILABLE);
+    await expect(f.execute(fund(f))).rejects.toMatchObject({
+      code: "tasks_unavailable",
+      message:
+        "vAPI reports Tasks as unavailable on Base right now. No new signature was made. An authorization signed earlier stays valid until it expires. Try again later.",
+    });
+    f.client.deployment.mockRejectedValue(new TasksClientError("network", "offline"));
+    await expect(f.execute(fund(f))).rejects.toMatchObject({
+      code: "tasks_unavailable",
+      message: expect.stringContaining("No new signature was made."),
+    });
+    // Only the failed attempt reached the vault, and nothing was uploaded or sent.
+    expect(f.typedSign).toHaveBeenCalledTimes(1);
+    expect(f.client.confirmV2Signature).not.toHaveBeenCalled();
+    expect(f.sign).not.toHaveBeenCalled();
+    serve(f, READINESS_V2_ONLY);
+    expect(await f.execute(fund(f))).toMatchObject({ ok: true });
+    expect(f.typedSign).toHaveBeenCalledTimes(2);
+    expect(await spent(f)).toBe("100000000");
+  });
+  it("sends the saved transaction of a signed authorization although Tasks is now unavailable", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_V2_ONLY);
+    authorizedFunding(f, 8453, BASE_USDC);
+    await sentThenDropped(f, { action: "fund" }, "100000000");
+    serve(f, READINESS_UNAVAILABLE);
+    expect(await f.execute(fund(f))).toMatchObject({
+      ok: true,
+      operation: { state: "confirmed", step: "v2-fund" },
+    });
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    expect(await spent(f)).toBe("100000000");
+  });
+  it("finishes a mined funding on a later day without asking the cap, approval or the deadline", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_V2_ONLY);
+    f.input.caps = { perCallAtomic: "1", perDayAtomic: "150000000" };
+    await sentThenDropped(f, { action: "fund" }, "100000000");
+    nodeHoldsItAsMined(f);
+    // Half an hour before the deadline, on a day whose cap has 50 USDC left, with stricter
+    // limits than on the first run. The API still holds the step as prepared.
+    const later = new Date(Date.parse(DEADLINE) - 1_800_000);
+    f.rpc.getBlock.mockResolvedValue({ timestamp: BigInt(later.getTime() / 1000) });
+    await reserveSpend(100_000_000n, f.input.caps, {
+      kind: "escrow-funding",
+      taskKey: "33333333-3333-4333-8333-333333333333",
+      maxPerTaskAtomic: 200_000_000n,
+      wallet: f.input.wallet,
+      ledgerPath: f.input.ledgerPath,
+      now: later,
+      reservationId: "44444444-4444-4444-8444-444444444444",
+    });
+    const rerun = createTaskV2Executor({ ...f.options, now: () => later });
+    expect(
+      await rerun({ ...fund(f), policy: { maxPerTaskUsd: 50, approveAboveUsd: 0 } }),
+    ).toMatchObject({ ok: true, operation: { state: "confirmed", step: "v2-fund" } });
+    // Reported, not signed or sent again.
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    expect(f.rpc.sendRawTransaction).toHaveBeenCalledTimes(1);
+    const reported = f.client.operationV2.mock.calls.filter(([, mode]) => mode === "transaction");
+    expect(reported).toHaveLength(2);
+    expect(reported.at(-1)![2].transactionHash).toBe(
+      keccak256(f.rpc.sendRawTransaction.mock.calls[0]![0].serializedTransaction),
+    );
+    // Counted once, on the day it was reserved; the later day holds only the other task.
+    expect(await spent(f)).toBe("100000000");
+    expect((await readSpendLedger(f.input.ledgerPath, later, f.input.wallet)).spentAtomic).toBe(
+      "100000000",
+    );
+    const rows = JSON.parse(await readFile(f.input.ledgerPath, "utf8")) as {
+      rows: { date: string; reservations?: { taskKey?: string }[] }[];
+    };
+    expect(
+      rows.rows.map((row) => [row.date, row.reservations?.map((entry) => entry.taskKey)]),
+    ).toEqual([
+      ["2026-10-26", [V2_WRITE_ORDER]],
+      ["2026-10-28", ["33333333-3333-4333-8333-333333333333"]],
+    ]);
+  });
+  it("finishes a mined authorized funding after its authorization window, without signing again", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_V2_ONLY);
+    authorizedFunding(f, 8453, BASE_USDC);
+    await sentThenDropped(f, { action: "fund" }, "100000000");
+    const key = await journalKey(f);
+    const rerun = twoHoursLater(f);
+    // The node does not know the transaction: the saved authorization is kept, not replaced,
+    // and the expired window is named.
+    await expect(rerun(fund(f))).rejects.toMatchObject({
+      code: "v2_plan_mismatch",
+      message: expect.stringContaining("bounded time window"),
+    });
+    expect(await journalKey(f)).toBe(key);
+    expect(f.client.prepareV2).toHaveBeenCalledTimes(1);
+    expect(f.typedSign).toHaveBeenCalledTimes(1);
+    // The node holds it as mined: the rerun reports it and finishes.
+    nodeHoldsItAsMined(f);
+    expect(await rerun(fund(f))).toMatchObject({
+      ok: true,
+      operation: { state: "confirmed", step: "v2-fund" },
+    });
+    expect(f.typedSign).toHaveBeenCalledTimes(1);
+    expect(f.client.confirmV2Signature).toHaveBeenCalledTimes(1);
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    expect(f.rpc.sendRawTransaction).toHaveBeenCalledTimes(1);
+    expect(await spent(f)).toBe("100000000");
+  });
+  it("signs nothing new for a mined funding, whatever step vAPI asks for", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_V2_ONLY);
+    authorizedFunding(f, 8453, BASE_USDC);
+    await sentThenDropped(f, { action: "fund" }, "100000000");
+    nodeHoldsItAsMined(f);
+    // The API answers with an approval that would pass every plan check.
+    const approval = {
+      ...f.prepared.operation,
+      step: "v2-approve-usdc" as const,
+      plan: {
+        ...f.prepared.operation.plan,
+        step: "v2-approve-usdc" as const,
+        to: BASE_USDC,
+        data: encodeFunctionData({
+          abi: parseAbi(["function approve(address,uint256) returns (bool)"]),
+          functionName: "approve",
+          args: [state.escrow, 100_000_000n],
+        }),
+      },
+    };
+    f.client.operationV2.mockImplementation(async () => ({
+      ...f.prepared,
+      operation: approval,
+      recovered: false,
+      scanComplete: true,
+    }));
+    await expect(
+      f.execute({ ...fund(f), policy: { maxPerTaskUsd: 50, approveAboveUsd: 0 } }),
+    ).rejects.toMatchObject({
+      code: "invalid_response",
+      message:
+        "vAPI asks for an earlier step although the last step of this operation is mined. Nothing was signed.",
+    });
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    expect(f.typedSign).toHaveBeenCalledTimes(1);
+    expect(f.rpc.sendRawTransaction).toHaveBeenCalledTimes(1);
+  });
+  it("prepares a new authorization when the saved one ran out before anything was signed", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_V2_ONLY);
+    const first = authorizedFunding(f, 8453, BASE_USDC);
+    walletHolds(f, 0n);
+    await expect(f.execute(fund(f))).rejects.toMatchObject({ code: "insufficient_usdc" });
+    const key = await journalKey(f);
+    // Inside the window the saved authorization is used again.
+    await expect(f.execute(fund(f))).rejects.toMatchObject({ code: "insufficient_usdc" });
+    expect(f.client.prepareV2).toHaveBeenCalledTimes(1);
+    expect(await journalKey(f)).toBe(key);
+    // Two hours later the wallet is topped up. vAPI hands out a new authorization.
+    walletHolds(f, 1_000_000_000n);
+    const message = {
+      ...first.typedData.message,
+      validAfter: (NOW_SECONDS + 7199n).toString(),
+      validBefore: (NOW_SECONDS + 7500n).toString(),
+      nonce: `0x${"34".repeat(32)}`,
+    };
+    const second = { ...first, typedData: { ...first.typedData, message } };
+    f.client.prepareV2.mockResolvedValue(second);
+    f.client.confirmV2Signature.mockImplementation(
+      async (_id: string, _op: string, signature: `0x${string}`) => {
+        f.prepared.operation.plan.data = encodeFunctionData({
+          abi: escrowV2Abi,
+          functionName: "fundWithAuthorization",
+          args: [
+            account.address,
+            BigInt(message.validAfter),
+            BigInt(message.validBefore),
+            message.nonce as `0x${string}`,
+            signature,
+          ],
+        });
+        return f.prepared;
+      },
+    );
+    expect(await twoHoursLater(f)(fund(f))).toMatchObject({ ok: true });
+    expect(f.client.prepareV2).toHaveBeenCalledTimes(2);
+    const keys = (
+      f.client.prepareV2.mock.calls as unknown as [string, unknown, { idempotencyKey: string }][]
+    ).map((call) => call[2].idempotencyKey);
+    expect(keys[0]).toBe(key);
+    expect(keys[1]).not.toBe(key);
+    expect(f.typedSign).toHaveBeenCalledTimes(1);
+    expect(f.typedSign).toHaveBeenCalledWith(second.typedData);
+    expect(await spent(f)).toBe("100000000");
+  });
+  it("keeps an authorization that was signed, also after its window", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_V2_ONLY);
+    authorizedFunding(f, 8453, BASE_USDC);
+    // Signed and counted; the upload is never answered, so no transaction exists.
+    f.client.confirmV2Signature.mockRejectedValueOnce(new Error("socket hang up"));
+    await expect(f.execute(fund(f))).rejects.toMatchObject({ code: "chain_error" });
+    const key = await journalKey(f);
+    // The ledger is lost as well: the journal alone remembers the signature.
+    await rm(f.input.ledgerPath);
+    await expect(twoHoursLater(f)(fund(f))).rejects.toMatchObject({ code: "v2_plan_mismatch" });
+    expect(await journalKey(f)).toBe(key);
+    expect(f.client.prepareV2).toHaveBeenCalledTimes(1);
+    expect(f.typedSign).toHaveBeenCalledTimes(1);
+  });
+  it("holds the unsigned steps of a started create, approve and fund sequence", async () => {
+    const f = onBase(await fixture("v2-approve-usdc"), READINESS_V2_ONLY);
+    freshFunding(
+      f,
+      encodeFunctionData({
+        abi: escrowFactoryV2Abi,
+        functionName: "createEscrow",
+        args: creationArgs(f.view, BASE, 0),
+      }),
+      BASE,
+    );
+    // The clone is created; the node then refuses to estimate the approval.
+    const estimate = vi.mocked(prepareTransactionRequest);
+    estimate
+      .mockImplementationOnce(estimate.getMockImplementation()!)
+      .mockRejectedValueOnce(new Error("execution reverted"));
+    await expect(f.execute({ ...f.input, write: { action: "fund" } })).rejects.toMatchObject({
+      code: "chain_error",
+    });
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    serve(f, READINESS_UNAVAILABLE);
+    await expect(f.execute({ ...f.input, write: { action: "fund" } })).rejects.toMatchObject({
+      code: "tasks_unavailable",
+      message: `vAPI reports Tasks as unavailable on Base right now. ${STILL_STANDS}`,
+    });
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    expect(f.rpc.sendRawTransaction).toHaveBeenCalledTimes(1);
+    serve(f, READINESS_V2_ONLY);
+    expect(await f.execute({ ...f.input, write: { action: "fund" } })).toMatchObject({
+      ok: true,
+      operation: { step: "v2-fund", state: "confirmed" },
+    });
+    expect(f.sign).toHaveBeenCalledTimes(3);
+    expect(await spent(f)).toBe("100000000");
+  });
+  it("takes a saved signed transaction alone as proof that the operation started", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_V2_ONLY);
+    await sentThenDropped(f, { action: "fund" }, "100000000");
+    // The spend ledger is lost; the signed transaction is still saved next to the journal.
+    await rm(f.input.ledgerPath);
+    serve(f, READINESS_UNAVAILABLE);
+    walletHolds(f, 0n);
+    expect(await f.execute({ ...f.input, write: { action: "fund" } })).toMatchObject({ ok: true });
+    expect(f.sign).toHaveBeenCalledTimes(1);
+    expect(await spent(f)).toBe("100000000");
+  });
+  it("still refuses a first run that only kept its preparation", async () => {
+    const f = onBase(await fixture("v2-fund"), READINESS_UNAVAILABLE);
+    const intent = authorizedFunding(f, 8453, BASE_USDC);
+    const run = () => f.execute({ ...f.input, write: { action: "fund" }, prepared: intent });
+    await expect(run()).rejects.toMatchObject({ code: "tasks_unavailable" });
+    // The journal and the intent are saved, but nothing was signed: the rerun is a first run.
+    await expect(run()).rejects.toMatchObject({
+      code: "tasks_unavailable",
+      message:
+        "vAPI reports Tasks as unavailable on Base right now. Nothing was signed and no money moved. Try again later.",
+    });
+    nothingLeftTheMachine(f);
+    await noLedger(f);
+  });
 });

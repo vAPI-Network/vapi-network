@@ -37,6 +37,8 @@ export type PendingPreparation = {
   inputs: unknown;
   operationId?: string;
   preparedV2?: TaskV2Prepared;
+  /** Set once a typed signature for this preparation was made; it may have left this machine. */
+  signed?: boolean;
 };
 
 export type TaskV2TargetBinding = { chainId: number; escrow: Address; termsHash: Hex };
@@ -57,6 +59,7 @@ export interface PendingTransactions {
   putPreparation(milestoneId: string, verb: string, preparation: PendingPreparation): Promise<void>;
   bindPreparedV2?(milestoneId: string, verb: string, prepared: TaskV2Prepared): Promise<void>;
   bindPreparationOperation(milestoneId: string, verb: string, operationId: string): Promise<void>;
+  markPreparationSigned?(milestoneId: string, verb: string): Promise<void>;
   completePreparation(milestoneId: string, verb: string): Promise<void>;
   reservationId(escrowId: string, generate: () => string): Promise<string>;
   clearExpiredFunding?(escrowId: string, reservationId: string): Promise<void>;
@@ -173,6 +176,7 @@ const stateSchema = z
             inputs: z.unknown(),
             operationId: z.uuid().optional(),
             preparedV2: taskV2PreparedSchema.optional(),
+            signed: z.boolean().optional(),
           })
           .strict(),
       )
@@ -389,6 +393,7 @@ export function createPendingTransactions(home: string): PendingTransactions {
             inputs: z.unknown(),
             operationId: z.uuid().optional(),
             preparedV2: taskV2PreparedSchema.optional(),
+            signed: z.boolean().optional(),
           })
           .strict()
           .parse(preparation);
@@ -434,6 +439,14 @@ export function createPendingTransactions(home: string): PendingTransactions {
           existing.operationId = parsedOperationId;
           await save(state);
         }
+      });
+    },
+    async markPreparationSigned(milestoneId, verb) {
+      await locked(async (state) => {
+        const existing = state.preparations[preparationKey(milestoneId, verb)];
+        if (!existing || existing.signed) return;
+        existing.signed = true;
+        await save(state);
       });
     },
     async completePreparation(milestoneId, verb) {

@@ -10,7 +10,12 @@ import {
   type AccountLinkOutcome,
   type StartAccountLinkArgs,
 } from "./account-add.js";
-import { DEFAULT_AGENT_TOOLS, writeAgentProfile, type AgentGrant } from "./agent-profile.js";
+import {
+  accountTaskLimitsUnderProfile,
+  DEFAULT_AGENT_TOOLS,
+  writeAgentProfile,
+  type AgentGrant,
+} from "./agent-profile.js";
 import { FileLockedError, withFileLock, writeJsonAtomic } from "./atomic-file.js";
 import {
   DEFAULT_SPEND_CAPS,
@@ -507,6 +512,11 @@ async function provisionSwarm(
     }
     if (member !== undefined) {
       if (!(await profileExists(home, member.account))) {
+        // The profile holds the member's task limits from here on; see `vapi agent create`.
+        // Limits the owner set below the defaults stay on the account and go into the profile.
+        const stricter = (
+          await opts.store.updateTaskPolicy(member.account, accountTaskLimitsUnderProfile)
+        ).taskPolicy;
         await writeAgentProfile(home, {
           version: 1,
           name: member.account,
@@ -516,7 +526,10 @@ async function provisionSwarm(
           tools: [...DEFAULT_AGENT_TOOLS],
           grants: roleGrants(member.role),
           verifiedOnly: true,
-          approveAboveUsd: 0.5,
+          approveAboveUsd: stricter?.approveAboveUsd ?? 0.5,
+          ...(stricter?.maxPerTaskUsd === undefined
+            ? {}
+            : { maxPerTaskUsd: stricter.maxPerTaskUsd }),
           maxSteps: 12,
           paused: false,
           createdAt: (opts.now?.() ?? new Date()).toISOString(),

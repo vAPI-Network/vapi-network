@@ -18,7 +18,7 @@ Agents is live on production. Link accounts and set each agent's daily Router al
 ## Task policy
 
 `maxPerTaskUsd` (default $100), set with `--max-per-task`, caps the running total of escrow funding and dispute fees reserved for one task. Tasks V2 is live on Base mainnet. Escrow funding also counts against the wallet's per-day cap
-(`--call-budget`) and asks for approval above `--approve-above`.
+(`--call-budget`) and asks for approval above `--approve-above`. For an account that already exists, `vapi agent create` clears a task limit that `vapi accounts caps` had set above the default, keeps one set below it in the profile and on the account, and says so; the profile holds the limits from then on, and `vapi accounts caps <name>` changes them there. From an agent session or without a terminal it refuses to raise `--max-per-task`, `--approve-above` or `--call-budget` above what that account has; see [wallets.md](./wallets.md).
 
 `autoReleaseBelowUsd` (default $25), set with `--auto-release-below`, lets
 `vapi task watch --auto-release` automatically release a delivered task below

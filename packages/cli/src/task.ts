@@ -20,6 +20,8 @@ import {
   createPendingTransactions,
   createTasksChain,
   createTasksRpcFor,
+  readTaskV2Limits,
+  type TaskV2LimitsReader,
   deliverTaskOperation,
   disputeTaskOperation,
   counterEvidenceTaskOperation,
@@ -146,12 +148,13 @@ export const TASK_HELP = `Usage:
   vapi task watch <id> [--until <state>] [--auto-release] [--timeout 7d] [--interval 5s] [--counterparty <0x…>] [--account <name>] [--json]
   vapi task status <id> [--operation <uuid> --step <v2-step> --recover|--abandon] [--account <name>] [--json]
 
-Durations: 5s, 10m, 48h, 7d, or an ISO-8601 timestamp. Task milestone deadlines require at least one hour; bounty and pool posting and proposal terms require at least 10 minutes.
+Durations: 5s, 10m, 48h, 7d, or an ISO-8601 timestamp. A task deadline and every task milestone deadline must be at least 3 hours ahead when vAPI receives the post (one hour of work time, one to award, one to fund); use 181m or more. Bounty and pool posting and proposal terms require at least 10 minutes.
 V1 dispute accepts a precomputed evidence hash. V2 dispute accepts --index with --evidence text. Milestone action indices are zero-based; declared milestone indices remain one-based.
 Jury: ${TASK_V2_JURY_RULES} ${TASK_V2_REVIEWER_GUIDANCE} Jury open repeats while the case is Snapshotting.
 Vote --commit seals the salt in a local ballot under VAPI_HOME before vAPI sees the commitment; --reveal reads that ballot back by the onchain commitment, so reveal from the machine that committed. --to-worker is USDC base units and only for split.
 Watch requires an interval of at least 1s and a positive timeout. Auto-release uses the acting wallet's agent profile, or defaults, and releases only amounts strictly below the threshold.
-Posting without --fund moves no money. --fund applies task and daily caps before signing. Task reads require tasks:read and writes require tasks:write; write access includes reads.
+Posting without --fund moves no money. --fund applies task and daily caps before signing. Fund, post --fund, approve-bond, sign --action award-consent and award --worker need vAPI to report Tasks as available and stop before signing when it does not; a rerun of an operation that already signed something is resumed instead. Show or raise task limits with vapi accounts caps <name> [--max-per-task <usd>] [--approve-above <usd>].
+Base mainnet runs V2 only: the worker runs sign --action award-consent, then the poster runs award --worker <addr>. propose sends an offer the poster can read. award <proposalId> and sign without --action are V1 only. Task reads require tasks:read and writes require tasks:write; write access includes reads.
 The thread cursor is the previous page's nextBeforeSeq; --after reads older messages using beforeSeq.
 Every command accepts --json. Watch and a partially completed sign may write more than one JSON value. Human diagnostics go to stderr.
 
@@ -207,6 +210,7 @@ export function parseTaskDuration(text: string, now: Date): number {
 
 export type TaskContext = {
   client: TasksClient;
+  limitsV2?: TaskV2LimitsReader;
   chain: TasksChain;
   pending?: PendingTransactions;
   baseUrl: string;
@@ -381,6 +385,12 @@ export async function taskContext(
       ? injected(options)
       : (injected ?? createHostedTasksClient(options));
   const pending = createPendingTransactions(getVapiPaths().directory);
+  const readRpcFor =
+    dependencies.tasks?.rpcFor ??
+    createTasksRpcFor(config, {
+      env,
+      ...(dependencies.fetchImpl === undefined ? {} : { fetch: dependencies.fetchImpl }),
+    });
   const chain =
     dependencies.tasks?.chain ??
     (publicOnly || target === undefined
@@ -413,6 +423,7 @@ export async function taskContext(
         ));
   return {
     client,
+    limitsV2: (chainId, shape) => readTaskV2Limits({ chainId, shape, rpcFor: readRpcFor, env }),
     baseUrl,
     ...(target === undefined ? {} : { target }),
     ...(token === undefined ? {} : { token }),
@@ -696,6 +707,7 @@ async function taskCommandInner(
         gate: enumOption(parsed.one("--gate"), ["open", "proven"], "--gate"),
         verifier: enumOption(parsed.one("--verifier"), ["poster", "vapi"], "--verifier"),
         openCheck: enumOption(parsed.one("--open-check"), ["allowlist", "invite"], "--open-check"),
+        intake: enumOption(parsed.one("--intake"), ["proposals", "submissions"], "--intake"),
       },
       now,
     );
@@ -736,7 +748,10 @@ async function taskCommandInner(
       ...(intake === undefined ? {} : { intake: intake as "proposals" | "submissions" }),
       ...(maxAwards === undefined ? {} : { maxAwards }),
       ...(parsed.one("--webhook") === undefined ? {} : { webhook: parsed.one("--webhook")! }),
-      onFeeUnavailable: () => io.stderr("The deployed fee is unavailable."),
+      onFeeUnavailable: () =>
+        io.stderr(
+          "The fee could not be read from the Tasks contract or from vAPI. Funding shows it before anything is signed.",
+        ),
     });
     if (parsed.has("--fund")) {
       if (outcome.funding?.error) {

@@ -9,8 +9,32 @@ import {
   DEFAULT_MAX_PER_TASK_USD,
   getVapiPaths,
   isMissingFile,
+  type WalletTaskPolicy,
 } from "./config.js";
 import { walletNameSchema } from "./wallet-name.js";
+
+/** Above this amount a person has to approve a task funding or fee, unless a limit says otherwise. */
+const DEFAULT_APPROVE_ABOVE_USD = 0.5;
+
+/**
+ * What an account keeps of its own task limits while an agent profile holds them: only the
+ * values its owner set below the defaults. A higher value is dropped. Removing the profile
+ * therefore never brings back an old raise, and never loosens a limit the owner had tightened.
+ */
+export function accountTaskLimitsUnderProfile(
+  current: Readonly<WalletTaskPolicy> | undefined,
+): WalletTaskPolicy | undefined {
+  const kept: WalletTaskPolicy = {
+    ...(current?.maxPerTaskUsd !== undefined && current.maxPerTaskUsd < DEFAULT_MAX_PER_TASK_USD
+      ? { maxPerTaskUsd: current.maxPerTaskUsd }
+      : {}),
+    ...(current?.approveAboveUsd !== undefined &&
+    current.approveAboveUsd < DEFAULT_APPROVE_ABOVE_USD
+      ? { approveAboveUsd: current.approveAboveUsd }
+      : {}),
+  };
+  return Object.keys(kept).length === 0 ? undefined : kept;
+}
 
 /**
  * The Call tools an agent profile may name when no register supplies the list.
@@ -29,7 +53,7 @@ const agentProfileShape = {
   model: z.string().min(1),
   instructions: z.string().max(20_000),
   verifiedOnly: z.boolean().default(true),
-  approveAboveUsd: z.number().min(0).default(0.5),
+  approveAboveUsd: z.number().min(0).default(DEFAULT_APPROVE_ABOVE_USD),
   maxPerTaskUsd: z.number().min(0).default(DEFAULT_MAX_PER_TASK_USD),
   autoReleaseBelowUsd: z.number().min(0).default(DEFAULT_AUTO_RELEASE_BELOW_USD),
   maxSteps: z.number().int().min(1).max(50).default(12),

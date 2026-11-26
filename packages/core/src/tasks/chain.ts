@@ -26,6 +26,7 @@ import type { ScopeBindings } from "./scope-bindings.js";
 import type { TasksDurationOverrides } from "./trusted-deployments.js";
 import { getTrustedTasksFactory } from "./trusted-deployments.js";
 import { taskFundingIntentNonce } from "./funding-intent.js";
+import { tasksUnavailableError } from "./availability.js";
 import { TasksClientError, type TasksClient } from "./client.js";
 import { freezeDeliveryManifest, sha256Hex } from "./delivery-manifest.js";
 import { taskFeeReservationKey } from "./dispute-fee.js";
@@ -93,7 +94,9 @@ export function createTasksChain(options: TasksChainOptions): TasksChain {
 
   async function deployment(): Promise<Deployment> {
     const value = await client.deployment();
-    if (!value.configured || value.network !== `eip155:${value.chainId}`)
+    if (!value.configured)
+      throw new TasksValidationError(tasksUnavailableError(value.chainId).message);
+    if (value.network !== `eip155:${value.chainId}`)
       throw new TasksValidationError("The Tasks chain deployment is unavailable.");
     // Resolve before signing authorizations, so unsupported chains fail locally.
     if (!getTrustedTasksFactory(value.chainId, options.trustedFactories))
