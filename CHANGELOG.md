@@ -12,6 +12,10 @@ sentence under it is the summary shown on the
 
 ## Unreleased
 
+## 0.16.1 - 2026-11-26
+
+Signed Tasks steps on Base mainnet are no longer refused because of vAPI's readiness answer, a sent transaction is no longer reported as failed, and funding and hiring stop with a clear message while vAPI reports Tasks as unavailable.
+
 ### Fixed
 
 - Tasks on Base mainnet: every signed step was refused with "Hosted plan deployment mismatch" because the client required `configured: true` in vAPI's readiness answer, which mainnet did not send. Payouts, refunds, cancellations, bounty awards, disputes, jury steps and votes no longer depend on that flag. They rely on the contract addresses pinned in the client and on the checks it runs on chain, as before.
@@ -42,6 +46,8 @@ sentence under it is the summary shown on the
 ## 0.16.0 - 2026-11-24
 
 Tasks V2 runs on Base mainnet from the CLI, the SDK and local MCP, against the audited contracts pinned in the client.
+
+Known issue: this version refuses every signed Tasks step on Base mainnet. Fixed in 0.16.1.
 
 ### Changed
 
