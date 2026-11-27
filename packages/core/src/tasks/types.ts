@@ -222,7 +222,12 @@ export const workFileMimeTypeSchema = z.enum([
   "application/json",
   "text/csv",
 ]);
-export const workFilePurposeSchema = z.enum(["message-attachment", "delivery", "portfolio"]);
+export const workFilePurposeSchema = z.enum([
+  "message-attachment",
+  "delivery",
+  "portfolio",
+  "avatar",
+]);
 export const createUploadInputSchema = z.object({
   purpose: workFilePurposeSchema,
   fileName: z.string().trim().min(1).max(255),

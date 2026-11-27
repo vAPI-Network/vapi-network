@@ -2742,3 +2742,133 @@ describe("audit-3 outcome presentation", () => {
     }
   });
 });
+
+describe("tasks.profile and tasks.offer", () => {
+  const profile = {
+    id: ID,
+    walletAddress: privateKeyToAccount(PRIVATE_KEY).address,
+    displayName: "Ada",
+    bio: "I build landing pages for small teams.",
+    skills: ["Web design"],
+    languages: [],
+    location: null,
+    status: "approved",
+    verified: true,
+    photoFileId: null,
+  };
+  const offer = {
+    id: ESCROW,
+    title: "Landing pages",
+    description: "I design and build landing pages that convert.",
+    category: "general_digital",
+    network: "eip155:8453",
+    asset: "USDC",
+    packages: [
+      {
+        tier: "starter",
+        summary: "One landing page with copy",
+        priceBaseUnits: "150000000",
+        deliveryTimeSeconds: 259_200,
+      },
+    ],
+    active: true,
+  };
+
+  it("reads and updates the provider profile and publishes and pauses services without signing", async () => {
+    const home = await mkdtemp(join(tmpdir(), "vapi-mcp-provider-"));
+    cleanups.push(() => rm(home, { recursive: true, force: true }));
+    const photo = join(home, "me.webp");
+    await writeFile(photo, new Uint8Array([1, 2, 3]));
+    const client = {
+      deployment: vi.fn(async () => ({ configured: false, network: "eip155:8453" })),
+      providerProfile: vi.fn(async () => ({ vendorProfile: { ...profile, listings: [offer] } })),
+      updateProviderProfile: vi.fn(async () => ({
+        vendorProfile: { ...profile, photoFileId: ESCROW },
+      })),
+      uploadFile: vi.fn(async () => ({ file: { id: ESCROW } })),
+      createOffer: vi.fn(async () => ({ listing: offer })),
+      updateOffer: vi.fn(async () => ({ listing: { ...offer, active: false } })),
+    } as unknown as TasksClient;
+    const chain = { ...missingTasksChain, signScopeMessage: vi.fn() };
+    const { server } = await watchServer({
+      client,
+      chain,
+      now: () => new Date(NOW),
+      randomUUID: () => ID,
+    });
+
+    const read = await server.callTool({ name: "tasks.profile", arguments: {} });
+    expect(read.isError, JSON.stringify(read)).not.toBe(true);
+    expect(read.structuredContent).toMatchObject({
+      action: "read",
+      profile: { displayName: "Ada" },
+      offers: [{ id: ESCROW }],
+      verification: { status: "verified", checks: [{ title: "vAPI ID" }, {}, {}] },
+      movesMoney: false,
+    });
+
+    const updated = await server.callTool({
+      name: "tasks.profile",
+      arguments: { photoPath: photo, languages: ["English"] },
+    });
+    expect(updated.isError, JSON.stringify(updated)).not.toBe(true);
+    expect(client.uploadFile).toHaveBeenCalledWith(
+      expect.objectContaining({ contentType: "image/webp", purpose: "avatar" }),
+    );
+    expect(client.updateProviderProfile).toHaveBeenCalledWith(
+      { languages: ["English"], photoFileId: ESCROW },
+      { idempotencyKey: ID },
+    );
+
+    const published = await server.callTool({
+      name: "tasks.offer",
+      arguments: {
+        title: "Landing pages",
+        description: "I design and build landing pages that convert.",
+        packages: [
+          {
+            tier: "starter",
+            priceUsd: "150",
+            deliveryTime: "3d",
+            summary: "One landing page with copy",
+          },
+        ],
+        category: "design-content",
+      },
+    });
+    expect(published.isError, JSON.stringify(published)).not.toBe(true);
+    expect(client.createOffer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        category: "design_content",
+        network: "eip155:8453",
+        asset: "USDC",
+        packages: [expect.objectContaining({ priceBaseUnits: "150000000" })],
+      }),
+      { idempotencyKey: ID },
+    );
+
+    const paused = await server.callTool({
+      name: "tasks.offer",
+      arguments: { offerId: ESCROW, paused: true },
+    });
+    expect(paused.structuredContent).toMatchObject({ action: "updated", movesMoney: false });
+    expect(client.updateOffer).toHaveBeenCalledWith(
+      ESCROW,
+      { paused: true },
+      { idempotencyKey: ID },
+    );
+
+    const refused = await server.callTool({
+      name: "tasks.offer",
+      arguments: {
+        offerId: ESCROW,
+        packages: [
+          { tier: "starter", priceUsd: "1", deliveryTime: "10m", summary: "One landing page" },
+        ],
+      },
+    });
+    expect(refused.isError).toBe(true);
+    expect(JSON.parse(refused.content[0]!.text)).toMatchObject({ code: "invalid_input" });
+    expect(chain.signScopeMessage).not.toHaveBeenCalled();
+  });
+});

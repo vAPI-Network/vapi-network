@@ -56,6 +56,22 @@ import {
   type TaskV2Consent,
   type TaskV2Prepared,
 } from "./v2-write.js";
+import {
+  offerCreateInputSchema,
+  offerResponseSchema,
+  offerUpdateInputSchema,
+  providerProfileCreateInputSchema,
+  providerProfileMutationResponseSchema,
+  providerProfileResponseSchema,
+  providerProfileUpdateInputSchema,
+  type OfferCreateInput,
+  type OfferResponse,
+  type OfferUpdateInput,
+  type ProviderProfileCreateInput,
+  type ProviderProfileMutationResponse,
+  type ProviderProfileResponse,
+  type ProviderProfileUpdateInput,
+} from "./provider.js";
 
 const publicFetch = createPublicFetch({ allowPrivateNetwork: false });
 
@@ -143,7 +159,7 @@ export function createTasksClient(options: TasksClientOptions): TasksClientV2 {
   // Every API call and storage PUT shares transport, timeout, and error handling.
   async function request<T>(
     path: string,
-    method: "GET" | "POST" | "PUT" | "DELETE",
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
     schema: z.ZodType<T>,
     call: RequestOptions = {},
   ): Promise<T> {
@@ -747,6 +763,38 @@ export function createTasksClient(options: TasksClientOptions): TasksClientV2 {
     earn(call: TasksRequestOptions = {}) {
       return request("/api/earn", "GET", tasksResponseSchemas.earn, { ...call, publicRead: true });
     },
+    /** The caller's provider profile with its services, or null before one exists. */
+    providerProfile(call: TasksRequestOptions = {}) {
+      return request("/v1/vendor-profile", "GET", providerProfileResponseSchema, call);
+    },
+    /** Creates the caller's provider profile. It is live at once and listed for verification. */
+    createProviderProfile(values: ProviderProfileCreateInput, call: TasksMutationOptions) {
+      return request("/v1/vendor-profile", "POST", providerProfileMutationResponseSchema, {
+        ...call,
+        body: input(providerProfileCreateInputSchema, values),
+      });
+    },
+    /** Changes bio, languages, location or photo; `photoFileId: null` removes the photo. */
+    updateProviderProfile(values: ProviderProfileUpdateInput, call: TasksMutationOptions) {
+      return request("/v1/vendor-profile", "PATCH", providerProfileMutationResponseSchema, {
+        ...call,
+        body: input(providerProfileUpdateInputSchema, values),
+      });
+    },
+    /** Publishes a service (an offer). Publishing moves no money. */
+    createOffer(values: OfferCreateInput, call: TasksMutationOptions) {
+      return request("/v1/listings", "POST", offerResponseSchema, {
+        ...call,
+        body: input(offerCreateInputSchema, values),
+      });
+    },
+    /** Changes or pauses one of the caller's services. */
+    updateOffer(id: string, values: OfferUpdateInput, call: TasksMutationOptions) {
+      return request(`/v1/listings/${segment(id)}`, "PATCH", offerResponseSchema, {
+        ...call,
+        body: input(offerUpdateInputSchema, values),
+      });
+    },
   };
   return client;
 }
@@ -922,6 +970,21 @@ export type TasksClient = {
     input: ConfigureWebhookInput,
     call?: TasksRequestOptions,
   ): Promise<TaskResponse<"configureWebhook">>;
+  providerProfile?(call?: TasksRequestOptions): Promise<ProviderProfileResponse>;
+  createProviderProfile?(
+    input: ProviderProfileCreateInput,
+    call: TasksMutationOptions,
+  ): Promise<ProviderProfileMutationResponse>;
+  updateProviderProfile?(
+    input: ProviderProfileUpdateInput,
+    call: TasksMutationOptions,
+  ): Promise<ProviderProfileMutationResponse>;
+  createOffer?(input: OfferCreateInput, call: TasksMutationOptions): Promise<OfferResponse>;
+  updateOffer?(
+    id: string,
+    input: OfferUpdateInput,
+    call: TasksMutationOptions,
+  ): Promise<OfferResponse>;
 };
 
 /** Factory-created clients implement v2; old adapters only need the original interface. */
@@ -938,5 +1001,10 @@ export type TasksClientV2 = TasksClient &
       | "signV2"
       | "confirmV2Signature"
       | "operationV2"
+      | "providerProfile"
+      | "createProviderProfile"
+      | "updateProviderProfile"
+      | "createOffer"
+      | "updateOffer"
     >
   >;

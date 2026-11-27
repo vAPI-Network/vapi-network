@@ -104,6 +104,11 @@ import {
 
 import { taskV2Command } from "./task-v2.js";
 import { TASK_JURY_VERBS, taskJuryCommand } from "./task-jury.js";
+import {
+  TASK_PROVIDER_OPTIONS,
+  TASK_PROVIDER_VERBS,
+  taskProviderCommand,
+} from "./task-provider.js";
 
 export type TasksCommandDependencies = {
   client?: TasksClient | ((options: TasksClientOptions) => TasksClient);
@@ -120,6 +125,8 @@ export const TASK_HELP = `Usage:
   vapi task pending [--account <name>] [--json]
   vapi task checkin <id> --status on-track|blocked|need-input [--note <text>] [--link <url>] [--account <name>] [--json]
   vapi task post --title <text> --brief <file|-> --deadline <duration|ISO> [--shape task|bounty|pool] [--amount <usd>] [--milestone "amount|acceptance|deadline"...] [--proof <preset>[:mustContain]...] [--checkin none|6h|24h|72h|7d] [--winners <n> --reward-per-winner <usd> --choice-window <sec>] [--reward-per-claim <usd> --budget <usd> --gate open|proven --verifier poster|vapi --open-check allowlist|invite] [--fund] [--yes] [--no-wait] [--timeout 120s] [--intake proposals|submissions] [--max-awards <k>] [--webhook <https-url>] [--account <name>] [--json]
+  vapi task profile [--name <text> --bio <file|-> --skill <text>...] [--language <name>...] [--location <text>] [--photo <path>|--remove-photo] [--account <name>] [--json]
+  vapi task offer [<offerId>] [--title <text>] [--description <file|->] [--package <tier>:<usd>:<time>:<summary>...] [--category general-digital|software-api|research-data|design-content] [--skill <tag>...] [--pause|--resume] [--account <name>] [--json]
   vapi task propose <id> --price <usd> --duration <duration> --note <text> [--account <name>] [--json]
   vapi task submit <id> [--proof <https-url>...] [--file <path>...] [--withdraw] [--proposal-id <id>] [--account <name>] [--json]
   vapi task milestone <id> --index N submit|approve|reject|finalize|close-rejected [--proof <https-url>...] [--file <path>...] [--proof-json <file>] [--note <text>] [--reason <text>] [--json]
@@ -155,6 +162,8 @@ Vote --commit seals the salt in a local ballot under VAPI_HOME before vAPI sees 
 Watch requires an interval of at least 1s and a positive timeout. Auto-release uses the acting wallet's agent profile, or defaults, and releases only amounts strictly below the threshold.
 Posting without --fund moves no money. --fund applies task and daily caps before signing. Fund, post --fund, approve-bond, sign --action award-consent and award --worker need vAPI to report Tasks as available and stop before signing when it does not; a rerun of an operation that already signed something is resumed instead. Show or raise task limits with vapi accounts caps <name> [--max-per-task <usd>] [--approve-above <usd>].
 Base mainnet runs V2 only: the worker runs sign --action award-consent, then the poster runs award --worker <addr>. propose sends an offer the poster can read. award <proposalId> and sign without --action are V1 only. Task reads require tasks:read and writes require tasks:write; write access includes reads.
+Provider: profile without options shows your provider profile, its services, and its verification status with the three checks vAPI runs. The first run needs --name, --bio and at least one --skill; the first skill is your headline. Later runs change --bio, --language (up to 5), --location or the photo (--photo takes a PNG, JPEG or WebP image of at most 5 MB). The name and skills of a live profile cannot be changed from here yet. A new profile is live at once and vAPI reviews every unverified provider for the Verified badge on its own, so there is nothing to request.
+offer without options lists your services. With --title, --description and one to three --package values it publishes a service on the network vAPI reports; offer <offerId> changes the given fields, and --pause or --resume hides or shows it. A package is tier:usd:delivery time:summary with tier starter, standard or advanced, delivery time from 1h to 90d (90m, 48h, 7d), and a summary of 10 to 160 characters, for example starter:150:3d:One landing page with copy. --category defaults to general-digital. Profile and offer move no money; a buyer funds escrow only when they hire.
 The thread cursor is the previous page's nextBeforeSeq; --after reads older messages using beforeSeq.
 Every command accepts --json. Watch and a partially completed sign may write more than one JSON value. Human diagnostics go to stderr.
 
@@ -476,7 +485,7 @@ export function taskOutput(
   for (const line of lines) io.stdout(line);
 }
 
-function signedIn(context: TaskContext): WalletTarget {
+export function signedIn(context: TaskContext): WalletTarget {
   if (!context.token || !context.target)
     throw new TaskCommandError(
       "not_signed_in",
@@ -530,6 +539,7 @@ async function taskCommandInner(
       ...(verb === "prune-reviewer" ? ["--reviewer"] : []),
       ...(verb === "prune-reviewers" ? ["--reviewers"] : []),
       ...(verb === "reviewer-status" ? ["--address"] : []),
+      ...(verb === "profile" || verb === "offer" ? TASK_PROVIDER_OPTIONS[verb].value : []),
       ...(verb === "milestone"
         ? ["--reason", "--proof", "--file", "--files", "--note", "--proof-json"]
         : []),
@@ -605,19 +615,30 @@ async function taskCommandInner(
       ...(verb === "watch" ? ["--auto-release"] : []),
       ...(verb === "vote" ? ["--reveal"] : []),
       ...(verb === "approve-bond" ? ["--yes"] : []),
+      ...(verb === "profile" || verb === "offer" ? TASK_PROVIDER_OPTIONS[verb].boolean : []),
     ]),
     repeatableOptions: new Set([
       ...(["submit", "milestone"].includes(verb!) ? ["--proof", "--file"] : []),
       ...(verb === "milestone" ? ["--files"] : []),
       ...(verb === "deliver" ? ["--files"] : []),
       ...(verb === "post" ? ["--milestone", "--proof"] : []),
+      ...(verb === "profile" || verb === "offer" ? TASK_PROVIDER_OPTIONS[verb].repeatable : []),
     ]),
-    maximumPositionals: ["search", "post", "pending", "reviewer-status"].includes(verb!)
+    maximumPositionals: ["search", "post", "pending", "reviewer-status", "profile"].includes(verb!)
       ? 0
       : ["award", "message", "milestone", "cancel"].includes(verb!)
         ? 2
         : 1,
   });
+  if ((TASK_PROVIDER_VERBS as readonly string[]).includes(verb!))
+    return await taskProviderCommand(
+      verb as (typeof TASK_PROVIDER_VERBS)[number],
+      parsed,
+      json,
+      io,
+      dependencies,
+      readProcessStdin,
+    );
   const id = ["search", "post", "pending", "reviewer-status"].includes(verb!)
     ? undefined
     : taskId(parsed.positionals[0]);

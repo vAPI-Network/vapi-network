@@ -4117,3 +4117,285 @@ describe("audit-3 outcome presentation", () => {
     expect(result.stdout.join("\n")).toContain("even a cancelled unstake can cost the vote");
   });
 });
+
+describe("vapi task profile and offer", () => {
+  const PROFILE_ID = "55555555-5555-4555-8555-555555555555";
+  const OFFER_ID = "66666666-6666-4666-8666-666666666666";
+  const BIO = "I build landing pages for small teams.";
+  function providerProfile(extra: Record<string, unknown> = {}) {
+    return {
+      id: PROFILE_ID,
+      walletAddress: ADDRESS,
+      displayName: "Ada",
+      bio: BIO,
+      skills: ["Web design"],
+      languages: [],
+      location: null,
+      status: "pending",
+      verified: false,
+      photoFileId: null,
+      ...extra,
+    };
+  }
+  const offer = {
+    id: OFFER_ID,
+    title: "Landing pages",
+    description: "I design and build landing pages that convert.",
+    category: "general_digital",
+    network: "eip155:8453",
+    asset: "USDC",
+    packages: [
+      {
+        tier: "starter",
+        summary: "One landing page with copy",
+        priceBaseUnits: "150000000",
+        deliveryTimeSeconds: 259_200,
+      },
+    ],
+    active: true,
+  };
+
+  it("shows the profile, its services and the verification checks without changing anything", async () => {
+    const client = fakeClient({
+      providerProfile: vi.fn(async () => ({
+        vendorProfile: { ...providerProfile(), listings: [offer] },
+      })),
+      createProviderProfile: vi.fn(),
+      updateProviderProfile: vi.fn(),
+    });
+    const { dependencies } = await fixture(true, client);
+    const json = await invoke(["profile"], dependencies);
+    expect(json.code).toBe(0);
+    expect(json.value).toMatchObject({
+      command: "task profile",
+      wallet: "worker",
+      action: "read",
+      profile: { id: PROFILE_ID, displayName: "Ada" },
+      offers: [{ id: OFFER_ID }],
+      verification: {
+        status: "not-verified",
+        checks: [{ title: "vAPI ID" }, { title: "A work link" }, { title: "One social account" }],
+      },
+      movesMoney: false,
+    });
+    const human = await invoke(["profile"], dependencies, false);
+    const text = human.stdout.join("\n");
+    expect(text).toContain("Live, not verified yet.");
+    expect(text).toContain("One social account: An X, LinkedIn or GitHub account linked to you.");
+    expect(text).toContain(`${OFFER_ID} · Landing pages · live`);
+    expect(text).toContain("starter · $150.00 USDC · 3d · One landing page with copy");
+    expect(text).toContain(`https://api.vapinetwork.ai/tasks/vendors/${PROFILE_ID}`);
+    expect(client.createProviderProfile).not.toHaveBeenCalled();
+    expect(client.updateProviderProfile).not.toHaveBeenCalled();
+  });
+
+  it("creates a profile with a photo uploaded as an avatar, then sets the location", async () => {
+    const { home, dependencies } = await fixture(true);
+    const photo = join(home, "me.png");
+    await writeFile(photo, new Uint8Array([137, 80, 78, 71]));
+    const client = fakeClient({
+      providerProfile: vi.fn(async () => ({ vendorProfile: null })),
+      createProviderProfile: vi.fn(async () => ({
+        vendorProfile: providerProfile({ photoFileId: FILE_ID }),
+      })),
+      updateProviderProfile: vi.fn(async () => ({
+        vendorProfile: providerProfile({ photoFileId: FILE_ID, location: "Lisbon" }),
+      })),
+    });
+    dependencies.tasks!.client = client;
+    dependencies.readStdin = async () => BIO;
+    const result = await invoke(
+      [
+        "profile",
+        "--name",
+        "Ada",
+        "--bio",
+        "-",
+        "--skill",
+        "Web design",
+        "--skill",
+        "Copy",
+        "--location",
+        "Lisbon",
+        "--photo",
+        photo,
+      ],
+      dependencies,
+    );
+    expect(result.code).toBe(0);
+    expect(result.value).toMatchObject({ action: "created", photoFileId: FILE_ID });
+    expect(client.uploadFile).toHaveBeenCalledWith(
+      expect.objectContaining({ fileName: "me.png", contentType: "image/png", purpose: "avatar" }),
+    );
+    expect(client.createProviderProfile).toHaveBeenCalledWith(
+      { displayName: "Ada", bio: BIO, skills: ["Web design", "Copy"], photoFileId: FILE_ID },
+      { idempotencyKey: KEY },
+    );
+    expect(client.updateProviderProfile).toHaveBeenCalledWith(
+      { location: "Lisbon" },
+      { idempotencyKey: KEY },
+    );
+  });
+
+  it("removes the photo of a live profile", async () => {
+    const client = fakeClient({
+      providerProfile: vi.fn(async () => ({ vendorProfile: providerProfile() })),
+      updateProviderProfile: vi.fn(async () => ({ vendorProfile: providerProfile() })),
+    });
+    const { dependencies } = await fixture(true, client);
+    const result = await invoke(["profile", "--remove-photo"], dependencies);
+    expect(result.code).toBe(0);
+    expect(client.updateProviderProfile).toHaveBeenCalledWith(
+      { photoFileId: null },
+      { idempotencyKey: KEY },
+    );
+  });
+
+  it.each([
+    [["profile", "--photo", "a.png", "--remove-photo"], "cannot be used together"],
+    [["profile", "--name", "Ada"], "a name, a bio and at least one skill"],
+    [["profile", "--language", "Klingon"], "Language must be one of"],
+    [["offer", "not-a-uuid", "--pause"], "<offerId> must be a UUID."],
+    [["offer", OFFER_ID, "--pause", "--resume"], "cannot be used together"],
+    [["offer", "--title", "Landing pages"], "title, a description and at least one package"],
+    [["offer", OFFER_ID, "--package", "starter:150:3d"], "A package is <tier>"],
+    [["offer", OFFER_ID, "--category", "art"], "Category must be"],
+    [["offer", ID, ID], "Too many positional arguments."],
+  ])("refuses %j as usage", async (argv, message) => {
+    const client = fakeClient({
+      providerProfile: vi.fn(async () => ({ vendorProfile: null })),
+      updateOffer: vi.fn(),
+    });
+    const { dependencies } = await fixture(true, client);
+    const result = await invoke(argv, dependencies);
+    expect(result.code).toBe(1);
+    expect(result.value).toMatchObject({ ok: false, error: { code: "usage_error" } });
+    expect((result.value!.error as { message: string }).message).toContain(message);
+    expect(client.updateOffer).not.toHaveBeenCalled();
+  });
+
+  it("publishes a service on vAPI's network and reports that no money moved", async () => {
+    const client = fakeClient({ createOffer: vi.fn(async () => ({ listing: offer })) });
+    const { dependencies } = await fixture(true, client);
+    dependencies.readStdin = async () => offer.description;
+    const result = await invoke(
+      [
+        "offer",
+        "--title",
+        "Landing pages",
+        "--description",
+        "-",
+        "--package",
+        "starter:150:3d:One landing page with copy",
+        "--package",
+        "standard:400:7d:Three pages: home, pricing, about",
+        "--category",
+        "design-content",
+        "--skill",
+        "web-design",
+      ],
+      dependencies,
+    );
+    expect(result.code).toBe(0);
+    expect(result.value).toMatchObject({
+      command: "task offer",
+      action: "created",
+      offer: { id: OFFER_ID },
+      movesMoney: false,
+    });
+    expect(client.createOffer).toHaveBeenCalledWith(
+      {
+        title: "Landing pages",
+        description: offer.description,
+        packages: [
+          {
+            tier: "starter",
+            summary: "One landing page with copy",
+            priceBaseUnits: "150000000",
+            deliveryTimeSeconds: 259_200,
+            revisionCount: null,
+            inclusions: ["One landing page with copy"],
+          },
+          {
+            tier: "standard",
+            summary: "Three pages: home, pricing, about",
+            priceBaseUnits: "400000000",
+            deliveryTimeSeconds: 604_800,
+            revisionCount: null,
+            inclusions: ["Three pages: home, pricing, about"],
+          },
+        ],
+        category: "design_content",
+        skills: ["web-design"],
+        network: "eip155:8453",
+        asset: "USDC",
+      },
+      { idempotencyKey: KEY },
+    );
+    const human = await invoke(
+      [
+        "offer",
+        "--title",
+        "Landing pages",
+        "--description",
+        "-",
+        "--package",
+        "starter:150:3d:One landing page with copy",
+      ],
+      dependencies,
+      false,
+    );
+    expect(human.stdout.join("\n")).toContain(
+      `Service published: ${OFFER_ID}. Hiring it moves money only when the buyer funds escrow.`,
+    );
+    expect(human.stdout.join("\n")).toContain(
+      `https://api.vapinetwork.ai/tasks/services/${OFFER_ID}`,
+    );
+  });
+
+  it("pauses and lists services", async () => {
+    const client = fakeClient({
+      updateOffer: vi.fn(async () => ({ listing: { ...offer, active: false } })),
+      providerProfile: vi.fn(async () => ({
+        vendorProfile: { ...providerProfile(), listings: [offer] },
+      })),
+    });
+    const { dependencies } = await fixture(true, client);
+    const paused = await invoke(["offer", OFFER_ID.toUpperCase(), "--pause"], dependencies);
+    expect(paused.code).toBe(0);
+    expect(client.updateOffer).toHaveBeenCalledWith(
+      OFFER_ID,
+      { paused: true },
+      { idempotencyKey: KEY },
+    );
+    const listed = await invoke(["offer"], dependencies);
+    expect(listed.value).toMatchObject({ action: "list", offers: [{ id: OFFER_ID }] });
+  });
+
+  it("explains a service change refused for a wallet without a provider profile", async () => {
+    const client = fakeClient({
+      updateOffer: vi.fn(async () => {
+        throw new TasksClientError(
+          "http",
+          "approved_vendor_required",
+          403,
+          "approved_vendor_required",
+        );
+      }),
+    });
+    const { dependencies } = await fixture(true, client);
+    const result = await invoke(["offer", OFFER_ID, "--resume"], dependencies);
+    expect(result.code).toBe(1);
+    expect(result.value).toMatchObject({ ok: false, error: { code: "approved_vendor_required" } });
+    expect((result.value!.error as { message: string }).message).toContain(
+      "no live provider profile",
+    );
+  });
+
+  it("needs sign-in", async () => {
+    const { dependencies } = await fixture(false);
+    const result = await invoke(["profile"], dependencies);
+    expect(result.code).toBe(1);
+    expect(result.value).toMatchObject({ ok: false, error: { code: "not_signed_in" } });
+  });
+});

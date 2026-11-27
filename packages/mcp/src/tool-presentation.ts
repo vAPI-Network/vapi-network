@@ -55,6 +55,8 @@ export const TOOL_PRESENTATION: Readonly<Record<string, ToolPresentation>> = {
   "tasks.pending": { title: "List pending task actions", annotations: readOnly },
   "tasks.checkin": { title: "Check in on a task", annotations: write },
   "tasks.post": { title: "Post a task", annotations: destructive },
+  "tasks.profile": { title: "Show or edit your provider profile", annotations: write },
+  "tasks.offer": { title: "List or publish your services", annotations: write },
   "tasks.propose": { title: "Propose on a task", annotations: write },
   "tasks.submit": { title: "Submit a proposal", annotations: write },
   "tasks.milestone": { title: "Act on a task milestone", annotations: destructive },

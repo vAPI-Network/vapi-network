@@ -104,6 +104,8 @@ import {
   tasksPendingTool,
   tasksCheckinTool,
   tasksPostTool,
+  tasksProfileTool,
+  tasksOfferTool,
   tasksProposeTool,
   tasksSubmitTool,
   tasksMilestoneTool,
@@ -737,6 +739,8 @@ export function createVapiServer(options: VapiServerOptions = {}) {
   server.registerTool("tasks.pending", tasksPendingTool, tasks.pending);
   server.registerTool("tasks.checkin", tasksCheckinTool, tasks.checkin);
   server.registerTool("tasks.post", tasksPostTool, tasks.post);
+  server.registerTool("tasks.profile", tasksProfileTool, tasks.profile);
+  server.registerTool("tasks.offer", tasksOfferTool, tasks.offer);
   server.registerTool("tasks.propose", tasksProposeTool, tasks.propose);
   server.registerTool("tasks.submit", tasksSubmitTool, tasks.submit);
   server.registerTool("tasks.milestone", tasksMilestoneTool, tasks.milestone);

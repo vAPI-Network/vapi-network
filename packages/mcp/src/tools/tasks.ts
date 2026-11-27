@@ -73,6 +73,13 @@ import {
   taskStatus,
   threadTask,
   waitForMilestone,
+  providerOfferTask,
+  providerProfileTask,
+  TASK_OFFER_CATEGORIES,
+  TASK_OFFER_TIERS,
+  TASK_PROVIDER_LANGUAGES,
+  TASK_PROVIDER_LIMITS,
+  offerPackage,
   type PendingTransactions,
   type TaskOperationContext,
   type TasksChain,
@@ -190,6 +197,83 @@ export const tasksPostTool = descriptor(
         "Optional 0x address of a worker to invite directly; the task is addressed to that wallet and shows up for them. Anyone may still propose.",
       )
       .optional(),
+  },
+);
+export const tasksProfileTool = descriptor(
+  "Does not move money. Read the acting wallet's provider profile, its services and its verification status with the three checks vAPI runs, or create or update the profile. A first profile needs displayName, bio and skills; the first skill is the headline. Later calls change bio, languages, location or the photo; the name and skills of a live profile cannot be changed here yet. photoPath is a local PNG, JPEG or WebP file of at most 5 MB. vAPI reviews every unverified provider for the Verified badge on its own, so there is nothing to request.",
+  {
+    ...walletArgument,
+    displayName: z
+      .string()
+      .trim()
+      .min(TASK_PROVIDER_LIMITS.nameMin)
+      .max(TASK_PROVIDER_LIMITS.nameMax)
+      .optional(),
+    bio: z
+      .string()
+      .trim()
+      .min(TASK_PROVIDER_LIMITS.bioMin)
+      .max(TASK_PROVIDER_LIMITS.bioMax)
+      .optional(),
+    skills: z
+      .array(z.string().trim().min(1).max(TASK_PROVIDER_LIMITS.skillMax))
+      .min(1)
+      .max(TASK_PROVIDER_LIMITS.skillsMax)
+      .optional(),
+    languages: z
+      .array(z.enum(TASK_PROVIDER_LANGUAGES))
+      .max(TASK_PROVIDER_LIMITS.languagesMax)
+      .optional(),
+    location: z
+      .string()
+      .trim()
+      .min(TASK_PROVIDER_LIMITS.locationMin)
+      .max(TASK_PROVIDER_LIMITS.locationMax)
+      .optional(),
+    photoPath: localPath.optional(),
+    removePhoto: z.boolean().optional(),
+  },
+);
+export const tasksOfferTool = descriptor(
+  "Does not move money. List the acting wallet's services, publish one with a title, a description and one to three packages, or change one by offerId; paused true hides it and false shows it again. A buyer funds escrow only when they hire.",
+  {
+    ...walletArgument,
+    offerId: z.uuid().toLowerCase().optional(),
+    title: z
+      .string()
+      .trim()
+      .min(TASK_PROVIDER_LIMITS.offerTitleMin)
+      .max(TASK_PROVIDER_LIMITS.offerTitleMax)
+      .optional(),
+    description: z
+      .string()
+      .trim()
+      .min(TASK_PROVIDER_LIMITS.offerDescriptionMin)
+      .max(TASK_PROVIDER_LIMITS.offerDescriptionMax)
+      .optional(),
+    packages: z
+      .array(
+        z
+          .object({
+            tier: z.enum(TASK_OFFER_TIERS),
+            priceUsd: positiveUsd,
+            deliveryTime: z
+              .string()
+              .describe("Delivery time from 1h to 90d, such as 90m, 48h or 7d."),
+            summary: z
+              .string()
+              .trim()
+              .min(TASK_PROVIDER_LIMITS.packageSummaryMin)
+              .max(TASK_PROVIDER_LIMITS.packageSummaryMax),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(TASK_PROVIDER_LIMITS.packagesMax)
+      .optional(),
+    category: z.enum(TASK_OFFER_CATEGORIES).optional(),
+    skills: z.array(z.string()).max(TASK_PROVIDER_LIMITS.offerSkillsMax).optional(),
+    paused: z.boolean().optional(),
   },
 );
 export const tasksProposeTool = descriptor(
@@ -859,6 +943,36 @@ export function createTasksTools(options: TasksToolsOptions) {
         unsupportedFields: outcome.unsupportedFields,
         postingMovesMoney: false,
       });
+    },
+    async profile(input: Input<typeof tasksProfileTool>) {
+      const photo = input.photoPath === undefined ? undefined : await readTaskFile(input.photoPath);
+      const ctx = await acting(input.wallet);
+      return taskResult(
+        await providerProfileTask(ctx, {
+          ...(input.displayName === undefined ? {} : { displayName: input.displayName }),
+          ...(input.bio === undefined ? {} : { bio: input.bio }),
+          ...(input.skills === undefined ? {} : { skills: input.skills }),
+          ...(input.languages === undefined ? {} : { languages: input.languages }),
+          ...(input.location === undefined ? {} : { location: input.location }),
+          ...(photo === undefined ? {} : { photo }),
+          ...(input.removePhoto ? { removePhoto: true } : {}),
+        }),
+      );
+    },
+    async offer(input: Input<typeof tasksOfferTool>) {
+      const packages = input.packages?.map(offerPackage);
+      const ctx = await acting(input.wallet);
+      return taskResult(
+        await providerOfferTask(ctx, {
+          ...(input.offerId === undefined ? {} : { id: input.offerId }),
+          ...(input.title === undefined ? {} : { title: input.title }),
+          ...(input.description === undefined ? {} : { description: input.description }),
+          ...(packages === undefined ? {} : { packages }),
+          ...(input.category === undefined ? {} : { category: input.category }),
+          ...(input.skills === undefined ? {} : { skills: input.skills }),
+          ...(input.paused === undefined ? {} : { paused: input.paused }),
+        }),
+      );
     },
     async propose(input: Input<typeof tasksProposeTool>) {
       const duration = parseTaskDuration(input.duration, now());

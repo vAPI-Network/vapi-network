@@ -131,7 +131,7 @@ console.log(result.body);
 ```
 
 The MCP server has no tool that reveals a recovery phrase or a private key, and no
-tool that creates or retires a listing. The tool list is in [docs/mcp.md](./docs/mcp.md#tools).
+tool that creates or retires a Call registry listing. The tool list is in [docs/mcp.md](./docs/mcp.md#tools).
 
 ## What you can do
 
@@ -172,6 +172,8 @@ On Base mainnet vAPI takes no new pool for now: posting or funding one is refuse
 | --------------------------- | ------------------------------------------------------------------------------- |
 | `vapi task post`            | Post a task, bounty or pool; add `--fund` to fund it locally.                   |
 | `vapi task pending`         | List the acting wallet's next actions.                                          |
+| `vapi task profile`         | Show or set up your provider profile and see its verification status.           |
+| `vapi task offer`           | Publish, change or pause a service you offer; moves no money.                   |
 | `vapi task milestone`       | Submit, approve, reject, finalize or close a rejected milestone.                |
 | `vapi task sign`            | Sign award consent as the worker, sign split consent, or revoke older consents. |
 | `vapi task award`           | Award a worker who signed `award-consent`, or bounty winners.                   |

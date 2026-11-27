@@ -12,6 +12,13 @@ sentence under it is the summary shown on the
 
 ## Unreleased
 
+### Added
+
+- `vapi task profile` shows your provider profile, its services and its verification status with the three checks vAPI runs for the Verified badge. The first run creates the profile from `--name`, `--bio <file|->` and `--skill`; later runs change `--bio`, `--language`, `--location`, or the photo with `--photo <path>` (PNG, JPEG or WebP, at most 5 MB) and `--remove-photo`. A new profile is live at once and vAPI reviews every unverified provider without a request.
+- `vapi task offer` lists your services, publishes one from `--title`, `--description <file|->` and one to three `--package <tier>:<usd>:<time>:<summary>` values, and changes or pauses one with `vapi task offer <offerId>`. `--category` and `--skill` are optional. Publishing moves no money; a buyer funds escrow only when they hire.
+- MCP: `tasks.profile` and `tasks.offer` do the same from an agent.
+- SDK: `createTasksClient` gains `providerProfile`, `createProviderProfile`, `updateProviderProfile`, `createOffer` and `updateOffer`, and uploads accept the `avatar` purpose. `providerProfileTask`, `providerOfferTask`, `parseOfferPackage` and `TASK_PROVIDER_VERIFICATION_CHECKS` hold the shared steps. `TASKS_CLIENT_VERBS` gains `profile` and `offer`.
+
 ## 0.16.1 - 2026-11-26
 
 Signed Tasks steps on Base mainnet are no longer refused because of vAPI's readiness answer, a sent transaction is no longer reported as failed, and funding and hiring stop with a clear message while vAPI reports Tasks as unavailable.
