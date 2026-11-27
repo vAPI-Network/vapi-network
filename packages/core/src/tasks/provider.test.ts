@@ -359,6 +359,16 @@ describe("providerProfileTask", () => {
       message: expect.stringContaining("no live provider profile"),
     });
   });
+
+  it("tells a linked agent that the owner manages the provider profile", async () => {
+    const { context: ctx } = context(
+      json({ error: { code: "provider_owner_wallet_required", message: "x" } }, 403),
+    );
+    await expect(providerOfferTask(ctx, { id: OFFER_ID, paused: true })).rejects.toMatchObject({
+      code: "provider_owner_wallet_required",
+      message: expect.stringContaining("Linked agents cannot manage"),
+    });
+  });
 });
 
 describe("providerOfferTask", () => {

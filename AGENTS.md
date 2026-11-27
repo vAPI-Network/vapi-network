@@ -68,8 +68,10 @@ Never run Railway/infra writes or enable `VAPI_RAILWAY_SMOKE` in cloud workspace
   either. It is read from `VAPI_API_KEY`, then the OS secret store, then the
   `apiKey` field of `config.json`; the config schema drops that field so the
   parsed config an MCP session holds can never carry it, and `writeConfigFile`
-  preserves it across a rewrite. Publishing is a human act: no MCP tool creates,
-  activates or retires a listing.
+  preserves it across a rewrite. Publishing to the Call registry is a human act:
+  no MCP tool creates, activates or retires a Call registry listing. Tasks
+  service offers are outside that rule: they run on the account's own Tasks
+  sign-in token, not the registry API key, so MCP tools may publish them.
 - Migration from `~/.vapi/agent-cash/` copies files, never deletes the old
   directory, never overwrites new state, and prints a notice.
 - Receipts are an append-only JSONL ledger. Spend accounting uses

@@ -27,6 +27,8 @@ const PROVIDER_REFUSALS: Readonly<Record<string, string>> = {
   approved_vendor_required:
     "This wallet has no live provider profile. Create one with vapi task profile --name <name> --bio <file> --skill <skill>, or call tasks.profile with displayName, bio and skills.",
   listing_not_owned: "Only the provider who published this service can change it.",
+  provider_owner_wallet_required:
+    "Linked agents cannot manage the owner's provider profile or services. The owner sets them up on the web, or the agent signs in with its own vAPI account.",
   vendor_profile_wallet_mismatch:
     "This provider profile belongs to another wallet. Act as the wallet that created it.",
   wallet_proof_required: "vAPI asks for a wallet proof first. Sign in again and retry.",

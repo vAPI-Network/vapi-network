@@ -131,7 +131,7 @@ console.log(result.body);
 ```
 
 The MCP server has no tool that reveals a recovery phrase or a private key, and no
-tool that creates or retires a listing. The tool list is in [docs/mcp.md](./docs/mcp.md#tools).
+tool that creates or retires a Call registry listing. The tool list is in [docs/mcp.md](./docs/mcp.md#tools).
 
 ## What you can do
 
