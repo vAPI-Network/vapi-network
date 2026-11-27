@@ -266,6 +266,8 @@ describe("Agent Cash MCP marketplace tools", () => {
       "tasks.pending",
       "tasks.checkin",
       "tasks.post",
+      "tasks.profile",
+      "tasks.offer",
       "tasks.propose",
       "tasks.submit",
       "tasks.milestone",

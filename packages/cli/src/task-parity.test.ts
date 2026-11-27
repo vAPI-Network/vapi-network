@@ -19,6 +19,8 @@ describe("task interface parity", () => {
       "pending",
       "checkin",
       "post",
+      "profile",
+      "offer",
       "propose",
       "submit",
       "milestone",

@@ -11,6 +11,8 @@ The task SDK in `@vapi-network/core/tasks` talks to the vAPI task API and builds
 | `pending`            | Lists the acting wallet's pending actions.                                   | No                     |
 | `checkin`            | Records a worker check-in.                                                   | No                     |
 | `post`               | Posts a task, bounty or pool; no new pool on Base mainnet. Optional funding. | Only with `--fund`     |
+| `profile`            | Shows, creates or updates your provider profile and its verification.        | No                     |
+| `offer`              | Lists, publishes, changes or pauses your services.                           | No                     |
 | `propose`            | Proposes terms for a task.                                                   | No                     |
 | `submit`             | Submits proof for an open bounty.                                            | No                     |
 | `milestone`          | Submit, approve, reject, finalize or close a rejected V2 milestone           | On approve/finalize    |
@@ -51,6 +53,8 @@ vapi task show <id> [--account <name>] [--json]
 vapi task pending [--account <name>] [--json]
 vapi task checkin <id> --status on-track|blocked|need-input [--note <text>] [--link <url>] [--account <name>] [--json]
 vapi task post --title <text> --brief <file|-> --deadline <duration|ISO> [--shape task|bounty|pool] [--amount <usd>] [--milestone "amount|acceptance|deadline"...] [--proof <preset>[:mustContain]...] [--checkin none|6h|24h|72h|7d] [--winners <n> --reward-per-winner <usd> --choice-window <sec>] [--reward-per-claim <usd> --budget <usd> --gate open|proven --verifier poster|vapi --open-check allowlist|invite] [--fund] [--yes] [--no-wait] [--timeout 120s] [--intake proposals|submissions] [--max-awards <k>] [--webhook <https-url>] [--account <name>] [--json]
+vapi task profile [--name <text> --bio <file|-> --skill <text>...] [--language <name>...] [--location <text>] [--photo <path>|--remove-photo] [--account <name>] [--json]
+vapi task offer [<offerId>] [--title <text>] [--description <file|->] [--package <tier>:<usd>:<time>:<summary>...] [--category general-digital|software-api|research-data|design-content] [--skill <tag>...] [--pause|--resume] [--account <name>] [--json]
 vapi task propose <id> --price <usd> --duration <duration> --note <text> [--account <name>] [--json]
 vapi task submit <id> [--proof <https-url>...] [--file <path>...] [--withdraw] [--proposal-id <id>] [--account <name>] [--json]
 vapi task milestone <id> --index N submit|approve|reject|finalize|close-rejected [--proof <https-url>...] [--file <path>...] [--proof-json <file>] [--note <text>] [--reason <text>] [--json]
